@@ -104,6 +104,14 @@ static const char *const kShaderSource =
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
     "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba32_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, gid.x + gid.y + 1u, 0xffffffffu), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba32_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, int(gid.x + gid.y), 0x7fffffff), gid); }\n"
     "kernel void zpu_cpu_add_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
@@ -15972,6 +15980,8 @@ int main(void) {
             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba32_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba32_sint() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
@@ -16549,11 +16559,13 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 47 ||
+            adapter_library.functionNames.count != 49 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba32_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba32_sint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
@@ -21203,6 +21215,68 @@ int main(void) {
                 memcmp(native_compute_float_bytes, adapter_compute_float_bytes, compute_float_byte_count) != 0) {
                 fail_with_error("float compute adapter execution failed", adapter_compute_error);
                 return 45 + (int)format_index;
+            }
+        }
+
+        const MTLPixelFormat compute_integer_formats[] = {
+            MTLPixelFormatRGBA32Uint, MTLPixelFormatRGBA32Sint,
+        };
+        NSString *compute_integer_names[] = {
+            @"zpu_cpu_fill_gradient_rgba32_uint", @"zpu_cpu_fill_gradient_rgba32_sint",
+        };
+        for (NSUInteger format_index = 0; format_index < sizeof(compute_integer_formats) / sizeof(compute_integer_formats[0]); ++format_index) {
+            const MTLPixelFormat format = compute_integer_formats[format_index];
+            const NSUInteger bytes_per_pixel = 16;
+            const NSUInteger compute_integer_byte_count = (NSUInteger)width * height * bytes_per_pixel;
+            MTLTextureDescriptor *native_compute_integer_descriptor = [compute_texture_descriptor copy];
+            native_compute_integer_descriptor.pixelFormat = format;
+            MTLTextureDescriptor *adapter_compute_integer_descriptor = [native_compute_integer_descriptor copy];
+            id<MTLTexture> native_compute_integer_texture = [device newTextureWithDescriptor:native_compute_integer_descriptor];
+            id<MTLTexture> adapter_compute_integer_texture = [adapter_device newTextureWithDescriptor:adapter_compute_integer_descriptor];
+            id<MTLFunction> native_compute_integer_function = [library newFunctionWithName:compute_integer_names[format_index]];
+            id<MTLComputePipelineState> native_compute_integer_pipeline =
+                [device newComputePipelineStateWithFunction:native_compute_integer_function error:&error];
+            id<MTLFunction> adapter_compute_integer_function =
+                ZPUMetalCreateCPUFunction(adapter_device, compute_integer_names[format_index]);
+            id<MTLComputePipelineState> adapter_compute_integer_pipeline =
+                [adapter_device newComputePipelineStateWithFunction:adapter_compute_integer_function error:&adapter_compute_error];
+            id<MTLCommandBuffer> native_compute_integer_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_compute_integer_encoder =
+                [native_compute_integer_command_buffer computeCommandEncoder];
+            [native_compute_integer_encoder setComputePipelineState:native_compute_integer_pipeline];
+            [native_compute_integer_encoder setTexture:native_compute_integer_texture atIndex:0];
+            [native_compute_integer_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                         threadsPerThreadgroup:MTLSizeMake(3, 2, 1)];
+            [native_compute_integer_encoder endEncoding];
+            [native_compute_integer_command_buffer commit];
+            [native_compute_integer_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_compute_integer_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_compute_integer_encoder =
+                [adapter_compute_integer_command_buffer computeCommandEncoder];
+            [adapter_compute_integer_encoder setComputePipelineState:adapter_compute_integer_pipeline];
+            [adapter_compute_integer_encoder setTexture:adapter_compute_integer_texture atIndex:0];
+            [adapter_compute_integer_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                          threadsPerThreadgroup:MTLSizeMake(3, 2, 1)];
+            [adapter_compute_integer_encoder endEncoding];
+            [adapter_compute_integer_command_buffer commit];
+            [adapter_compute_integer_command_buffer waitUntilCompleted];
+            uint8_t native_compute_integer_bytes[compute_integer_byte_count];
+            uint8_t adapter_compute_integer_bytes[compute_integer_byte_count];
+            [native_compute_integer_texture getBytes:native_compute_integer_bytes
+                                          bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                           fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_compute_integer_texture getBytes:adapter_compute_integer_bytes
+                                           bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (native_compute_integer_function == nil || native_compute_integer_pipeline == nil ||
+                native_compute_integer_texture == nil ||
+                native_compute_integer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_compute_integer_function == nil || adapter_compute_integer_pipeline == nil ||
+                adapter_compute_integer_texture == nil ||
+                adapter_compute_integer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_compute_integer_bytes, adapter_compute_integer_bytes, compute_integer_byte_count) != 0) {
+                fail_with_error("integer compute adapter execution failed", adapter_compute_error);
+                return 47 + (int)format_index;
             }
         }
 

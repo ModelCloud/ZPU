@@ -4897,7 +4897,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6 and kernel != 7 and kernel != 8 and kernel != 9) return error.UnsupportedOperation;
+        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6 and kernel != 7 and kernel != 8 and kernel != 9 and kernel != 10 and kernel != 11) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5625,6 +5625,26 @@ fn executeCompute(command: ComputeCommand) Error!void {
                 (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
                 0.25,
                 1,
+            });
+        },
+        10 => {
+            if (command.texture.format != .rgba32_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1),
+                @floatFromInt(y + 1),
+                @floatFromInt(x + y + 1),
+                4294967295.0,
+            });
+        },
+        11 => {
+            if (command.texture.format != .rgba32_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1),
+                -@as(f32, @floatFromInt(y + 1)),
+                @floatFromInt(x + y),
+                2147483647.0,
             });
         },
         7 => return executeTraceTriangles(command),
@@ -9462,6 +9482,42 @@ test "CPU compute gradient preserves wide target encodings" {
         0, 0, 0,    0x3e, 0, 0, 0, 0x3e, 0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f,
         0, 0, 0x80, 0x3e, 0, 0, 0, 0x3e, 0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f,
     }, rgba32.bytes);
+}
+
+test "CPU compute integer gradients preserve RGBA32 lanes and top-left rows" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const uint_texture = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba32_uint));
+    defer destroyTexture(uint_texture);
+    const sint_texture = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba32_sint));
+    defer destroyTexture(sint_texture);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(10);
+    try encoder.setTexture(uint_texture, 0);
+    try encoder.dispatchThreads(.{ .width = 3, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.setKernel(11);
+    try encoder.setTexture(sint_texture, 0);
+    try encoder.dispatchThreads(.{ .width = 3, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try command_buffer.commit();
+
+    for (0..2) |y| for (0..3) |x| {
+        const offset = y * uint_texture.stride + x * 16;
+        try std.testing.expectEqual(@as(u32, @intCast(x + 1)), readU32Little(uint_texture.bytes, offset));
+        try std.testing.expectEqual(@as(u32, @intCast(y + 1)), readU32Little(uint_texture.bytes, offset + 4));
+        try std.testing.expectEqual(@as(u32, @intCast(x + y + 1)), readU32Little(uint_texture.bytes, offset + 8));
+        try std.testing.expectEqual(std.math.maxInt(u32), readU32Little(uint_texture.bytes, offset + 12));
+        try std.testing.expectEqual(@as(i32, @intCast(x + 1)), std.mem.readInt(i32, sint_texture.bytes[offset..][0..4], .little));
+        try std.testing.expectEqual(-@as(i32, @intCast(y + 1)), std.mem.readInt(i32, sint_texture.bytes[offset + 4 ..][0..4], .little));
+        try std.testing.expectEqual(@as(i32, @intCast(x + y)), std.mem.readInt(i32, sint_texture.bytes[offset + 8 ..][0..4], .little));
+        try std.testing.expectEqual(std.math.maxInt(i32), std.mem.readInt(i32, sint_texture.bytes[offset + 12 ..][0..4], .little));
+    };
 }
 
 test "CPU compute buffer copy preserves logical channels across formats" {

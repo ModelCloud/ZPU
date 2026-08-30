@@ -980,6 +980,15 @@ pub const Target = struct {
         self.writeColorWithSrgbEncoding(x, y, color, @intFromEnum(abi.ColorWriteMask.all), .native_float, .nearest_even);
     }
 
+    /// Store a texture-compute result in the resource's raw texel domain.
+    /// Integer Metal textures receive integer values from integer kernels;
+    /// routing those values through the normalized fragment-write path would
+    /// incorrectly clamp every value above one to the texture maximum.
+    pub fn storeRawColor(self: *Target, x: usize, y: usize, color: [4]f32) void {
+        if (x >= self.width or y >= self.height) return;
+        self.clearColor(x, y, color);
+    }
+
     fn clearColor(self: *Target, x: usize, y: usize, color: [4]f32) void {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
