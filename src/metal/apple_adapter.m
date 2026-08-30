@@ -2193,6 +2193,14 @@ static BOOL zpu_metal4_argument_table_buffer(ZPUMTL4ArgumentTable *table,
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_metal4_argument_table_buffer_slot_empty(ZPUMTL4ArgumentTable *table,
+                                                         NSUInteger index) {
+    if (table == nil || index >= table->_maxBufferBindCount) return YES;
+    return ((const uint64_t *)table->_bufferAddresses.bytes)[index] == 0 &&
+           ((const uint64_t *)table->_bufferResources.bytes)[index] == 0;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_metal4_buffer_range(MTL4BufferRange range, ZPUDevice *owner,
                                      ZPUBuffer **buffer, NSUInteger *offset) {
     if (buffer == NULL || offset == NULL || range.bufferAddress == 0 ||
@@ -10756,6 +10764,32 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     const uint64_t *bufferStrides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
+        if (index != 0) {
+            if (!zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
+                if ((stages & (MTLRenderStageVertex | MTLRenderStageFragment)) == 0) {
+                    ZPUBuffer *buffer = nil;
+                    NSUInteger bufferOffset = 0;
+                    if (!zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
+                                                           &buffer, &bufferOffset)) {
+                        [_owner markError];
+                        return;
+                    }
+                    if ((stages & MTLRenderStageTile) != 0) {
+                        [(id)_legacy setTileBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                    }
+                    if ((stages & zpu_mtl_render_stage_object) != 0) {
+                        [(id)_legacy setObjectBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                    }
+                    if ((stages & zpu_mtl_render_stage_mesh) != 0) {
+                        [(id)_legacy setMeshBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                    }
+                    continue;
+                }
+                [_owner markError];
+                return;
+            }
+            continue;
+        }
         ZPUBuffer *buffer = nil;
         NSUInteger bufferOffset = 0;
         if (!zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
@@ -10786,6 +10820,7 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
+        if (index != 0 && textureIDs[index] == 0) continue;
         id resource = zpu_resource_for_id(textureIDs[index]);
         if (textureIDs[index] != 0 &&
             (![resource isKindOfClass:[ZPUTexture class]] || ((ZPUTexture *)resource)->_owner != _owner->_owner)) {
@@ -10800,6 +10835,7 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
+        if (index != 0 && samplerIDs[index] == 0) continue;
         id resource = zpu_resource_for_id(samplerIDs[index]);
         if (samplerIDs[index] != 0 &&
             (![resource isKindOfClass:[ZPUSamplerState class]] || ((ZPUSamplerState *)resource)->_owner != _owner->_owner)) {
@@ -10977,6 +11013,13 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     if (_argumentTable == nil) return;
     if (_argumentTable->_invalid) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
+        if (index != 0) {
+            if (!zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
+                [_owner markError];
+                return;
+            }
+            continue;
+        }
         ZPUBuffer *buffer = nil;
         NSUInteger bufferOffset = 0;
         if (!zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
@@ -10992,14 +11035,26 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         }
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
+    BOOL hasTextureBinding = NO;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
+        if (index > 1) {
+            if (textureIDs[index] != 0) {
+                [_owner markError];
+                return;
+            }
+            continue;
+        }
+        if (textureIDs[index] == 0) continue;
         id resource = zpu_resource_for_id(textureIDs[index]);
-        if (textureIDs[index] != 0 &&
-            (![resource isKindOfClass:[ZPUTexture class]] || ((ZPUTexture *)resource)->_owner != _owner->_owner)) {
+        if (![resource isKindOfClass:[ZPUTexture class]] || ((ZPUTexture *)resource)->_owner != _owner->_owner) {
             [_owner markError];
             return;
         }
         [_legacy setTexture:(id<MTLTexture>)resource atIndex:index];
+        hasTextureBinding = YES;
+    }
+    if (!hasTextureBinding && _argumentTable->_maxTextureBindCount != 0) {
+        [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:0];
     }
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {

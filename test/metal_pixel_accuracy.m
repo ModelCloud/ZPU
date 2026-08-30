@@ -9966,7 +9966,8 @@ int main(void) {
         [metal4_queue signalEvent:metal4_event value:13];
         [metal4_queue waitForEvent:metal4_event value:13];
         MTL4ArgumentTableDescriptor *metal4_table_descriptor = [MTL4ArgumentTableDescriptor new];
-        metal4_table_descriptor.maxTextureBindCount = 1;
+        metal4_table_descriptor.maxBufferBindCount = 2;
+        metal4_table_descriptor.maxTextureBindCount = 3;
         metal4_table_descriptor.label = @"zpu-cpu-table";
         id<MTL4ArgumentTable> metal4_table =
             [adapter_device newArgumentTableWithDescriptor:metal4_table_descriptor error:&metal4_error];
@@ -13232,7 +13233,9 @@ int main(void) {
         adapter_metal4_origin_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         adapter_metal4_origin_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
         MTL4ArgumentTableDescriptor *adapter_metal4_origin_table_descriptor = [MTL4ArgumentTableDescriptor new];
-        adapter_metal4_origin_table_descriptor.maxBufferBindCount = 1;
+        adapter_metal4_origin_table_descriptor.maxBufferBindCount = 2;
+        adapter_metal4_origin_table_descriptor.maxTextureBindCount = 2;
+        adapter_metal4_origin_table_descriptor.maxSamplerStateBindCount = 2;
         id<MTL4ArgumentTable> adapter_metal4_origin_table =
             [adapter_device newArgumentTableWithDescriptor:adapter_metal4_origin_table_descriptor error:&metal4_error];
         [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16 atIndex:0];
