@@ -92,7 +92,7 @@ triangle path:
   The expanded direct instance index selects the corresponding ZPU-owned
   slice, preserving Apple's top-left X/Y pixel grid while keeping execution
   entirely on the CPU. Deferred primitive and indexed draws also resolve
-  `baseInstance` at commit time and select successive slices. Layered
+  `baseInstance` (for direct and indirect draws) and select successive slices. Layered
   Depth/stencil array planes are also staged as independent CPU arrays and
   participate in per-layer clears, load/store, depth tests, and stencil
   operations. Layered tile/mesh/patch draws and layered multisample passes
@@ -185,7 +185,8 @@ triangle path:
   the corresponding ZPU texture and use that target's width/height for
   rasterization; direct layered color passes select up to eight 2D-array
   slices by direct instance index, while primitive/indexed indirect draws
-  resolve `baseInstance` at commit time. Layered depth/stencil array planes
+  honor `baseInstance` and resolve it at commit time where indirect arguments
+  are used. Layered depth/stencil array planes
   select and update matching per-layer CPU state; tile/mesh/patch draws and
   layered multisample passes remain explicitly rejected
 - buffer-backed texture views that alias storage with checked row strides and

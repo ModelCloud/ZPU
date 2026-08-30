@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 33u
+#define ZPU_METAL_ABI_VERSION 34u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -563,8 +563,8 @@ int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *e
 /* Layered draws select these ZPU-owned 2D-array color/depth/stencil slices
  * by expanded instance index. The bounded CPU profile supports up to eight
  * layers; layered tile/mesh/patch draws and layered multisample passes remain
- * rejected. Indirect primitive and indexed draws resolve baseInstance at
- * commit time and select the corresponding slices. */
+ * rejected. Direct and indirect primitive/indexed draws honor baseInstance
+ * and select the corresponding slices. */
 int zpu_metal_render_encoder_set_render_target_array(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count);
 int zpu_metal_render_encoder_set_color_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 int zpu_metal_render_encoder_set_depth_texture_array(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count);
@@ -625,9 +625,11 @@ int zpu_metal_render_encoder_set_tessellation_factor_scale(zpu_metal_render_enco
 int zpu_metal_render_encoder_update_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_wait_for_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_draw_primitives(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t vertex_start, size_t vertex_count, size_t instance_count);
+int zpu_metal_render_encoder_draw_primitives_base_instance(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t vertex_start, size_t vertex_count, size_t instance_count, size_t base_instance);
 int zpu_metal_render_encoder_draw_primitives_indirect(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset);
 int zpu_metal_render_encoder_draw_indexed_primitives(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t index_count, zpu_metal_index_type index_type, zpu_metal_buffer *index_buffer, size_t index_buffer_offset, size_t instance_count);
 int zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t index_count, zpu_metal_index_type index_type, zpu_metal_buffer *index_buffer, size_t index_buffer_offset, size_t instance_count, int64_t base_vertex);
+int zpu_metal_render_encoder_draw_indexed_primitives_base_vertex_instance(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t index_count, zpu_metal_index_type index_type, zpu_metal_buffer *index_buffer, size_t index_buffer_offset, size_t instance_count, int64_t base_vertex, size_t base_instance);
 int zpu_metal_render_encoder_draw_indexed_primitives_indirect(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, zpu_metal_index_type index_type, zpu_metal_buffer *index_buffer, size_t index_buffer_offset, zpu_metal_buffer *indirect_buffer, size_t indirect_buffer_offset);
 int zpu_metal_render_encoder_dispatch_threads_per_tile(zpu_metal_render_encoder *encoder, zpu_metal_tile_kernel kernel, zpu_metal_size tile_size, zpu_metal_size threads_per_tile);
 int zpu_metal_render_encoder_draw_mesh_threadgroups(zpu_metal_render_encoder *encoder, zpu_metal_mesh_kernel kernel, zpu_metal_size threadgroups_per_grid, zpu_metal_size threads_per_object_threadgroup, zpu_metal_size threads_per_mesh_threadgroup);

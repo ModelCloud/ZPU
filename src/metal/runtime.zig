@@ -3073,11 +3073,20 @@ pub const RenderEncoder = struct {
     }
 
     pub fn drawPrimitives(self: *RenderEncoder, primitive: abi.PrimitiveType, vertex_start: usize, vertex_count: usize, instance_count: usize) Error!void {
+        return self.drawPrimitivesWithBaseInstance(primitive, vertex_start, vertex_count, instance_count, 0);
+    }
+
+    pub fn drawPrimitivesWithBaseInstance(self: *RenderEncoder, primitive: abi.PrimitiveType, vertex_start: usize, vertex_count: usize, instance_count: usize, base_instance: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive)) return error.InvalidCommand;
         if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (instance_count == 0 or vertex_count == 0) return;
         const array_target_count = self.renderTargetArrayCount();
-        if (array_target_count == 0 or (array_target_count > 1 and instance_count > array_target_count))
+        if (array_target_count == 0) return error.InvalidArgument;
+        if (array_target_count > 1) {
+            const last_instance = std.math.add(usize, base_instance, instance_count - 1) catch return error.InvalidArgument;
+            if (last_instance >= array_target_count) return error.InvalidArgument;
+        }
+        if (array_target_count > 1 and instance_count > array_target_count)
             return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
         const source = try self.sourceVertices(&owned_source);
@@ -3107,7 +3116,10 @@ pub const RenderEncoder = struct {
                 .visibility_mode = self.visibility_mode,
                 .visibility_offset = self.visibility_offset,
                 .visibility_result_type = self.visibility_result_type,
-                .array_index = if (array_target_count > 1) instance else 0,
+                .array_index = if (array_target_count > 1)
+                    std.math.add(usize, base_instance, instance) catch return error.InvalidArgument
+                else
+                    0,
             } });
         }
     }
@@ -3146,16 +3158,25 @@ pub const RenderEncoder = struct {
     }
 
     pub fn drawIndexedPrimitives(self: *RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, instance_count: usize) Error!void {
-        return self.drawIndexedPrimitivesWithBaseVertex(primitive, index_count, index_type, index_buffer, index_buffer_offset, instance_count, 0);
+        return self.drawIndexedPrimitivesWithBaseVertexAndInstance(primitive, index_count, index_type, index_buffer, index_buffer_offset, instance_count, 0, 0);
     }
 
     pub fn drawIndexedPrimitivesWithBaseVertex(self: *RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, instance_count: usize, base_vertex: i64) Error!void {
+        return self.drawIndexedPrimitivesWithBaseVertexAndInstance(primitive, index_count, index_type, index_buffer, index_buffer_offset, instance_count, base_vertex, 0);
+    }
+
+    pub fn drawIndexedPrimitivesWithBaseVertexAndInstance(self: *RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, instance_count: usize, base_vertex: i64, base_instance: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validIndexType(index_type)) return error.InvalidCommand;
         if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (!validBuffer(index_buffer) or index_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (instance_count == 0 or index_count == 0) return;
         const array_target_count = self.renderTargetArrayCount();
-        if (array_target_count == 0 or (array_target_count > 1 and instance_count > array_target_count))
+        if (array_target_count == 0) return error.InvalidArgument;
+        if (array_target_count > 1) {
+            const last_instance = std.math.add(usize, base_instance, instance_count - 1) catch return error.InvalidArgument;
+            if (last_instance >= array_target_count) return error.InvalidArgument;
+        }
+        if (array_target_count > 1 and instance_count > array_target_count)
             return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
         const source = try self.sourceVertices(&owned_source);
@@ -3191,7 +3212,10 @@ pub const RenderEncoder = struct {
                 .visibility_mode = self.visibility_mode,
                 .visibility_offset = self.visibility_offset,
                 .visibility_result_type = self.visibility_result_type,
-                .array_index = if (array_target_count > 1) instance else 0,
+                .array_index = if (array_target_count > 1)
+                    std.math.add(usize, base_instance, instance) catch return error.InvalidArgument
+                else
+                    0,
             } });
         }
     }
@@ -9624,6 +9648,11 @@ pub export fn zpu_metal_render_encoder_draw_primitives(encoder: ?*RenderEncoder,
     return 0;
 }
 
+pub export fn zpu_metal_render_encoder_draw_primitives_base_instance(encoder: ?*RenderEncoder, primitive: abi.PrimitiveType, vertex_start: usize, vertex_count: usize, instance_count: usize, base_instance: usize) callconv(.c) c_int {
+    (encoder orelse return -1).drawPrimitivesWithBaseInstance(primitive, vertex_start, vertex_count, instance_count, base_instance) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_render_encoder_draw_primitives_indirect(encoder: ?*RenderEncoder, primitive: abi.PrimitiveType, indirect_buffer: ?*Buffer, indirect_buffer_offset: usize) callconv(.c) c_int {
     (encoder orelse return -1).drawPrimitivesIndirect(primitive, indirect_buffer orelse return -1, indirect_buffer_offset) catch |err| return errorCode(err);
     return 0;
@@ -9636,6 +9665,11 @@ pub export fn zpu_metal_render_encoder_draw_indexed_primitives(encoder: ?*Render
 
 pub export fn zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(encoder: ?*RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: ?*Buffer, index_buffer_offset: usize, instance_count: usize, base_vertex: i64) callconv(.c) c_int {
     (encoder orelse return -1).drawIndexedPrimitivesWithBaseVertex(primitive, index_count, index_type, index_buffer orelse return -1, index_buffer_offset, instance_count, base_vertex) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_draw_indexed_primitives_base_vertex_instance(encoder: ?*RenderEncoder, primitive: abi.PrimitiveType, index_count: usize, index_type: abi.IndexType, index_buffer: ?*Buffer, index_buffer_offset: usize, instance_count: usize, base_vertex: i64, base_instance: usize) callconv(.c) c_int {
+    (encoder orelse return -1).drawIndexedPrimitivesWithBaseVertexAndInstance(primitive, index_count, index_type, index_buffer orelse return -1, index_buffer_offset, instance_count, base_vertex, base_instance) catch |err| return errorCode(err);
     return 0;
 }
 

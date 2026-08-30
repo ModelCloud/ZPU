@@ -16577,8 +16577,10 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     if (zpu_metal_render_encoder_draw_primitives(_zpuEncoder, (zpu_metal_primitive_type)primitiveType, vertexStart, vertexCount, instanceCount) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType vertexStart:(NSUInteger)vertexStart vertexCount:(NSUInteger)vertexCount instanceCount:(NSUInteger)instanceCount baseInstance:(NSUInteger)baseInstance {
-    (void)baseInstance;
-    [self drawPrimitives:primitiveType vertexStart:vertexStart vertexCount:vertexCount instanceCount:instanceCount];
+    if (![self validateVertexStrideForDraw]) return;
+    if (zpu_metal_render_encoder_draw_primitives_base_instance(
+            _zpuEncoder, (zpu_metal_primitive_type)primitiveType, vertexStart, vertexCount,
+            instanceCount, baseInstance) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
     if (![self validateVertexStrideForDraw]) return;
@@ -16606,14 +16608,13 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexCount:(NSUInteger)indexCount indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset instanceCount:(NSUInteger)instanceCount baseVertex:(NSInteger)baseVertex baseInstance:(NSUInteger)baseInstance {
     if (![self validateVertexStrideForDraw]) return;
-    (void)baseInstance;
     ZPUBuffer *zpuIndexBuffer = (ZPUBuffer *)indexBuffer;
     if (![zpuIndexBuffer isKindOfClass:[ZPUBuffer class]]) { [_owner markError]; return; }
     [_owner retainResource:zpuIndexBuffer];
-    if (zpu_metal_render_encoder_draw_indexed_primitives_base_vertex(
+    if (zpu_metal_render_encoder_draw_indexed_primitives_base_vertex_instance(
         _zpuEncoder, (zpu_metal_primitive_type)primitiveType, indexCount,
         (zpu_metal_index_type)(indexType == MTLIndexTypeUInt16 ? ZPU_METAL_INDEX_UINT16 : ZPU_METAL_INDEX_UINT32),
-        zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount, (int64_t)baseVertex) != ZPU_METAL_OK) [_owner markError];
+        zpuIndexBuffer->_zpuBuffer, indexBufferOffset, instanceCount, (int64_t)baseVertex, baseInstance) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)drawIndexedPrimitives:(MTLPrimitiveType)primitiveType indexType:(MTLIndexType)indexType indexBuffer:(id<MTLBuffer>)indexBuffer indexBufferOffset:(NSUInteger)indexBufferOffset indirectBuffer:(id<MTLBuffer>)indirectBuffer indirectBufferOffset:(NSUInteger)indirectBufferOffset {
     if (![self validateVertexStrideForDraw]) return;
