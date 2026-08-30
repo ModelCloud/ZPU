@@ -2010,9 +2010,13 @@ static ZPUTexture *zpu_hidden_color_target(ZPUDevice *owner, ZPUTexture *attachm
     const NSUInteger width = zpu_metal_texture_width(attachmentTexture);
     const NSUInteger height = zpu_metal_texture_height(attachmentTexture);
     if (width == 0 || height == 0) return nil;
-    MTLTextureDescriptor *descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                            width:width height:height mipmapped:NO];
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor new];
+    descriptor.textureType = attachment.sampleCount > 1 ? MTLTextureType2DMultisample : MTLTextureType2D;
+    descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    descriptor.width = width;
+    descriptor.height = height;
+    descriptor.mipmapLevelCount = 1;
+    descriptor.sampleCount = attachment.sampleCount > 1 ? attachment.sampleCount : 1;
     descriptor.storageMode = MTLStorageModeShared;
     descriptor.usage = MTLTextureUsageRenderTarget;
     return (ZPUTexture *)[owner newTextureWithDescriptor:descriptor];
