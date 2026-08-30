@@ -3062,21 +3062,14 @@ static void zpu_metal4_clear_render_argument_slot(ZPURenderEncoder *legacy,
                                                     BOOL clearTexture,
                                                     BOOL clearSampler) {
     if (legacy == nil) return;
-    /* The fixed CPU vertex/fragment profiles expose only slot zero. A
-     * nonzero slot is still a valid Metal argument-table slot, but it is not
-     * represented by those bounded profiles and therefore cannot have a
-     * previously-applied CPU binding to clear. Tile/object/mesh bindings are
-     * retained as stage metadata and must clear every slot explicitly. */
     if (stage == MTLRenderStageVertex) {
-        if (index != 0) return;
-        if (clearBuffer) [(id)legacy setVertexBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-        if (clearTexture) [(id)legacy setVertexTexture:(id<MTLTexture>)nil atIndex:0];
-        if (clearSampler) [(id)legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:0];
+        if (clearBuffer) [(id)legacy setVertexBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        if (clearTexture) [(id)legacy setVertexTexture:(id<MTLTexture>)nil atIndex:index];
+        if (clearSampler) [(id)legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:index];
     } else if (stage == MTLRenderStageFragment) {
-        if (index != 0) return;
-        if (clearBuffer) [(id)legacy setFragmentBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-        if (clearTexture) [(id)legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:0];
-        if (clearSampler) [(id)legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:0];
+        if (clearBuffer) [(id)legacy setFragmentBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        if (clearTexture) [(id)legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:index];
+        if (clearSampler) [(id)legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:index];
     } else if (stage == MTLRenderStageTile) {
         if (clearBuffer) [(id)legacy setTileBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
         if (clearTexture) [(id)legacy setTileTexture:(id<MTLTexture>)nil atIndex:index];
@@ -13565,37 +13558,28 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     const uint64_t *bufferStrides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
         if (index != 0) {
-            if (!zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
-                if ((stages & (MTLRenderStageVertex | MTLRenderStageFragment)) == 0) {
-                    ZPUBuffer *buffer = nil;
-                    NSUInteger bufferOffset = 0;
-                    if (!zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
-                                                           &buffer, &bufferOffset)) {
-                        [_owner markError];
-                        return;
-                    }
-                    if ((stages & MTLRenderStageTile) != 0) {
-                        [(id)_legacy setTileBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
-                    }
-                    if ((stages & zpu_mtl_render_stage_object) != 0) {
-                        [(id)_legacy setObjectBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
-                    }
-                    if ((stages & zpu_mtl_render_stage_mesh) != 0) {
-                        [(id)_legacy setMeshBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
-                    }
-                    continue;
-                }
+            ZPUBuffer *buffer = nil;
+            NSUInteger bufferOffset = 0;
+            if (!zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index) &&
+                !zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
+                                                   &buffer, &bufferOffset)) {
                 [_owner markError];
                 return;
             }
+            if ((stages & MTLRenderStageVertex) != 0) {
+                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+            }
+            if ((stages & MTLRenderStageFragment) != 0) {
+                [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+            }
             if ((stages & MTLRenderStageTile) != 0) {
-                [(id)_legacy setTileBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+                [(id)_legacy setTileBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
             }
             if ((stages & zpu_mtl_render_stage_object) != 0) {
-                [(id)_legacy setObjectBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+                [(id)_legacy setObjectBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
             }
             if ((stages & zpu_mtl_render_stage_mesh) != 0) {
-                [(id)_legacy setMeshBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+                [(id)_legacy setMeshBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
             }
             continue;
         }
