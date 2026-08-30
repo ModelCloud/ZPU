@@ -726,7 +726,7 @@ pub fn buildTilePacketsFromMacrobins(clusters: []const Cluster, surface_w: u32, 
         const macro_bounds = ScreenBounds{ .min_x = @intCast(mx * @as(usize, macro_w)), .min_y = @intCast(my * @as(usize, macro_h)), .max_x = @min(surface_w, @as(u32, @intCast((mx + 1) * @as(usize, macro_w)))), .max_y = @min(surface_h, @as(u32, @intCast((my + 1) * @as(usize, macro_h)))) };
         const mh = macro_headers[macro_index];
         const begin = @as(usize, mh.offset);
-        const end = begin + @as(usize, mh.count);
+        const end = rangeEnd(mh.offset, mh.count) orelse return error.InvalidGeometry;
         if (end > macro_entries.len) return error.InvalidGeometry;
         for (macro_entries[begin..end]) |reference| {
             const cluster_index = @as(usize, reference.cluster_index);
@@ -757,7 +757,7 @@ pub fn buildTilePacketsFromMacrobins(clusters: []const Cluster, surface_w: u32, 
         const macro_bounds = ScreenBounds{ .min_x = @intCast(mx * @as(usize, macro_w)), .min_y = @intCast(my * @as(usize, macro_h)), .max_x = @min(surface_w, @as(u32, @intCast((mx + 1) * @as(usize, macro_w)))), .max_y = @min(surface_h, @as(u32, @intCast((my + 1) * @as(usize, macro_h)))) };
         const mh = macro_headers[macro_index];
         const begin = @as(usize, mh.offset);
-        const end = begin + @as(usize, mh.count);
+        const end = rangeEnd(mh.offset, mh.count) orelse return error.InvalidGeometry;
         if (end > macro_entries.len) return error.InvalidGeometry;
         for (macro_entries[begin..end]) |reference| {
             const cluster_index = @as(usize, reference.cluster_index);
@@ -782,7 +782,8 @@ pub fn buildTilePacketsFromMacrobins(clusters: []const Cluster, surface_w: u32, 
     }
     for (headers[0..tile_count]) |header| {
         const begin = @as(usize, header.offset);
-        const end = begin + @as(usize, header.count);
+        const end = rangeEnd(header.offset, header.count) orelse return error.InvalidGeometry;
+        if (end > packets.len) return error.InvalidGeometry;
         heapSortPackets(packets[begin..end]);
     }
     return total;
@@ -849,7 +850,7 @@ pub fn cullValidatedHierarchyHzb(hierarchy: ValidatedHierarchy, hzb: Hzb, visibl
 /// New code should retain the `ValidatedHierarchy` token and call
 /// `cullValidatedHierarchyHzb()` directly so validation is not repeated.
 pub fn cullHierarchyHzb(nodes: []const ClusterNode, roots: []const u32, clusters: []const Cluster, hzb: Hzb, visible: []bool, stack: []u32) BinError!usize {
-    return cullValidatedHierarchyHzb(.{ .nodes = nodes, .roots = roots, .clusters = clusters, .compare = hzb.policy.compare }, hzb, visible, stack);
+    return cullValidatedHierarchyHzb(.{ .nodes = nodes, .roots = roots, .clusters = clusters, .compare = hzb.policy.compare, .revision = 0 }, hzb, visible, stack);
 }
 
 test "HZB odd dimensions use exact power-of-two footprints" {
@@ -876,6 +877,19 @@ test "previous-frame HZB requires conservative reprojection proof" {
     var values: [1]f32 = undefined;
     var levels: [1]HzbLevel = undefined;
     try std.testing.expectError(error.InvalidPolicy, Hzb.build(&depth, 1, 1, .{ .source = .previous_frame_conservative, .compare = .less }, &values, &levels));
+}
+
+test "compatibility hierarchy culling entry point remains callable" {
+    const depth = [_]f32{0.9};
+    var values: [1]f32 = undefined;
+    var levels: [1]HzbLevel = undefined;
+    const hzb = try Hzb.build(&depth, 1, 1, .{ .source = .depth_prepass, .compare = .less }, &values, &levels);
+    const clusters = [_]Cluster{.{ .id = 1, .draw_id = 1, .material_id = 1, .first_triangle = 0, .triangle_count = 1, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 1, .max_y = 1 }, .best_depth = 0.1, .order_key = .{ .submission = 0, .command = 0, .primitive_group = 0 } }};
+    const nodes = [_]ClusterNode{.{ .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 1, .max_y = 1 }, .best_depth = 0.1, .first_cluster = 0, .cluster_count = 1 }};
+    var visible: [1]bool = undefined;
+    var stack: [2]u32 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try cullHierarchyHzb(&nodes, &[_]u32{0}, &clusters, hzb, &visible, &stack));
+    try std.testing.expect(visible[0]);
 }
 
 test "HZB aliases full-resolution depth and stores only coarse levels" {

@@ -75,13 +75,19 @@ pub fn build(b: *std.Build) void {
         scalar_packet_cpu_cube_test.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
         scalar_packet_cpu_cube_test.root_module.link_libc = true;
         const run_scalar_packet_cpu_cube_test = b.addRunArtifact(scalar_packet_cpu_cube_test);
+        // The default core-only build is a compile gate. Keep execution on the
+        // explicit `test` step so CI can enforce compilation before behavior.
+        b.getInstallStep().dependOn(&render_test.step);
+        b.getInstallStep().dependOn(&locality_test.step);
+        b.getInstallStep().dependOn(&prepared_test.step);
+        b.getInstallStep().dependOn(&scalar_packet_test.step);
+        b.getInstallStep().dependOn(&scalar_packet_cpu_cube_test.step);
         const test_step = b.step("test", "Run dependency-free render foundation tests");
         test_step.dependOn(&run_render_test.step);
         test_step.dependOn(&run_locality_test.step);
         test_step.dependOn(&run_prepared_test.step);
         test_step.dependOn(&run_scalar_packet_test.step);
         test_step.dependOn(&run_scalar_packet_cpu_cube_test.step);
-        b.getInstallStep().dependOn(test_step);
         return;
     }
 

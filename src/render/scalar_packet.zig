@@ -137,7 +137,7 @@ pub fn renderPackets(surface: Surface, primitives: []const prepared.PreparedPrim
     if (headers.len < tile_count) return error.InvalidPacketStream;
     for (headers[0..tile_count], 0..) |header, tile_index| {
         const begin = @as(usize, header.offset);
-        const end = begin + @as(usize, header.count);
+        const end = rangeEnd(header.offset, header.count) orelse return error.InvalidPacketStream;
         if (end > packets.len) return error.InvalidPacketStream;
         const tile_x = tile_index % columns;
         const tile_y = tile_index / columns;

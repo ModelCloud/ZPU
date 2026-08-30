@@ -24,7 +24,7 @@ Branch: `perf/host-tuned-tiles`
 Current PR title:
 
 ```text
-feat(experimental): introduce the Mosaic render planning foundation
+WIP: feat(experimental): introduce the Mosaic render pipeline
 ```
 
 The branch now implements planning, prepared primitives, and a scalar packet
@@ -100,7 +100,9 @@ Native Mosaic path -----------------------------+
                                strict fallback for ineligible Vulkan work
 ```
 
-The current branch stops at ordered tile-packet generation.
+The current branch stops at prepared scalar packet execution with differential
+coverage against `cpu_cube`. Compact physical packet streams are planned but
+not yet executable, and no Vulkan draw is routed through Mosaic yet.
 
 ## Core design decisions and rationale
 
@@ -149,11 +151,11 @@ Long-term, compiled capability should become granular enough to distinguish at l
 
 ```text
 surface_avx2
-cluster_primitive_avx2
-cluster_pixel_avx2
+mosaic_primitive_avx2
+mosaic_pixel_avx2
 surface_avx512
-cluster_primitive_avx512
-cluster_pixel_avx512
+mosaic_primitive_avx512
+mosaic_pixel_avx512
 ```
 
 Do not claim a 3D raster executable class merely because unrelated AVX2 surface kernels are linked.
@@ -1130,7 +1132,7 @@ Before the planning foundation should be considered stable enough to build major
 [x] dependency-free Zig build/test gates green
 [x] artifact capability dependency cleaned up
 [x] hierarchy validator rejects malformed topology and non-conservative bounds
-[ ] HZB property tests pass normal/reverse Z and odd dimensions
+[x] HZB property tests pass normal/reverse Z and dimensions 1..33
 [x] extent classification uses full cluster fanout
 [x] tile ordering construction is sub-quadratic
 [x] raster worker count is not capped at five

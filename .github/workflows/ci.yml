@@ -8,18 +8,28 @@ on:
 permissions:
   contents: read
 jobs:
-  build:
+  core:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: tools/limited-cpus.sh zig fmt --check build.zig src tools
+      - name: Formatting
+        run: tools/limited-cpus.sh zig fmt --check build.zig src tools
       - name: Dependency-free render compiler gate
         run: tools/limited-cpus.sh zig build -Dcore-only=true
       - name: Dependency-free render test gate
         run: tools/limited-cpus.sh zig build test -Dcore-only=true
+
+  build:
+    needs: core
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - name: Enable arm64 APT multiarch sources
         run: |
           # GitHub's Ubuntu 24.04 Azure mirror does not publish arm64 indexes,
@@ -39,16 +49,15 @@ jobs:
             "Architectures: arm64" \
             | sudo tee /etc/apt/sources.list.d/arm64.sources >/dev/null
           sudo dpkg --add-architecture arm64
-      - name: Install reproducible Ubuntu coverage and Vulkan-loader tools
+      - name: Install build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
-          dpkg-query -W -f='${Package}=${Version}\n' kcov libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 twm vulkan-tools xauth xvfb
+          sudo apt-get install -y --no-install-recommends libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64
+          dpkg-query -W -f='${Package}=${Version}\n' libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64
       - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: tools/limited-cpus.sh zig build test
       - run: tools/limited-cpus.sh zig build behavior
-      - run: tools/limited-cpus.sh zig build coverage
       - run: tools/limited-cpus.sh zig build smoke
       - name: Affinity/topology and explicit worker-cap proof
         run: |
@@ -72,6 +81,48 @@ jobs:
           if not any(m['backend']=='avx2' for m in r['metrics']):
               print('AVX2 execution unverified: x86-64-v3 kernel tier unavailable on this runner')
           PY
+      - run: tools/limited-cpus.sh zig build demo
+      - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
+      - run: tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
+      - name: Verify ICD ELF ABI
+        run: |
+          test "$(readelf -d zig-out/lib/libvulkan_zpu.so | awk '/NEEDED/ {print $5}' | sort)" = "$(printf '%s\n' '[ld-linux-x86-64.so.2]' '[libc.so.6]' '[libxcb.so.1]' | sort)"
+          exports="$(readelf --dyn-syms --wide zig-out/lib/libvulkan_zpu.so | awk '$5 == "GLOBAL" && $7 != "UND" {print $8}')"
+          test "$(printf '%s\n' "$exports" | wc -l)" -eq 3
+          for symbol in vk_icdNegotiateLoaderICDInterfaceVersion vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr; do
+            printf '%s\n' "$exports" | grep -qx "$symbol"
+          done
+
+  coverage:
+    needs: core
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install coverage prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends kcov libxcb1-dev
+          dpkg-query -W -f='${Package}=${Version}\n' kcov libxcb1-dev
+      - run: tools/limited-cpus.sh zig build coverage
+
+  integration:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install Vulkan and X11 integration prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan1 libvulkan-dev libxcb1-dev twm vulkan-tools xauth xvfb
+          dpkg-query -W -f='${Package}=${Version}\n' libvulkan1 libvulkan-dev libxcb1-dev twm vulkan-tools xauth xvfb
+      - run: tools/limited-cpus.sh zig build
+      - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - name: Authoritative system Vulkan-loader discovery
         run: |
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/runtime"
@@ -95,14 +146,3 @@ jobs:
         run: tools/limited-cpus.sh zig build vkcube-visual
       - name: Require vkcube inside a minimal desktop session
         run: tools/limited-cpus.sh zig build desktop-session
-      - run: tools/limited-cpus.sh zig build demo
-      - run: test "$(sha256sum zpu-demo.ppm | cut -d' ' -f1)" = "919b08ed95dec247b8c456e7fc1b85ac47e5a9d0030a54f6287fbfe424d37ef4"
-      - run: tools/limited-cpus.sh zig build -Doptimize=ReleaseFast
-      - name: Verify ICD ELF ABI
-        run: |
-          test "$(readelf -d zig-out/lib/libvulkan_zpu.so | awk '/NEEDED/ {print $5}' | sort)" = "$(printf '%s\n' '[ld-linux-x86-64.so.2]' '[libc.so.6]' '[libxcb.so.1]' | sort)"
-          exports="$(readelf --dyn-syms --wide zig-out/lib/libvulkan_zpu.so | awk '$5 == "GLOBAL" && $7 != "UND" {print $8}')"
-          test "$(printf '%s\n' "$exports" | wc -l)" -eq 3
-          for symbol in vk_icdNegotiateLoaderICDInterfaceVersion vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr; do
-            printf '%s\n' "$exports" | grep -qx "$symbol"
-          done
