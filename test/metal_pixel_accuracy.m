@@ -643,6 +643,47 @@ static int test_adapter_metal4_object_protocols(id<MTLDevice> adapter_device,
         fprintf(stderr, "metal-pixel: CPU adapter Metal 4 protocol audit object creation failed\n");
         return 165;
     }
+    if (result == 0) {
+        dispatch_queue_t feedback_queue = dispatch_queue_create("zpu.metal4.feedback", DISPATCH_QUEUE_SERIAL);
+        const void *feedback_queue_key = &feedback_queue_key;
+        dispatch_queue_set_specific(feedback_queue, feedback_queue_key, (void *)feedback_queue_key, NULL);
+        MTL4CommandQueueDescriptor *feedback_queue_descriptor = [MTL4CommandQueueDescriptor new];
+        feedback_queue_descriptor.feedbackQueue = feedback_queue;
+        id<MTL4CommandQueue> routed_queue =
+            [adapter_device newMTL4CommandQueueWithDescriptor:feedback_queue_descriptor error:&error];
+        id<MTL4CommandBuffer> routed_command_buffer = [adapter_device newCommandBuffer];
+        if (routed_command_buffer != nil && allocator != nil) {
+            [routed_command_buffer beginCommandBufferWithAllocator:allocator];
+            [routed_command_buffer endCommandBuffer];
+        }
+        MTL4CommitOptions *routed_options = ZPUMetalCreateCPUCommitOptions();
+        dispatch_semaphore_t feedback_done = dispatch_semaphore_create(0);
+        __block BOOL feedback_called = NO;
+        __block BOOL feedback_on_requested_queue = NO;
+        [routed_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            (void)feedback;
+            feedback_called = YES;
+            feedback_on_requested_queue = dispatch_get_specific(feedback_queue_key) == feedback_queue_key;
+            dispatch_semaphore_signal(feedback_done);
+        }];
+        id<MTL4CommandBuffer> routed_buffers[] = {routed_command_buffer};
+        [routed_queue commit:routed_buffers count:1 options:routed_options];
+        const long feedback_wait = dispatch_semaphore_wait(
+            feedback_done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        /* The handler signals before its dispatch block returns. Drain the
+         * requested serial queue so ARC cleanup cannot race the queue's
+         * internal dispatch bookkeeping. */
+        dispatch_sync(feedback_queue, ^{});
+        /* The SDK declares this descriptor property as assign. Clear it
+         * explicitly before releasing the descriptor so the test does not
+         * depend on private SDK cleanup ordering. */
+        feedback_queue_descriptor.feedbackQueue = nil;
+        if (routed_queue == nil || routed_command_buffer == nil || routed_options == nil ||
+            feedback_wait != 0 || !feedback_called || !feedback_on_requested_queue) {
+            fprintf(stderr, "metal-pixel: Metal 4 feedback queue routing failed\n");
+            return 166;
+        }
+    }
     return result;
 }
 

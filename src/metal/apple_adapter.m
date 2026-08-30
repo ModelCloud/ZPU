@@ -1203,6 +1203,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUCommandQueue *_legacyQueue;
     NSString *_label;
     NSMutableSet *_residencySets;
+    __unsafe_unretained dispatch_queue_t _feedbackQueue;
     BOOL _failed;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CommandQueueDescriptor *)descriptor;
@@ -13979,6 +13980,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         _owner = owner;
         _label = [descriptor.label copy];
         _residencySets = [NSMutableSet set];
+        _feedbackQueue = descriptor.feedbackQueue;
         id queue = [owner newCommandQueue];
         if ([queue isKindOfClass:[ZPUCommandQueue class]]) _legacyQueue = (ZPUCommandQueue *)queue;
         else _failed = YES;
@@ -14033,7 +14035,13 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         ZPUMTL4CommitFeedback *feedback = [[ZPUMTL4CommitFeedback alloc]
             initWithError:error startTime:startTime endTime:CFAbsoluteTimeGetCurrent()];
         for (MTL4CommitFeedbackHandler block in [(ZPUMTL4CommitOptions *)options feedbackHandlers]) {
-            block((id<MTL4CommitFeedback>)feedback);
+            if (_feedbackQueue != nil) {
+                dispatch_async(_feedbackQueue, ^{
+                    block((id<MTL4CommitFeedback>)feedback);
+                });
+            } else {
+                block((id<MTL4CommitFeedback>)feedback);
+            }
         }
     }
 }

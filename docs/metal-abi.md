@@ -314,7 +314,10 @@ triangle path:
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
-  deferred CPU kernels
+  deferred CPU kernels. `MTL4CommandQueueDescriptor.feedbackQueue` routes
+  commit feedback handlers onto the caller-supplied serial dispatch queue;
+  with no queue, the bounded CPU adapter preserves its synchronous feedback
+  behavior
 - CPU-owned Metal 4 compiler metadata for the registered ZPU kernel set:
   MTL4LibraryFunctionDescriptor objects resolve through ZPU libraries,
   compiler-created compute pipeline descriptors instantiate the existing ZPU
