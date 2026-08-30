@@ -1383,9 +1383,11 @@ pub const CommandBuffer = struct {
             .compute => |compute| {
                 sparseSyncOptionalBuffer(compute.buffer);
                 sparseSyncOptionalBuffer(compute.indirect_buffer);
+                sparseSyncTexture(compute.texture);
                 defer {
                     sparseFlushOptionalBuffer(compute.buffer);
                     sparseFlushOptionalBuffer(compute.indirect_buffer);
+                    sparseFlushTexture(compute.texture);
                 }
                 var resolved = compute;
                 if (compute.indirect_buffer) |indirect_buffer| {
@@ -3387,31 +3389,18 @@ fn executeCompute(command: ComputeCommand) Error!void {
                 std.math.mul(usize, @as(usize, width), 4) catch return error.InvalidArgument,
             ) catch return error.InvalidArgument;
             if (!rangeValid(source.bytes.len, command.buffer_offset, required)) return error.InvalidArgument;
+            const byte_to_float: f32 = 1.0 / 255.0;
+            var target = command.texture.asTarget();
             for (0..height) |y| {
                 const source_row = command.buffer_offset + y * row_bytes;
                 for (0..width) |x| {
                     const source_offset = source_row + x * 4;
-                    const destination_offset = y * command.texture.stride + x * command.texture.format.bytesPerPixel();
-                    switch (command.texture.format) {
-                        .r8_unorm => command.texture.bytes[destination_offset] = source.bytes[source_offset + 0],
-                        .rg8_unorm => {
-                            command.texture.bytes[destination_offset + 0] = source.bytes[source_offset + 0];
-                            command.texture.bytes[destination_offset + 1] = source.bytes[source_offset + 1];
-                        },
-                        .rgba8_unorm => {
-                            command.texture.bytes[destination_offset + 0] = source.bytes[source_offset + 0];
-                            command.texture.bytes[destination_offset + 1] = source.bytes[source_offset + 1];
-                            command.texture.bytes[destination_offset + 2] = source.bytes[source_offset + 2];
-                            command.texture.bytes[destination_offset + 3] = source.bytes[source_offset + 3];
-                        },
-                        .bgra8_unorm => {
-                            command.texture.bytes[destination_offset + 0] = source.bytes[source_offset + 2];
-                            command.texture.bytes[destination_offset + 1] = source.bytes[source_offset + 1];
-                            command.texture.bytes[destination_offset + 2] = source.bytes[source_offset + 0];
-                            command.texture.bytes[destination_offset + 3] = source.bytes[source_offset + 3];
-                        },
-                        .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_uint, .rgba32_sint, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth16_unorm, .depth32_float, .stencil8, .depth24_unorm_stencil8, .depth32_float_stencil8, .x32_stencil8, .x24_stencil8 => return error.UnsupportedFormat,
-                    }
+                    target.storeColor(x, y, .{
+                        @as(f32, @floatFromInt(source.bytes[source_offset + 0])) * byte_to_float,
+                        @as(f32, @floatFromInt(source.bytes[source_offset + 1])) * byte_to_float,
+                        @as(f32, @floatFromInt(source.bytes[source_offset + 2])) * byte_to_float,
+                        @as(f32, @floatFromInt(source.bytes[source_offset + 3])) * byte_to_float,
+                    });
                 }
             }
         },
@@ -6347,6 +6336,66 @@ test "CPU compute gradient preserves wide target encodings" {
         0, 0, 0,    0x3e, 0, 0, 0, 0x3e, 0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f,
         0, 0, 0x80, 0x3e, 0, 0, 0, 0x3e, 0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f,
     }, rgba32.bytes);
+}
+
+test "CPU compute buffer copy preserves logical channels across formats" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const source_bytes = [_]u8{ 32, 64, 96, 128, 64, 96, 128, 160 };
+    const source = try createBuffer(device, source_bytes.len, @ptrCast(&source_bytes));
+    defer destroyBuffer(source);
+    const r8 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.r8_unorm));
+    defer destroyTexture(r8);
+    const rg8 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rg8_unorm));
+    defer destroyTexture(rg8);
+    const rgba8 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(rgba8);
+    const bgra8 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(bgra8);
+    const r16 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.r16_unorm));
+    defer destroyTexture(r16);
+    const r16_float = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.r16_float));
+    defer destroyTexture(r16_float);
+    const rgba16 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rgba16_unorm));
+    defer destroyTexture(rgba16);
+    const r32 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.r32_float));
+    defer destroyTexture(r32);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(2);
+    try encoder.setBuffer(source, 0, 0);
+    const textures = [_]*Texture{ r8, rg8, rgba8, bgra8, r16, r16_float, rgba16, r32 };
+    for (textures) |texture| {
+        try encoder.setTexture(texture, 1);
+        try encoder.dispatchThreads(.{ .width = 2, .height = 1, .depth = 1 }, .{ .width = 2, .height = 1, .depth = 1 });
+    }
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0), rgba8.bytes[0]);
+    try command_buffer.commit();
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 64 }, r8.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 64, 64, 96 }, rg8.bytes);
+    try std.testing.expectEqualSlices(u8, &source_bytes, rgba8.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 96, 64, 32, 128, 128, 96, 64, 160 }, bgra8.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x20, 0x20, 0x40, 0x40 }, r16.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x20, 0x20, 0x40, 0x40, 0x60, 0x60, 0x80, 0x80,
+        0x40, 0x40, 0x60, 0x60, 0x80, 0x80, 0xa0, 0xa0,
+    }, rgba16.bytes);
+    var expected_r16_float_bytes = [_]u8{0} ** 4;
+    var expected_r16_float = try raster3d.Target.init(&expected_r16_float_bytes, 2, 1, 4, .r16_float);
+    expected_r16_float.storeColor(0, 0, .{ @as(f32, 32) / 255.0, 0, 0, 1 });
+    expected_r16_float.storeColor(1, 0, .{ @as(f32, 64) / 255.0, 0, 0, 1 });
+    try std.testing.expectEqualSlices(u8, &expected_r16_float_bytes, r16_float.bytes);
+    const r32_first: f32 = @bitCast(std.mem.readInt(u32, r32.bytes[0..4], .little));
+    const r32_second: f32 = @bitCast(std.mem.readInt(u32, r32.bytes[4..8], .little));
+    try std.testing.expectApproxEqAbs(@as(f32, 32) / 255.0, r32_first, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 64) / 255.0, r32_second, 0.000001);
 }
 
 test "CPU compute encoder preserves deferred Metal 4 copy and fill ordering" {

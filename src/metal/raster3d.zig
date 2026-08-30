@@ -191,8 +191,15 @@ pub const Target = struct {
     }
 
     fn writeF16(row_bytes: []u8, offset: usize, value: f32) void {
-        const half: f16 = @floatCast(value);
-        std.mem.writeInt(u16, row_bytes[offset..][0..2], @bitCast(half), .little);
+        // Apple texture writes truncate a non-representable float toward the
+        // zero-side half-float value. Zig's scalar cast rounds to nearest, so
+        // adjust an upward rounding by one half-float ULP before storing.
+        var bits: u16 = @bitCast(@as(f16, @floatCast(value)));
+        if (std.math.isFinite(value) and value != 0) {
+            const rounded: f32 = @floatCast(@as(f16, @bitCast(bits)));
+            if ((value > 0 and rounded > value) or (value < 0 and rounded < value)) bits -|= 1;
+        }
+        std.mem.writeInt(u16, row_bytes[offset..][0..2], bits, .little);
     }
 
     fn writeU16(row_bytes: []u8, offset: usize, value: f32) void {

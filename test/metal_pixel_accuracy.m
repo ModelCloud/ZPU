@@ -12918,6 +12918,80 @@ int main(void) {
             return 57;
         }
 
+        /* The copy profile consumes uchar4 source texels but writes a
+         * logical float4. Exercise the same CPU/ZPU path across representative
+         * target encodings; native Metal is used only as the byte oracle. */
+        const struct {
+            MTLPixelFormat format;
+            NSUInteger bytes_per_pixel;
+            const char *name;
+        } generic_copy_formats[] = {
+            {MTLPixelFormatR8Unorm, 1, "R8Unorm"},
+            {MTLPixelFormatR16Unorm, 2, "R16Unorm"},
+            {MTLPixelFormatR16Float, 2, "R16Float"},
+            {MTLPixelFormatRG8Unorm, 2, "RG8Unorm"},
+            {MTLPixelFormatRG16Unorm, 4, "RG16Unorm"},
+            {MTLPixelFormatRG16Float, 4, "RG16Float"},
+            {MTLPixelFormatRGBA8Unorm, 4, "RGBA8Unorm"},
+            {MTLPixelFormatBGRA8Unorm, 4, "BGRA8Unorm"},
+            {MTLPixelFormatR32Float, 4, "R32Float"},
+            {MTLPixelFormatRGBA16Unorm, 8, "RGBA16Unorm"},
+            {MTLPixelFormatRGBA16Float, 8, "RGBA16Float"},
+            {MTLPixelFormatRG32Float, 8, "RG32Float"},
+            {MTLPixelFormatRGBA32Float, 16, "RGBA32Float"},
+        };
+        for (NSUInteger format_index = 0;
+             format_index < sizeof(generic_copy_formats) / sizeof(generic_copy_formats[0]);
+             ++format_index) {
+            const NSUInteger generic_bytes_per_pixel = generic_copy_formats[format_index].bytes_per_pixel;
+            MTLTextureDescriptor *generic_native_descriptor = [compute_texture_descriptor copy];
+            generic_native_descriptor.pixelFormat = generic_copy_formats[format_index].format;
+            id<MTLTexture> generic_native_texture = [device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLTexture> generic_adapter_texture =
+                [adapter_device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLCommandBuffer> generic_native_command_buffer = [queue commandBuffer];
+            id<MTLCommandBuffer> generic_adapter_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> generic_native_encoder =
+                [generic_native_command_buffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> generic_adapter_encoder =
+                [generic_adapter_command_buffer computeCommandEncoder];
+            [generic_native_encoder setComputePipelineState:native_copy_pipeline];
+            [generic_native_encoder setBuffer:native_copy_buffer offset:0 atIndex:0];
+            [generic_native_encoder setTexture:generic_native_texture atIndex:1];
+            [generic_native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+            [generic_native_encoder endEncoding];
+            [generic_native_command_buffer commit];
+            [generic_native_command_buffer waitUntilCompleted];
+            [generic_adapter_encoder setComputePipelineState:adapter_copy_pipeline];
+            [generic_adapter_encoder setBuffer:adapter_copy_buffer offset:0 atIndex:0];
+            [generic_adapter_encoder setTexture:generic_adapter_texture atIndex:1];
+            [generic_adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                 threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+            [generic_adapter_encoder endEncoding];
+            [generic_adapter_command_buffer commit];
+            [generic_adapter_command_buffer waitUntilCompleted];
+            const NSUInteger generic_byte_count = (NSUInteger)width * height * generic_bytes_per_pixel;
+            uint8_t generic_native_copy_pixels[width * height * 16];
+            uint8_t generic_adapter_copy_pixels[width * height * 16];
+            memset(generic_native_copy_pixels, 0, sizeof(generic_native_copy_pixels));
+            memset(generic_adapter_copy_pixels, 0, sizeof(generic_adapter_copy_pixels));
+            [generic_native_texture getBytes:generic_native_copy_pixels
+                                 bytesPerRow:(NSUInteger)width * generic_bytes_per_pixel
+                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [generic_adapter_texture getBytes:generic_adapter_copy_pixels
+                                  bytesPerRow:(NSUInteger)width * generic_bytes_per_pixel
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (generic_native_texture == nil || generic_adapter_texture == nil ||
+                generic_native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                generic_adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(generic_native_copy_pixels, generic_adapter_copy_pixels, generic_byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: generic CPU buffer copy mismatch for %s\n",
+                        generic_copy_formats[format_index].name);
+                return 149 + (int)format_index;
+            }
+        }
+
         /* Indirect compute is still CPU-recorded on the adapter. Apple's
          * implementation is used only to establish the byte oracle. The
          * output texture is inherited from the compute encoder while the
