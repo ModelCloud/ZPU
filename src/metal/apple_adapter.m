@@ -605,9 +605,13 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _offset;
     MTLDataType _dataType;
     NSUInteger _argumentIndex;
+    MTLPointerType *_pointerType;
+    MTLTextureReferenceType *_textureReferenceType;
 }
 - (instancetype)initWithName:(NSString *)name offset:(NSUInteger)offset
                      dataType:(MTLDataType)dataType argumentIndex:(NSUInteger)argumentIndex;
+- (void)setPointerType:(MTLPointerType *)pointerType
+ textureReferenceType:(MTLTextureReferenceType *)textureReferenceType;
 @end
 
 @interface ZPUStructType : MTLStructType {
@@ -634,6 +638,20 @@ API_AVAILABLE(macos(10.13), ios(11.0))
                            alignment:(NSUInteger)alignment
                             dataSize:(NSUInteger)dataSize
                          structType:(MTLStructType *)structType;
+@end
+
+API_AVAILABLE(macos(10.13), ios(11.0))
+@interface ZPUTextureReferenceType : MTLTextureReferenceType {
+@public
+    MTLDataType _dataType;
+    MTLDataType _textureDataType;
+    MTLTextureType _textureType;
+    MTLBindingAccess _access;
+    BOOL _depthTexture;
+}
+- (instancetype)initWithTextureType:(MTLTextureType)textureType
+                            dataType:(MTLDataType)dataType
+                              access:(MTLBindingAccess)access;
 @end
 
 @interface ZPUVertexAttribute : MTLVertexAttribute {
@@ -7351,6 +7369,8 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
         _offset = offset;
         _dataType = dataType;
         _argumentIndex = argumentIndex;
+        _pointerType = nil;
+        _textureReferenceType = nil;
     }
     return self;
 }
@@ -7359,10 +7379,17 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 - (MTLDataType)dataType { return _dataType; }
 - (MTLStructType *)structType { return nil; }
 - (MTLArrayType *)arrayType { return nil; }
-- (MTLTextureReferenceType *)textureReferenceType API_AVAILABLE(macos(10.13), ios(11.0)) { return nil; }
-- (MTLPointerType *)pointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return nil; }
+- (MTLTextureReferenceType *)textureReferenceType API_AVAILABLE(macos(10.13), ios(11.0)) {
+    return _textureReferenceType;
+}
+- (MTLPointerType *)pointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return _pointerType; }
 - (MTLTensorReferenceType *)tensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
 - (NSUInteger)argumentIndex API_AVAILABLE(macos(10.13), ios(11.0)) { return _argumentIndex; }
+- (void)setPointerType:(MTLPointerType *)pointerType
+ textureReferenceType:(MTLTextureReferenceType *)textureReferenceType {
+    _pointerType = pointerType;
+    _textureReferenceType = textureReferenceType;
+}
 @end
 
 @implementation ZPUStructType
@@ -7409,6 +7436,27 @@ API_AVAILABLE(macos(10.13), ios(11.0))
 - (BOOL)elementIsArgumentBuffer { return _elementIsArgumentBuffer; }
 - (MTLStructType *)elementStructType { return _elementStructType; }
 - (MTLArrayType *)elementArrayType { return _elementArrayType; }
+@end
+
+API_AVAILABLE(macos(10.13), ios(11.0))
+@implementation ZPUTextureReferenceType
+- (instancetype)initWithTextureType:(MTLTextureType)textureType
+                            dataType:(MTLDataType)dataType
+                              access:(MTLBindingAccess)access {
+    if ((self = [super init])) {
+        _dataType = MTLDataTypeTexture;
+        _textureDataType = dataType;
+        _textureType = textureType;
+        _access = access;
+        _depthTexture = NO;
+    }
+    return self;
+}
+- (MTLDataType)dataType { return _dataType; }
+- (MTLDataType)textureDataType { return _textureDataType; }
+- (MTLTextureType)textureType { return _textureType; }
+- (MTLBindingAccess)access { return _access; }
+- (BOOL)isDepthTexture { return _depthTexture; }
 @end
 
 @implementation ZPUVertexAttribute
@@ -7802,7 +7850,42 @@ static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLFunctionReflection *zpu_argument_buffer_function_reflection(NSString *name) {
+    if (![name isEqualToString:zpu_cpu_argument_buffer_function_name]) return nil;
+
+    ZPUPointerType *dataPointer = [[ZPUPointerType alloc]
+        initWithElementType:MTLDataTypeFloat access:MTLBindingAccessReadWrite
+                  alignment:sizeof(float) dataSize:sizeof(float) structType:nil];
+    ZPUTextureReferenceType *textureReference = [[ZPUTextureReferenceType alloc]
+        initWithTextureType:MTLTextureType2D dataType:MTLDataTypeFloat
+                      access:MTLBindingAccessReadOnly];
+    ZPUStructMember *data = [[ZPUStructMember alloc] initWithName:@"data" offset:0
+        dataType:MTLDataTypePointer argumentIndex:0];
+    [data setPointerType:dataPointer textureReferenceType:nil];
+    ZPUStructMember *texture = [[ZPUStructMember alloc] initWithName:@"tex" offset:8
+        dataType:MTLDataTypeTexture argumentIndex:1];
+    [texture setPointerType:nil textureReferenceType:textureReference];
+    ZPUStructMember *sampler = [[ZPUStructMember alloc] initWithName:@"samp" offset:16
+        dataType:MTLDataTypeSampler argumentIndex:2];
+    ZPUStructMember *color = [[ZPUStructMember alloc] initWithName:@"color" offset:32
+        dataType:MTLDataTypeFloat4 argumentIndex:3];
+    MTLStructType *structType = [[ZPUStructType alloc]
+        initWithMembers:@[data, texture, sampler, color]];
+    ZPUBinding *binding = zpu_reflection_binding(@"args", MTLBindingTypeBuffer,
+                                                  MTLBindingAccessReadOnly, 0);
+    [binding setBufferDataSize:48 dataType:MTLDataTypeStruct];
+    binding->_bufferStructType = structType;
+    binding->_bufferPointerType = [[ZPUPointerType alloc]
+        initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                  alignment:16 dataSize:48 structType:structType];
+    return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+        initWithBindings:@[binding] userAnnotation:nil];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
+    MTLFunctionReflection *argumentBufferReflection = zpu_argument_buffer_function_reflection(name);
+    if (argumentBufferReflection != nil) return argumentBufferReflection;
     MTLFunctionReflection *mlReflection = zpu_mtl4_ml_function_reflection(name);
     if (mlReflection != nil) return mlReflection;
     if ([name isEqualToString:@"zpu_test_no_raster_vertex"]) {

@@ -26031,6 +26031,103 @@ int main(void) {
             [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
         id<MTLBuffer> adapter_nested_profile_buffer =
             [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        BOOL nested_profile_reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *native_nested_profile_reflection =
+                [library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer"];
+            MTLFunctionReflection *adapter_nested_profile_reflection =
+                [adapter_library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer"];
+            id<MTLBinding> native_nested_profile_binding =
+                native_nested_profile_reflection.bindings.firstObject;
+            id<MTLBinding> adapter_nested_profile_binding =
+                adapter_nested_profile_reflection.bindings.firstObject;
+            id<MTLBufferBinding> native_nested_profile_buffer_binding =
+                (id<MTLBufferBinding>)native_nested_profile_binding;
+            id<MTLBufferBinding> adapter_nested_profile_buffer_binding =
+                (id<MTLBufferBinding>)adapter_nested_profile_binding;
+            MTLStructType *native_nested_profile_struct =
+                native_nested_profile_buffer_binding.bufferStructType;
+            MTLStructType *adapter_nested_profile_struct =
+                adapter_nested_profile_buffer_binding.bufferStructType;
+            NSArray<NSString *> *nested_profile_member_names = @[@"data", @"tex", @"samp", @"color"];
+            NSArray<NSNumber *> *nested_profile_member_offsets = @[@0, @8, @16, @32];
+            NSArray<NSNumber *> *nested_profile_member_types = @[
+                @(MTLDataTypePointer), @(MTLDataTypeTexture), @(MTLDataTypeSampler), @(MTLDataTypeFloat4)];
+            NSArray<NSNumber *> *nested_profile_member_indices = @[@0, @1, @2, @3];
+            nested_profile_reflection_ok =
+                native_nested_profile_reflection != nil && adapter_nested_profile_reflection != nil &&
+                native_nested_profile_reflection.bindings.count == 1 &&
+                adapter_nested_profile_reflection.bindings.count == 1 &&
+                native_nested_profile_binding != nil && adapter_nested_profile_binding != nil &&
+                [native_nested_profile_binding.name isEqualToString:@"args"] &&
+                [adapter_nested_profile_binding.name isEqualToString:@"args"] &&
+                native_nested_profile_binding.type == adapter_nested_profile_binding.type &&
+                native_nested_profile_binding.type == MTLBindingTypeBuffer &&
+                native_nested_profile_binding.access == adapter_nested_profile_binding.access &&
+                native_nested_profile_binding.access == MTLBindingAccessReadOnly &&
+                native_nested_profile_binding.index == adapter_nested_profile_binding.index &&
+                native_nested_profile_binding.index == 0 &&
+                native_nested_profile_buffer_binding.bufferDataSize ==
+                    adapter_nested_profile_buffer_binding.bufferDataSize &&
+                native_nested_profile_buffer_binding.bufferDataSize == 48 &&
+                native_nested_profile_buffer_binding.bufferAlignment ==
+                    adapter_nested_profile_buffer_binding.bufferAlignment &&
+                native_nested_profile_buffer_binding.bufferAlignment == 16 &&
+                native_nested_profile_buffer_binding.bufferDataType ==
+                    adapter_nested_profile_buffer_binding.bufferDataType &&
+                native_nested_profile_buffer_binding.bufferDataType == MTLDataTypeStruct &&
+                native_nested_profile_struct != nil && adapter_nested_profile_struct != nil &&
+                native_nested_profile_struct.members.count == 4 &&
+                adapter_nested_profile_struct.members.count == 4;
+            for (NSUInteger member_index = 0; nested_profile_reflection_ok && member_index < 4; ++member_index) {
+                MTLStructMember *native_member = native_nested_profile_struct.members[member_index];
+                MTLStructMember *adapter_member = adapter_nested_profile_struct.members[member_index];
+                nested_profile_reflection_ok =
+                    [native_member.name isEqualToString:nested_profile_member_names[member_index]] &&
+                    [adapter_member.name isEqualToString:nested_profile_member_names[member_index]] &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.offset == nested_profile_member_offsets[member_index].unsignedIntegerValue &&
+                    native_member.dataType == adapter_member.dataType &&
+                    native_member.dataType == nested_profile_member_types[member_index].unsignedIntegerValue &&
+                    native_member.argumentIndex == adapter_member.argumentIndex &&
+                    native_member.argumentIndex == nested_profile_member_indices[member_index].unsignedIntegerValue;
+            }
+            MTLPointerType *native_data_pointer =
+                native_nested_profile_struct.members.count < 2 ? nil :
+                native_nested_profile_struct.members[0].pointerType;
+            MTLPointerType *adapter_data_pointer =
+                adapter_nested_profile_struct.members.count < 2 ? nil :
+                adapter_nested_profile_struct.members[0].pointerType;
+            MTLTextureReferenceType *native_texture_reference =
+                native_nested_profile_struct.members.count < 2 ? nil :
+                native_nested_profile_struct.members[1].textureReferenceType;
+            MTLTextureReferenceType *adapter_texture_reference =
+                adapter_nested_profile_struct.members.count < 2 ? nil :
+                adapter_nested_profile_struct.members[1].textureReferenceType;
+            nested_profile_reflection_ok = nested_profile_reflection_ok &&
+                native_data_pointer != nil && adapter_data_pointer != nil &&
+                native_data_pointer.elementType == adapter_data_pointer.elementType &&
+                native_data_pointer.elementType == MTLDataTypeFloat &&
+                native_data_pointer.access == adapter_data_pointer.access &&
+                native_data_pointer.access == MTLBindingAccessReadWrite &&
+                native_data_pointer.alignment == adapter_data_pointer.alignment &&
+                native_data_pointer.alignment == sizeof(float) &&
+                native_data_pointer.dataSize == adapter_data_pointer.dataSize &&
+                native_data_pointer.dataSize == sizeof(float) &&
+                native_texture_reference != nil && adapter_texture_reference != nil &&
+                native_texture_reference.textureType == adapter_texture_reference.textureType &&
+                native_texture_reference.textureType == MTLTextureType2D &&
+                native_texture_reference.textureDataType == adapter_texture_reference.textureDataType &&
+                native_texture_reference.textureDataType == MTLDataTypeFloat &&
+                native_texture_reference.access == adapter_texture_reference.access &&
+                native_texture_reference.access == MTLBindingAccessReadOnly &&
+                native_texture_reference.isDepthTexture == adapter_texture_reference.isDepthTexture &&
+                !native_texture_reference.isDepthTexture &&
+                adapter_nested_profile_struct.members[2].pointerType == nil &&
+                adapter_nested_profile_struct.members[2].textureReferenceType == nil &&
+                adapter_nested_profile_struct.members[3].pointerType == nil &&
+                adapter_nested_profile_struct.members[3].textureReferenceType == nil;
+        }
         if (native_nested_profile_encoder != nil && adapter_nested_profile_encoder != nil &&
             native_nested_profile_buffer != nil && adapter_nested_profile_buffer != nil) {
             [native_nested_profile_encoder setArgumentBuffer:native_nested_profile_buffer offset:0];
@@ -26069,6 +26166,7 @@ int main(void) {
                 [native_nested_profile_encoder alignment] != 16 ||
                 native_nested_profile_color_offset != adapter_nested_profile_color_offset ||
                 native_nested_profile_color_offset != 32 ||
+                !nested_profile_reflection_ok ||
                 adapter_nested_profile_buffer_address != adapter_copy_buffer.gpuAddress + 8 ||
                 adapter_nested_profile_texture_id != adapter_compute_icb_texture.gpuResourceID._impl ||
                 adapter_nested_profile_sampler_id != adapter_sampler.gpuResourceID._impl) {

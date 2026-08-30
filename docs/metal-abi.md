@@ -488,8 +488,10 @@ triangle path:
   stencil bindings into declaration-order slots: resources use 8-byte
   synthetic GPU addresses (with buffer offsets folded into the address), while
   scalar/vector/matrix constants use their native Metal size/alignment and
-  array stride. Rebinding captures direct constant writes; arbitrary
-  shader-specific struct layouts remain unsupported rather than being guessed
+  array stride. Rebinding captures direct constant writes. The explicit
+  `zpu_cpu_argument_buffer` profile also reflects and encodes one fixed nested
+  pointer/texture/sampler/constant layout; arbitrary shader-specific struct
+  layouts remain unsupported rather than being guessed
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports
