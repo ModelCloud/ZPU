@@ -11842,6 +11842,68 @@ int main(void) {
                 return 157;
             }
 
+            const float refit_ray_vertices[] = {
+                instance_ray_vertices[0], instance_ray_vertices[1], instance_ray_vertices[2],
+                instance_ray_vertices[3], instance_ray_vertices[4], instance_ray_vertices[5],
+                instance_ray_vertices[6], instance_ray_vertices[7], instance_ray_vertices[8],
+            };
+            id<MTLBuffer> adapter_refit_ray_vertices =
+                [adapter_device newBufferWithBytes:refit_ray_vertices length:sizeof(refit_ray_vertices)
+                                            options:MTLResourceStorageModeShared];
+            MTLPrimitiveAccelerationStructureDescriptor *refit_descriptor =
+                [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+            MTLAccelerationStructureTriangleGeometryDescriptor *refit_geometry =
+                [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+            refit_geometry.vertexBuffer = adapter_refit_ray_vertices;
+            refit_geometry.vertexBufferOffset = 0;
+            refit_geometry.vertexStride = 3 * sizeof(float);
+            refit_geometry.triangleCount = 1;
+            if (@available(macOS 13.0, iOS 16.0, *)) {
+                refit_geometry.vertexFormat = MTLAttributeFormatFloat3;
+            }
+            refit_descriptor.geometryDescriptors = @[refit_geometry];
+            id<MTLAccelerationStructure> adapter_refit_ray_acceleration_structure =
+                [adapter_device newAccelerationStructureWithSize:ray_allocation_size];
+            id<MTLCommandBuffer> adapter_refit_ray_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_refit_ray_encoder =
+                [adapter_refit_ray_command_buffer accelerationStructureCommandEncoder];
+            [adapter_refit_ray_encoder refitAccelerationStructure:adapter_ray_acceleration_structure
+                                                         descriptor:refit_descriptor
+                                                        destination:adapter_refit_ray_acceleration_structure
+                                                      scratchBuffer:adapter_ray_scratch
+                                                scratchBufferOffset:0];
+            [adapter_refit_ray_encoder endEncoding];
+            [adapter_refit_ray_command_buffer commit];
+            [adapter_refit_ray_command_buffer waitUntilCompleted];
+            id<MTLTexture> adapter_refit_ray_texture =
+                [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+            id<MTLCommandBuffer> adapter_refit_trace_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_refit_trace_encoder =
+                [adapter_refit_trace_command_buffer computeCommandEncoder];
+            [adapter_refit_trace_encoder setComputePipelineState:adapter_ray_pipeline];
+            [adapter_refit_trace_encoder setAccelerationStructure:adapter_refit_ray_acceleration_structure
+                                                     atBufferIndex:0];
+            [adapter_refit_trace_encoder setTexture:adapter_refit_ray_texture atIndex:0];
+            [adapter_refit_trace_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                       threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+            [adapter_refit_trace_encoder endEncoding];
+            [adapter_refit_trace_command_buffer commit];
+            [adapter_refit_trace_command_buffer waitUntilCompleted];
+            uint8_t adapter_refit_ray_pixels[ray_byte_count];
+            [adapter_refit_ray_texture getBytes:adapter_refit_ray_pixels bytesPerRow:ray_width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+            if (adapter_refit_ray_vertices == nil || refit_descriptor == nil || refit_geometry == nil ||
+                adapter_refit_ray_acceleration_structure == nil || adapter_refit_ray_command_buffer == nil ||
+                adapter_refit_ray_encoder == nil ||
+                adapter_refit_ray_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_refit_ray_texture == nil || adapter_refit_trace_command_buffer == nil ||
+                adapter_refit_trace_encoder == nil ||
+                adapter_refit_trace_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_instance_ray_pixels, adapter_refit_ray_pixels, ray_byte_count) != 0) {
+                fail_with_error("CPU triangle refit pixel oracle failed", adapter_ray_error);
+                return 159;
+            }
+
             BOOL adapter_metal4_ray_trace_exact = YES;
             if (@available(macOS 26.0, iOS 26.0, *)) {
                 NSError *metal4_ray_error = nil;

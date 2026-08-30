@@ -15070,7 +15070,51 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         [_owner markError];
         return;
     }
-    if (source != destination) memcpy(destination->_storage.contents, source->_storage.contents, source->_size);
+    BOOL rebuild_payload = NO;
+    BOOL rebuild_failed = NO;
+    if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
+        BOOL traceable = YES;
+        for (MTLAccelerationStructureGeometryDescriptor *geometry in
+             ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+            if (![geometry isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
+                traceable = NO;
+                break;
+            }
+        }
+        if (traceable) {
+            rebuild_payload = YES;
+            rebuild_failed = !zpu_cpu_acceleration_write_payload(destination, descriptor);
+        }
+    } else if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
+        rebuild_payload = YES;
+        rebuild_failed = !zpu_cpu_acceleration_write_instance_payload(
+            destination, (MTLInstanceAccelerationStructureDescriptor *)descriptor);
+    } else if (@available(macOS 26.0, iOS 26.0, *)) {
+        if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
+            rebuild_payload = YES;
+            rebuild_failed = !zpu_cpu_acceleration_write_metal4_instance_payload(
+                destination, (MTL4InstanceAccelerationStructureDescriptor *)descriptor);
+        } else if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
+            BOOL traceable = YES;
+            for (MTL4AccelerationStructureGeometryDescriptor *geometry in
+                 ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                    traceable = NO;
+                    break;
+                }
+            }
+            if (traceable) {
+                rebuild_payload = YES;
+                rebuild_failed = !zpu_cpu_acceleration_write_metal4_payload(
+                    destination, (MTL4PrimitiveAccelerationStructureDescriptor *)descriptor);
+            }
+        }
+    }
+    if (rebuild_failed) {
+        [_owner markError];
+        return;
+    }
+    if (!rebuild_payload && source != destination) memcpy(destination->_storage.contents, source->_storage.contents, source->_size);
     destination->_built = YES;
     destination->_compacted = NO;
     destination->_compactedSize = source->_compactedSize;

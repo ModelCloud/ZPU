@@ -418,9 +418,11 @@ triangle path:
 - CPU acceleration-structure resources expose deterministic ZPU-backed storage,
   heap placement, resource IDs, and descriptor-derived size queries. Their CPU
   command encoder supports build, refit, copy, compact-size, and compaction
-  metadata/storage operations; the fixed Float3 triangle trace profile
-  traverses CPU-serialized legacy and Metal 4 primitive geometry, while
-  arbitrary ray intersection execution remains fail-closed
+  metadata/storage operations; refit rebuilds supported CPU triangle and
+  instance payloads from current ZPU-owned geometry; the fixed Float3 triangle
+  trace profile traverses CPU-serialized legacy and Metal 4 primitive and
+  bounded instance geometry, while arbitrary ray intersection execution
+  remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level
