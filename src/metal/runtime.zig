@@ -5753,7 +5753,7 @@ pub fn destroyBuffer(buffer: *Buffer) void {
 }
 
 pub fn createTexture(device: *Device, width: u32, height: u32, format_raw: u16) Error!*Texture {
-    if (!validDevice(device)) return error.InvalidResource;
+    if (!validDevice(device) or width == 0 or height == 0) return error.InvalidArgument;
     const format = textureFormatFromRaw(format_raw) orelse return error.UnsupportedFormat;
     const stride = std.math.mul(usize, width, format.bytesPerPixel()) catch return error.InvalidArgument;
     const length = std.math.mul(usize, stride, height) catch return error.InvalidArgument;
@@ -5804,6 +5804,7 @@ pub fn createTextureInHeapAtOffset(heap: *Heap, width: u32, height: u32, format_
 
 pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_raw: u16, offset: usize, bytes_per_row: usize) Error!*Texture {
     if (!validBuffer(buffer)) return error.InvalidResource;
+    if (width == 0 or height == 0) return error.InvalidArgument;
     if (buffer.sparse_page_bytes != 0) return error.UnsupportedOperation;
     const format: TextureFormat = switch (format_raw) {
         @intFromEnum(abi.PixelFormat.a8_unorm) => .a8_unorm,
@@ -9590,6 +9591,22 @@ test "no-copy buffers alias caller storage" {
     try std.testing.expectEqual(@intFromPtr(&bytes), @intFromPtr(buffer.bytes.ptr));
     buffer.bytes[0] = 9;
     try std.testing.expectEqual(@as(u8, 9), bytes[0]);
+}
+
+test "texture creation rejects zero-sized resources" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    try std.testing.expectError(error.InvalidArgument,
+        createTexture(device, 0, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm)));
+    try std.testing.expectError(error.InvalidArgument,
+        createTexture(device, 1, 0, @intFromEnum(abi.PixelFormat.rgba8_unorm)));
+
+    const buffer = try createBuffer(device, 16, null);
+    defer destroyBuffer(buffer);
+    try std.testing.expectError(error.InvalidArgument,
+        createTextureFromBuffer(buffer, 0, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm), 0, 4));
+    try std.testing.expectError(error.InvalidArgument,
+        createTextureFromBuffer(buffer, 1, 0, @intFromEnum(abi.PixelFormat.rgba8_unorm), 0, 4));
 }
 
 test "buffer-backed textures alias rows without copying" {
