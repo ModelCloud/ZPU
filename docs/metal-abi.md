@@ -310,7 +310,8 @@ triangle path:
   the ZPU device recording the command
 - MTL4 argument-table application binds zero resource IDs as explicit nulls for
   CPU compute and render-stage state, so replacing a table cannot leak a prior
-  texture, sampler, or buffer binding into the next dispatch or draw
+  texture, sampler, or buffer binding into the next dispatch or draw; bounded
+  CPU compute profiles preserve texture-0 and texture-1 bindings independently
 - matching registered legacy tile, object, and mesh stage resource setters
   validate and retain ZPU-owned buffers, textures, samplers, offsets, threadgroup
   metadata, and inline byte snapshots; these bindings are metadata for the
