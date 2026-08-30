@@ -1385,8 +1385,10 @@ fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_d
 
 fn stripeLane(y: i32, height: u32, lane_count: usize, stripe_count: usize) usize {
     if (lane_count == 1) return 0;
-    if (lane_count == 2 and stripe_count == 2) return if (@as(u32, @intCast(y)) < height / 2) 0 else 1;
-    const stripe = @min((@as(u64, @intCast(y)) * stripe_count) / height, stripe_count - 1);
+    // Invert the exact [floor(h*s/n), floor(h*(s+1)/n)) stripe bounds used by
+    // the raster loops. `y*n/h` disagrees at odd-height boundaries and can
+    // leave a row owned by the wrong lane.
+    const stripe = @min(((@as(u64, @intCast(y)) + 1) * stripe_count - 1) / height, stripe_count - 1);
     return @intCast(stripe % lane_count);
 }
 
@@ -2708,7 +2710,7 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
+        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -2838,7 +2840,7 @@ fn rasterFlatSpanTriangleTexture16x16(color_words: []align(4) u32, depth_words: 
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
+        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -2911,7 +2913,7 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and (@as(usize, @intCast(y)) * stripe_count / height) % parallel_band_count != lane_index) continue;
+        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -3088,6 +3090,16 @@ fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
     if (lane_index == parallel_band_count - 1 and word_count * 4 < bytes.len) @memset(bytes[word_count * 4 ..], @truncate(pattern));
 }
 
+fn fillPatternRasterLane(bytes: []u8, width: u32, height: u32, stripe_count: usize, pattern: u32, lane_index: usize) void {
+    const row_words = @as(usize, width);
+    var stripe_index = lane_index;
+    while (stripe_index < stripe_count) : (stripe_index += parallel_band_count) {
+        const first_row = @as(usize, height) * stripe_index / stripe_count;
+        const last_row = @as(usize, height) * (stripe_index + 1) / stripe_count;
+        fillPatternWords(bytes, first_row * row_words, (last_row - first_row) * row_words, pattern);
+    }
+}
+
 fn fillPatternRectLane(bytes: []u8, width: u32, rect: Rect, pattern: u32, lane_index: usize) void {
     if (rect.width == 0 or rect.height == 0) return;
     const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / parallel_band_count;
@@ -3140,8 +3152,12 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             if (context.clear_spans) {
                 clearPreparedSpansLane(context, lane_index);
             } else {
-                if (context.clear_color_pattern) |pattern| fillPatternLane(context.target, pattern, lane_index);
-                if (context.clear_depth_pattern) |pattern| if (context.depth) |depth| fillPatternLane(depth, pattern, lane_index);
+                // Clear exactly the stripes this lane will rasterize. Clearing
+                // contiguous half-images here races with the four-stripe draw
+                // partition: one lane can otherwise overwrite rows after the
+                // other lane has already rendered them.
+                if (context.clear_color_pattern) |pattern| fillPatternRasterLane(context.target, context.width, context.height, context.stripe_count, pattern, lane_index);
+                if (context.clear_depth_pattern) |pattern| if (context.depth) |depth| fillPatternRasterLane(depth, context.width, context.height, context.stripe_count, pattern, lane_index);
             }
             if (context.count_work) runParallelBand(context, lane_index, true) else runParallelBand(context, lane_index, false);
             if (context.expected_target) |expected| {
@@ -3994,6 +4010,24 @@ test "interleaved parallel lanes are pixel exact with serial rendering" {
     try std.testing.expectEqual(serial_written, parallel_written);
     try std.testing.expectEqualSlices(u8, &serial, &parallel);
     try std.testing.expectEqualSlices(u8, &serial_depth, &parallel_depth);
+}
+
+test "parallel draw clears follow raster stripe ownership" {
+    const w: u32 = 3;
+    const h: u32 = 11;
+    const pattern: u32 = 0x44332211;
+    var bytes = [_]u8{0xaa} ** (w * h * 4);
+    fillPatternRasterLane(&bytes, w, h, parallel_slice_count, pattern, 0);
+    for (0..h) |y| {
+        const owned = stripeLane(@intCast(y), h, parallel_band_count, parallel_slice_count) == 0;
+        for (0..w) |x| {
+            const offset = (@as(usize, y) * w + x) * 4;
+            const expected: u32 = if (owned) pattern else 0xaaaaaaaa;
+            try std.testing.expectEqual(expected, std.mem.readInt(u32, bytes[offset..][0..4], .little));
+        }
+    }
+    fillPatternRasterLane(&bytes, w, h, parallel_slice_count, pattern, 1);
+    for (0..w * h) |pixel| try std.testing.expectEqual(pattern, std.mem.readInt(u32, bytes[pixel * 4 ..][0..4], .little));
 }
 
 test "prepared bounds conservatively cover transformed content" {
