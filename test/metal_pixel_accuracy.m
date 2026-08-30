@@ -13864,6 +13864,10 @@ int main(void) {
             [adapter_legacy_mesh_encoder setMeshBuffer:adapter_vertex_buffer offset:0 atIndex:0];
             [adapter_legacy_mesh_encoder setMeshTexture:adapter_legacy_mesh_texture atIndex:0];
             [adapter_legacy_mesh_encoder setMeshSamplerState:adapter_sampler atIndex:0];
+            /* Mesh-grid coordinates stay in the attachment-global Apple
+             * top-left space. This non-zero scissor must clip the deferred
+             * CPU/ZPU writes without rebasing the gradient to (0, 0). */
+            [adapter_legacy_mesh_encoder setScissorRect:(MTLScissorRect){1, 1, 3, 2}];
             [adapter_legacy_mesh_encoder drawMeshThreadgroups:MTLSizeMake(3, 2, 1)
                                    threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                                      threadsPerMeshThreadgroup:MTLSizeMake(2, 2, 1)];
@@ -13888,9 +13892,10 @@ int main(void) {
             for (NSUInteger y = 0; y < 3; ++y) {
                 for (NSUInteger x = 0; x < 5; ++x) {
                     const NSUInteger pixel = (y * 5 + x) * 4;
-                    expected_legacy_mesh_pixels[pixel + 0] = 64;
-                    expected_legacy_mesh_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
-                    expected_legacy_mesh_pixels[pixel + 2] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    const BOOL covered = x >= 1 && x < 4 && y >= 1 && y < 3;
+                    expected_legacy_mesh_pixels[pixel + 0] = covered ? 64 : 0;
+                    expected_legacy_mesh_pixels[pixel + 1] = covered ? (uint8_t)(((y + 1) * 255 + 4) / 8) : 0;
+                    expected_legacy_mesh_pixels[pixel + 2] = covered ? (uint8_t)(((x + 1) * 255 + 4) / 8) : 0;
                     expected_legacy_mesh_pixels[pixel + 3] = 255;
                 }
             }
