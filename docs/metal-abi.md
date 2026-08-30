@@ -179,7 +179,9 @@ triangle path:
   silently applied by the CPU adapter
 - render-pass attachment mip levels and single array/cube face slices select
   the corresponding ZPU texture and use that target's width/height for
-  rasterization; multi-layer render passes and depth planes remain explicitly
+  rasterization; direct layered color passes select up to eight 2D-array
+  slices by direct instance index, while layered depth/stencil planes,
+  indirect layered draws, and layered multisample passes remain explicitly
   rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
