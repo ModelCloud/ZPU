@@ -990,7 +990,8 @@ pub const Target = struct {
                     (clearPackedU2(color[3]) << 30);
                 writePacked32(row_bytes, offset, bits);
             },
-            else => self.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all)),
+            else => self.writeColorWithSrgbEncoding(
+                x, y, color, @intFromEnum(abi.ColorWriteMask.all), .fixed_point, .nearest_up),
         }
     }
 
@@ -2097,6 +2098,18 @@ test "CPU normalized stores use Apple's nearest-even byte conversion" {
     var resolved = try Target.init(&resolved_pixels, 1, 1, 4, .rgba8_unorm);
     resolved.storeResolvedColor(0, 0, .{ @as(f32, 5) / 6, @as(f32, 1) / 6, 0.5, 1 });
     try std.testing.expectEqual([4]u8{ 213, 43, 128, 255 }, resolved_pixels);
+}
+
+test "CPU fixed-point clears use Apple's upward half-byte conversion" {
+    var rgba_pixels = [_]u8{ 0, 0, 0, 0 };
+    var rgba = try Target.init(&rgba_pixels, 1, 1, 4, .rgba8_unorm);
+    clearTarget(&rgba, .{ 0.3, 0.3, 0.3, 0.3 });
+    try std.testing.expectEqual([4]u8{ 77, 77, 77, 77 }, rgba_pixels);
+
+    var bgra_pixels = [_]u8{ 0, 0, 0, 0 };
+    var bgra = try Target.init(&bgra_pixels, 1, 1, 4, .bgra8_unorm);
+    clearTarget(&bgra, .{ 0.3, 0.3, 0.3, 0.3 });
+    try std.testing.expectEqual([4]u8{ 77, 77, 77, 77 }, bgra_pixels);
 }
 
 test "CPU sRGB stores use Apple fixed-point conversion boundaries" {
