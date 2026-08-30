@@ -14591,6 +14591,48 @@ int main(void) {
                 memcmp(native_cube_array_bytes, adapter_cube_array_bytes, cube_face_bytes) == 0 &&
                 memcmp(adapter_cube_array_bytes, cube_array_source[slice], cube_face_bytes) == 0;
         }
+        id<MTLTexture> native_cube_array_convenience_copy = [device newTextureWithDescriptor:cube_array_descriptor];
+        id<MTLTexture> adapter_cube_array_convenience_copy = [adapter_device newTextureWithDescriptor:cube_array_descriptor];
+        id<MTLCommandBuffer> native_cube_array_convenience_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_cube_array_convenience_blit =
+            [native_cube_array_convenience_command_buffer blitCommandEncoder];
+        [native_cube_array_convenience_blit copyFromTexture:native_cube_array_texture
+                                                   toTexture:native_cube_array_convenience_copy];
+        [native_cube_array_convenience_blit endEncoding];
+        [native_cube_array_convenience_command_buffer commit];
+        [native_cube_array_convenience_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_cube_array_convenience_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_cube_array_convenience_blit =
+            [adapter_cube_array_convenience_command_buffer blitCommandEncoder];
+        [adapter_cube_array_convenience_blit copyFromTexture:adapter_cube_array_texture
+                                                    toTexture:adapter_cube_array_convenience_copy];
+        [adapter_cube_array_convenience_blit endEncoding];
+        [adapter_cube_array_convenience_command_buffer commit];
+        [adapter_cube_array_convenience_command_buffer waitUntilCompleted];
+        BOOL cube_array_convenience_match = native_cube_array_convenience_copy != nil &&
+            adapter_cube_array_convenience_copy != nil && native_cube_array_convenience_blit != nil &&
+            adapter_cube_array_convenience_blit != nil &&
+            native_cube_array_convenience_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_cube_array_convenience_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger slice = 0; slice < cube_array_slice_count; ++slice) {
+            [native_cube_array_convenience_copy getBytes:native_cube_array_bytes
+                                             bytesPerRow:cube_size * 4
+                                           bytesPerImage:cube_face_bytes
+                                            fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                           mipmapLevel:0 slice:slice];
+            [adapter_cube_array_convenience_copy getBytes:adapter_cube_array_bytes
+                                              bytesPerRow:cube_size * 4
+                                            bytesPerImage:cube_face_bytes
+                                             fromRegion:MTLRegionMake2D(0, 0, cube_size, cube_size)
+                                            mipmapLevel:0 slice:slice];
+            cube_array_convenience_match = cube_array_convenience_match &&
+                memcmp(native_cube_array_bytes, cube_array_source[slice], cube_face_bytes) == 0 &&
+                memcmp(adapter_cube_array_bytes, native_cube_array_bytes, cube_face_bytes) == 0;
+        }
+        if (!cube_copy_match || !cube_array_convenience_match) {
+            fprintf(stderr, "metal-pixel: cube whole-surface copy failed\n");
+            return 79;
+        }
         id<MTLTexture> native_cube_array_view =
             [native_cube_array_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                            textureType:MTLTextureTypeCubeArray
