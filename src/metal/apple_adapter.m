@@ -6051,6 +6051,15 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
     }
+    if ([name isEqualToString:@"zpu_test_stage_in_vertex"] ||
+        [name isEqualToString:@"zpu_test_visible"] ||
+        [name isEqualToString:@"zpu_test_visible_secondary"] ||
+        [name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
+        [name isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
+        [name isEqualToString:zpu_cpu_ml_identity_function_name]) {
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[] userAnnotation:nil];
+    }
     if ([name hasPrefix:@"zpu_cpu_"]) {
         zpu_metal_compute_kernel kernel = 0;
         if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;

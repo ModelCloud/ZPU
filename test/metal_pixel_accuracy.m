@@ -7345,7 +7345,23 @@ int main(void) {
                 adapter_alias_position.attributeType == MTLDataTypeFloat4 &&
                 [adapter_alias_stage_position.name isEqualToString:@"position"] &&
             adapter_alias_stage_position.attributeIndex == 0 &&
-            adapter_alias_stage_position.attributeType == MTLDataTypeFloat4;
+                adapter_alias_stage_position.attributeType == MTLDataTypeFloat4;
+        }
+        BOOL adapter_function_reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            NSArray<NSString *> *reflection_names = @[
+                @"zpu_test_stage_in_vertex", @"zpu_test_fragment",
+                @"zpu_test_visible", @"zpu_test_visible_secondary",
+            ];
+            for (NSString *reflection_name in reflection_names) {
+                MTLFunctionReflection *native_reflection =
+                    [library reflectionForFunctionWithName:reflection_name];
+                MTLFunctionReflection *adapter_reflection =
+                    [adapter_library reflectionForFunctionWithName:reflection_name];
+                adapter_function_reflection_ok = adapter_function_reflection_ok &&
+                    native_reflection != nil && adapter_reflection != nil &&
+                    native_reflection.bindings.count == 0 && adapter_reflection.bindings.count == 0;
+            }
         }
         BOOL adapter_specialized_render_exact = YES;
         if (@available(macOS 11.0, iOS 14.0, *)) {
@@ -7725,6 +7741,7 @@ int main(void) {
             adapter_constant_function == nil ||
             !adapter_stage_input_attributes_ok ||
             !adapter_specialized_metadata_ok ||
+            !adapter_function_reflection_ok ||
             !adapter_specialized_render_exact ||
             !adapter_stitched_library_ok ||
             !adapter_function_descriptor_ok ||
