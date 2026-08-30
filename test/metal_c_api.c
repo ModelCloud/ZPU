@@ -374,6 +374,7 @@ int main(void) {
         {ZPU_METAL_RG16_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG16_SINT, 4},
         {ZPU_METAL_RGBA16_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_UINT, 8},
         {ZPU_METAL_RGBA16_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_SINT, 8},
+        {ZPU_METAL_RGB10A2_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGB10A2_UINT, 4},
     };
     zpu_metal_texture *compute_narrow_integer_textures[
         sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0])] = {0};
@@ -423,6 +424,15 @@ int main(void) {
             for (size_t x = 0; x < 3; ++x) {
                 const uint8_t *pixel = compute_narrow_integer_pixels[profile] +
                     y * 3 * bytes_per_pixel + x * bytes_per_pixel;
+                if (compute_narrow_integer_profiles[profile].format == ZPU_METAL_RGB10A2_UINT) {
+                    uint32_t actual = 0;
+                    uint32_t expected = (uint32_t)(x + 1) |
+                        ((uint32_t)(y + 1) << 10) |
+                        ((uint32_t)(x + y + 1) << 20) | (3u << 30);
+                    memcpy(&actual, pixel, sizeof(actual));
+                    if (actual != expected) return 54;
+                    continue;
+                }
                 const int is_signed = (compute_narrow_integer_profiles[profile].format == ZPU_METAL_R8_SINT ||
                     compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG8_SINT ||
                     compute_narrow_integer_profiles[profile].format == ZPU_METAL_RGBA8_SINT ||

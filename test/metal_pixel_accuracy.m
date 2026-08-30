@@ -176,6 +176,10 @@ static const char *const kShaderSource =
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
     "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, int(gid.x + gid.y), 32767), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgb10a2_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, gid.x + gid.y + 1u, 3u), gid); }\n"
     "kernel void zpu_cpu_add_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
@@ -16062,6 +16066,7 @@ int main(void) {
             "kernel void zpu_cpu_fill_gradient_rg16_sint() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba16_uint() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba16_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgb10a2_uint() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
@@ -16639,7 +16644,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 65 ||
+            adapter_library.functionNames.count != 66 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -16662,6 +16667,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg16_sint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba16_uint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba16_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgb10a2_uint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
@@ -21393,6 +21399,7 @@ int main(void) {
             {MTLPixelFormatRG16Sint, 4, @"zpu_cpu_fill_gradient_rg16_sint"},
             {MTLPixelFormatRGBA16Uint, 8, @"zpu_cpu_fill_gradient_rgba16_uint"},
             {MTLPixelFormatRGBA16Sint, 8, @"zpu_cpu_fill_gradient_rgba16_sint"},
+            {MTLPixelFormatRGB10A2Uint, 4, @"zpu_cpu_fill_gradient_rgb10a2_uint"},
             {MTLPixelFormatR32Uint, 4, @"zpu_cpu_fill_gradient_r32_uint"},
             {MTLPixelFormatR32Sint, 4, @"zpu_cpu_fill_gradient_r32_sint"},
             {MTLPixelFormatRG32Uint, 8, @"zpu_cpu_fill_gradient_rg32_uint"},

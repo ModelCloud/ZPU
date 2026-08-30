@@ -4897,7 +4897,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 27) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 28) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5757,6 +5757,13 @@ fn executeCompute(command: ComputeCommand) Error!void {
             var target = command.texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), @floatFromInt(x + y), 32767,
+            });
+        },
+        28 => {
+            if (command.texture.format != .rgb10a2_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), @floatFromInt(y + 1), @floatFromInt(x + y + 1), 3,
             });
         },
         7 => return executeTraceTriangles(command),
@@ -9787,6 +9794,32 @@ test "CPU compute integer gradients preserve R8/RG8/RGBA8 and 16-bit lanes" {
         try std.testing.expectEqual(-@as(i16, @intCast(y + 1)), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset + 2 ..][0..2], .little));
         try std.testing.expectEqual(@as(i16, @intCast(x + y)), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset + 4 ..][0..2], .little));
         try std.testing.expectEqual(@as(i16, 32767), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset + 6 ..][0..2], .little));
+    };
+}
+
+test "CPU compute packed RGB10A2 uint gradient preserves bit fields" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgb10a2_uint));
+    defer destroyTexture(texture);
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(28);
+    try encoder.setTexture(texture, 0);
+    try encoder.dispatchThreads(.{ .width = 3, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try command_buffer.commit();
+
+    for (0..2) |y| for (0..3) |x| {
+        const offset = y * texture.stride + x * 4;
+        const expected = @as(u32, @intCast(x + 1)) |
+            (@as(u32, @intCast(y + 1)) << 10) |
+            (@as(u32, @intCast(x + y + 1)) << 20) | (3 << 30);
+        try std.testing.expectEqual(expected, readU32Little(texture.bytes, offset));
     };
 }
 
