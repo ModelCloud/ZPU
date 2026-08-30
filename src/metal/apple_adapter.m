@@ -1593,6 +1593,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _retainedReferences;
     MTLCommandBufferErrorOption _errorOptions;
     ZPUFunctionLogContainer *_logs;
+    NSCondition *_statusCondition;
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
@@ -12903,6 +12904,7 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
         _logs = [[ZPUFunctionLogContainer alloc] initWithEntries:@[]];
         _retainedReferences = YES;
         _errorOptions = MTLCommandBufferErrorOptionNone;
+        _statusCondition = [NSCondition new];
     }
     return self;
 }
@@ -12946,8 +12948,14 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
 - (NSError *)error { return _error; }
 - (void)enqueue { [self commit]; }
 - (void)commit {
-    if (_scheduled) return;
+    [_statusCondition lock];
+    if (_scheduled) {
+        [_statusCondition unlock];
+        return;
+    }
     _scheduled = YES;
+    [_statusCondition broadcast];
+    [_statusCondition unlock];
     _gpuStartTime = zpu_drawable_host_time();
     if (_hasComputeWork) _kernelStartTime = _gpuStartTime;
     NSArray *scheduled = [_scheduledHandlers copy];
@@ -12986,7 +12994,11 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
 - (void)waitUntilCompleted {
     (void)zpu_metal_command_buffer_wait_until_completed(_zpuCommandBuffer);
 }
-- (void)waitUntilScheduled {}
+- (void)waitUntilScheduled {
+    [_statusCondition lock];
+    while (!_scheduled) [_statusCondition wait];
+    [_statusCondition unlock];
+}
 - (void)presentDrawable:(id<MTLDrawable>)drawable {
     ZPUCPUDrawable *cpuDrawable = (ZPUCPUDrawable *)drawable;
     if (_scheduled || ![cpuDrawable isKindOfClass:[ZPUCPUDrawable class]] ||

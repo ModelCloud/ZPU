@@ -29165,6 +29165,45 @@ int main(void) {
             fprintf(stderr, "metal-pixel: Objective-C adapter command did not complete\n");
             return 20;
         }
+        /* waitUntilScheduled must observe the CPU adapter's scheduled
+         * transition even when the caller waits from another thread. */
+        id<MTLCommandBuffer> native_scheduled_wait_buffer = [[device newCommandQueue] commandBuffer];
+        id<MTLCommandBuffer> adapter_scheduled_wait_buffer = [[adapter_device newCommandQueue] commandBuffer];
+        dispatch_semaphore_t native_scheduled_wait_started = dispatch_semaphore_create(0);
+        dispatch_semaphore_t adapter_scheduled_wait_started = dispatch_semaphore_create(0);
+        dispatch_semaphore_t native_scheduled_wait_done = dispatch_semaphore_create(0);
+        dispatch_semaphore_t adapter_scheduled_wait_done = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            dispatch_semaphore_signal(native_scheduled_wait_started);
+            [native_scheduled_wait_buffer waitUntilScheduled];
+            dispatch_semaphore_signal(native_scheduled_wait_done);
+        });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            dispatch_semaphore_signal(adapter_scheduled_wait_started);
+            [adapter_scheduled_wait_buffer waitUntilScheduled];
+            dispatch_semaphore_signal(adapter_scheduled_wait_done);
+        });
+        if (native_scheduled_wait_buffer == nil || adapter_scheduled_wait_buffer == nil ||
+            dispatch_semaphore_wait(native_scheduled_wait_started,
+                                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+            dispatch_semaphore_wait(adapter_scheduled_wait_started,
+                                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+            fprintf(stderr, "metal-pixel: scheduled-wait fixture setup failed\n");
+            return 21;
+        }
+        [native_scheduled_wait_buffer commit];
+        [adapter_scheduled_wait_buffer commit];
+        [native_scheduled_wait_buffer waitUntilCompleted];
+        [adapter_scheduled_wait_buffer waitUntilCompleted];
+        if (dispatch_semaphore_wait(native_scheduled_wait_done,
+                                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+            dispatch_semaphore_wait(adapter_scheduled_wait_done,
+                                    dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+            native_scheduled_wait_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_scheduled_wait_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: native/CPU waitUntilScheduled mismatch\n");
+            return 22;
+        }
         MTLCommandBufferDescriptor *adapter_unretained_descriptor = [MTLCommandBufferDescriptor new];
         adapter_unretained_descriptor.retainedReferences = NO;
         adapter_unretained_descriptor.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
