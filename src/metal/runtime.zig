@@ -123,13 +123,15 @@ pub const TextureFormat = enum {
             self == .bgra8_unorm or self == .bgra8_unorm_srgb or
             self == .b5g6r5_unorm or self == .a1bgr5_unorm or self == .abgr4_unorm or self == .bgr5a1_unorm or
             self == .rgb10a2_unorm or self == .rgb10a2_uint or self == .bgr10a2_unorm or self == .rg11b10_float or self == .rgb9e5_float or
-            self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_uint or self == .rgba16_sint or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
+            self == .r32_uint or self == .r32_sint or self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_uint or self == .rgba16_sint or self == .rgba16_float or
+            self == .rg32_uint or self == .rg32_sint or self == .rg32_float or self == .rgba32_float;
     }
 
     fn isIntegerColor(self: TextureFormat) bool {
         return self == .r8_uint or self == .r8_sint or self == .r16_uint or self == .r16_sint or
             self == .rg8_uint or self == .rg8_sint or self == .rg16_uint or self == .rg16_sint or
             self == .rgba8_uint or self == .rgba8_sint or self == .rgb10a2_uint or
+            self == .r32_uint or self == .r32_sint or self == .rg32_uint or self == .rg32_sint or
             self == .rgba16_uint or self == .rgba16_sint;
     }
 };
@@ -379,7 +381,8 @@ pub const Texture = struct {
                 .rg16_uint => .rg16_uint,
                 .rg16_sint => .rg16_sint,
                 .rg16_float => .rg16_float,
-                .r32_uint, .r32_sint => unreachable,
+                .r32_uint => .r32_uint,
+                .r32_sint => .r32_sint,
                 .rgba8_unorm => .rgba8_unorm,
                 .rgba8_unorm_srgb => .rgba8_unorm_srgb,
                 .rgba8_snorm => .rgba8_snorm,
@@ -402,7 +405,8 @@ pub const Texture = struct {
                 .rgba16_uint => .rgba16_uint,
                 .rgba16_sint => .rgba16_sint,
                 .rgba16_float => .rgba16_float,
-                .rg32_uint, .rg32_sint => unreachable,
+                .rg32_uint => .rg32_uint,
+                .rg32_sint => .rg32_sint,
                 .rg32_float => .rg32_float,
                 .rgba32_uint, .rgba32_sint => unreachable,
                 .rgba32_float => .rgba32_float,
@@ -1936,8 +1940,12 @@ pub const RenderEncoder = struct {
                         @intFromEnum(abi.PixelFormat.rg11b10_float) => abi.PixelFormat.rg11b10_float,
                         @intFromEnum(abi.PixelFormat.rgb9e5_float) => abi.PixelFormat.rgb9e5_float,
                         @intFromEnum(abi.PixelFormat.bgr10a2_unorm) => abi.PixelFormat.bgr10a2_unorm,
+                        @intFromEnum(abi.PixelFormat.r32_uint) => abi.PixelFormat.r32_uint,
+                        @intFromEnum(abi.PixelFormat.r32_sint) => abi.PixelFormat.r32_sint,
                         @intFromEnum(abi.PixelFormat.r32_float) => abi.PixelFormat.r32_float,
                         @intFromEnum(abi.PixelFormat.rgba16_float) => abi.PixelFormat.rgba16_float,
+                        @intFromEnum(abi.PixelFormat.rg32_uint) => abi.PixelFormat.rg32_uint,
+                        @intFromEnum(abi.PixelFormat.rg32_sint) => abi.PixelFormat.rg32_sint,
                         @intFromEnum(abi.PixelFormat.rg32_float) => abi.PixelFormat.rg32_float,
                         @intFromEnum(abi.PixelFormat.rgba32_float) => abi.PixelFormat.rgba32_float,
                         else => return error.UnsupportedFormat,

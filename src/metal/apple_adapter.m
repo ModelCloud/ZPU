@@ -1654,6 +1654,8 @@ static BOOL zpu_integer_render_format_supported(MTLPixelFormat format) {
         format == MTLPixelFormatRG8Uint || format == MTLPixelFormatRG8Sint ||
         format == MTLPixelFormatRG16Uint || format == MTLPixelFormatRG16Sint ||
         format == MTLPixelFormatRGBA8Uint || format == MTLPixelFormatRGBA8Sint ||
+        format == MTLPixelFormatR32Uint || format == MTLPixelFormatR32Sint ||
+        format == MTLPixelFormatRG32Uint || format == MTLPixelFormatRG32Sint ||
         format == MTLPixelFormatRGB10A2Uint || format == MTLPixelFormatRGBA16Uint ||
         format == MTLPixelFormatRGBA16Sint;
 }
@@ -1823,11 +1825,15 @@ static BOOL zpu_render_pipeline_format_supported_for_fragment(MTLPixelFormat for
     if ([fragmentName isEqualToString:@"zpu_cpu_rg8_sint_fragment"]) return format == MTLPixelFormatRG8Sint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rg16_uint_fragment"]) return format == MTLPixelFormatRG16Uint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rg16_sint_fragment"]) return format == MTLPixelFormatRG16Sint;
+    if ([fragmentName isEqualToString:@"zpu_cpu_r32_uint_fragment"]) return format == MTLPixelFormatR32Uint;
+    if ([fragmentName isEqualToString:@"zpu_cpu_r32_sint_fragment"]) return format == MTLPixelFormatR32Sint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rgba8_uint_fragment"]) return format == MTLPixelFormatRGBA8Uint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rgba8_sint_fragment"]) return format == MTLPixelFormatRGBA8Sint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rgb10a2_uint_fragment"]) return format == MTLPixelFormatRGB10A2Uint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rgba16_uint_fragment"]) return format == MTLPixelFormatRGBA16Uint;
     if ([fragmentName isEqualToString:@"zpu_cpu_rgba16_sint_fragment"]) return format == MTLPixelFormatRGBA16Sint;
+    if ([fragmentName isEqualToString:@"zpu_cpu_rg32_uint_fragment"]) return format == MTLPixelFormatRG32Uint;
+    if ([fragmentName isEqualToString:@"zpu_cpu_rg32_sint_fragment"]) return format == MTLPixelFormatRG32Sint;
     return NO;
 }
 
@@ -6096,9 +6102,13 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         [name isEqualToString:@"zpu_cpu_rg8_sint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_rg16_uint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_rg16_sint_fragment"] ||
+        [name isEqualToString:@"zpu_cpu_r32_uint_fragment"] ||
+        [name isEqualToString:@"zpu_cpu_r32_sint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_rgb10a2_uint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_rgba16_uint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_rgba16_sint_fragment"] ||
+        [name isEqualToString:@"zpu_cpu_rg32_uint_fragment"] ||
+        [name isEqualToString:@"zpu_cpu_rg32_sint_fragment"] ||
         [name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
         [name isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
         [name isEqualToString:zpu_cpu_ml_identity_function_name]) {
@@ -6218,9 +6228,13 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         @"zpu_cpu_rg8_sint_fragment",
         @"zpu_cpu_rg16_uint_fragment",
         @"zpu_cpu_rg16_sint_fragment",
+        @"zpu_cpu_r32_uint_fragment",
+        @"zpu_cpu_r32_sint_fragment",
         @"zpu_cpu_rgb10a2_uint_fragment",
         @"zpu_cpu_rgba16_uint_fragment",
         @"zpu_cpu_rgba16_sint_fragment",
+        @"zpu_cpu_rg32_uint_fragment",
+        @"zpu_cpu_rg32_sint_fragment",
         zpu_cpu_ml_identity_function_name,
     ] containsObject:name];
 }
@@ -7796,7 +7810,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_rg16_uint_fragment zpu_cpu_rg16_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_ml_identity"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_rg16_uint_fragment zpu_cpu_rg16_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -8452,9 +8466,13 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             @"zpu_cpu_rg8_sint_fragment",
             @"zpu_cpu_rg16_uint_fragment",
             @"zpu_cpu_rg16_sint_fragment",
+            @"zpu_cpu_r32_uint_fragment",
+            @"zpu_cpu_r32_sint_fragment",
             @"zpu_cpu_rgb10a2_uint_fragment",
             @"zpu_cpu_rgba16_uint_fragment",
             @"zpu_cpu_rgba16_sint_fragment",
+            @"zpu_cpu_rg32_uint_fragment",
+            @"zpu_cpu_rg32_sint_fragment",
             zpu_cpu_ml_identity_function_name,
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
