@@ -7311,6 +7311,69 @@ int main(void) {
             adapter_stage_color_attribute.isActive &&
             native_stage_input_function.vertexAttributes.count == 2 &&
             native_stage_input_function.stageInputAttributes.count == 2;
+        BOOL adapter_stitched_library_ok = YES;
+        if (@available(macOS 12.0, iOS 15.0, *)) {
+            NSError *native_stitched_error = nil;
+            NSString *native_stitched_source =
+                @"#include <metal_stdlib>\nusing namespace metal;\n"
+                 "[[ stitchable ]] float4 zpu_stitch_identity(float4 value) { return value; }\n";
+            id<MTLLibrary> native_stitched_base =
+                [device newLibraryWithSource:native_stitched_source options:nil error:&native_stitched_error];
+            id<MTLFunction> native_stitched_function =
+                [native_stitched_base newFunctionWithName:@"zpu_stitch_identity"];
+            MTLFunctionStitchingFunctionNode *native_stitched_node =
+                [[MTLFunctionStitchingFunctionNode alloc]
+                    initWithName:@"zpu_stitch_identity"
+                        arguments:@[[[MTLFunctionStitchingInputNode alloc] initWithArgumentIndex:0]]
+              controlDependencies:@[]];
+            MTLFunctionStitchingGraph *native_stitched_graph =
+                [[MTLFunctionStitchingGraph alloc] initWithFunctionName:@"zpu_cpu_stitched_identity"
+                                                                   nodes:@[native_stitched_node]
+                                                              outputNode:native_stitched_node
+                                                              attributes:@[]];
+            MTLStitchedLibraryDescriptor *native_stitched_descriptor = [MTLStitchedLibraryDescriptor new];
+            native_stitched_descriptor.functions = @[native_stitched_function];
+            native_stitched_descriptor.functionGraphs = @[native_stitched_graph];
+            id<MTLLibrary> native_stitched_library =
+                [device newLibraryWithStitchedDescriptor:native_stitched_descriptor error:&native_stitched_error];
+
+            MTLFunctionStitchingFunctionNode *adapter_stitched_node =
+                [[MTLFunctionStitchingFunctionNode alloc]
+                    initWithName:@"zpu_test_visible"
+                        arguments:@[[[MTLFunctionStitchingInputNode alloc] initWithArgumentIndex:0]]
+              controlDependencies:@[]];
+            MTLFunctionStitchingGraph *adapter_stitched_graph =
+                [[MTLFunctionStitchingGraph alloc] initWithFunctionName:@"zpu_cpu_stitched_identity"
+                                                                   nodes:@[adapter_stitched_node]
+                                                              outputNode:adapter_stitched_node
+                                                              attributes:@[]];
+            MTLStitchedLibraryDescriptor *adapter_stitched_descriptor = [MTLStitchedLibraryDescriptor new];
+            adapter_stitched_descriptor.functions = @[[adapter_library newFunctionWithName:@"zpu_test_visible"]];
+            adapter_stitched_descriptor.functionGraphs = @[adapter_stitched_graph];
+            NSError *adapter_stitched_error = nil;
+            id<MTLLibrary> adapter_stitched_library =
+                [adapter_device newLibraryWithStitchedDescriptor:adapter_stitched_descriptor
+                                                            error:&adapter_stitched_error];
+            id<MTLFunction> adapter_stitched_function =
+                [adapter_stitched_library newFunctionWithName:@"zpu_cpu_stitched_identity"];
+            __block BOOL adapter_stitched_completion_called = NO;
+            [adapter_device newLibraryWithStitchedDescriptor:adapter_stitched_descriptor
+                                           completionHandler:^(id<MTLLibrary> library, NSError *error) {
+                adapter_stitched_completion_called = library != nil && error == nil;
+            }];
+            adapter_stitched_library_ok =
+                native_stitched_library != nil && native_stitched_error == nil &&
+                native_stitched_library.functionNames.count == 1 &&
+                [native_stitched_library.functionNames[0] isEqualToString:@"zpu_cpu_stitched_identity"] &&
+                [native_stitched_library newFunctionWithName:@"zpu_cpu_stitched_identity"].functionType ==
+                    MTLFunctionTypeVisible &&
+                adapter_stitched_library != nil && adapter_stitched_error == nil &&
+                adapter_stitched_library.functionNames.count == 1 &&
+                [adapter_stitched_library.functionNames[0] isEqualToString:@"zpu_cpu_stitched_identity"] &&
+                adapter_stitched_function != nil && adapter_stitched_function.device == adapter_device &&
+                adapter_stitched_function.functionType == MTLFunctionTypeVisible &&
+                adapter_stitched_completion_called;
+        }
         id<MTLFunction> adapter_constant_function =
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"
                                   constantValues:[MTLFunctionConstantValues new]
@@ -7324,6 +7387,7 @@ int main(void) {
         if (adapter_library == nil || adapter_library_function == nil ||
             adapter_constant_function == nil ||
             !adapter_stage_input_attributes_ok ||
+            !adapter_stitched_library_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
             adapter_library.functionNames.count != 10 ||

@@ -1177,10 +1177,13 @@ static uint64_t zpu_next_cpu_drawable_id;
 @public
     ZPUDevice *_owner;
     NSString *_name;
+    MTLFunctionType _functionTypeOverride;
     NSArray *_vertexAttributes;
     NSArray *_stageInputAttributes;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType;
 @end
 
 @interface ZPUFunctionHandle : NSObject <MTLFunctionHandle> {
@@ -1229,6 +1232,7 @@ static uint64_t zpu_next_cpu_drawable_id;
 @public
     ZPUDevice *_owner;
     NSArray *_functionNames;
+    NSSet *_visibleFunctionNames;
     NSString *_label;
     MTLLibraryType _type;
     NSString *_installName;
@@ -7741,16 +7745,49 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return [self newLibraryWithSource:source options:nil error:error];
 }
 - (id<MTLLibrary>)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(12.0), ios(15.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal does not stitch arbitrary shader libraries");
-    return nil;
+    if (descriptor == nil || descriptor.functionGraphs == nil || descriptor.functions == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal stitched libraries require non-nil function and graph arrays");
+        return nil;
+    }
+    for (id<MTLFunction> function in descriptor.functions) {
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != self ||
+            cpuFunction.functionType != MTLFunctionTypeVisible ||
+            ![cpuFunction.name isEqualToString:@"zpu_test_visible"]) {
+            zpu_set_error(error, @"ZPU CPU Metal stitched libraries accept only the registered identity function");
+            return nil;
+        }
+    }
+    NSMutableArray<NSString *> *graphNames = [NSMutableArray arrayWithCapacity:descriptor.functionGraphs.count];
+    for (MTLFunctionStitchingGraph *graph in descriptor.functionGraphs) {
+        if (![graph isKindOfClass:[MTLFunctionStitchingGraph class]] || graph.functionName.length == 0 ||
+            [graphNames containsObject:graph.functionName] || graph.nodes.count != 1 ||
+            graph.outputNode != graph.nodes[0] || graph.attributes.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal supports only unique one-node stitched identity graphs");
+            return nil;
+        }
+        MTLFunctionStitchingFunctionNode *node = graph.nodes[0];
+        if (![node isKindOfClass:[MTLFunctionStitchingFunctionNode class]] ||
+            ![node.name isEqualToString:@"zpu_test_visible"] || node.arguments.count != 1 ||
+            node.controlDependencies.count != 0 ||
+            ![node.arguments[0] isKindOfClass:[MTLFunctionStitchingInputNode class]] ||
+            [(MTLFunctionStitchingInputNode *)node.arguments[0] argumentIndex] != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal stitched graphs must be identity functions of argument zero");
+            return nil;
+        }
+        [graphNames addObject:graph.functionName];
+    }
+    ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:self source:@""];
+    library->_functionNames = [graphNames copy];
+    library->_visibleFunctionNames = [NSSet setWithArray:graphNames];
+    if (error != NULL) *error = nil;
+    return (id<MTLLibrary>)library;
 }
 - (void)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)descriptor completionHandler:(MTLNewLibraryCompletionHandler)completionHandler API_AVAILABLE(macos(12.0), ios(15.0)) {
-    (void)descriptor;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    zpu_set_error(&error, @"ZPU CPU Metal does not stitch arbitrary shader libraries");
-    completionHandler(nil, error);
+    id<MTLLibrary> library = [self newLibraryWithStitchedDescriptor:descriptor error:&error];
+    completionHandler(library, error);
 }
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)error API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
     (void)options;
@@ -8152,9 +8189,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 
 @implementation ZPUCPUFunction
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name {
+    return [self initWithOwner:owner name:name functionType:0];
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType {
     if ((self = [super init])) {
         _owner = owner;
         _name = [name copy];
+        _functionTypeOverride = functionType;
         _vertexAttributes = @[];
         _stageInputAttributes = @[];
         if ([_name isEqualToString:@"zpu_test_stage_in_vertex"]) {
@@ -8184,6 +8226,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (id<MTLDevice>)device { return (id<MTLDevice>)_owner; }
 - (NSString *)name { return _name; }
 - (MTLFunctionType)functionType {
+    if (_functionTypeOverride != 0) return _functionTypeOverride;
     if ([_name isEqualToString:@"zpu_test_visible"] ||
         [_name isEqualToString:@"zpu_test_visible_secondary"]) return MTLFunctionTypeVisible;
     if ([_name rangeOfString:@"vertex" options:NSCaseInsensitiveSearch].location != NSNotFound) return MTLFunctionTypeVertex;
@@ -8230,6 +8273,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         _owner = owner;
         _type = type;
         _installName = [installName copy];
+        _visibleFunctionNames = [NSSet set];
         NSMutableArray *names = [NSMutableArray array];
         for (NSString *name in @[
             @"zpu_test_vertex",
@@ -8268,7 +8312,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (id<MTLFunction>)newFunctionWithName:(NSString *)functionName {
     if (_type != MTLLibraryTypeExecutable) return nil;
     if (![_functionNames containsObject:functionName]) return nil;
-    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner name:functionName];
+    MTLFunctionType functionType = [_visibleFunctionNames containsObject:functionName] ?
+        MTLFunctionTypeVisible : 0;
+    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner name:functionName
+                                                        functionType:functionType];
 }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)constantValues error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)constantValues;

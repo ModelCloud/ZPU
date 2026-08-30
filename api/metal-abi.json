@@ -375,6 +375,7 @@
     "MTLDevice.newLibraryWithFile",
     "MTLDevice.newLibraryWithURL",
     "MTLDevice.newLibraryWithData",
+    "MTLLibrary.newLibraryWithStitchedDescriptor",
     "MTLDevice.newDynamicLibrary",
     "MTLDevice.newDynamicLibraryWithURL",
     "MTLDevice.newBinaryArchiveWithDescriptor",
@@ -876,7 +877,7 @@
     "MTLRayTracingPipelineState",
     "MTLComputePipelineState unregistered reflection",
     "MTL4Compiler arbitrary ML graph and arbitrary MSL families",
-    "MTLLibrary stitched loading and arbitrary MSL compilation",
+    "MTLLibrary arbitrary stitching and arbitrary MSL compilation",
     "MTLSparseTextureTailPacking raw 3D depth-packed backing layout"
   ]
 }
