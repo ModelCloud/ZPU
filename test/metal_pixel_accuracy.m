@@ -127,6 +127,11 @@ static const char *const kShaderSource =
     "struct ZPUCPUArgumentBufferArray { device float *data[2]; "
     "texture2d<float> tex[2]; sampler samp[2]; float4 color[2]; };\n"
     "kernel void zpu_cpu_argument_buffer_array(constant ZPUCPUArgumentBufferArray &args [[buffer(0)]]) { (void)args; }\n"
+    "struct ZPUCPUNestedInnerArgumentBuffer { device float *data [[id(0)]]; "
+    "texture2d<float> tex [[id(1)]]; };\n"
+    "struct ZPUCPUNestedOuterArgumentBuffer { constant ZPUCPUNestedInnerArgumentBuffer &inner [[id(0)]]; "
+    "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
+    "kernel void zpu_cpu_argument_buffer_nested(constant ZPUCPUNestedOuterArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "struct ZPUCPUTensorArgumentBuffer { tensor<device float, dextents<int32_t, 2>> input [[id(0)]]; };\n"
     "kernel void zpu_cpu_tensor_argument_buffer(constant ZPUCPUTensorArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "struct ZPUCPUTensorArgumentBufferArray { tensor<device float, dextents<int32_t, 2>> inputs[2]; };\n"
@@ -15153,6 +15158,7 @@ int main(void) {
             "kernel void zpu_cpu_ml_matmul_f16() {}\n"
             "kernel void zpu_cpu_argument_buffer() {}\n"
             "kernel void zpu_cpu_argument_buffer_array() {}\n"
+            "kernel void zpu_cpu_argument_buffer_nested() {}\n"
             "kernel void zpu_cpu_tensor_argument_buffer() {}\n"
             "kernel void zpu_cpu_tensor_argument_buffer_array() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
@@ -15717,7 +15723,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 44 ||
+            adapter_library.functionNames.count != 45 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -15731,6 +15737,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f16"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_nested"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tensor_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tensor_argument_buffer_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
@@ -27478,6 +27485,146 @@ int main(void) {
         if (!tensor_profile_reflection_ok) {
             fprintf(stderr, "metal-pixel: CPU tensor argument reflection mismatch\n");
             return 262;
+        }
+
+        /* A nested argument-buffer encoder has its own packed resource
+         * storage, while the parent stores the child buffer address at the
+         * nested binding slot. Native Metal is only the layout oracle here;
+         * both parent and child encoders below are CPU/ZPU objects. */
+        id<MTLFunction> native_nested_argument_function =
+            [library newFunctionWithName:@"zpu_cpu_argument_buffer_nested"];
+        id<MTLFunction> adapter_nested_argument_function =
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_nested"];
+        id<MTLArgumentEncoder> native_recursive_argument_encoder =
+            [native_nested_argument_function newArgumentEncoderWithBufferIndex:0];
+        id<MTLArgumentEncoder> adapter_recursive_argument_encoder =
+            [adapter_nested_argument_function newArgumentEncoderWithBufferIndex:0];
+        id<MTLArgumentEncoder> native_recursive_child_encoder =
+            [native_recursive_argument_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> adapter_recursive_child_encoder =
+            [adapter_recursive_argument_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> adapter_invalid_nested_child_encoder =
+            [adapter_recursive_argument_encoder newArgumentEncoderForBufferAtIndex:1];
+        id<MTLBuffer> native_nested_argument_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_nested_argument_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_nested_child_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_nested_child_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        BOOL nested_argument_profile_reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *native_nested_argument_reflection =
+                [library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer_nested"];
+            MTLFunctionReflection *adapter_nested_argument_reflection =
+                [adapter_library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer_nested"];
+            id<MTLBufferBinding> native_nested_argument_binding =
+                (id<MTLBufferBinding>)native_nested_argument_reflection.bindings.firstObject;
+            id<MTLBufferBinding> adapter_nested_argument_binding =
+                (id<MTLBufferBinding>)adapter_nested_argument_reflection.bindings.firstObject;
+            MTLStructType *native_nested_argument_struct =
+                native_nested_argument_binding.bufferStructType;
+            MTLStructType *adapter_nested_argument_struct =
+                adapter_nested_argument_binding.bufferStructType;
+            nested_argument_profile_reflection_ok =
+                native_nested_argument_reflection != nil && adapter_nested_argument_reflection != nil &&
+                native_nested_argument_reflection.bindings.count == 1 &&
+                adapter_nested_argument_reflection.bindings.count == 1 &&
+                native_nested_argument_binding != nil && adapter_nested_argument_binding != nil &&
+                native_nested_argument_binding.bufferDataType == MTLDataTypeStruct &&
+                adapter_nested_argument_binding.bufferDataType == MTLDataTypeStruct &&
+                native_nested_argument_binding.bufferDataSize == adapter_nested_argument_binding.bufferDataSize &&
+                native_nested_argument_binding.bufferDataSize == 32 &&
+                native_nested_argument_binding.bufferAlignment == adapter_nested_argument_binding.bufferAlignment &&
+                native_nested_argument_binding.bufferAlignment == 16 &&
+                native_nested_argument_struct != nil && adapter_nested_argument_struct != nil &&
+                native_nested_argument_struct.members.count == 3 &&
+                adapter_nested_argument_struct.members.count == 3;
+            NSArray<NSString *> *nested_argument_member_names = @[@"inner", @"samp", @"color"];
+            NSArray<NSNumber *> *nested_argument_member_offsets = @[@0, @8, @16];
+            NSArray<NSNumber *> *nested_argument_member_indices = @[@0, @1, @2];
+            for (NSUInteger member_index = 0;
+                 nested_argument_profile_reflection_ok && member_index < 3; ++member_index) {
+                MTLStructMember *native_member = native_nested_argument_struct.members[member_index];
+                MTLStructMember *adapter_member = adapter_nested_argument_struct.members[member_index];
+                nested_argument_profile_reflection_ok =
+                    [native_member.name isEqualToString:nested_argument_member_names[member_index]] &&
+                    [adapter_member.name isEqualToString:nested_argument_member_names[member_index]] &&
+                    native_member.dataType == adapter_member.dataType &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.offset == nested_argument_member_offsets[member_index].unsignedIntegerValue &&
+                    native_member.argumentIndex == adapter_member.argumentIndex &&
+                    native_member.argumentIndex == nested_argument_member_indices[member_index].unsignedIntegerValue;
+            }
+            MTLStructMember *native_inner_member = native_nested_argument_struct.members.firstObject;
+            MTLStructMember *adapter_inner_member = adapter_nested_argument_struct.members.firstObject;
+            MTLPointerType *native_inner_pointer = native_inner_member.pointerType;
+            MTLPointerType *adapter_inner_pointer = adapter_inner_member.pointerType;
+            nested_argument_profile_reflection_ok = nested_argument_profile_reflection_ok &&
+                native_inner_pointer != nil && adapter_inner_pointer != nil &&
+                native_inner_pointer.elementType == adapter_inner_pointer.elementType &&
+                native_inner_pointer.elementType == MTLDataTypeStruct &&
+                native_inner_pointer.access == adapter_inner_pointer.access &&
+                native_inner_pointer.access == MTLBindingAccessReadOnly &&
+                native_inner_pointer.alignment == adapter_inner_pointer.alignment &&
+                native_inner_pointer.alignment == 8 &&
+                native_inner_pointer.dataSize == adapter_inner_pointer.dataSize &&
+                native_inner_pointer.dataSize == 16;
+        }
+        if (native_recursive_argument_encoder != nil && adapter_recursive_argument_encoder != nil &&
+            native_recursive_child_encoder != nil && adapter_recursive_child_encoder != nil &&
+            native_nested_argument_buffer != nil && adapter_nested_argument_buffer != nil &&
+            native_nested_child_buffer != nil && adapter_nested_child_buffer != nil) {
+            [native_recursive_argument_encoder setArgumentBuffer:native_nested_argument_buffer offset:0];
+            [adapter_recursive_argument_encoder setArgumentBuffer:adapter_nested_argument_buffer offset:0];
+            [native_recursive_child_encoder setArgumentBuffer:native_nested_child_buffer offset:0];
+            [adapter_recursive_child_encoder setArgumentBuffer:adapter_nested_child_buffer offset:0];
+            [native_recursive_argument_encoder setBuffer:native_nested_child_buffer offset:0 atIndex:0];
+            [adapter_recursive_argument_encoder setBuffer:adapter_nested_child_buffer offset:0 atIndex:0];
+            [native_recursive_child_encoder setBuffer:native_copy_buffer offset:8 atIndex:0];
+            [adapter_recursive_child_encoder setBuffer:adapter_copy_buffer offset:8 atIndex:0];
+            [native_recursive_child_encoder setTexture:native_compute_texture atIndex:1];
+            [adapter_recursive_child_encoder setTexture:adapter_compute_icb_texture atIndex:1];
+            [native_recursive_argument_encoder setSamplerState:native_nested_array_sampler atIndex:1];
+            [adapter_recursive_argument_encoder setSamplerState:adapter_sampler atIndex:1];
+            const float nested_argument_color[] = {0.125f, 0.25f, 0.5f, 1.0f};
+            memcpy([native_recursive_argument_encoder constantDataAtIndex:2],
+                   nested_argument_color, sizeof(nested_argument_color));
+            memcpy([adapter_recursive_argument_encoder constantDataAtIndex:2],
+                   nested_argument_color, sizeof(nested_argument_color));
+            uint64_t adapter_nested_argument_parent[2] = {0};
+            uint64_t adapter_nested_argument_child[2] = {0};
+            memcpy(adapter_nested_argument_parent, adapter_nested_argument_buffer.contents,
+                   sizeof(adapter_nested_argument_parent));
+            memcpy(adapter_nested_argument_child, adapter_nested_child_buffer.contents,
+                   sizeof(adapter_nested_argument_child));
+            float adapter_nested_argument_color[4] = {0};
+            memcpy(adapter_nested_argument_color,
+                   (uint8_t *)adapter_nested_argument_buffer.contents + 16,
+                   sizeof(adapter_nested_argument_color));
+            if ([native_recursive_argument_encoder encodedLength] !=
+                    [adapter_recursive_argument_encoder encodedLength] ||
+                [native_recursive_argument_encoder alignment] !=
+                    [adapter_recursive_argument_encoder alignment] ||
+                [native_recursive_argument_encoder encodedLength] != 32 ||
+                [native_recursive_argument_encoder alignment] != 16 ||
+                [native_recursive_child_encoder encodedLength] != 16 ||
+                [native_recursive_child_encoder alignment] != 8 ||
+                adapter_nested_argument_parent[0] != adapter_nested_child_buffer.gpuAddress ||
+                adapter_nested_argument_parent[1] != adapter_sampler.gpuResourceID._impl ||
+                adapter_nested_argument_child[0] != adapter_copy_buffer.gpuAddress + 8 ||
+                adapter_nested_argument_child[1] != adapter_compute_icb_texture.gpuResourceID._impl ||
+                memcmp(adapter_nested_argument_color, nested_argument_color,
+                       sizeof(nested_argument_color)) != 0 ||
+                adapter_invalid_nested_child_encoder != nil ||
+                !nested_argument_profile_reflection_ok) {
+                fprintf(stderr, "metal-pixel: CPU nested argument encoder mismatch\n");
+                return 264;
+            }
+        } else {
+            fprintf(stderr, "metal-pixel: CPU nested argument encoder fixture allocation failed\n");
+            return 264;
         }
 
         /* The array form exercises Metal's tensor-aware array reflection,
