@@ -153,7 +153,7 @@ jobs:
           tools/limited-cpus.sh vulkaninfo --summary | tee vulkaninfo-summary.txt
           grep -F 'ZPU Experimental CPU' vulkaninfo-summary.txt
           grep -E 'deviceType[[:space:]]*=[[:space:]]*PHYSICAL_DEVICE_TYPE_CPU' vulkaninfo-summary.txt
-          grep -E 'apiVersion[[:space:]]*=[[:space:]]*1\.0\.0' vulkaninfo-summary.txt
+          grep -E 'apiVersion[[:space:]]*=[[:space:]]*1\.4\.360' vulkaninfo-summary.txt
           grep -Ei 'vendorID[[:space:]]*=[[:space:]]*0x1cdc' vulkaninfo-summary.txt
           grep -Ei 'deviceID[[:space:]]*=[[:space:]]*0x0001' vulkaninfo-summary.txt
       - name: Exact 240x240 system-loader transfer validation
