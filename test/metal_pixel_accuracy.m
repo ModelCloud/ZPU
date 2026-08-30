@@ -7537,6 +7537,75 @@ int main(void) {
         uint8_t adapter_compute_pixels[byte_count];
         [adapter_compute_texture getBytes:adapter_compute_pixels bytesPerRow:(NSUInteger)width * 4
                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+
+  /* The registered gradient profile writes a logical float4. The CPU
+   * target encoder must preserve that result across representative color
+   * formats it advertises, while native Metal remains the byte oracle. */
+        const struct {
+            MTLPixelFormat format;
+            NSUInteger bytes_per_pixel;
+            const char *name;
+        } generic_compute_formats[] = {
+            {MTLPixelFormatR8Unorm, 1, "R8Unorm"},
+            {MTLPixelFormatR16Unorm, 2, "R16Unorm"},
+            {MTLPixelFormatR16Float, 2, "R16Float"},
+            {MTLPixelFormatRG8Unorm, 2, "RG8Unorm"},
+            {MTLPixelFormatRG16Unorm, 4, "RG16Unorm"},
+            {MTLPixelFormatRG16Float, 4, "RG16Float"},
+            {MTLPixelFormatRGBA8Unorm, 4, "RGBA8Unorm"},
+            {MTLPixelFormatBGRA8Unorm, 4, "BGRA8Unorm"},
+            {MTLPixelFormatRGBA16Unorm, 8, "RGBA16Unorm"},
+            {MTLPixelFormatRGBA32Float, 16, "RGBA32Float"},
+        };
+        for (NSUInteger format_index = 0;
+             format_index < sizeof(generic_compute_formats) / sizeof(generic_compute_formats[0]);
+             ++format_index) {
+            const NSUInteger generic_bytes_per_pixel = generic_compute_formats[format_index].bytes_per_pixel;
+            MTLTextureDescriptor *generic_native_descriptor = [compute_texture_descriptor copy];
+            generic_native_descriptor.pixelFormat = generic_compute_formats[format_index].format;
+            id<MTLTexture> generic_native_texture = [device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLTexture> generic_adapter_texture =
+                [adapter_device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLCommandBuffer> generic_native_command_buffer = [queue commandBuffer];
+            id<MTLCommandBuffer> generic_adapter_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> generic_native_encoder =
+                [generic_native_command_buffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> generic_adapter_encoder =
+                [generic_adapter_command_buffer computeCommandEncoder];
+            [generic_native_encoder setComputePipelineState:native_compute_pipeline];
+            [generic_native_encoder setTexture:generic_native_texture atIndex:0];
+            [generic_native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [generic_native_encoder endEncoding];
+            [generic_native_command_buffer commit];
+            [generic_native_command_buffer waitUntilCompleted];
+            [generic_adapter_encoder setComputePipelineState:adapter_compute_pipeline];
+            [generic_adapter_encoder setTexture:generic_adapter_texture atIndex:0];
+            [generic_adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                 threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [generic_adapter_encoder endEncoding];
+            [generic_adapter_command_buffer commit];
+            [generic_adapter_command_buffer waitUntilCompleted];
+            const NSUInteger generic_byte_count = (NSUInteger)width * height * generic_bytes_per_pixel;
+            uint8_t generic_native_pixels[width * height * 16];
+            uint8_t generic_adapter_pixels[width * height * 16];
+            memset(generic_native_pixels, 0, sizeof(generic_native_pixels));
+            memset(generic_adapter_pixels, 0, sizeof(generic_adapter_pixels));
+            [generic_native_texture getBytes:generic_native_pixels
+                                 bytesPerRow:(NSUInteger)width * generic_bytes_per_pixel
+                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [generic_adapter_texture getBytes:generic_adapter_pixels
+                                  bytesPerRow:(NSUInteger)width * generic_bytes_per_pixel
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (generic_native_texture == nil || generic_adapter_texture == nil ||
+                generic_native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                generic_adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(generic_native_pixels, generic_adapter_pixels, generic_byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: generic CPU compute mismatch for %s\n",
+                        generic_compute_formats[format_index].name);
+                return 148 + (int)format_index;
+            }
+        }
         if (native_compute_function == nil || native_compute_pipeline == nil || native_compute_texture == nil ||
             native_compute_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_compute_function == nil || adapter_compute_pipeline == nil || adapter_default_library == nil ||

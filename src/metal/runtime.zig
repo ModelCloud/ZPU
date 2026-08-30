@@ -3107,10 +3107,6 @@ pub const ComputeEncoder = struct {
     }
 };
 
-fn unorm8Fraction(numerator: u32, denominator: u32) u8 {
-    return @intCast((@as(u64, numerator) * 255 + @as(u64, denominator) / 2) / denominator);
-}
-
 fn unorm8ChannelCount(format: TextureFormat) usize {
     return switch (format) {
         .a8_unorm => 1,
@@ -3367,38 +3363,20 @@ fn executeCompute(command: ComputeCommand) Error!void {
     const width = @min(command.threads_per_grid.width, command.texture.width);
     const height = @min(command.threads_per_grid.height, command.texture.height);
     switch (command.kernel) {
-        1, 3, 4 => for (0..height) |y| {
-            for (0..width) |x| {
-                const red = unorm8Fraction(@as(u32, @intCast(x)) + 1, 8);
-                const green = unorm8Fraction(@as(u32, @intCast(y)) + 1, 8);
-                const blue = if (command.kernel == 4)
-                    unorm8Fraction(@as(u32, command.array_slice orelse 0) + 1, 8)
+        1, 3, 4 => {
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| {
+                const blue = if (command.kernel == 4 and command.array_slice != null)
+                    (@as(f32, @floatFromInt(command.array_slice.?)) + 1.0) / 8.0
                 else
-                    64;
-                const offset = y * command.texture.stride + x * command.texture.format.bytesPerPixel();
-                switch (command.texture.format) {
-                    .r8_unorm => command.texture.bytes[offset] = red,
-                    .rg8_unorm => {
-                        command.texture.bytes[offset + 0] = red;
-                        command.texture.bytes[offset + 1] = green;
-                    },
-                    .rgba8_unorm => {
-                        command.texture.bytes[offset + 0] = red;
-                        command.texture.bytes[offset + 1] = green;
-                        command.texture.bytes[offset + 2] = blue;
-                        command.texture.bytes[offset + 3] = 255;
-                    },
-                    .bgra8_unorm => {
-                        // Metal's BGRA texture memory is [B, G, R, A], while the
-                        // kernel's logical result is RGBA.
-                        command.texture.bytes[offset + 0] = blue;
-                        command.texture.bytes[offset + 1] = green;
-                        command.texture.bytes[offset + 2] = red;
-                        command.texture.bytes[offset + 3] = 255;
-                    },
-                    .a8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint, .r16_snorm, .r16_uint, .r16_sint, .r16_unorm, .r16_float, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint, .rg16_snorm, .rg16_uint, .rg16_sint, .rg16_unorm, .rg16_float, .r32_uint, .r32_sint, .r32_float, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .rgba16_snorm, .rgba16_unorm, .rgba16_uint, .rgba16_sint, .rgba16_float, .rg32_uint, .rg32_sint, .rg32_float, .rgba32_uint, .rgba32_sint, .rgba32_float, .bgra8_unorm_srgb, .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm, .depth16_unorm, .depth32_float, .stencil8, .depth24_unorm_stencil8, .depth32_float_stencil8, .x32_stencil8, .x24_stencil8 => return error.UnsupportedFormat,
-                }
-            }
+                    0.25;
+                target.storeColor(x, y, .{
+                    (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                    (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                    blue,
+                    1.0,
+                });
+            };
         },
         2 => {
             const source = command.buffer orelse return error.InvalidCommand;
@@ -6319,6 +6297,56 @@ test "CPU compute writes narrow unorm targets at their native stride" {
     destroyComputeEncoder(rg8_encoder);
     try rg8_command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 32 }, rg8.bytes);
+}
+
+test "CPU compute gradient preserves wide target encodings" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const r16 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.r16_unorm));
+    defer destroyTexture(r16);
+    const r16_float = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.r16_float));
+    defer destroyTexture(r16_float);
+    const rg16 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rg16_unorm));
+    defer destroyTexture(rg16);
+    const rg16_float = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rg16_float));
+    defer destroyTexture(rg16_float);
+    const rgba16 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rgba16_unorm));
+    defer destroyTexture(rgba16);
+    const rgba32 = try createTexture(device, 2, 1, @intFromEnum(abi.PixelFormat.rgba32_float));
+    defer destroyTexture(rgba32);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(1);
+    const textures = [_]*Texture{ r16, r16_float, rg16, rg16_float, rgba16, rgba32 };
+    for (textures) |texture| {
+        try encoder.setTexture(texture, 0);
+        try encoder.dispatchThreads(.{ .width = 2, .height = 1, .depth = 1 }, .{ .width = 2, .height = 1, .depth = 1 });
+    }
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0), r16.bytes[0]);
+    try command_buffer.commit();
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0x20, 0, 0x40 }, r16.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0x30, 0, 0x34 }, r16_float.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0, 0x20, 0, 0x20, 0, 0x40, 0, 0x20,
+    }, rg16.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0, 0x30, 0, 0x30, 0, 0x34, 0, 0x30,
+    }, rg16_float.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0, 0x20, 0, 0x20, 0, 0x40, 0xff, 0xff,
+        0, 0x40, 0, 0x20, 0, 0x40, 0xff, 0xff,
+    }, rgba16.bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0, 0, 0,    0x3e, 0, 0, 0, 0x3e, 0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f,
+        0, 0, 0x80, 0x3e, 0, 0, 0, 0x3e, 0, 0, 0x80, 0x3e, 0, 0, 0x80, 0x3f,
+    }, rgba32.bytes);
 }
 
 test "CPU compute encoder preserves deferred Metal 4 copy and fill ordering" {
