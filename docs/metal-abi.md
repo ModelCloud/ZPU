@@ -354,8 +354,10 @@ triangle path:
 - legacy triangle-patch draws accept half-precision, per-patch-and-per-instance
   tessellation factors and execute factor-one patches, including patch-index,
   control-point-index, and indirect argument buffers. All of those buffers are
-  ZPU-owned and read at commit time; non-factor-one tessellation, quad patches,
-  and arbitrary tessellation shader profiles fail closed
+  ZPU-owned and read at commit time; direct and indirect `baseInstance` values
+  select layered color/depth/stencil targets using the same upper-left pixel
+  grid as ordinary draws. Non-factor-one tessellation, quad patches, and
+  arbitrary tessellation shader profiles fail closed
 - compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
   and follow the same deferred lifetime rules
 - CPU command buffers expose host-clock `GPUStartTime`/`GPUEndTime` around
@@ -619,8 +621,8 @@ Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function st
 implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile and mesh profiles are CPU/ZPU-owned
 through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
 pipeline-data serializer; the registered factor-one triangle-patch profile is
-CPU/ZPU-owned through the legacy render encoder and ICB path. Arbitrary
-tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
+CPU/ZPU-owned through the legacy render encoder, layered render targets, and
+ICB path. Arbitrary tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
 synchronization families, arbitrary ray-tracing execution beyond the bounded triangle and
 legacy/Metal 4 instance profiles, opaque native 3D sparse-texture tail
 backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is

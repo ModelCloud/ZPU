@@ -1647,9 +1647,44 @@ pub const CommandBuffer = struct {
                     (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
                     resolved_patch.factor_scale != 1.0)
                     return self.fail(error.InvalidArgument);
-                sparseSyncTexture(target_handle);
-                defer sparseFlushTexture(target_handle);
                 if (resolved_patch.instance_count == 0 or resolved_patch.patch_count == 0) continue;
+
+                const last_instance = std.math.add(usize, resolved_patch.base_instance, resolved_patch.instance_count - 1) catch
+                    return self.fail(error.InvalidArgument);
+                if (active_array_target_count > 1 and last_instance >= active_array_target_count)
+                    return self.fail(error.InvalidArgument);
+                if (active_array_target_count > 1) {
+                    for (active_array_color_attachments[0][0..active_array_target_count]) |target| {
+                        sparseSyncTexture(target orelse return self.fail(error.InvalidResource));
+                    }
+                    for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                        if (attachment != null) {
+                            for (active_array_color_attachments[physical_index + 1][0..active_array_target_count]) |target| {
+                                sparseSyncTexture(target orelse return self.fail(error.InvalidResource));
+                            }
+                        }
+                    }
+                } else {
+                    sparseSyncTexture(target_handle);
+                    for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
+                }
+                defer {
+                    if (active_array_target_count > 1) {
+                        for (active_array_color_attachments[0][0..active_array_target_count]) |target| {
+                            sparseFlushOptionalTexture(target);
+                        }
+                        for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                            if (attachment != null) {
+                                for (active_array_color_attachments[physical_index + 1][0..active_array_target_count]) |target| {
+                                    sparseFlushOptionalTexture(target);
+                                }
+                            }
+                        }
+                    } else {
+                        sparseFlushTexture(target_handle);
+                        for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                    }
+                }
 
                 const patch_end = std.math.add(usize, resolved_patch.patch_start, resolved_patch.patch_count) catch
                     return self.fail(error.InvalidArgument);
@@ -1662,8 +1697,6 @@ pub const CommandBuffer = struct {
                 }
 
                 const factor_entry_size = @sizeOf(u16) * 4;
-                const last_instance = std.math.add(usize, resolved_patch.base_instance, resolved_patch.instance_count - 1) catch
-                    return self.fail(error.InvalidArgument);
                 const factor_instance_offset = std.math.mul(usize, last_instance, resolved_patch.factor_instance_stride) catch
                     return self.fail(error.InvalidArgument);
                 const factor_patch_offset = std.math.mul(usize, patch_end - 1, factor_entry_size) catch
@@ -1701,16 +1734,11 @@ pub const CommandBuffer = struct {
                     }
                 }
 
-                var target = target_handle.asTarget();
                 var extra_targets_storage: [7]raster3d.Target = undefined;
                 var extra_targets: [7]?*raster3d.Target = [_]?*raster3d.Target{null} ** 7;
                 var extra_count: usize = 0;
                 for (active_color_attachments[1..], 0..) |attachment, physical_index| {
-                    if (attachment) |value| {
-                        extra_targets_storage[physical_index] = value.asTarget();
-                        extra_targets[physical_index] = &extra_targets_storage[physical_index];
-                        extra_count = @max(extra_count, physical_index + 1);
-                    }
+                    if (attachment != null) extra_count = @max(extra_count, physical_index + 1);
                 }
                 const logical_output_count: usize = if (draw_options.write_extra_targets)
                     @min(extra_count + 1, 8)
@@ -1721,6 +1749,32 @@ pub const CommandBuffer = struct {
                 for (0..resolved_patch.instance_count) |instance| {
                     const instance_id = std.math.add(usize, resolved_patch.base_instance, instance) catch
                         return self.fail(error.InvalidArgument);
+                    const array_index = if (active_array_target_count > 1) instance_id else 0;
+                    const instance_target = if (active_array_target_count > 1)
+                        active_array_color_attachments[0][array_index] orelse return self.fail(error.InvalidResource)
+                    else
+                        target_handle;
+                    var target = instance_target.asTarget();
+                    extra_targets = [_]?*raster3d.Target{null} ** 7;
+                    for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                        if (attachment != null) {
+                            const instance_extra = if (active_array_target_count > 1)
+                                active_array_color_attachments[physical_index + 1][array_index] orelse
+                                    return self.fail(error.InvalidResource)
+                            else
+                                attachment.?;
+                            extra_targets_storage[physical_index] = instance_extra.asTarget();
+                            extra_targets[physical_index] = &extra_targets_storage[physical_index];
+                        }
+                    }
+                    const depth_values = if (active_array_target_count > 1)
+                        active_depth_array_values[array_index]
+                    else
+                        active_depth;
+                    const stencil_values = if (active_array_target_count > 1)
+                        active_stencil_array_values[array_index]
+                    else
+                        active_stencil;
                     for (0..resolved_patch.patch_count) |local_patch| {
                         const draw_patch_index = std.math.add(usize, resolved_patch.patch_start, local_patch) catch
                             return self.fail(error.InvalidArgument);
@@ -1769,8 +1823,8 @@ pub const CommandBuffer = struct {
                             extra_targets[0..extra_count],
                             null,
                             &.{},
-                            active_depth,
-                            active_stencil,
+                            depth_values,
+                            stencil_values,
                             &patch_vertices,
                             .triangle,
                             draw_options,
@@ -3387,7 +3441,6 @@ pub const RenderEncoder = struct {
         indirect_buffer: ?*Buffer,
         indirect_buffer_offset: usize,
     ) Error!void {
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const control_point_index_alignment: usize = switch (control_point_index_type) {
             .uint16 => @alignOf(u16),
             .uint32, .none => @alignOf(u32),
@@ -8361,6 +8414,78 @@ test "CPU render encoder maps indirect and indexed base instances to array color
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, direct_indexed_layers[0].bytes[0..4]);
     for (direct_indexed_layers[1..]) |layer| {
         try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
+    }
+}
+
+test "CPU layered triangle patches map base instances on the top-left grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const factors = [_]u16{
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+    };
+    const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(factors)), @ptrCast(&factors));
+    defer destroyBuffer(factor_buffer);
+
+    var patch_layers: [3]*Texture = undefined;
+    var reference_layers: [3]*Texture = undefined;
+    for (&patch_layers, &reference_layers) |*patch_layer, *reference_layer| {
+        patch_layer.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+        reference_layer.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    }
+    defer for (patch_layers, &reference_layers) |patch_layer, *reference_layer| {
+        destroyTexture(patch_layer);
+        destroyTexture(reference_layer.*);
+    };
+
+    const pass = abi.RenderPassDescriptor{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const viewport = abi.Viewport{ .origin_x = 1, .origin_y = 1, .width = 3, .height = 2, .znear = 0, .zfar = 1 };
+    const scissor = abi.ScissorRect{ .x = 1, .y = 1, .width = 3, .height = 2 };
+
+    var patch_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(patch_commands);
+    var patch_encoder = try beginRender(patch_commands, patch_layers[0], pass);
+    try patch_encoder.setRenderTargetArray(&patch_layers, patch_layers.len);
+    try patch_encoder.setViewport(viewport);
+    try patch_encoder.setScissorRect(scissor);
+    try patch_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try patch_encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf([4]u16));
+    try patch_encoder.drawPatches(1, 3, 0, 1, null, 0, 2, 1, .none, null, 0);
+    try patch_encoder.endEncoding();
+    destroyRenderEncoder(patch_encoder);
+
+    var reference_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(reference_commands);
+    for (reference_layers, 0..) |reference_layer, layer| {
+        var reference_encoder = try beginRender(reference_commands, reference_layer, pass);
+        try reference_encoder.setViewport(viewport);
+        try reference_encoder.setScissorRect(scissor);
+        if (layer != 0) {
+            try reference_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+            try reference_encoder.drawPrimitives(.triangle, 0, 3, 1);
+        }
+        try reference_encoder.endEncoding();
+        destroyRenderEncoder(reference_encoder);
+    }
+
+    try patch_commands.commit();
+    try reference_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, patch_commands.status);
+    try std.testing.expectEqual(CommandStatus.completed, reference_commands.status);
+    for (patch_layers, reference_layers) |patch_layer, reference_layer| {
+        try std.testing.expectEqualSlices(u8, patch_layer.bytes, reference_layer.bytes);
     }
 }
 
