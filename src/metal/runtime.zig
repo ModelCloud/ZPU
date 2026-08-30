@@ -461,6 +461,7 @@ const TileCommand = struct {
     tile_size: abi.Size,
     threads_per_tile: abi.Size,
     color_attachment_map: [8]u8,
+    options: raster3d.DrawOptions,
 };
 
 const MeshCommand = struct {
@@ -1558,6 +1559,17 @@ pub const CommandBuffer = struct {
                 const tile_count_x = (@as(usize, target_handle.width) + tile.tile_size.width - 1) / tile.tile_size.width;
                 const tile_count_y = (@as(usize, target_handle.height) + tile.tile_size.height - 1) / tile.tile_size.height;
                 const layer_count = if (active_array_target_count > 1) active_array_target_count else 1;
+                var tile_options = tile.options;
+                // The bounded profile has one logical output. Its selected
+                // physical attachment is already the target passed here;
+                // normalize only the helper's local output map while
+                // retaining fixed-function state.
+                tile_options.write_extra_targets = false;
+                tile_options.color_attachment_map[0] = 0;
+                const x0 = @min(@as(usize, tile_options.scissor.x), @as(usize, target_handle.width));
+                const y0 = @min(@as(usize, tile_options.scissor.y), @as(usize, target_handle.height));
+                const x1 = @min(x0 +| @as(usize, tile_options.scissor.width), @as(usize, target_handle.width));
+                const y1 = @min(y0 +| @as(usize, tile_options.scissor.height), @as(usize, target_handle.height));
                 for (0..layer_count) |layer| {
                     const layer_texture = if (active_array_target_count > 1)
                         active_array_color_attachments[output_index][layer] orelse return self.fail(error.InvalidResource)
@@ -1570,16 +1582,24 @@ pub const CommandBuffer = struct {
                             const tile_origin_y = tile_y * tile.tile_size.height;
                             for (0..tile.threads_per_tile.height) |local_y| {
                                 const y = tile_origin_y + local_y;
-                                if (y >= target.height) continue;
+                                if (y >= target.height or y < y0 or y >= y1) continue;
                                 for (0..tile.threads_per_tile.width) |local_x| {
                                     const x = tile_origin_x + local_x;
-                                    if (x >= target.width) continue;
-                                    target.storeColor(x, y, .{
+                                    if (x >= target.width or x < x0 or x >= x1) continue;
+                                    const depth_values = if (active_array_target_count > 1)
+                                        active_depth_array_values[layer]
+                                    else
+                                        active_depth;
+                                    const stencil_values = if (active_array_target_count > 1)
+                                        active_stencil_array_values[layer]
+                                    else
+                                        active_stencil;
+                                    _ = raster3d.writePoint(&target, depth_values, stencil_values, x, y, 0.5, .{
                                         (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
                                         (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
                                         0.25,
                                         1.0,
-                                    });
+                                    }, tile_options);
                                 }
                             }
                         }
@@ -3368,6 +3388,7 @@ pub const RenderEncoder = struct {
             .tile_size = tile_size,
             .threads_per_tile = threads_per_tile,
             .color_attachment_map = self.color_attachment_map,
+            .options = self.options(),
         } });
     }
 
@@ -7482,6 +7503,69 @@ test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, texture.bytes[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 159, 96, 64, 255 }, texture.bytes[2 * texture.stride + 4 * 4 ..][0..4]);
+}
+
+test "CPU tile dispatch clips in the attachment-global top-left grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const depth = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.depth32_float));
+    defer destroyTexture(depth);
+    const stencil = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.stencil8));
+    defer destroyTexture(stencil);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store },
+        .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+    });
+    try encoder.setDepthTexture(depth);
+    try encoder.setStencilTexture(stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 0);
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less), true);
+    try encoder.setStencilState(
+        true,
+        @intFromEnum(abi.CompareFunction.always),
+        @intFromEnum(abi.StencilOperation.keep),
+        @intFromEnum(abi.StencilOperation.keep),
+        @intFromEnum(abi.StencilOperation.replace),
+        0xff,
+        0xff,
+    );
+    try encoder.setStencilReference(7, 7);
+    try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
+    try encoder.dispatchThreadsPerTile(
+        1,
+        .{ .width = 2, .height = 2, .depth = 1 },
+        .{ .width = 2, .height = 2, .depth = 1 },
+    );
+    // Verify the tile command keeps the original scissor snapshot.
+    try encoder.setScissorRect(.{ .x = 0, .y = 0, .width = 5, .height = 3 });
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+
+    var expected = [_]u8{0} ** (5 * 3 * 4);
+    for (0..3) |y| {
+        for (0..5) |x| {
+            const pixel = (y * 5 + x) * 4;
+            expected[pixel + 3] = 255;
+            if (x >= 1 and x < 4 and y >= 1 and y < 3) {
+                expected[pixel + 0] = @intCast(((x + 1) * 255 + 4) / 8);
+                expected[pixel + 1] = @intCast(((y + 1) * 255 + 4) / 8);
+                expected[pixel + 2] = 64;
+            }
+        }
+    }
+    const depth_value: f32 = 0.5;
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &expected, color.bytes);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&depth_value), depth.bytes[6 * 4 .. 7 * 4]);
+    try std.testing.expectEqual(@as(u8, 7), stencil.bytes[7]);
+    try std.testing.expectEqual(@as(u8, 0), stencil.bytes[0]);
 }
 
 test "CPU layered tile dispatch broadcasts each slice on the upper-left grid" {

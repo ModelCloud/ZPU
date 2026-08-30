@@ -285,7 +285,8 @@ triangle path:
   copies, while arbitrary ML graphs and arbitrary-MSL compiler requests remain
   fail-closed; the registered `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
-  exact upper-left `(0,0)` coordinates and RGBA8/BGRA8 storage ordering; the
+  exact attachment-global upper-left `(0,0)` coordinates, recorded scissor
+  clipping, fixed profile depth 0.5, and RGBA8/BGRA8 storage ordering; the
   registered `zpu_cpu_mesh_gradient_rgba8` plus
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
   CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,

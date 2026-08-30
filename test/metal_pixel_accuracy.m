@@ -13239,6 +13239,7 @@ int main(void) {
             }
             [adapter_mtl4_tile_encoder setArgumentTable:adapter_mtl4_tile_stage_table
                                                  atStages:MTLRenderStageTile];
+            [adapter_mtl4_tile_encoder setScissorRect:(MTLScissorRect){1, 1, 3, 2}];
             [adapter_mtl4_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
             [adapter_mtl4_tile_encoder endEncoding];
             [adapter_mtl4_tile_command_buffer endCommandBuffer];
@@ -13255,9 +13256,10 @@ int main(void) {
             for (NSUInteger y = 0; y < 3; ++y) {
                 for (NSUInteger x = 0; x < 5; ++x) {
                     const NSUInteger pixel = (y * 5 + x) * 4;
-                    expected_tile_pixels[pixel + 0] = (uint8_t)(((x + 1) * 255 + 4) / 8);
-                    expected_tile_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
-                    expected_tile_pixels[pixel + 2] = 64;
+                    const BOOL covered = x >= 1 && x < 4 && y >= 1 && y < 3;
+                    expected_tile_pixels[pixel + 0] = covered ? (uint8_t)(((x + 1) * 255 + 4) / 8) : 0;
+                    expected_tile_pixels[pixel + 1] = covered ? (uint8_t)(((y + 1) * 255 + 4) / 8) : 0;
+                    expected_tile_pixels[pixel + 2] = covered ? 64 : 0;
                     expected_tile_pixels[pixel + 3] = 255;
                 }
             }
@@ -13375,6 +13377,7 @@ int main(void) {
             [adapter_legacy_tile_encoder setTileBuffer:adapter_vertex_buffer offset:0 atIndex:0];
             [adapter_legacy_tile_encoder setTileTexture:adapter_legacy_tile_texture atIndex:0];
             [adapter_legacy_tile_encoder setTileSamplerState:adapter_sampler atIndex:0];
+            [adapter_legacy_tile_encoder setScissorRect:(MTLScissorRect){1, 1, 3, 2}];
             [adapter_legacy_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
             [adapter_legacy_tile_encoder endEncoding];
             [adapter_legacy_tile_command_buffer commit];
@@ -13397,9 +13400,10 @@ int main(void) {
             for (NSUInteger y = 0; y < 3; ++y) {
                 for (NSUInteger x = 0; x < 5; ++x) {
                     const NSUInteger pixel = (y * 5 + x) * 4;
-                    expected_legacy_tile_pixels[pixel + 0] = 64;
-                    expected_legacy_tile_pixels[pixel + 1] = (uint8_t)(((y + 1) * 255 + 4) / 8);
-                    expected_legacy_tile_pixels[pixel + 2] = (uint8_t)(((x + 1) * 255 + 4) / 8);
+                    const BOOL covered = x >= 1 && x < 4 && y >= 1 && y < 3;
+                    expected_legacy_tile_pixels[pixel + 0] = covered ? 64 : 0;
+                    expected_legacy_tile_pixels[pixel + 1] = covered ? (uint8_t)(((y + 1) * 255 + 4) / 8) : 0;
+                    expected_legacy_tile_pixels[pixel + 2] = covered ? (uint8_t)(((x + 1) * 255 + 4) / 8) : 0;
                     expected_legacy_tile_pixels[pixel + 3] = 255;
                 }
             }

@@ -410,7 +410,10 @@ typedef struct zpu_metal_cpu_acceleration_triangle {
 } zpu_metal_cpu_acceleration_triangle;
 
 /* Tile kernels are explicit CPU/ZPU operations. They are not MSL and do not
- * invoke Apple's Metal tile encoder. */
+ * invoke Apple's Metal tile encoder. The bounded profile emits one logical
+ * pixel per tile thread in attachment-global top-left coordinates, clipped
+ * by the recorded scissor and passed through fixed-function depth/stencil and
+ * color-write state at profile depth 0.5. */
 typedef uint8_t zpu_metal_tile_kernel;
 enum {
     ZPU_METAL_TILE_FILL_GRADIENT_RGBA8 = 1,
