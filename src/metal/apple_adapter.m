@@ -2534,7 +2534,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_metal4_buffer_range(MTL4BufferRange range, ZPUDevice *owner,
                                      ZPUBuffer **buffer, NSUInteger *offset) {
     if (buffer == NULL || offset == NULL || range.bufferAddress == 0 ||
-        range.length > (uint64_t)NSUIntegerMax) return NO;
+        (range.length != UINT64_MAX && range.length > (uint64_t)NSUIntegerMax)) return NO;
     if (!zpu_metal4_buffer_address_offset(owner, range.bufferAddress, buffer, offset)) return NO;
     return range.length == UINT64_MAX || range.length <= (uint64_t)(*buffer).length - *offset;
 }
@@ -14479,16 +14479,19 @@ static BOOL zpu_cpu_acceleration_read_position(ZPUBuffer *buffer, NSUInteger off
 
 static BOOL zpu_cpu_acceleration_write_triangle(zpu_metal_cpu_acceleration_triangle *triangle,
                                                  ZPUBuffer *vertexBuffer, NSUInteger vertexOffset,
-                                                 NSUInteger vertexStride,
+                                                 NSUInteger vertexStride, NSUInteger vertexRangeLength,
                                                  ZPUBuffer *indexBuffer, NSUInteger indexOffset,
-                                                 MTLIndexType indexType, NSUInteger triangleIndex) {
+                                                 NSUInteger indexRangeLength, MTLIndexType indexType,
+                                                 NSUInteger triangleIndex) {
     const NSUInteger indexSize = indexType == MTLIndexTypeUInt16 ? sizeof(uint16_t) : sizeof(uint32_t);
     for (NSUInteger vertex = 0; vertex < 3; ++vertex) {
         NSUInteger vertexIndex = triangleIndex * 3 + vertex;
         if (indexBuffer != nil) {
             if (indexOffset > indexBuffer.length || vertexIndex > (NSUIntegerMax - indexOffset) / indexSize) return NO;
             const NSUInteger byteOffset = indexOffset + vertexIndex * indexSize;
-            if (byteOffset > indexBuffer.length || indexBuffer.length - byteOffset < indexSize || indexBuffer.contents == NULL) return NO;
+            if (byteOffset > indexBuffer.length || indexBuffer.length - byteOffset < indexSize ||
+                byteOffset - indexOffset > indexRangeLength || indexRangeLength - (byteOffset - indexOffset) < indexSize ||
+                indexBuffer.contents == NULL) return NO;
             if (indexType == MTLIndexTypeUInt16) {
                 uint16_t value = 0;
                 memcpy(&value, (const uint8_t *)indexBuffer.contents + byteOffset, sizeof(value));
@@ -14499,7 +14502,9 @@ static BOOL zpu_cpu_acceleration_write_triangle(zpu_metal_cpu_acceleration_trian
                 vertexIndex = value;
             }
         }
-        if (vertexIndex > (NSUIntegerMax - vertexOffset) / vertexStride) return NO;
+        if (vertexIndex > (NSUIntegerMax - vertexOffset) / vertexStride ||
+            vertexIndex * vertexStride > vertexRangeLength ||
+            vertexRangeLength - vertexIndex * vertexStride < 3 * sizeof(float)) return NO;
         if (!zpu_cpu_acceleration_read_position(vertexBuffer, vertexOffset + vertexIndex * vertexStride,
                                                 &triangle->positions[vertex * 3])) return NO;
     }
@@ -14553,8 +14558,70 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
         for (NSUInteger triangleIndex = 0; triangleIndex < triangles.triangleCount; ++triangleIndex) {
             zpu_metal_cpu_acceleration_triangle triangle;
             if (!zpu_cpu_acceleration_write_triangle(&triangle, vertexBuffer, triangles.vertexBufferOffset,
-                                                     vertexStride,
+                                                     vertexStride, vertexBuffer.length - triangles.vertexBufferOffset,
                                                      indexBuffer, triangles.indexBufferOffset,
+                                                     indexBuffer == nil ? 0 : indexBuffer.length - triangles.indexBufferOffset,
+                                                     triangles.indexType, triangleIndex)) return NO;
+            memcpy((uint8_t *)target->_storage.contents + 256 + destinationIndex * sizeof(triangle),
+                   &triangle, sizeof(triangle));
+            destinationIndex += 1;
+        }
+    }
+    return YES;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_cpu_acceleration_write_metal4_payload(
+    ZPUAccelerationStructure *target, MTL4PrimitiveAccelerationStructureDescriptor *descriptor) {
+    if (!zpu_acceleration_storage_range_valid(target, target->_size)) return NO;
+    NSUInteger triangleCount = 0;
+    for (MTL4AccelerationStructureGeometryDescriptor *geometry in descriptor.geometryDescriptors) {
+        if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) return NO;
+        const NSUInteger count = ((MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry).triangleCount;
+        if (count > SIZE_MAX - triangleCount) return NO;
+        triangleCount += count;
+    }
+    if (triangleCount > UINT32_MAX || triangleCount > (target->_size - 256) / sizeof(zpu_metal_cpu_acceleration_triangle)) return NO;
+    memset(target->_storage.contents, 0, target->_size);
+    zpu_metal_cpu_acceleration_structure_header header = {
+        .magic = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
+        .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
+        .triangle_count = (uint32_t)triangleCount,
+        .flags = triangleCount == 0 ? 0u : 1u,
+        .triangle_offset = 256,
+        .reserved = {0, 0, 0},
+    };
+    memcpy(target->_storage.contents, &header, sizeof(header));
+    NSUInteger destinationIndex = 0;
+    for (MTL4AccelerationStructureGeometryDescriptor *geometry in descriptor.geometryDescriptors) {
+        MTL4AccelerationStructureTriangleGeometryDescriptor *triangles =
+            (MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry;
+        ZPUBuffer *vertexBuffer = nil;
+        NSUInteger vertexOffset = 0;
+        if (!zpu_metal4_buffer_range(triangles.vertexBuffer, target->_owner, &vertexBuffer, &vertexOffset) ||
+            vertexOffset % sizeof(float) != 0) return NO;
+        const NSUInteger vertexRangeLength = triangles.vertexBuffer.length == UINT64_MAX ?
+            vertexBuffer.length - vertexOffset : (NSUInteger)triangles.vertexBuffer.length;
+        ZPUBuffer *indexBuffer = nil;
+        NSUInteger indexOffset = 0;
+        NSUInteger indexRangeLength = 0;
+        if (triangles.indexBuffer.bufferAddress != 0) {
+            if (!zpu_metal4_buffer_range(triangles.indexBuffer, target->_owner, &indexBuffer, &indexOffset) ||
+                indexOffset % (triangles.indexType == MTLIndexTypeUInt16 ? sizeof(uint16_t) : sizeof(uint32_t)) != 0) return NO;
+            indexRangeLength = triangles.indexBuffer.length == UINT64_MAX ?
+                indexBuffer.length - indexOffset : (NSUInteger)triangles.indexBuffer.length;
+        } else if (triangles.indexBuffer.length != 0) {
+            return NO;
+        }
+        if (triangles.vertexFormat != MTLAttributeFormatFloat3 ||
+            (indexBuffer != nil && triangles.indexType != MTLIndexTypeUInt16 && triangles.indexType != MTLIndexTypeUInt32)) return NO;
+        const NSUInteger vertexStride = triangles.vertexStride == 0 ? 12 : triangles.vertexStride;
+        if (vertexStride < 12 || vertexStride % 4 != 0 || triangles.transformationMatrixBuffer.bufferAddress != 0) return NO;
+        for (NSUInteger triangleIndex = 0; triangleIndex < triangles.triangleCount; ++triangleIndex) {
+            zpu_metal_cpu_acceleration_triangle triangle;
+            if (!zpu_cpu_acceleration_write_triangle(&triangle, vertexBuffer, vertexOffset,
+                                                     vertexStride, vertexRangeLength,
+                                                     indexBuffer, indexOffset, indexRangeLength,
                                                      triangles.indexType, triangleIndex)) return NO;
             memcpy((uint8_t *)target->_storage.contents + 256 + destinationIndex * sizeof(triangle),
                    &triangle, sizeof(triangle));
@@ -14619,9 +14686,32 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
             memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
         }
     } else {
-        memset(target->_storage.contents, 0, target->_size);
-        const uint64_t descriptorTag = [descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]] ? 2 : 3;
-        memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
+        BOOL metal4_payload_written = NO;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
+                BOOL traceable = YES;
+                for (MTL4AccelerationStructureGeometryDescriptor *geometry in
+                     ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                    if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                        traceable = NO;
+                        break;
+                    }
+                }
+                if (traceable) {
+                    if (!zpu_cpu_acceleration_write_metal4_payload(
+                            target, (MTL4PrimitiveAccelerationStructureDescriptor *)descriptor)) {
+                        [_owner markError];
+                        return;
+                    }
+                    metal4_payload_written = YES;
+                }
+            }
+        }
+        if (!metal4_payload_written) {
+            memset(target->_storage.contents, 0, target->_size);
+            const uint64_t descriptorTag = [descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]] ? 2 : 3;
+            memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
+        }
     }
     target->_compactedSize = target->_size / 2 == 0 ? 1 : target->_size / 2;
     target->_built = YES;

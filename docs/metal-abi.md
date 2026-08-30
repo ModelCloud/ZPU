@@ -226,10 +226,12 @@ triangle path:
   3D dispatches expand z into plane commands while preserving the z coordinate
   in the CPU kernel; indirect array/3D dispatches resolve the deferred z
   extent at commit and skip slices outside that extent. The triangle trace
-  profile consumes a CPU-serialized legacy `MTLPrimitiveAccelerationStructureDescriptor`
-  containing Float3 triangle geometry, casts one orthographic primary ray per
-  output texel, and writes exact RGBA8 hit/miss values on Metal's top-left grid;
-  indexed UInt16/UInt32 geometry and explicit vertex strides are supported,
+  profile consumes a CPU-serialized legacy or Metal 4
+  `MTLPrimitiveAccelerationStructureDescriptor` containing Float3 triangle
+  geometry, including Metal 4 GPU-address ranges, casts one orthographic
+  primary ray per output texel, and writes exact RGBA8 hit/miss values on
+  Metal's top-left grid; indexed UInt16/UInt32 geometry and explicit vertex
+  strides are supported,
   while transforms, instances, curves, motion, custom intersection functions,
   and arbitrary ray tracing remain fail-closed
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
@@ -415,8 +417,8 @@ triangle path:
   heap placement, resource IDs, and descriptor-derived size queries. Their CPU
   command encoder supports build, refit, copy, compact-size, and compaction
   metadata/storage operations; the fixed Float3 triangle trace profile
-  traverses CPU-serialized legacy primitive geometry, while arbitrary ray
-  intersection execution remains fail-closed
+  traverses CPU-serialized legacy and Metal 4 primitive geometry, while
+  arbitrary ray intersection execution remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level

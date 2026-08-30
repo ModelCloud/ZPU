@@ -11720,6 +11720,91 @@ int main(void) {
                                 adapter_ray_error : native_ray_error);
                 return 155;
             }
+
+            BOOL adapter_metal4_ray_trace_exact = YES;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                NSError *metal4_ray_error = nil;
+                MTL4CommandAllocatorDescriptor *metal4_ray_allocator_descriptor =
+                    [MTL4CommandAllocatorDescriptor new];
+                id<MTL4CommandAllocator> metal4_ray_allocator =
+                    [adapter_device newCommandAllocatorWithDescriptor:metal4_ray_allocator_descriptor
+                                                                  error:&metal4_ray_error];
+                MTL4CommandQueueDescriptor *metal4_ray_queue_descriptor =
+                    [MTL4CommandQueueDescriptor new];
+                id<MTL4CommandQueue> metal4_ray_queue =
+                    [adapter_device newMTL4CommandQueueWithDescriptor:metal4_ray_queue_descriptor
+                                                                  error:&metal4_ray_error];
+                MTL4PrimitiveAccelerationStructureDescriptor *metal4_ray_descriptor =
+                    [MTL4PrimitiveAccelerationStructureDescriptor new];
+                MTL4AccelerationStructureTriangleGeometryDescriptor *metal4_ray_geometry =
+                    [MTL4AccelerationStructureTriangleGeometryDescriptor new];
+                metal4_ray_geometry.vertexBuffer =
+                    MTL4BufferRangeMake(adapter_ray_vertices.gpuAddress, UINT64_MAX);
+                metal4_ray_geometry.vertexFormat = MTLAttributeFormatFloat3;
+                metal4_ray_geometry.vertexStride = 4 * sizeof(float);
+                metal4_ray_geometry.indexBuffer = MTL4BufferRangeMake(adapter_ray_indices.gpuAddress, UINT64_MAX);
+                metal4_ray_geometry.indexType = MTLIndexTypeUInt16;
+                metal4_ray_geometry.triangleCount = 1;
+                metal4_ray_descriptor.geometryDescriptors = @[metal4_ray_geometry];
+                MTLAccelerationStructureSizes metal4_ray_sizes =
+                    [adapter_device accelerationStructureSizesWithDescriptor:metal4_ray_descriptor];
+                const NSUInteger metal4_ray_allocation_size = metal4_ray_sizes.accelerationStructureSize == 0 ?
+                    256 : metal4_ray_sizes.accelerationStructureSize;
+                id<MTLAccelerationStructure> metal4_ray_acceleration_structure =
+                    [adapter_device newAccelerationStructureWithSize:metal4_ray_allocation_size];
+                id<MTLBuffer> metal4_ray_scratch =
+                    [adapter_device newBufferWithLength:metal4_ray_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                               metal4_ray_sizes.buildScratchBufferSize
+                                                options:MTLResourceStorageModeShared];
+                id<MTL4CommandBuffer> metal4_ray_build_command_buffer = [adapter_device newCommandBuffer];
+                [metal4_ray_build_command_buffer beginCommandBufferWithAllocator:metal4_ray_allocator];
+                id<MTL4ComputeCommandEncoder> metal4_ray_build_encoder =
+                    [metal4_ray_build_command_buffer computeCommandEncoder];
+                [metal4_ray_build_encoder buildAccelerationStructure:metal4_ray_acceleration_structure
+                                                            descriptor:metal4_ray_descriptor
+                                                         scratchBuffer:MTL4BufferRangeMake(metal4_ray_scratch.gpuAddress,
+                                                                                           metal4_ray_scratch.length)];
+                [metal4_ray_build_encoder endEncoding];
+                [metal4_ray_build_command_buffer endCommandBuffer];
+                id<MTL4CommandBuffer> metal4_ray_build_buffers[] = {metal4_ray_build_command_buffer};
+                MTL4CommitOptions *metal4_ray_options = ZPUMetalCreateCPUCommitOptions();
+                __block NSError *metal4_ray_feedback_error = nil;
+                [metal4_ray_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                    metal4_ray_feedback_error = feedback.error;
+                }];
+                [metal4_ray_queue commit:metal4_ray_build_buffers count:1 options:metal4_ray_options];
+
+                id<MTLTexture> adapter_metal4_ray_texture =
+                    [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+                id<MTLCommandBuffer> adapter_metal4_ray_command_buffer = [adapter_queue commandBuffer];
+                id<MTLComputeCommandEncoder> adapter_metal4_ray_encoder =
+                    [adapter_metal4_ray_command_buffer computeCommandEncoder];
+                [adapter_metal4_ray_encoder setComputePipelineState:adapter_ray_pipeline];
+                [adapter_metal4_ray_encoder setAccelerationStructure:metal4_ray_acceleration_structure
+                                                         atBufferIndex:0];
+                [adapter_metal4_ray_encoder setTexture:adapter_metal4_ray_texture atIndex:0];
+                [adapter_metal4_ray_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                          threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+                [adapter_metal4_ray_encoder endEncoding];
+                [adapter_metal4_ray_command_buffer commit];
+                [adapter_metal4_ray_command_buffer waitUntilCompleted];
+                uint8_t adapter_metal4_ray_pixels[ray_byte_count];
+                [adapter_metal4_ray_texture getBytes:adapter_metal4_ray_pixels bytesPerRow:ray_width * 4
+                                          fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+                adapter_metal4_ray_trace_exact =
+                    metal4_ray_allocator != nil && metal4_ray_queue != nil &&
+                    metal4_ray_descriptor != nil && metal4_ray_geometry != nil &&
+                    metal4_ray_acceleration_structure != nil && metal4_ray_scratch != nil &&
+                    metal4_ray_build_command_buffer != nil && metal4_ray_build_encoder != nil &&
+                    metal4_ray_feedback_error == nil && adapter_metal4_ray_texture != nil &&
+                    adapter_metal4_ray_command_buffer != nil && adapter_metal4_ray_encoder != nil &&
+                    adapter_metal4_ray_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                    memcmp(native_ray_pixels, adapter_metal4_ray_pixels, ray_byte_count) == 0;
+                if (!adapter_metal4_ray_trace_exact) {
+                    fail_with_error("Metal 4 CPU triangle trace pixel oracle failed", metal4_ray_feedback_error);
+                    return 156;
+                }
+            }
         }
 
         const MTLPixelFormat compute_float_formats[] = {
