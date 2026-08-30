@@ -1544,8 +1544,14 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUDevice *_owner;
     NSString *_label;
     NSMutableSet *_residencySets;
+    NSUInteger _maxCommandBufferCount;
+    NSHashTable *_uncompletedCommandBuffers;
+    NSCondition *_commandBufferCondition;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue;
+- (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue
+          maxCommandBufferCount:(NSUInteger)maxCommandBufferCount;
+- (void)commandBufferDidComplete:(id)commandBuffer;
 @end
 
 @interface ZPUCommandBuffer : NSObject <MTLCommandBuffer> {
@@ -9841,10 +9847,18 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return (id<MTLCommandQueue>)[[ZPUCommandQueue alloc] initWithOwner:self queue:queue];
 }
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)maxCommandBufferCount {
-    return maxCommandBufferCount == 0 ? nil : [self newCommandQueue];
+    if (maxCommandBufferCount == 0) return nil;
+    zpu_metal_command_queue *queue = zpu_metal_device_new_command_queue(_zpuDevice);
+    if (queue == NULL) return nil;
+    return (id<MTLCommandQueue>)[[ZPUCommandQueue alloc]
+        initWithOwner:self queue:queue maxCommandBufferCount:maxCommandBufferCount];
 }
 - (id<MTLCommandQueue>)newCommandQueueWithDescriptor:(MTLCommandQueueDescriptor *)descriptor API_AVAILABLE(macos(15.0), ios(18.0)) {
-    return descriptor == nil ? nil : [self newCommandQueue];
+    if (descriptor == nil) return nil;
+    zpu_metal_command_queue *queue = zpu_metal_device_new_command_queue(_zpuDevice);
+    if (queue == NULL) return nil;
+    return (id<MTLCommandQueue>)[[ZPUCommandQueue alloc]
+        initWithOwner:self queue:queue maxCommandBufferCount:descriptor.maxCommandBufferCount];
 }
 - (MTLSizeAndAlign)heapTextureSizeAndAlignWithDescriptor:(MTLTextureDescriptor *)descriptor API_AVAILABLE(macos(10.13), ios(10.0)) {
     NSUInteger size = 0;
@@ -12606,10 +12620,21 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
 
 @implementation ZPUCommandQueue
 - (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue {
+    return [self initWithOwner:owner queue:queue maxCommandBufferCount:0];
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner queue:(zpu_metal_command_queue *)queue
+          maxCommandBufferCount:(NSUInteger)maxCommandBufferCount {
     if ((self = [super init])) {
         _owner = owner;
         _zpuQueue = queue;
         _residencySets = [NSMutableSet set];
+        /* A zero descriptor value means the implementation-selected queue
+         * default. The CPU queue is synchronous, so use an effectively
+         * unbounded default while still enforcing explicit limits before a
+         * second uncompleted command buffer is created. */
+        _maxCommandBufferCount = maxCommandBufferCount == 0 ? NSUIntegerMax : maxCommandBufferCount;
+        _uncompletedCommandBuffers = [NSHashTable weakObjectsHashTable];
+        _commandBufferCondition = [NSCondition new];
     }
     return self;
 }
@@ -12640,12 +12665,23 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     for (NSUInteger index = 0; index < count; ++index) [self removeResidencySet:residencySets[index]];
 }
 - (id<MTLCommandBuffer>)commandBuffer {
+    [_commandBufferCondition lock];
+    while (_uncompletedCommandBuffers.count >= _maxCommandBufferCount) {
+        [_commandBufferCondition wait];
+    }
     zpu_metal_command_buffer *commandBuffer = zpu_metal_command_queue_command_buffer(_zpuQueue);
-    if (commandBuffer == NULL) return nil;
-    return (id<MTLCommandBuffer>)[[ZPUCommandBuffer alloc] initWithOwner:self commandBuffer:commandBuffer];
+    if (commandBuffer == NULL) {
+        [_commandBufferCondition unlock];
+        return nil;
+    }
+    ZPUCommandBuffer *result = [[ZPUCommandBuffer alloc] initWithOwner:self commandBuffer:commandBuffer];
+    [_uncompletedCommandBuffers addObject:result];
+    [_commandBufferCondition unlock];
+    return (id<MTLCommandBuffer>)result;
 }
 - (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences {
     ZPUCommandBuffer *buffer = (ZPUCommandBuffer *)[self commandBuffer];
+    if (buffer == nil) return nil;
     buffer->_retainedReferences = NO;
     return (id<MTLCommandBuffer>)buffer;
 }
@@ -12655,6 +12691,13 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     buffer->_retainedReferences = descriptor.retainedReferences;
     buffer->_errorOptions = descriptor.errorOptions;
     return (id<MTLCommandBuffer>)buffer;
+}
+- (void)commandBufferDidComplete:(id)commandBuffer {
+    if (commandBuffer == nil) return;
+    [_commandBufferCondition lock];
+    [_uncompletedCommandBuffers removeObject:commandBuffer];
+    [_commandBufferCondition broadcast];
+    [_commandBufferCondition unlock];
 }
 @end
 
@@ -12735,6 +12778,7 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     return self;
 }
 - (void)dealloc {
+    [_owner commandBufferDidComplete:self];
     if (_zpuCommandBuffer != NULL) zpu_metal_command_buffer_destroy(_zpuCommandBuffer);
 }
 - (void)retainResource:(id)resource {
@@ -12805,6 +12849,7 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     zpu_sparse_synchronize_resources();
     _gpuEndTime = zpu_drawable_host_time();
     if (_hasComputeWork) _kernelEndTime = _gpuEndTime;
+    [_owner commandBufferDidComplete:self];
     NSArray *completed = [_completedHandlers copy];
     [_completedHandlers removeAllObjects];
     for (MTLCommandBufferHandler block in completed) block((id<MTLCommandBuffer>)self);

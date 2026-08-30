@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #import <Metal/MTLIOCompressor.h>
 #import <IOSurface/IOSurfaceRef.h>
+#import <dispatch/dispatch.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13448,6 +13449,56 @@ int main(void) {
             [adapter_device heapTextureSizeAndAlignWithDescriptor:adapter_texture_descriptor];
         id<MTLCommandQueue> adapter_limited_queue =
             [adapter_device newCommandQueueWithMaxCommandBufferCount:1];
+        id<MTLCommandQueue> native_limited_queue =
+            [device newCommandQueueWithMaxCommandBufferCount:1];
+        id<MTLCommandBuffer> native_limited_first = [native_limited_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_limited_first = [adapter_limited_queue commandBuffer];
+        __block id<MTLCommandBuffer> native_limited_second = nil;
+        __block id<MTLCommandBuffer> adapter_limited_second = nil;
+        dispatch_semaphore_t native_limited_started = dispatch_semaphore_create(0);
+        dispatch_semaphore_t adapter_limited_started = dispatch_semaphore_create(0);
+        dispatch_semaphore_t native_limited_ready = dispatch_semaphore_create(0);
+        dispatch_semaphore_t adapter_limited_ready = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            dispatch_semaphore_signal(native_limited_started);
+            native_limited_second = [native_limited_queue commandBuffer];
+            dispatch_semaphore_signal(native_limited_ready);
+        });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+            dispatch_semaphore_signal(adapter_limited_started);
+            adapter_limited_second = [adapter_limited_queue commandBuffer];
+            dispatch_semaphore_signal(adapter_limited_ready);
+        });
+        if (native_limited_first == nil || adapter_limited_first == nil ||
+            dispatch_semaphore_wait(native_limited_started, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+            dispatch_semaphore_wait(adapter_limited_started, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+            fprintf(stderr, "metal-pixel: command queue max-buffer fixture setup failed\n");
+            return 73;
+        }
+        [native_limited_first commit];
+        [native_limited_first waitUntilCompleted];
+        [adapter_limited_first commit];
+        [adapter_limited_first waitUntilCompleted];
+        if (dispatch_semaphore_wait(native_limited_ready, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+            dispatch_semaphore_wait(adapter_limited_ready, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+            native_limited_second == nil || adapter_limited_second == nil) {
+            fprintf(stderr, "metal-pixel: command queue max-buffer limit did not unblock on completion\n");
+            return 73;
+        }
+        [native_limited_second commit];
+        [native_limited_second waitUntilCompleted];
+        [adapter_limited_second commit];
+        [adapter_limited_second waitUntilCompleted];
+        id<MTLCommandBuffer> native_limited_after_completion = [native_limited_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_limited_after_completion = [adapter_limited_queue commandBuffer];
+        if (native_limited_after_completion == nil || adapter_limited_after_completion == nil) {
+            fprintf(stderr, "metal-pixel: command queue max-buffer slot was not released on completion\n");
+            return 74;
+        }
+        [native_limited_after_completion commit];
+        [native_limited_after_completion waitUntilCompleted];
+        [adapter_limited_after_completion commit];
+        [adapter_limited_after_completion waitUntilCompleted];
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         const BOOL adapter_supports_legacy_feature_set =
