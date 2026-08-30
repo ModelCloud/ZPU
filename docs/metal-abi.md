@@ -95,8 +95,10 @@ triangle path:
   `baseInstance` (for direct and indirect draws) and select successive slices. Layered
   Depth/stencil array planes are also staged as independent CPU arrays and
   participate in per-layer clears, load/store, depth tests, and stencil
-  operations. Layered tile/mesh/patch draws and layered multisample passes
-  remain explicitly rejected.
+  operations. The registered tile profile broadcasts its deterministic
+  upper-left-grid output to every layer; layered mesh draws and layered
+  multisample passes remain explicitly rejected, while factor-one triangle
+  patches select layers by `baseInstance`.
 - CPU-owned 2D multisample textures with Apple-verified 2x and 4x default
   sample locations, represented as independent ZPU sample planes. Ordered
   render encoders can store those planes or resolve them into a matching
@@ -187,8 +189,10 @@ triangle path:
   slices by direct instance index, while primitive/indexed indirect draws
   honor `baseInstance` and resolve it at commit time where indirect arguments
   are used. Layered depth/stencil array planes
-  select and update matching per-layer CPU state; tile/mesh/patch draws and
-  layered multisample passes remain explicitly rejected
+  select and update matching per-layer CPU state; the registered tile profile
+  broadcasts to each layer, factor-one triangle patches select layers by
+  `baseInstance`, and layered mesh draws and layered multisample passes remain
+  explicitly rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
 - compatible pixel-format views for all supported color and integer formats

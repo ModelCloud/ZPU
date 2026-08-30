@@ -706,6 +706,78 @@ int main(void) {
     zpu_metal_command_buffer_destroy(layer_patch_reference_commands);
     zpu_metal_buffer_destroy(layer_patch_factor_buffer);
 
+    zpu_metal_texture *layer_tile_textures[3] = {0};
+    zpu_metal_texture *layer_tile_reference_textures[3] = {0};
+    for (size_t layer = 0; layer < 3; ++layer) {
+        layer_tile_textures[layer] = zpu_metal_device_new_texture(device, &mesh_descriptor);
+        layer_tile_reference_textures[layer] = zpu_metal_device_new_texture(device, &mesh_descriptor);
+    }
+    zpu_metal_command_buffer *layer_tile_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_render_encoder *layer_tile_encoder =
+        zpu_metal_command_buffer_render_encoder(layer_tile_commands, layer_tile_textures[0], &render_pass);
+    zpu_metal_command_buffer *layer_tile_reference_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    int layer_tile_setup_failed = layer_tile_commands == NULL || layer_tile_encoder == NULL ||
+        layer_tile_reference_commands == NULL;
+    for (size_t layer = 0; layer < 3; ++layer) {
+        if (layer_tile_textures[layer] == NULL || layer_tile_reference_textures[layer] == NULL) {
+            layer_tile_setup_failed = 1;
+        }
+    }
+    if (layer_tile_setup_failed ||
+        zpu_metal_render_encoder_set_render_target_array(layer_tile_encoder, layer_tile_textures, 3) != 0 ||
+        zpu_metal_render_encoder_dispatch_threads_per_tile(
+            layer_tile_encoder, ZPU_METAL_TILE_FILL_GRADIENT_RGBA8,
+            (zpu_metal_size){2, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_render_encoder_end_encoding(layer_tile_encoder) != 0) return 86;
+    for (size_t layer = 0; layer < 3; ++layer) {
+        zpu_metal_render_encoder *reference_encoder = zpu_metal_command_buffer_render_encoder(
+            layer_tile_reference_commands, layer_tile_reference_textures[layer], &render_pass);
+        if (reference_encoder == NULL ||
+            zpu_metal_render_encoder_dispatch_threads_per_tile(
+                reference_encoder, ZPU_METAL_TILE_FILL_GRADIENT_RGBA8,
+                (zpu_metal_size){2, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+            zpu_metal_render_encoder_end_encoding(reference_encoder) != 0) return 87;
+        zpu_metal_render_encoder_destroy(reference_encoder);
+    }
+    uint8_t layer_tile_before[3][5 * 3 * 4] = {{0}};
+    for (size_t layer = 0; layer < 3; ++layer) {
+        if (zpu_metal_texture_get_bytes(layer_tile_textures[layer], layer_tile_before[layer],
+                                        sizeof(layer_tile_before[layer]), 5 * 4,
+                                        (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+            memcmp(layer_tile_before[layer], (const uint8_t[sizeof(layer_tile_before[layer])]){0},
+                   sizeof(layer_tile_before[layer])) != 0) return 88;
+    }
+    if (zpu_metal_command_buffer_commit(layer_tile_commands) != 0 ||
+        zpu_metal_command_buffer_commit(layer_tile_reference_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(layer_tile_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED ||
+        zpu_metal_command_buffer_get_status(layer_tile_reference_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 89;
+    uint8_t layer_tile_pixels[3][5 * 3 * 4] = {{0}};
+    uint8_t layer_tile_reference_pixels[3][5 * 3 * 4] = {{0}};
+    for (size_t layer = 0; layer < 3; ++layer) {
+        if (zpu_metal_texture_get_bytes(layer_tile_textures[layer], layer_tile_pixels[layer],
+                                        sizeof(layer_tile_pixels[layer]), 5 * 4,
+                                        (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+            zpu_metal_texture_get_bytes(layer_tile_reference_textures[layer], layer_tile_reference_pixels[layer],
+                                        sizeof(layer_tile_reference_pixels[layer]), 5 * 4,
+                                        (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
+            memcmp(layer_tile_pixels[layer], layer_tile_reference_pixels[layer],
+                   sizeof(layer_tile_pixels[layer])) != 0) return 90;
+    }
+    if (memcmp(layer_tile_pixels[0], (const uint8_t[]){64, 32, 32, 255}, 4) != 0 ||
+        memcmp(layer_tile_pixels[0] + 2 * 5 * 4 + 4 * 4,
+               (const uint8_t[]){64, 96, 159, 255}, 4) != 0 ||
+        memcmp(layer_tile_pixels[0], layer_tile_pixels[1], sizeof(layer_tile_pixels[0])) != 0 ||
+        memcmp(layer_tile_pixels[1], layer_tile_pixels[2], sizeof(layer_tile_pixels[1])) != 0) return 91;
+    zpu_metal_render_encoder_destroy(layer_tile_encoder);
+    for (size_t layer = 0; layer < 3; ++layer) {
+        zpu_metal_texture_destroy(layer_tile_textures[layer]);
+        zpu_metal_texture_destroy(layer_tile_reference_textures[layer]);
+    }
+    zpu_metal_command_buffer_destroy(layer_tile_commands);
+    zpu_metal_command_buffer_destroy(layer_tile_reference_commands);
+
     const uint8_t indirect_dispatch_args[] = {2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0};
     const uint8_t initial_indirect_dispatch_args[] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
     zpu_metal_texture *compute_indirect_texture =

@@ -13278,6 +13278,138 @@ int main(void) {
             return 109;
         }
 
+        /* Layered tile dispatch has no instance/baseInstance selector. The
+         * registered CPU profile therefore models the tile stage once per
+         * render-target slice, with the same absolute upper-left X/Y origin.
+         * Native Metal supplies the byte oracle through its equivalent array
+         * gradient kernel; the adapter side remains a ZPU-owned tile pass. */
+        BOOL adapter_layered_tile_exact = YES;
+        NSError *adapter_layered_tile_error = nil;
+        if (@available(macOS 11.0, iOS 11.0, *)) {
+            enum {
+                layered_tile_width = 5,
+                layered_tile_height = 3,
+                layered_tile_layers = 3,
+                layered_tile_bytes = layered_tile_width * layered_tile_height * 4,
+            };
+            id<MTLFunction> native_layered_tile_oracle_function =
+                [library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"];
+            id<MTLComputePipelineState> native_layered_tile_oracle_pipeline =
+                [device newComputePipelineStateWithFunction:native_layered_tile_oracle_function error:&error];
+            MTLTextureDescriptor *native_layered_tile_oracle_descriptor = [MTLTextureDescriptor new];
+            native_layered_tile_oracle_descriptor.textureType = MTLTextureType2DArray;
+            native_layered_tile_oracle_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+            native_layered_tile_oracle_descriptor.width = layered_tile_width;
+            native_layered_tile_oracle_descriptor.height = layered_tile_height;
+            native_layered_tile_oracle_descriptor.arrayLength = layered_tile_layers;
+            native_layered_tile_oracle_descriptor.mipmapLevelCount = 1;
+            native_layered_tile_oracle_descriptor.sampleCount = 1;
+            native_layered_tile_oracle_descriptor.storageMode = MTLStorageModeShared;
+            native_layered_tile_oracle_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> native_layered_tile_oracle_texture =
+                [device newTextureWithDescriptor:native_layered_tile_oracle_descriptor];
+            id<MTLCommandBuffer> native_layered_tile_oracle_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_layered_tile_oracle_encoder =
+                [native_layered_tile_oracle_command_buffer computeCommandEncoder];
+            if (native_layered_tile_oracle_pipeline != nil && native_layered_tile_oracle_texture != nil &&
+                native_layered_tile_oracle_command_buffer != nil && native_layered_tile_oracle_encoder != nil) {
+                [native_layered_tile_oracle_encoder setComputePipelineState:native_layered_tile_oracle_pipeline];
+                [native_layered_tile_oracle_encoder setTexture:native_layered_tile_oracle_texture atIndex:0];
+                [native_layered_tile_oracle_encoder dispatchThreads:
+                    MTLSizeMake(layered_tile_width, layered_tile_height, layered_tile_layers)
+                    threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+                [native_layered_tile_oracle_encoder endEncoding];
+                [native_layered_tile_oracle_command_buffer commit];
+                [native_layered_tile_oracle_command_buffer waitUntilCompleted];
+            }
+
+            id<MTLFunction> adapter_layered_tile_function =
+                [adapter_default_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"];
+            MTLTileRenderPipelineDescriptor *adapter_layered_tile_descriptor =
+                [MTLTileRenderPipelineDescriptor new];
+            adapter_layered_tile_descriptor.tileFunction = adapter_layered_tile_function;
+            adapter_layered_tile_descriptor.rasterSampleCount = 1;
+            adapter_layered_tile_descriptor.maxTotalThreadsPerThreadgroup = 4;
+            adapter_layered_tile_descriptor.threadgroupSizeMatchesTileSize = YES;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                adapter_layered_tile_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(2, 2, 1);
+            }
+            adapter_layered_tile_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+            id<MTLRenderPipelineState> adapter_layered_tile_pipeline =
+                [adapter_device newRenderPipelineStateWithTileDescriptor:adapter_layered_tile_descriptor
+                                                                     options:0 reflection:nil
+                                                                        error:&adapter_layered_tile_error];
+            MTLTextureDescriptor *adapter_layered_tile_texture_descriptor =
+                [MTLTextureDescriptor new];
+            adapter_layered_tile_texture_descriptor.textureType = MTLTextureType2DArray;
+            adapter_layered_tile_texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+            adapter_layered_tile_texture_descriptor.width = layered_tile_width;
+            adapter_layered_tile_texture_descriptor.height = layered_tile_height;
+            adapter_layered_tile_texture_descriptor.arrayLength = layered_tile_layers;
+            adapter_layered_tile_texture_descriptor.mipmapLevelCount = 1;
+            adapter_layered_tile_texture_descriptor.sampleCount = 1;
+            adapter_layered_tile_texture_descriptor.storageMode = MTLStorageModeShared;
+            adapter_layered_tile_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> adapter_layered_tile_texture =
+                [adapter_device newTextureWithDescriptor:adapter_layered_tile_texture_descriptor];
+            MTLRenderPassDescriptor *adapter_layered_tile_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_layered_tile_pass.colorAttachments[0].texture = adapter_layered_tile_texture;
+            adapter_layered_tile_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_layered_tile_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_layered_tile_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            adapter_layered_tile_pass.renderTargetArrayLength = layered_tile_layers;
+            adapter_layered_tile_pass.tileWidth = 2;
+            adapter_layered_tile_pass.tileHeight = 2;
+            id<MTLCommandBuffer> adapter_layered_tile_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_layered_tile_encoder =
+                [adapter_layered_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_layered_tile_pass];
+            if (adapter_layered_tile_encoder != nil && adapter_layered_tile_pipeline != nil) {
+                [adapter_layered_tile_encoder setRenderPipelineState:adapter_layered_tile_pipeline];
+                [adapter_layered_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
+                [adapter_layered_tile_encoder endEncoding];
+                [adapter_layered_tile_command_buffer commit];
+                [adapter_layered_tile_command_buffer waitUntilCompleted];
+            }
+
+            uint8_t native_layered_tile_pixels[layered_tile_layers][layered_tile_bytes] = {{0}};
+            uint8_t adapter_layered_tile_pixels[layered_tile_layers][layered_tile_bytes] = {{0}};
+            for (NSUInteger slice = 0; slice < layered_tile_layers; ++slice) {
+                if (native_layered_tile_oracle_texture != nil) {
+                    [native_layered_tile_oracle_texture getBytes:native_layered_tile_pixels[slice]
+                                                       bytesPerRow:layered_tile_width * 4
+                                                     bytesPerImage:layered_tile_bytes
+                                                      fromRegion:MTLRegionMake3D(0, 0, 0,
+                                                                                  layered_tile_width,
+                                                                                  layered_tile_height, 1)
+                                                     mipmapLevel:0 slice:slice];
+                }
+                if (adapter_layered_tile_texture != nil) {
+                    [adapter_layered_tile_texture getBytes:adapter_layered_tile_pixels[slice]
+                                                     bytesPerRow:layered_tile_width * 4
+                                                    bytesPerImage:layered_tile_bytes
+                                                     fromRegion:MTLRegionMake3D(0, 0, 0,
+                                                                                 layered_tile_width,
+                                                                                 layered_tile_height, 1)
+                                                    mipmapLevel:0 slice:slice];
+                }
+                adapter_layered_tile_exact = adapter_layered_tile_exact &&
+                    memcmp(native_layered_tile_pixels[slice], adapter_layered_tile_pixels[slice], layered_tile_bytes) == 0;
+            }
+            adapter_layered_tile_exact = adapter_layered_tile_exact &&
+                native_layered_tile_oracle_function != nil && native_layered_tile_oracle_pipeline != nil &&
+                native_layered_tile_oracle_texture != nil && native_layered_tile_oracle_command_buffer != nil &&
+                native_layered_tile_oracle_encoder != nil &&
+                native_layered_tile_oracle_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_layered_tile_function != nil && adapter_layered_tile_pipeline != nil &&
+                adapter_layered_tile_texture != nil && adapter_layered_tile_command_buffer != nil &&
+                adapter_layered_tile_encoder != nil &&
+                adapter_layered_tile_command_buffer.status == MTLCommandBufferStatusCompleted;
+        }
+        if (!adapter_layered_tile_exact) {
+            fail_with_error("layered CPU tile dispatch pixel exactness failed", adapter_layered_tile_error);
+            return 111;
+        }
+
         /* The registered mesh profile is also CPU/ZPU-owned. It represents
          * one logical pixel per mesh-grid thread, so the asymmetric target
          * exercises Metal's upper-left (0,0) origin and clipped mesh grids.

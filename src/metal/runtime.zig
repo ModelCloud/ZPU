@@ -1525,10 +1525,28 @@ pub const CommandBuffer = struct {
                 if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != tile.target) return self.fail(error.InvalidResource);
-                sparseSyncTexture(target_handle);
-                defer sparseFlushTexture(target_handle);
                 validateColorAttachmentOutputs(active_color_attachments, tile.color_attachment_map, 1) catch |err| return self.fail(err);
-                const output_texture = active_color_attachments[@as(usize, tile.color_attachment_map[0])] orelse return self.fail(error.InvalidResource);
+                const output_index = @as(usize, tile.color_attachment_map[0]);
+                const output_texture = if (active_array_target_count > 1)
+                    active_array_color_attachments[output_index][0] orelse return self.fail(error.InvalidResource)
+                else
+                    active_color_attachments[output_index] orelse return self.fail(error.InvalidResource);
+                if (active_array_target_count > 1) {
+                    for (active_array_color_attachments[output_index][0..active_array_target_count]) |output| {
+                        sparseSyncTexture(output orelse return self.fail(error.InvalidResource));
+                    }
+                } else {
+                    sparseSyncTexture(output_texture);
+                }
+                defer {
+                    if (active_array_target_count > 1) {
+                        for (active_array_color_attachments[output_index][0..active_array_target_count]) |output| {
+                            sparseFlushOptionalTexture(output);
+                        }
+                    } else {
+                        sparseFlushTexture(output_texture);
+                    }
+                }
                 if (tile.kernel != 1 or
                     (output_texture.format != .rgba8_unorm and output_texture.format != .bgra8_unorm) or
                     tile.tile_size.width == 0 or tile.tile_size.height == 0 or tile.tile_size.depth != 1 or
@@ -1538,23 +1556,30 @@ pub const CommandBuffer = struct {
                     tile.threads_per_tile.height > tile.tile_size.height) return self.fail(error.InvalidArgument);
                 const tile_count_x = (@as(usize, target_handle.width) + tile.tile_size.width - 1) / tile.tile_size.width;
                 const tile_count_y = (@as(usize, target_handle.height) + tile.tile_size.height - 1) / tile.tile_size.height;
-                var target = output_texture.asTarget();
-                for (0..tile_count_y) |tile_y| {
-                    for (0..tile_count_x) |tile_x| {
-                        const tile_origin_x = tile_x * tile.tile_size.width;
-                        const tile_origin_y = tile_y * tile.tile_size.height;
-                        for (0..tile.threads_per_tile.height) |local_y| {
-                            const y = tile_origin_y + local_y;
-                            if (y >= target.height) continue;
-                            for (0..tile.threads_per_tile.width) |local_x| {
-                                const x = tile_origin_x + local_x;
-                                if (x >= target.width) continue;
-                                target.storeColor(x, y, .{
-                                    (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
-                                    (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
-                                    0.25,
-                                    1.0,
-                                });
+                const layer_count = if (active_array_target_count > 1) active_array_target_count else 1;
+                for (0..layer_count) |layer| {
+                    const layer_texture = if (active_array_target_count > 1)
+                        active_array_color_attachments[output_index][layer] orelse return self.fail(error.InvalidResource)
+                    else
+                        output_texture;
+                    var target = layer_texture.asTarget();
+                    for (0..tile_count_y) |tile_y| {
+                        for (0..tile_count_x) |tile_x| {
+                            const tile_origin_x = tile_x * tile.tile_size.width;
+                            const tile_origin_y = tile_y * tile.tile_size.height;
+                            for (0..tile.threads_per_tile.height) |local_y| {
+                                const y = tile_origin_y + local_y;
+                                if (y >= target.height) continue;
+                                for (0..tile.threads_per_tile.width) |local_x| {
+                                    const x = tile_origin_x + local_x;
+                                    if (x >= target.width) continue;
+                                    target.storeColor(x, y, .{
+                                        (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                                        (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                                        0.25,
+                                        1.0,
+                                    });
+                                }
                             }
                         }
                     }
@@ -3313,7 +3338,6 @@ pub const RenderEncoder = struct {
 
     pub fn dispatchThreadsPerTile(self: *RenderEncoder, kernel: u8, tile_size: abi.Size, threads_per_tile: abi.Size) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
             else => return error.InvalidCommand,
@@ -7441,6 +7465,56 @@ test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
     try command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, texture.bytes[0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 159, 96, 64, 255 }, texture.bytes[2 * texture.stride + 4 * 4 ..][0..4]);
+}
+
+test "CPU layered tile dispatch broadcasts each slice on the upper-left grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    var layers: [3]*Texture = undefined;
+    var references: [3]*Texture = undefined;
+    for (&layers, &references) |*layer, *reference| {
+        layer.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        reference.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        @memset(layer.*.bytes, 0xa5);
+        @memset(reference.*.bytes, 0xa5);
+    }
+    defer for (layers, &references) |layer, *reference| {
+        destroyTexture(layer);
+        destroyTexture(reference.*);
+    };
+
+    var layered_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(layered_commands);
+    var layered_encoder = try beginRender(layered_commands, layers[0], .{ .color = .{ .load_action = .load, .store_action = .store } });
+    try layered_encoder.setRenderTargetArray(&layers, layers.len);
+    try layered_encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try layered_encoder.endEncoding();
+    destroyRenderEncoder(layered_encoder);
+
+    var reference_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(reference_commands);
+    for (references) |reference| {
+        var reference_encoder = try beginRender(reference_commands, reference, .{ .color = .{ .load_action = .load, .store_action = .store } });
+        try reference_encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+        try reference_encoder.endEncoding();
+        destroyRenderEncoder(reference_encoder);
+    }
+
+    for (layers, &references) |layer, *reference| {
+        try std.testing.expectEqual(@as(u8, 0xa5), layer.bytes[0]);
+        try std.testing.expectEqual(@as(u8, 0xa5), reference.*.bytes[0]);
+    }
+    try layered_commands.commit();
+    try reference_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, layered_commands.status);
+    try std.testing.expectEqual(CommandStatus.completed, reference_commands.status);
+    for (layers, &references) |layer, *reference| {
+        try std.testing.expectEqualSlices(u8, reference.*.bytes, layer.bytes);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, layer.bytes[0..4]);
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 159, 96, 64, 255 }, layer.bytes[2 * layer.stride + 4 * 4 ..][0..4]);
+    }
 }
 
 test "CPU mesh indirect grid is deferred and uses Metal threadgroup dimensions" {
