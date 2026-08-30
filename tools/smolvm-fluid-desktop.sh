@@ -118,7 +118,7 @@ require_programs() {
             die 'scrot or ImageMagick import is required for screenshot capture'
         fi
     fi
-    if ! python3 -c 'from PIL import Image' 2>/dev/null; then
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]] && ! python3 -c 'from PIL import Image' 2>/dev/null; then
         die 'python3 PIL is required for PNG compression'
     fi
 }
