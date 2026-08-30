@@ -134,6 +134,10 @@ triangle path:
   pipeline attachment format validation, blending factors/operations, color
   write masks, depth bounds, nil depth-stencil disabling, and Metal top-left
   triangle edge inclusion
+- deprecated sparse-texture access-counter selectors validate sparse tile
+  regions and write ordered zero counters through the CPU/ZPU blit stream; the
+  CPU adapter has no GPU cache-miss stream, so zero is the explicit
+  deterministic value
 - Metal pixel-grid coordinates: texture row/column zero is the upper-left
   texel, `MTLViewport` and `MTLScissorRect` origins are applied in that same
   top-left space, and clip-space `+Y` maps toward decreasing row indices

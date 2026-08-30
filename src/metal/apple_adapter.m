@@ -2715,6 +2715,19 @@ static BOOL zpu_sparse_texture_mapping_region_valid(ZPUTexture *texture, NSUInte
     return zpu_sparse_texture_region_valid(texture, level, slice, region);
 }
 
+static BOOL zpu_sparse_texture_access_counter_range(ZPUTexture *texture, MTLRegion region,
+                                                    NSUInteger level, NSUInteger slice,
+                                                    NSUInteger *counterCount) {
+    if (counterCount == NULL || texture == nil || texture->_sparseMappings == nil ||
+        !zpu_sparse_texture_mapping_region_valid(texture, level, slice, region)) return NO;
+    NSUInteger count = region.size.width;
+    if (region.size.height != 0 && count > NSUIntegerMax / region.size.height) return NO;
+    count *= region.size.height;
+    if (region.size.depth != 0 && count > NSUIntegerMax / region.size.depth) return NO;
+    *counterCount = count * region.size.depth;
+    return YES;
+}
+
 static BOOL zpu_sparse_texture_tail_tile_range(ZPUTexture *texture, NSUInteger level,
                                                NSUInteger slice, NSUInteger tileX,
                                                NSUInteger tileY, NSUInteger tileZ,
@@ -13052,22 +13065,37 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [_owner retainResource:sample];
     [_owner retainResource:destination];
 }
-- (void)getTextureAccessCounters:(id<MTLTexture>)texture region:(MTLRegion)region mipLevel:(NSUInteger)mipLevel slice:(NSUInteger)slice resetCounters:(BOOL)resetCounters countersBuffer:(id<MTLBuffer>)countersBuffer countersBufferOffset:(NSUInteger)countersBufferOffset API_AVAILABLE(macos(11.0), macCatalyst(14.0)) {
-    (void)texture;
-    (void)region;
-    (void)mipLevel;
-    (void)slice;
+- (void)getTextureAccessCounters:(id<MTLTexture>)texture region:(MTLRegion)region mipLevel:(NSUInteger)mipLevel slice:(NSUInteger)slice resetCounters:(BOOL)resetCounters countersBuffer:(id<MTLBuffer>)countersBuffer countersBufferOffset:(NSUInteger)countersBufferOffset API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
     (void)resetCounters;
-    (void)countersBuffer;
-    (void)countersBufferOffset;
-    [_owner markError];
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)countersBuffer;
+    NSUInteger counterCount = 0;
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
+        !zpu_sparse_texture_access_counter_range(zpuTexture, region, mipLevel, slice, &counterCount) ||
+        !zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || zpuBuffer.contents == nil ||
+        countersBufferOffset % sizeof(uint32_t) != 0 || counterCount > NSUIntegerMax / sizeof(uint32_t) ||
+        countersBufferOffset > zpuBuffer.length ||
+        counterCount * sizeof(uint32_t) > zpuBuffer.length - countersBufferOffset ||
+        zpu_metal_blit_encoder_fill_buffer(_zpuEncoder, zpuBuffer->_zpuBuffer,
+                                            countersBufferOffset, counterCount * sizeof(uint32_t), 0) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    [_owner retainResource:zpuTexture];
+    [_owner retainResource:zpuBuffer];
 }
-- (void)resetTextureAccessCounters:(id<MTLTexture>)texture region:(MTLRegion)region mipLevel:(NSUInteger)mipLevel slice:(NSUInteger)slice API_AVAILABLE(macos(11.0), macCatalyst(14.0)) {
-    (void)texture;
-    (void)region;
-    (void)mipLevel;
-    (void)slice;
-    [_owner markError];
+- (void)resetTextureAccessCounters:(id<MTLTexture>)texture region:(MTLRegion)region mipLevel:(NSUInteger)mipLevel slice:(NSUInteger)slice API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(13.0), tvos(16.0)) {
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    NSUInteger counterCount = 0;
+    if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
+        !zpu_sparse_texture_access_counter_range(zpuTexture, region, mipLevel, slice, &counterCount)) {
+        [_owner markError];
+        return;
+    }
+    /* CPU/ZPU execution has no GPU cache access stream. Its defined counter
+     * value is always zero, so reset is intentionally an ordered no-op. */
+    (void)counterCount;
+    [_owner retainResource:zpuTexture];
 }
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUTensor *source = (ZPUTensor *)sourceTensor;

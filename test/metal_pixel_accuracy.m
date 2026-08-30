@@ -11599,9 +11599,51 @@ int main(void) {
             legacy_mismatch_destination != nil && legacy_mismatch_state != nil &&
             legacy_mismatch_command.status == MTLCommandBufferStatusError;
 
+        /* Deprecated sparse-texture access counters have no CPU cache-miss
+         * stream to expose. The adapter therefore defines them as ordered
+         * zero counters, one uint32 per requested tile, while still honoring
+         * Metal's sparse tile region and destination-buffer offset rules. */
+        id<MTLBuffer> legacy_access_counter_buffer =
+            [adapter_device newBufferWithLength:32 options:MTLResourceStorageModeShared];
+        memset(legacy_access_counter_buffer.contents, 0xa5, legacy_access_counter_buffer.length);
+        id<MTLCommandBuffer> legacy_access_counter_command =
+            [adapter_sparse_texture_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> legacy_access_counter_blit =
+            [legacy_access_counter_command blitCommandEncoder];
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [legacy_access_counter_blit resetTextureAccessCounters:legacy_indirect_texture
+                                                        region:MTLRegionMake2D(0, 0, 2, 2)
+                                                      mipLevel:0
+                                                        slice:0];
+        [legacy_access_counter_blit getTextureAccessCounters:legacy_indirect_texture
+                                                      region:MTLRegionMake2D(0, 0, 2, 2)
+                                                    mipLevel:0
+                                                      slice:0
+                                               resetCounters:YES
+                                              countersBuffer:legacy_access_counter_buffer
+                                        countersBufferOffset:4];
+        #pragma clang diagnostic pop
+        [legacy_access_counter_blit endEncoding];
+        [legacy_access_counter_command commit];
+        [legacy_access_counter_command waitUntilCompleted];
+        BOOL legacy_access_counter_exact =
+            legacy_access_counter_buffer != nil && legacy_access_counter_command.status == MTLCommandBufferStatusCompleted;
+        if (legacy_access_counter_exact) {
+            const uint8_t *counter_bytes = legacy_access_counter_buffer.contents;
+            for (NSUInteger index = 0; index < legacy_access_counter_buffer.length; ++index) {
+                const uint8_t expected = index >= 4 && index < 20 ? 0 : 0xa5;
+                if (counter_bytes[index] != expected) {
+                    legacy_access_counter_exact = NO;
+                    break;
+                }
+            }
+        }
+
         if (!legacy_deferred_direct_exact || !legacy_deferred_indirect_exact ||
             !legacy_deferred_batch_exact || !legacy_deferred_indirect_atomic ||
-            !legacy_deferred_move_exact || !legacy_deferred_move_compatibility) {
+            !legacy_deferred_move_exact || !legacy_deferred_move_compatibility ||
+            !legacy_access_counter_exact) {
             fprintf(stderr, "metal-pixel: deferred CPU resource-state mapping exactness failed\n");
             return 180;
         }
