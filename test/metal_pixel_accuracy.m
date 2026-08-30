@@ -374,6 +374,152 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     return result;
 }
 
+static int test_adapter_extended_object_protocols(id<MTLDevice> adapter_device,
+                                                  id<MTLBuffer> adapter_buffer,
+                                                  id<MTLTexture> adapter_texture)
+    API_AVAILABLE(macos(10.11), ios(8.0)) {
+    int result = 0;
+#define ZPU_AUDIT_EXTENDED_OBJECT(object, protocol_type, name) \
+    do { \
+        if (result == 0 && (object) != nil) { \
+            result = test_adapter_object_protocol_selector_coverage( \
+                (object), @protocol(protocol_type), (name)); \
+        } \
+    } while (0)
+
+    /* These objects are intentionally created from the adapter itself. A
+     * protocol audit must exercise the concrete CPU/ZPU instance rather than
+     * only comparing the device's method table. */
+    if (@available(macOS 10.14, iOS 12.0, *)) {
+        MTLIndirectCommandBufferDescriptor *icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+        icb_descriptor.inheritBuffers = YES;
+        icb_descriptor.maxVertexBufferBindCount = 1;
+        id<MTLIndirectCommandBuffer> indirect_command_buffer =
+            [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor
+                                                     maxCommandCount:1 options:0];
+        ZPU_AUDIT_EXTENDED_OBJECT(indirect_command_buffer, MTLIndirectCommandBuffer,
+                                  "MTLIndirectCommandBuffer");
+    }
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        id<MTLAccelerationStructure> acceleration_structure =
+            [adapter_device newAccelerationStructureWithSize:256];
+        ZPU_AUDIT_EXTENDED_OBJECT(acceleration_structure, MTLAccelerationStructure,
+                                  "MTLAccelerationStructure");
+
+        MTLRenderPipelineDescriptor *render_descriptor = [MTLRenderPipelineDescriptor new];
+        render_descriptor.vertexFunction =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_vertex");
+        render_descriptor.fragmentFunction =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_fragment");
+        render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *render_error = nil;
+        id<MTLRenderPipelineState> render_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:render_descriptor error:&render_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(render_pipeline, MTLRenderPipelineState,
+                                  "MTLRenderPipelineState(extended)");
+
+        id<MTLFunction> vertex_function = render_descriptor.vertexFunction;
+        id<MTLFunctionHandle> function_handle = nil;
+        if (@available(macOS 12.0, iOS 15.0, *)) {
+            function_handle = [render_pipeline functionHandleWithFunction:vertex_function
+                                                                       stage:MTLRenderStageVertex];
+        }
+        ZPU_AUDIT_EXTENDED_OBJECT(function_handle, MTLFunctionHandle, "MTLFunctionHandle");
+
+        MTLVisibleFunctionTableDescriptor *visible_descriptor = [MTLVisibleFunctionTableDescriptor new];
+        visible_descriptor.functionCount = 1;
+        id<MTLVisibleFunctionTable> visible_function_table =
+            [render_pipeline newVisibleFunctionTableWithDescriptor:visible_descriptor
+                                                               stage:MTLRenderStageVertex];
+        ZPU_AUDIT_EXTENDED_OBJECT(visible_function_table, MTLVisibleFunctionTable,
+                                  "MTLVisibleFunctionTable");
+
+        MTLIntersectionFunctionTableDescriptor *intersection_descriptor =
+            [MTLIntersectionFunctionTableDescriptor new];
+        intersection_descriptor.functionCount = 1;
+        id<MTLIntersectionFunctionTable> intersection_function_table =
+            [render_pipeline newIntersectionFunctionTableWithDescriptor:intersection_descriptor
+                                                                     stage:MTLRenderStageVertex];
+        ZPU_AUDIT_EXTENDED_OBJECT(intersection_function_table, MTLIntersectionFunctionTable,
+                                  "MTLIntersectionFunctionTable");
+
+        MTLBinaryArchiveDescriptor *archive_descriptor = [MTLBinaryArchiveDescriptor new];
+        NSError *archive_error = nil;
+        id<MTLBinaryArchive> binary_archive =
+            [adapter_device newBinaryArchiveWithDescriptor:archive_descriptor error:&archive_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(binary_archive, MTLBinaryArchive, "MTLBinaryArchive");
+
+        id<MTLDynamicLibrary> dynamic_library =
+            [adapter_device newDynamicLibrary:[adapter_device newDefaultLibrary] error:&archive_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(dynamic_library, MTLDynamicLibrary, "MTLDynamicLibrary");
+    }
+    if (@available(macOS 10.15, iOS 14.0, *)) {
+        MTLRasterizationRateLayerDescriptor *identity_layer =
+            [[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(1, 1, 0)];
+        identity_layer.horizontal[0] = @1.0f;
+        identity_layer.vertical[0] = @1.0f;
+        MTLRasterizationRateMapDescriptor *rate_descriptor =
+            [MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:
+                MTLSizeMake(8, 8, 0) layer:identity_layer];
+        id<MTLRasterizationRateMap> rate_map =
+            [adapter_device newRasterizationRateMapWithDescriptor:rate_descriptor];
+        ZPU_AUDIT_EXTENDED_OBJECT(rate_map, MTLRasterizationRateMap, "MTLRasterizationRateMap");
+    }
+    if (@available(macOS 10.15, iOS 14.0, *)) {
+        MTLCounterSampleBufferDescriptor *counter_descriptor = [MTLCounterSampleBufferDescriptor new];
+        counter_descriptor.counterSet = adapter_device.counterSets.firstObject;
+        counter_descriptor.storageMode = MTLStorageModeShared;
+        counter_descriptor.sampleCount = 1;
+        NSError *counter_error = nil;
+        id<MTLCounterSampleBuffer> counter_sample_buffer =
+            [adapter_device newCounterSampleBufferWithDescriptor:counter_descriptor error:&counter_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(counter_sample_buffer, MTLCounterSampleBuffer,
+                                  "MTLCounterSampleBuffer");
+    }
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        MTLResidencySetDescriptor *residency_descriptor = [MTLResidencySetDescriptor new];
+        residency_descriptor.initialCapacity = 1;
+        NSError *residency_error = nil;
+        id<MTLResidencySet> residency_set =
+            [adapter_device newResidencySetWithDescriptor:residency_descriptor error:&residency_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(residency_set, MTLResidencySet, "MTLResidencySet");
+
+        MTLLogStateDescriptor *log_descriptor = [MTLLogStateDescriptor new];
+        log_descriptor.level = MTLLogLevelInfo;
+        log_descriptor.bufferSize = 1024;
+        NSError *log_error = nil;
+        id<MTLLogState> log_state =
+            [adapter_device newLogStateWithDescriptor:log_descriptor error:&log_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(log_state, MTLLogState, "MTLLogState");
+
+        MTLCommandQueueDescriptor *queue_descriptor = [MTLCommandQueueDescriptor new];
+        queue_descriptor.maxCommandBufferCount = 1;
+        queue_descriptor.logState = log_state;
+        id<MTLCommandQueue> descriptor_queue =
+            [adapter_device newCommandQueueWithDescriptor:queue_descriptor];
+        ZPU_AUDIT_EXTENDED_OBJECT(descriptor_queue, MTLCommandQueue, "MTLCommandQueue(descriptor)");
+    }
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLResourceViewPoolDescriptor *view_descriptor = [MTLResourceViewPoolDescriptor new];
+        view_descriptor.resourceViewCount = 1;
+        NSError *view_error = nil;
+        id<MTLTextureViewPool> texture_view_pool =
+            [adapter_device newTextureViewPoolWithDescriptor:view_descriptor error:&view_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(texture_view_pool, MTLTextureViewPool, "MTLTextureViewPool");
+
+        MTLIOCommandQueueDescriptor *io_descriptor = [MTLIOCommandQueueDescriptor new];
+        NSError *io_error = nil;
+        id<MTLIOCommandQueue> io_queue =
+            [adapter_device newIOCommandQueueWithDescriptor:io_descriptor error:&io_error];
+        ZPU_AUDIT_EXTENDED_OBJECT(io_queue, MTLIOCommandQueue, "MTLIOCommandQueue");
+    }
+    (void)adapter_buffer;
+    (void)adapter_texture;
+#undef ZPU_AUDIT_EXTENDED_OBJECT
+    return result;
+}
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static int test_adapter_metal4_object_protocols(id<MTLDevice> adapter_device,
                                                 id<MTLTexture> adapter_texture) {
@@ -9993,6 +10139,9 @@ int main(void) {
         const int adapter_core_object_protocol_result =
             test_adapter_core_object_protocols(adapter_device, adapter_vertex_buffer, adapter_texture);
         if (adapter_core_object_protocol_result != 0) return adapter_core_object_protocol_result;
+        const int adapter_extended_object_protocol_result =
+            test_adapter_extended_object_protocols(adapter_device, adapter_vertex_buffer, adapter_texture);
+        if (adapter_extended_object_protocol_result != 0) return adapter_extended_object_protocol_result;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const int adapter_metal4_object_protocol_result =
                 test_adapter_metal4_object_protocols(adapter_device, adapter_texture);
