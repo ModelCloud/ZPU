@@ -25876,6 +25876,9 @@ int main(void) {
             layout_descriptors[index].dataType = layout_types[index];
             layout_descriptors[index].index = layout_indices[index];
         }
+        /* Standalone descriptors do not carry shader struct metadata, so
+         * native Metal ignores constantBlockAlignment for this layout. */
+        layout_descriptors[0].constantBlockAlignment = 64;
         NSArray<MTLArgumentDescriptor *> *layout_descriptor_array =
             [NSArray arrayWithObjects:layout_descriptors count:5];
         id<MTLArgumentEncoder> adapter_layout_encoder =

@@ -15642,11 +15642,11 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
             NSUInteger stride = 0;
             if (!zpu_argument_align_up(elementSize, elementAlignment, &stride) ||
                 (elements != 0 && stride > NSUIntegerMax / elements)) return nil;
+            /* constantBlockAlignment only affects a shader-described constant
+             * block with matching alignas metadata. Standalone argument
+             * descriptors have no such struct metadata, and native Metal
+             * ignores this property for them. */
             NSUInteger blockAlignment = elementAlignment;
-            if (!zpu_argument_type_is_resource(descriptor.dataType) &&
-                descriptor.constantBlockAlignment > blockAlignment) {
-                blockAlignment = descriptor.constantBlockAlignment;
-            }
             if (!zpu_argument_align_up(cursor, blockAlignment, &cursor)) return nil;
             if (blockAlignment > maximumAlignment) maximumAlignment = blockAlignment;
             for (NSUInteger element = 0; element < elements; ++element) {
