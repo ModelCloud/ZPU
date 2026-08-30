@@ -10777,10 +10777,6 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     const NSUInteger inputCount = addition ? 3 : 2;
     for (NSUInteger index = 0; index < inputCount; ++index) {
         if (inputDimensions[index] == nil) {
-            if (addition) {
-                zpu_set_error(error, @"ZPU CPU Metal 4 ML add requires dimensions for all tensor bindings");
-                return nil;
-            }
             continue;
         }
         NSUInteger values[MTL_TENSOR_MAX_RANK];
@@ -12762,6 +12758,15 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         memcmp(expectedValues, actualValues, expected.rank * sizeof(NSUInteger)) == 0;
 }
 
+static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtents *right) {
+    if (left == nil || right == nil || left.rank != right.rank || left.rank > MTL_TENSOR_MAX_RANK) return NO;
+    NSUInteger leftValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger rightValues[MTL_TENSOR_MAX_RANK];
+    return zpu_tensor_read_extents(left, left.rank, leftValues, NO) &&
+        zpu_tensor_read_extents(right, right.rank, rightValues, NO) &&
+        memcmp(leftValues, rightValues, left.rank * sizeof(NSUInteger)) == 0;
+}
+
 @implementation ZPUMTL4MachineLearningEncoder
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner {
     if ((self = [super init])) _owner = owner;
@@ -12912,7 +12917,9 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[inputCount - 1], destination->_dimensions) ||
         (addition && (right->_dimensions == nil ||
                    !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[1], right->_dimensions) ||
-                   right->_dimensions.rank != source->_dimensions.rank))) {
+                   right->_dimensions.rank != source->_dimensions.rank ||
+                   !zpu_mtl4_ml_dimensions_equal(source->_dimensions, right->_dimensions) ||
+                   !zpu_mtl4_ml_dimensions_equal(source->_dimensions, destination->_dimensions)))) {
         [_owner markError];
         return;
     }

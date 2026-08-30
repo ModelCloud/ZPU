@@ -19973,6 +19973,65 @@ int main(void) {
             return 155;
         }
 
+        /* Metal permits a machine-learning pipeline to leave input
+         * dimensions unspecified. The CPU path resolves those dimensions
+         * from the bound ZPU tensors at dispatch, while still requiring all
+         * elementwise add operands to match exactly. */
+        NSError *metal4_ml_add_dynamic_error = nil;
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_add_dynamic_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_add_dynamic_descriptor.label = @"zpu-cpu-ml-add-u8-dynamic";
+        metal4_ml_add_dynamic_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_add_function_descriptor;
+        id<MTL4MachineLearningPipelineState> metal4_ml_add_dynamic_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_add_dynamic_descriptor error:&metal4_ml_add_dynamic_error];
+        [metal4_ml_add_output replaceSliceOrigin:metal4_ml_identity_zero
+                                   sliceDimensions:metal4_ml_identity_dimensions
+                                         withBytes:metal4_ml_add_sentinel
+                                           strides:metal4_ml_identity_packed_strides];
+        id<MTL4CommandBuffer> metal4_ml_add_dynamic_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_add_dynamic_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_add_dynamic_encoder =
+            [metal4_ml_add_dynamic_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_add_dynamic_encoder setPipelineState:metal4_ml_add_dynamic_pipeline];
+        [metal4_ml_add_dynamic_encoder setArgumentTable:metal4_ml_add_table];
+        [metal4_ml_add_dynamic_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_add_dynamic_encoder endEncoding];
+        [metal4_ml_add_dynamic_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_add_dynamic_command_buffers[] = {
+            metal4_ml_add_dynamic_command_buffer,
+        };
+        MTL4CommitOptions *metal4_ml_add_dynamic_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_add_dynamic_feedback_error = nil;
+        [metal4_ml_add_dynamic_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_add_dynamic_feedback_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_add_dynamic_command_buffers
+                        count:1
+                       options:metal4_ml_add_dynamic_options];
+        [metal4_ml_add_output getBytes:metal4_ml_add_values
+                               strides:metal4_ml_identity_packed_strides
+                      fromSliceOrigin:metal4_ml_identity_zero
+                       sliceDimensions:metal4_ml_identity_dimensions];
+        BOOL metal4_ml_add_dynamic_nil_dimensions = YES;
+        for (NSUInteger binding_index = 0; binding_index < 3; ++binding_index) {
+            id<MTLTensorBinding> binding =
+                (id<MTLTensorBinding>)metal4_ml_add_dynamic_pipeline.reflection.bindings[binding_index];
+            metal4_ml_add_dynamic_nil_dimensions = metal4_ml_add_dynamic_nil_dimensions &&
+                binding.dimensions == nil;
+        }
+        if (metal4_ml_add_dynamic_pipeline == nil || metal4_ml_add_dynamic_error != nil ||
+            metal4_ml_add_dynamic_pipeline.reflection.bindings.count != 3 ||
+            !metal4_ml_add_dynamic_nil_dimensions || metal4_ml_add_table == nil ||
+            metal4_ml_add_dynamic_encoder == nil || metal4_ml_add_dynamic_command_buffer == nil ||
+            metal4_ml_add_dynamic_feedback_error != nil ||
+            memcmp(metal4_ml_add_values, metal4_ml_add_expected, sizeof(metal4_ml_add_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML dynamic dimensions failed",
+                            metal4_ml_add_dynamic_error ?: metal4_ml_add_dynamic_feedback_error);
+            return 162;
+        }
+
         MTLTensorDescriptor *metal4_ml_add_wrong_type_descriptor =
             [metal4_ml_identity_tensor_descriptor copy];
         metal4_ml_add_wrong_type_descriptor.dataType = MTLTensorDataTypeFloat32;
