@@ -7040,8 +7040,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return layerCount != 0;
 }
 - (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count <= 1; }
-- (BOOL)supportsDynamicLibraries { return NO; }
-- (BOOL)supportsRenderDynamicLibraries { return NO; }
+- (BOOL)supportsDynamicLibraries { return YES; }
+- (BOOL)supportsRenderDynamicLibraries { return YES; }
 - (BOOL)supportsRaytracing { return NO; }
 - (BOOL)supportsCounterSampling:(MTLCounterSamplingPoint)point {
     return point == MTLCounterSamplingPointAtDrawBoundary ||

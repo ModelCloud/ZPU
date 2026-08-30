@@ -7099,10 +7099,12 @@ int main(void) {
                 adapter_dynamic_source_library != nil &&
                 adapter_dynamic_source_library.type == MTLLibraryTypeDynamic &&
                 [adapter_dynamic_source_library.installName isEqualToString:adapter_dynamic_options.installName] &&
-                adapter_dynamic_library != nil &&
-                [adapter_dynamic_library conformsToProtocol:@protocol(MTLDynamicLibrary)] &&
-                adapter_dynamic_library.device == adapter_device &&
-                [adapter_dynamic_library.installName isEqualToString:adapter_dynamic_options.installName] &&
+            adapter_dynamic_library != nil &&
+            [adapter_dynamic_library conformsToProtocol:@protocol(MTLDynamicLibrary)] &&
+            adapter_dynamic_library.device == adapter_device &&
+            adapter_device.supportsDynamicLibraries &&
+            adapter_device.supportsRenderDynamicLibraries &&
+            [adapter_dynamic_library.installName isEqualToString:adapter_dynamic_options.installName] &&
                 adapter_dynamic_serialized && adapter_dynamic_reloaded != nil &&
                 adapter_dynamic_reloaded.device == adapter_device &&
                 [adapter_dynamic_reloaded.installName isEqualToString:adapter_dynamic_options.installName];
