@@ -477,6 +477,21 @@ static BOOL zpu_cpu_stage_binding_is_null(id encoder, MTLRenderStages stage,
     return [bindings[key] isKindOfClass:[NSNull class]];
 }
 
+static BOOL zpu_cpu_stage_binding_is_absent(id encoder, MTLRenderStages stage,
+                                            NSUInteger index, NSString *kind) {
+    if (encoder == nil || kind == nil) return NO;
+    Ivar legacy_ivar = class_getInstanceVariable(object_getClass(encoder), "_legacy");
+    if (legacy_ivar == NULL) return NO;
+    id legacy = object_getIvar(encoder, legacy_ivar);
+    if (legacy == nil) return NO;
+    Ivar bindings_ivar = class_getInstanceVariable(object_getClass(legacy), "_stageBindings");
+    if (bindings_ivar == NULL) return NO;
+    NSDictionary *bindings = (NSDictionary *)object_getIvar(legacy, bindings_ivar);
+    NSString *key = [NSString stringWithFormat:@"%lu:%lu:%@",
+                     (unsigned long)stage, (unsigned long)index, kind];
+    return bindings[key] == nil;
+}
+
 static int test_texture_view_format_compatibility(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device)
     API_AVAILABLE(macos(14.0), ios(17.0)) {
@@ -17107,6 +17122,20 @@ int main(void) {
                 !zpu_cpu_stage_binding_is_null(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"sampler")) {
                 fprintf(stderr, "metal-pixel: Metal 4 tile argument-table replacement retained a stale slot\n");
                 return 154;
+            }
+            const uint32_t tile_stage_bytes[] = {0x11223344, 0x55667788};
+            [(id)adapter_mtl4_tile_encoder setTileBuffer:adapter_vertex_buffer offset:0 atIndex:1];
+            [(id)adapter_mtl4_tile_encoder setTileBytes:tile_stage_bytes
+                                                  length:sizeof(tile_stage_bytes) atIndex:1];
+            if (!zpu_cpu_stage_binding_is_absent(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"buffer") ||
+                !zpu_cpu_stage_binding_is_absent(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"bufferOffset")) {
+                fprintf(stderr, "metal-pixel: Metal 4 tile bytes binding retained a stale buffer\n");
+                return 155;
+            }
+            [(id)adapter_mtl4_tile_encoder setTileBuffer:adapter_vertex_buffer offset:0 atIndex:1];
+            if (!zpu_cpu_stage_binding_is_absent(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"bytes")) {
+                fprintf(stderr, "metal-pixel: Metal 4 tile buffer binding retained stale inline bytes\n");
+                return 156;
             }
             [adapter_mtl4_tile_encoder setArgumentTable:adapter_mtl4_tile_stage_table
                                                  atStages:MTLRenderStageTile];

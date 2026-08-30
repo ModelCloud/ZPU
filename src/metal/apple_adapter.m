@@ -13496,6 +13496,39 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     }
     [(id)_legacy executeCommandsInBuffer:indirectCommandBuffer indirectBuffer:(id<MTLBuffer>)range indirectBufferOffset:rangeOffset];
 }
+- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileBytes:bytes length:length atIndex:index];
+}
+- (void)setTileBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileBuffer:buffer offset:offset atIndex:index];
+}
+- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileBufferOffset:offset atIndex:index];
+}
+- (void)setTileBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileBuffers:buffers offsets:offsets withRange:range];
+}
+- (void)setTileTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileTexture:texture atIndex:index];
+}
+- (void)setTileTextures:(const id<MTLTexture> __nullable [__nonnull])textures withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileTextures:textures withRange:range];
+}
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileSamplerState:sampler atIndex:index];
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileSamplerStates:samplers withRange:range];
+}
+- (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
+    [(id)_legacy setTileSamplerState:sampler lodMinClamp:lodMinClamp lodMaxClamp:lodMaxClamp atIndex:index];
+}
+- (void)setTileSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers
+                lodMinClamps:(const float [__nonnull])lodMinClamps
+                lodMaxClamps:(const float [__nonnull])lodMaxClamps
+                    withRange:(NSRange)range API_AVAILABLE(ios(11.0), tvos(14.5), macos(11.0), macCatalyst(14.0)) {
+    [(id)_legacy setTileSamplerStates:samplers lodMinClamps:lodMinClamps lodMaxClamps:lodMaxClamps withRange:range];
+}
 - (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
     [(id)_legacy setObjectThreadgroupMemoryLength:length atIndex:index];
 }
@@ -17349,6 +17382,8 @@ static BOOL zpu_render_stage_record_bytes(ZPURenderEncoder *encoder, MTLRenderSt
     }
     NSString *key = zpu_render_stage_binding_key(stage, index, @"bytes");
     encoder->_stageBindings[key] = [NSData dataWithBytes:bytes length:length];
+    [encoder->_stageBindings removeObjectForKey:zpu_render_stage_binding_key(stage, index, @"buffer")];
+    [encoder->_stageBindings removeObjectForKey:zpu_render_stage_binding_key(stage, index, @"bufferOffset")];
     return YES;
 }
 
@@ -17363,6 +17398,7 @@ static BOOL zpu_render_stage_record_buffer(ZPURenderEncoder *encoder, MTLRenderS
     NSString *key = zpu_render_stage_binding_key(stage, index, @"buffer");
     encoder->_stageBindings[key] = buffer == nil ? (id)[NSNull null] : (id)buffer;
     encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"bufferOffset")] = @(offset);
+    [encoder->_stageBindings removeObjectForKey:zpu_render_stage_binding_key(stage, index, @"bytes")];
     if (buffer != nil) [encoder->_owner retainResource:buffer];
     return YES;
 }
@@ -17370,6 +17406,12 @@ static BOOL zpu_render_stage_record_buffer(ZPURenderEncoder *encoder, MTLRenderS
 static BOOL zpu_render_stage_record_buffer_offset(ZPURenderEncoder *encoder, MTLRenderStages stage,
                                                    NSUInteger offset, NSUInteger index) {
     if (!zpu_render_stage_begin(encoder, stage, index)) return NO;
+    id buffer = encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"buffer")];
+    if (buffer != nil && buffer != (id)[NSNull null] &&
+        (![buffer isKindOfClass:[ZPUBuffer class]] || offset > [(ZPUBuffer *)buffer length])) {
+        [encoder->_owner markError];
+        return NO;
+    }
     encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"bufferOffset")] = @(offset);
     return YES;
 }
