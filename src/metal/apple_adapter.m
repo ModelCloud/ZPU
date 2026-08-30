@@ -17486,7 +17486,7 @@ static BOOL zpu_render_record_direct_extra_sampler(ZPURenderEncoder *encoder,
      * profiles have no executable sampler state, so their unused extra slots
      * can be retained as metadata. */
     if (index == 0 || index >= 16 ||
-        (encoder->_pipelineState != nil && encoder->_pipelineState->_sampleTexture) ||
+        (encoder->_pipelineState != nil && encoder->_pipelineState->_sampleTexture && sampler != nil) ||
         (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] ||
                             zpuSampler->_owner != [encoder->_owner device]))) {
         [encoder->_owner markError];
