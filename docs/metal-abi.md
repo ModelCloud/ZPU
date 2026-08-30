@@ -91,8 +91,10 @@ triangle path:
 - CPU-owned direct layered color render passes for up to eight 2D-array slices.
   The expanded direct instance index selects the corresponding ZPU-owned
   slice, preserving Apple's top-left X/Y pixel grid while keeping execution
-  entirely on the CPU. Layered depth/stencil planes, indirect layered draws,
-  and layered multisample passes remain explicitly rejected.
+  entirely on the CPU. Deferred primitive and indexed draws also resolve
+  `baseInstance` at commit time and select successive slices. Layered
+  depth/stencil planes, tile/mesh/patch draws, and layered multisample passes
+  remain explicitly rejected.
 - CPU-owned 2D multisample textures with Apple-verified 2x and 4x default
   sample locations, represented as independent ZPU sample planes. Ordered
   render encoders can store those planes or resolve them into a matching
@@ -180,8 +182,9 @@ triangle path:
 - render-pass attachment mip levels and single array/cube face slices select
   the corresponding ZPU texture and use that target's width/height for
   rasterization; direct layered color passes select up to eight 2D-array
-  slices by direct instance index, while layered depth/stencil planes,
-  indirect layered draws, and layered multisample passes remain explicitly
+  slices by direct instance index, while primitive/indexed indirect draws
+  resolve `baseInstance` at commit time. Layered depth/stencil planes,
+  tile/mesh/patch draws, and layered multisample passes remain explicitly
   rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime

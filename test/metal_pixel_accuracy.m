@@ -3720,6 +3720,158 @@ static int test_layered_color_render_against_native(
     return 0;
 }
 
+static int test_layered_indirect_color_render_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    enum { width = 7, height = 5, layers = 4, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+        {{ 0.71f,  0.77f, 0.5f, 1.0f}, {0.73f, 0.29f, 0.11f, 0.67f}},
+    };
+    const uint16_t indices[] = {0, 1, 2, 3, 4, 5};
+    for (NSUInteger indexed = 0; indexed < 2; ++indexed) {
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+        native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
+        adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
+        id<MTLBuffer> native_vertex_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_vertex_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_index_buffer = indexed == 0 ? nil :
+            [native_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_index_buffer = indexed == 0 ? nil :
+            [adapter_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+        const uint32_t primitive_arguments[] = {6, 2, 0, 1};
+        const uint32_t indexed_arguments[] = {6, 2, 0, 0, 1};
+        const void *argument_bytes = indexed == 0 ? (const void *)primitive_arguments : (const void *)indexed_arguments;
+        const NSUInteger argument_length = indexed == 0 ? sizeof(primitive_arguments) : sizeof(indexed_arguments);
+        id<MTLBuffer> native_indirect_buffer =
+            [native_device newBufferWithBytes:argument_bytes length:argument_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_indirect_buffer =
+            [adapter_device newBufferWithBytes:argument_bytes length:argument_length options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_vertex_buffer == nil || adapter_vertex_buffer == nil ||
+            native_indirect_buffer == nil || adapter_indirect_buffer == nil ||
+            (indexed != 0 && (native_index_buffer == nil || adapter_index_buffer == nil))) {
+            fail_with_error("layered indirect resource/pipeline allocation", adapter_error ?: native_error);
+            return 192;
+        }
+        for (NSUInteger parallel_index = 0; parallel_index < 2; ++parallel_index) {
+            MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
+            texture_descriptor.textureType = MTLTextureType2DArray;
+            texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+            texture_descriptor.width = width;
+            texture_descriptor.height = height;
+            texture_descriptor.arrayLength = layers;
+            texture_descriptor.mipmapLevelCount = 1;
+            texture_descriptor.sampleCount = 1;
+            texture_descriptor.storageMode = MTLStorageModeShared;
+            texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+            id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+            MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_pass.renderTargetArrayLength = layers;
+            native_pass.colorAttachments[0].texture = native_texture;
+            native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+            MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+            adapter_pass.colorAttachments[0].texture = adapter_texture;
+            id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+            id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+            id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+            id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+            id<MTLParallelRenderCommandEncoder> native_parallel = nil;
+            id<MTLParallelRenderCommandEncoder> adapter_parallel = nil;
+            id<MTLRenderCommandEncoder> native_encoder = nil;
+            id<MTLRenderCommandEncoder> adapter_encoder = nil;
+            if (parallel_index == 0) {
+                native_encoder = [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+                adapter_encoder = [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+            } else {
+                native_parallel = [native_command_buffer parallelRenderCommandEncoderWithDescriptor:native_pass];
+                adapter_parallel = [adapter_command_buffer parallelRenderCommandEncoderWithDescriptor:adapter_pass];
+                native_encoder = [native_parallel renderCommandEncoder];
+                adapter_encoder = [adapter_parallel renderCommandEncoder];
+            }
+            if (native_encoder == nil || adapter_encoder == nil) {
+                fprintf(stderr, "metal-pixel: layered indirect %s encoder creation failed for %s draw\n",
+                        parallel_index == 0 ? "render" : "parallel", indexed == 0 ? "primitive" : "indexed");
+                return 193;
+            }
+            [native_encoder setRenderPipelineState:native_pipeline];
+            [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+            if (indexed == 0) {
+                [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:native_indirect_buffer indirectBufferOffset:0];
+            } else {
+                [native_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16
+                                          indexBuffer:native_index_buffer indexBufferOffset:0 indirectBuffer:native_indirect_buffer indirectBufferOffset:0];
+            }
+            [native_encoder endEncoding];
+            if (native_parallel != nil) [native_parallel endEncoding];
+            [adapter_encoder setRenderPipelineState:adapter_pipeline];
+            [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            if (indexed == 0) {
+                [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:adapter_indirect_buffer indirectBufferOffset:0];
+            } else {
+                [adapter_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16
+                                           indexBuffer:adapter_index_buffer indexBufferOffset:0 indirectBuffer:adapter_indirect_buffer indirectBufferOffset:0];
+            }
+            [adapter_encoder endEncoding];
+            if (adapter_parallel != nil) [adapter_parallel endEncoding];
+            [native_command_buffer commit];
+            [adapter_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+            [adapter_command_buffer waitUntilCompleted];
+            uint8_t native_pixels[layers][max_byte_count] = {{0}};
+            uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+            for (NSUInteger layer = 0; layer < layers; ++layer) {
+                [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4
+                            bytesPerImage:max_byte_count
+                             fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                             mipmapLevel:0 slice:layer];
+                [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4
+                             bytesPerImage:max_byte_count
+                              fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                              mipmapLevel:0 slice:layer];
+                if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+                    fprintf(stderr, "metal-pixel: layered indirect %s %s slice %zu mismatch statuses=%ld/%ld\n",
+                            parallel_index == 0 ? "render" : "parallel", indexed == 0 ? "primitive" : "indexed", layer,
+                            (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+                    fail_with_error("native layered indirect render error", native_command_buffer.error);
+                    fail_with_error("adapter layered indirect render error", adapter_command_buffer.error);
+                    return 194;
+                }
+            }
+            if (memcmp(native_pixels[0], native_pixels[1], max_byte_count) == 0 ||
+                memcmp(native_pixels[1], native_pixels[2], max_byte_count) != 0 ||
+                memcmp(native_pixels[0], native_pixels[3], max_byte_count) != 0 ||
+                native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_command_buffer.status != MTLCommandBufferStatusCompleted) {
+                fprintf(stderr, "metal-pixel: layered indirect %s %s base-instance routing failed\n",
+                        parallel_index == 0 ? "render" : "parallel", indexed == 0 ? "primitive" : "indexed");
+                return 195;
+            }
+        }
+    }
+    return 0;
+}
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static int test_metal4_layered_color_render_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
@@ -3855,6 +4007,163 @@ static int test_metal4_layered_color_render_against_native(
             fprintf(stderr, "metal-pixel: Metal 4 layered %s native command did not complete\n",
                     format == MTLPixelFormatRGBA8Unorm ? "RGBA8" : "BGRA8");
             return 191;
+        }
+    }
+    return 0;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static int test_metal4_layered_indirect_color_render_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTL4Compiler> adapter_compiler, MTL4RenderPipelineDescriptor *adapter_base_pipeline_descriptor,
+    id<MTL4CommandAllocator> adapter_allocator, id<MTL4CommandQueue> adapter_queue) {
+    enum { width = 7, height = 5, layers = 4, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+        {{ 0.71f,  0.77f, 0.5f, 1.0f}, {0.73f, 0.29f, 0.11f, 0.67f}},
+    };
+    const uint16_t indices[] = {0, 1, 2, 3, 4, 5};
+    const uint32_t primitive_arguments[] = {6, 2, 0, 1};
+    const uint32_t indexed_arguments[] = {6, 2, 0, 0, 1};
+    if (adapter_compiler == nil || adapter_base_pipeline_descriptor == nil ||
+        adapter_allocator == nil || adapter_queue == nil) return 196;
+    for (NSUInteger indexed = 0; indexed < 2; ++indexed) {
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+        native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        MTL4RenderPipelineDescriptor *adapter_pipeline_descriptor = [adapter_base_pipeline_descriptor copy];
+        MTL4LibraryFunctionDescriptor *adapter_vertex_descriptor =
+            [adapter_base_pipeline_descriptor.vertexFunctionDescriptor copy];
+        MTL4LibraryFunctionDescriptor *adapter_fragment_descriptor =
+            [adapter_base_pipeline_descriptor.fragmentFunctionDescriptor copy];
+        adapter_vertex_descriptor.name = @"zpu_cpu_layered_vertex";
+        adapter_fragment_descriptor.name = @"zpu_cpu_layered_fragment";
+        adapter_pipeline_descriptor.vertexFunctionDescriptor = adapter_vertex_descriptor;
+        adapter_pipeline_descriptor.fragmentFunctionDescriptor = adapter_fragment_descriptor;
+        adapter_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_compiler newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor
+                                                   compilerTaskOptions:nil error:&adapter_error];
+        const void *argument_bytes = indexed == 0 ? (const void *)primitive_arguments : (const void *)indexed_arguments;
+        const NSUInteger argument_length = indexed == 0 ? sizeof(primitive_arguments) : sizeof(indexed_arguments);
+        id<MTLBuffer> native_vertex_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_vertex_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_index_buffer = indexed == 0 ? nil :
+            [native_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_index_buffer = indexed == 0 ? nil :
+            [adapter_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_indirect_buffer =
+            [native_device newBufferWithBytes:argument_bytes length:argument_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_indirect_buffer =
+            [adapter_device newBufferWithBytes:argument_bytes length:argument_length options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_vertex_buffer == nil || adapter_vertex_buffer == nil ||
+            native_indirect_buffer == nil || adapter_indirect_buffer == nil ||
+            (indexed != 0 && (native_index_buffer == nil || adapter_index_buffer == nil))) {
+            fail_with_error("Metal 4 layered indirect resource/pipeline allocation", adapter_error ?: native_error);
+            return 197;
+        }
+        MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
+        texture_descriptor.textureType = MTLTextureType2DArray;
+        texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        texture_descriptor.width = width;
+        texture_descriptor.height = height;
+        texture_descriptor.arrayLength = layers;
+        texture_descriptor.mipmapLevelCount = 1;
+        texture_descriptor.sampleCount = 1;
+        texture_descriptor.storageMode = MTLStorageModeShared;
+        texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.renderTargetArrayLength = layers;
+        native_pass.colorAttachments[0].texture = native_texture;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+        MTL4RenderPassDescriptor *adapter_pass = [MTL4RenderPassDescriptor new];
+        adapter_pass.renderTargetArrayLength = layers;
+        adapter_pass.colorAttachments[0].texture = adapter_texture;
+        adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_pass.colorAttachments[0].clearColor = native_pass.colorAttachments[0].clearColor;
+        id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTL4CommandBuffer> adapter_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_command_buffer beginCommandBufferWithAllocator:adapter_allocator];
+        id<MTL4RenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        MTL4ArgumentTableDescriptor *table_descriptor = [MTL4ArgumentTableDescriptor new];
+        table_descriptor.maxBufferBindCount = 1;
+        NSError *table_error = nil;
+        id<MTL4ArgumentTable> table =
+            [adapter_device newArgumentTableWithDescriptor:table_descriptor error:&table_error];
+        [table setAddress:adapter_vertex_buffer.gpuAddress atIndex:0];
+        if (native_encoder == nil || adapter_command_buffer == nil || adapter_encoder == nil || table == nil) {
+            fail_with_error("Metal 4 layered indirect encoder allocation", table_error ?: native_error);
+            return 198;
+        }
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+        if (indexed == 0) {
+            [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:native_indirect_buffer indirectBufferOffset:0];
+        } else {
+            [native_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16
+                                      indexBuffer:native_index_buffer indexBufferOffset:0 indirectBuffer:native_indirect_buffer indirectBufferOffset:0];
+        }
+        [native_encoder endEncoding];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setArgumentTable:table atStages:MTLRenderStageVertex];
+        if (indexed == 0) {
+            [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:adapter_indirect_buffer.gpuAddress];
+        } else {
+            [adapter_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexType:MTLIndexTypeUInt16
+                                       indexBuffer:adapter_index_buffer.gpuAddress indexBufferLength:sizeof(indices)
+                                    indirectBuffer:adapter_indirect_buffer.gpuAddress];
+        }
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_command_buffers[] = {adapter_command_buffer};
+        [adapter_queue commit:adapter_command_buffers count:1];
+        uint8_t native_pixels[layers][max_byte_count] = {{0}};
+        uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                         fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+            [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                          fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+            if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: Metal 4 layered indirect %s slice %zu mismatch statuses=%ld\n",
+                        indexed == 0 ? "primitive" : "indexed", layer, (long)native_command_buffer.status);
+                fail_with_error("native Metal 4 layered indirect render error", native_command_buffer.error);
+                fail_with_error("adapter Metal 4 layered indirect render error", table_error);
+                return 199;
+            }
+        }
+        if (memcmp(native_pixels[0], native_pixels[1], max_byte_count) == 0 ||
+            memcmp(native_pixels[1], native_pixels[2], max_byte_count) != 0 ||
+            memcmp(native_pixels[0], native_pixels[3], max_byte_count) != 0 ||
+            native_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Metal 4 layered indirect %s base-instance routing failed\n",
+                    indexed == 0 ? "primitive" : "indexed");
+            return 200;
         }
     }
     return 0;
@@ -5107,6 +5416,10 @@ int main(void) {
             device, adapter_device, layered_vertex_function, layered_fragment_function,
             adapter_layered_vertex_function, adapter_layered_fragment_function);
         if (layered_color_result != 0) return layered_color_result;
+        const int layered_indirect_color_result = test_layered_indirect_color_render_against_native(
+            device, adapter_device, layered_vertex_function, layered_fragment_function,
+            adapter_layered_vertex_function, adapter_layered_fragment_function);
+        if (layered_indirect_color_result != 0) return layered_indirect_color_result;
         const int multisample_depth_stencil_result = test_multisample_depth_stencil_against_native(
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);
@@ -13850,6 +14163,10 @@ int main(void) {
             device, adapter_device, layered_vertex_function, layered_fragment_function, adapter_mtl4_compiler,
             adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
         if (metal4_layered_color_result != 0) return metal4_layered_color_result;
+        const int metal4_layered_indirect_color_result = test_metal4_layered_indirect_color_render_against_native(
+            device, adapter_device, layered_vertex_function, layered_fragment_function, adapter_mtl4_compiler,
+            adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
+        if (metal4_layered_indirect_color_result != 0) return metal4_layered_indirect_color_result;
 
         /* Replacing an argument table must clear null entries. In particular,
          * a CPU encoder cannot retain a prior texture binding just because a

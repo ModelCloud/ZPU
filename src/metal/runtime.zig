@@ -449,8 +449,10 @@ const DrawCommand = struct {
     visibility_offset: usize = 0,
     visibility_result_type: abi.VisibilityResultType = .reset,
     // Direct layered draws use the expanded instance index as the selected
-    // render-target-array slice. Indirect and non-layered draws retain zero.
+    // render-target-array slice. Indirect draws add their base instance after
+    // deferred argument resolution; non-layered draws retain zero.
     array_index: usize = 0,
+    base_instance: usize = 0,
 };
 
 const TileCommand = struct {
@@ -843,6 +845,8 @@ pub const CommandBuffer = struct {
         if (!rangeValid(indirect_buffer.bytes.len, draw.indirect_buffer_offset, argument_size)) return error.InvalidArgument;
         const offset = draw.indirect_buffer_offset;
         const instance_count = readU32Little(indirect_buffer.bytes, offset + 4);
+        const base_instance_offset: usize = if (indexed) 16 else 12;
+        draw.base_instance = readU32Little(indirect_buffer.bytes, offset + base_instance_offset);
         draw.vertex_count = readU32Little(indirect_buffer.bytes, offset);
         draw.vertex_start = readU32Little(indirect_buffer.bytes, offset + 8);
         if (indexed) {
@@ -1187,18 +1191,50 @@ pub const CommandBuffer = struct {
                 }
             },
             .draw => |draw| {
-                const array_index = if (active_array_target_count > 1) draw.array_index else 0;
-                if (array_index >= active_array_target_count) return self.fail(error.InvalidArgument);
+                var resolved_draw = draw;
+                const instance_count = self.resolveIndirectDraw(&resolved_draw) catch |err| return self.fail(err);
+                if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
+                const array_index = if (active_array_target_count > 1)
+                    std.math.add(usize, resolved_draw.array_index, resolved_draw.base_instance) catch return self.fail(error.InvalidArgument)
+                else
+                    0;
+                if (array_index >= active_array_target_count or
+                    instance_count > active_array_target_count - array_index)
+                    return self.fail(error.InvalidArgument);
                 const target_handle = active_array_color_attachments[0][array_index] orelse
                     (active_target orelse return self.fail(error.InvalidCommand));
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
-                sparseSyncTexture(target_handle);
-                for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
+                if (active_array_target_count > 1) {
+                    for (active_array_color_attachments[0][0..active_array_target_count]) |target| {
+                        sparseSyncTexture(target orelse return self.fail(error.InvalidResource));
+                    }
+                    for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                        if (attachment != null) {
+                            for (active_array_color_attachments[physical_index + 1][0..active_array_target_count]) |target| {
+                                sparseSyncTexture(target orelse return self.fail(error.InvalidResource));
+                            }
+                        }
+                    }
+                } else {
+                    sparseSyncTexture(target_handle);
+                    for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
+                }
                 for (active_sample_targets[0..active_sample_count]) |sample| sparseSyncOptionalTexture(sample);
                 for (active_sample_color_attachments) |sample| sparseSyncOptionalTexture(sample);
                 defer {
-                    sparseFlushTexture(target_handle);
-                    for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                    if (active_array_target_count > 1) {
+                        for (active_array_color_attachments[0][0..active_array_target_count]) |target| sparseFlushOptionalTexture(target);
+                        for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                            if (attachment != null) {
+                                for (active_array_color_attachments[physical_index + 1][0..active_array_target_count]) |target| {
+                                    sparseFlushOptionalTexture(target);
+                                }
+                            }
+                        }
+                    } else {
+                        sparseFlushTexture(target_handle);
+                        for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                    }
                     for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
                     for (active_sample_color_attachments) |sample| sparseFlushOptionalTexture(sample);
                 }
@@ -1210,13 +1246,10 @@ pub const CommandBuffer = struct {
                 defer {
                     sparseFlushOptionalBuffer(draw.vertex_buffer);
                     sparseFlushOptionalBuffer(draw.index_buffer);
-                    sparseFlushOptionalBuffer(draw.indirect_buffer);
                     sparseFlushOptionalBuffer(draw.fragment_uniform_buffer);
                     sparseFlushOptionalBuffer(draw.visibility_buffer);
+                    sparseFlushOptionalBuffer(draw.indirect_buffer);
                 }
-                var resolved_draw = draw;
-                const instance_count = self.resolveIndirectDraw(&resolved_draw) catch |err| return self.fail(err);
-                if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
                 var owned_source_vertices: ?[]abi.Vertex = null;
                 var owned_indexed_vertices: ?[]abi.Vertex = null;
                 const draw_vertices = self.resolveDrawVertices(
@@ -1289,7 +1322,20 @@ pub const CommandBuffer = struct {
                 validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
                 if (active_sample_count == 1) {
-                    for (0..instance_count) |_| {
+                    for (0..instance_count) |instance| {
+                        if (active_array_target_count > 1 and resolved_draw.indirect_buffer != null) {
+                            const instance_array_index = array_index + instance;
+                            const instance_target = active_array_color_attachments[0][instance_array_index] orelse
+                                return self.fail(error.InvalidResource);
+                            target = instance_target.asTarget();
+                            for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                                if (attachment != null) {
+                                    const instance_extra = active_array_color_attachments[physical_index + 1][instance_array_index] orelse
+                                        return self.fail(error.InvalidResource);
+                                    extra_targets_storage[physical_index] = instance_extra.asTarget();
+                                }
+                            }
+                        }
                         stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
                             @constCast(&target),
                             extra_targets[0..extra_count],
@@ -2897,7 +2943,6 @@ pub const RenderEncoder = struct {
 
     pub fn drawPrimitivesIndirect(self: *RenderEncoder, primitive: abi.PrimitiveType, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 16)) return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
         const source = try self.sourceVertices(&owned_source);
@@ -2982,7 +3027,6 @@ pub const RenderEncoder = struct {
 
     pub fn drawIndexedPrimitivesIndirect(self: *RenderEncoder, primitive: abi.PrimitiveType, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validIndexType(index_type) or !validBuffer(index_buffer) or !validBuffer(indirect_buffer)) return error.InvalidArgument;
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         if (index_buffer.device != self.command_buffer.queue.device or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 20)) return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
@@ -8032,6 +8076,73 @@ test "CPU render encoder maps direct instances to array color layers" {
     destroyRenderEncoder(encoder);
     try command_buffer.commit();
     for (layers) |layer| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
+    }
+}
+
+test "CPU render encoder maps indirect instances and base instance to array color layers" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const arguments = [_]u32{ vertices.len, 2, 0, 1 };
+    const argument_buffer = try createBuffer(device, @sizeOf(@TypeOf(arguments)), @ptrCast(&arguments));
+    defer destroyBuffer(argument_buffer);
+    var layers: [3]*Texture = undefined;
+    for (&layers) |*layer| {
+        layer.* = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    }
+    defer for (layers) |layer| destroyTexture(layer);
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, layers[0], .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    });
+    try encoder.setRenderTargetArray(&layers, layers.len);
+    try encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try encoder.drawPrimitivesIndirect(.triangle, argument_buffer, 0);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, layers[0].bytes[0..4]);
+    for (layers[1..]) |layer| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
+    }
+
+    const indices = [_]u16{ 0, 1, 2, 3, 4, 5 };
+    const index_buffer = try createBuffer(device, @sizeOf(@TypeOf(indices)), @ptrCast(&indices));
+    defer destroyBuffer(index_buffer);
+    const indexed_arguments = [_]u32{ indices.len, 2, 0, 0, 1 };
+    const indexed_argument_buffer = try createBuffer(device, @sizeOf(@TypeOf(indexed_arguments)), @ptrCast(&indexed_arguments));
+    defer destroyBuffer(indexed_argument_buffer);
+    var indexed_layers: [3]*Texture = undefined;
+    for (&indexed_layers) |*layer| {
+        layer.* = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    }
+    defer for (indexed_layers) |layer| destroyTexture(layer);
+    var indexed_command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(indexed_command_buffer);
+    var indexed_encoder = try beginRender(indexed_command_buffer, indexed_layers[0], .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    });
+    try indexed_encoder.setRenderTargetArray(&indexed_layers, indexed_layers.len);
+    try indexed_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try indexed_encoder.drawIndexedPrimitivesIndirect(.triangle, .uint16, index_buffer, 0, indexed_argument_buffer, 0);
+    try indexed_encoder.endEncoding();
+    destroyRenderEncoder(indexed_encoder);
+    try indexed_command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, indexed_layers[0].bytes[0..4]);
+    for (indexed_layers[1..]) |layer| {
         try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
     }
 }
