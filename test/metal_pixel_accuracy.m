@@ -25937,6 +25937,71 @@ int main(void) {
             return 52;
         }
 
+        /* Resource and constant arrays use the descriptor's declaration
+         * order, while each element advances by its natural Metal stride.
+         * In particular, float3 occupies a 16-byte slot in an argument
+         * buffer even though only three scalar components are written. */
+        MTLArgumentDescriptor *array_descriptors[2];
+        MTLDataType array_types[2] = {MTLDataTypePointer, MTLDataTypeFloat3};
+        NSUInteger array_indices[2] = {5, 9};
+        NSUInteger array_lengths[2] = {2, 2};
+        for (NSUInteger index = 0; index < 2; ++index) {
+            array_descriptors[index] = [MTLArgumentDescriptor argumentDescriptor];
+            array_descriptors[index].dataType = array_types[index];
+            array_descriptors[index].index = array_indices[index];
+            array_descriptors[index].arrayLength = array_lengths[index];
+        }
+        NSArray<MTLArgumentDescriptor *> *array_descriptor_array =
+            [NSArray arrayWithObjects:array_descriptors count:2];
+        id<MTLArgumentEncoder> adapter_array_encoder =
+            [adapter_device newArgumentEncoderWithArguments:array_descriptor_array];
+        NSArray<MTLArgumentDescriptor *> *native_array_descriptor_array =
+            [[NSArray alloc] initWithArray:array_descriptor_array copyItems:YES];
+        id<MTLArgumentEncoder> native_array_encoder =
+            [device newArgumentEncoderWithArguments:native_array_descriptor_array];
+        id<MTLBuffer> adapter_array_buffer =
+            [adapter_device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_array_buffer =
+            [device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+        if (adapter_array_encoder != nil && native_array_encoder != nil &&
+            adapter_array_buffer != nil && native_array_buffer != nil) {
+            [adapter_array_encoder setArgumentBuffer:adapter_array_buffer offset:0];
+            [native_array_encoder setArgumentBuffer:native_array_buffer offset:0];
+            void *adapter_array_float3_0 = [adapter_array_encoder constantDataAtIndex:9];
+            void *adapter_array_float3_1 = [adapter_array_encoder constantDataAtIndex:10];
+            void *native_array_float3_0 = [native_array_encoder constantDataAtIndex:9];
+            void *native_array_float3_1 = [native_array_encoder constantDataAtIndex:10];
+            [adapter_array_encoder setBuffer:adapter_copy_buffer offset:8 atIndex:5];
+            [adapter_array_encoder setBuffer:adapter_copy_buffer offset:16 atIndex:6];
+            uint64_t adapter_array_resource_0 = 0;
+            uint64_t adapter_array_resource_1 = 0;
+            memcpy(&adapter_array_resource_0, adapter_array_buffer.contents, sizeof(adapter_array_resource_0));
+            memcpy(&adapter_array_resource_1, (uint8_t *)adapter_array_buffer.contents + 8,
+                   sizeof(adapter_array_resource_1));
+            const NSUInteger adapter_array_float3_0_offset = adapter_array_float3_0 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_array_float3_0 - (uint8_t *)adapter_array_buffer.contents);
+            const NSUInteger adapter_array_float3_1_offset = adapter_array_float3_1 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_array_float3_1 - (uint8_t *)adapter_array_buffer.contents);
+            const NSUInteger native_array_float3_0_offset = native_array_float3_0 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_array_float3_0 - (uint8_t *)native_array_buffer.contents);
+            const NSUInteger native_array_float3_1_offset = native_array_float3_1 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_array_float3_1 - (uint8_t *)native_array_buffer.contents);
+            if ([adapter_array_encoder encodedLength] != [native_array_encoder encodedLength] ||
+                [adapter_array_encoder alignment] != [native_array_encoder alignment] ||
+                [adapter_array_encoder encodedLength] != 48 || [adapter_array_encoder alignment] != 16 ||
+                adapter_array_float3_0_offset != native_array_float3_0_offset ||
+                adapter_array_float3_1_offset != native_array_float3_1_offset ||
+                adapter_array_float3_0_offset != 16 || adapter_array_float3_1_offset != 32 ||
+                adapter_array_resource_0 != adapter_copy_buffer.gpuAddress + 8 ||
+                adapter_array_resource_1 != adapter_copy_buffer.gpuAddress + 16) {
+                fprintf(stderr, "metal-pixel: CPU argument array layout mismatch\n");
+                return 53;
+            }
+        } else {
+            fprintf(stderr, "metal-pixel: CPU argument array fixture allocation failed\n");
+            return 53;
+        }
+
         /* A count-based NSArray-style range must not wrap its final binding
          * index. The second entry below would alias slot zero if
          * location + index were evaluated without overflow checking. */
