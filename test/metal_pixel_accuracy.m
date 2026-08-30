@@ -9189,7 +9189,26 @@ int main(void) {
         id<MTLCommandBuffer> adapter_compute_command_buffer = [adapter_queue commandBuffer];
         id<MTLComputeCommandEncoder> adapter_compute_encoder =
             [adapter_compute_command_buffer computeCommandEncoder];
+        const id<MTLBuffer> *empty_compute_buffers = NULL;
+        const NSUInteger *empty_compute_offsets = NULL;
+        const NSUInteger *empty_compute_strides = NULL;
+        const id<MTLTexture> *empty_compute_textures = NULL;
+        const id<MTLSamplerState> *empty_compute_samplers = NULL;
+        const float *empty_compute_lod_clamps = NULL;
         [adapter_compute_encoder setComputePipelineState:adapter_compute_pipeline];
+        [adapter_compute_encoder setBuffers:empty_compute_buffers offsets:empty_compute_offsets withRange:NSMakeRange(0, 0)];
+        [adapter_compute_encoder setTextures:empty_compute_textures withRange:NSMakeRange(0, 0)];
+        [adapter_compute_encoder setSamplerStates:empty_compute_samplers withRange:NSMakeRange(0, 0)];
+        [adapter_compute_encoder setSamplerStates:empty_compute_samplers
+                                   lodMinClamps:empty_compute_lod_clamps
+                                   lodMaxClamps:empty_compute_lod_clamps
+                                       withRange:NSMakeRange(0, 0)];
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            [adapter_compute_encoder setBuffers:empty_compute_buffers
+                                        offsets:empty_compute_offsets
+                               attributeStrides:empty_compute_strides
+                                      withRange:NSMakeRange(0, 0)];
+        }
         [adapter_compute_encoder setTexture:adapter_compute_texture atIndex:0];
         [adapter_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                             threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -11457,7 +11476,9 @@ int main(void) {
             [adapter_mtl4_compiled_pipeline newVisibleFunctionTableWithDescriptor:adapter_visible_descriptor];
         id<MTLFunctionHandle> adapter_table_handle = adapter_mtl4_render_function_handle;
         id<MTLFunctionHandle> adapter_table_handles[] = {adapter_table_handle, nil};
+        const id<MTLFunctionHandle> *empty_table_functions = NULL;
         [adapter_visible_function_table setFunction:adapter_table_handle atIndex:0];
+        [adapter_visible_function_table setFunctions:empty_table_functions withRange:NSMakeRange(0, 0)];
         [adapter_visible_function_table setFunctions:adapter_table_handles withRange:NSMakeRange(1, 2)];
         adapter_visible_function_table.label = @"zpu-cpu-visible-functions";
 
@@ -11469,11 +11490,18 @@ int main(void) {
         id<MTLBuffer> adapter_table_buffers[] = {adapter_vertex_buffer, nil};
         NSUInteger adapter_table_offsets[] = {0, 16};
         id<MTLFunctionHandle> adapter_intersection_handles[] = {adapter_table_handle, nil};
+        const id<MTLBuffer> *empty_table_buffers = NULL;
+        const NSUInteger *empty_table_offsets = NULL;
+        const id<MTLVisibleFunctionTable> *empty_table_visible_tables = NULL;
         [adapter_intersection_function_table setBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_intersection_function_table setBuffers:empty_table_buffers
+                                                offsets:empty_table_offsets
+                                              withRange:NSMakeRange(0, 0)];
         [adapter_intersection_function_table setBuffers:adapter_table_buffers
                                                 offsets:adapter_table_offsets
                                               withRange:NSMakeRange(0, 2)];
         [adapter_intersection_function_table setFunction:adapter_table_handle atIndex:0];
+        [adapter_intersection_function_table setFunctions:empty_table_functions withRange:NSMakeRange(0, 0)];
         [adapter_intersection_function_table setFunctions:adapter_intersection_handles withRange:NSMakeRange(0, 2)];
         [adapter_intersection_function_table
             setOpaqueTriangleIntersectionFunctionWithSignature:MTLIntersectionFunctionSignatureTriangleData
@@ -11482,6 +11510,8 @@ int main(void) {
             setOpaqueCurveIntersectionFunctionWithSignature:MTLIntersectionFunctionSignatureWorldSpaceData
                                                      withRange:NSMakeRange(0, 2)];
         [adapter_intersection_function_table setVisibleFunctionTable:adapter_visible_function_table atBufferIndex:0];
+        [adapter_intersection_function_table setVisibleFunctionTables:empty_table_visible_tables
+                                                       withBufferRange:NSMakeRange(0, 0)];
         adapter_intersection_function_table.label = @"zpu-cpu-intersection-functions";
         BOOL adapter_function_handle_ids_ok = YES;
         if (@available(macOS 26.0, iOS 26.0, *)) {
@@ -15828,6 +15858,23 @@ int main(void) {
         memcpy(constant_data, &argument_constant, sizeof(argument_constant));
         [adapter_argument_encoder setArgumentBuffer:adapter_argument_buffer offset:0];
         void *bound_constant_data = [adapter_argument_encoder constantDataAtIndex:5];
+        const id<MTLBuffer> *empty_argument_buffers = NULL;
+        const NSUInteger *empty_argument_offsets = NULL;
+        const id<MTLTexture> *empty_argument_textures = NULL;
+        const id<MTLSamplerState> *empty_argument_samplers = NULL;
+        const id<MTLRenderPipelineState> *empty_argument_render_pipelines = NULL;
+        const id<MTLComputePipelineState> *empty_argument_compute_pipelines = NULL;
+        const id<MTLIndirectCommandBuffer> *empty_argument_command_buffers = NULL;
+        const id<MTLVisibleFunctionTable> *empty_argument_visible_tables = NULL;
+        const id<MTLIntersectionFunctionTable> *empty_argument_intersection_tables = NULL;
+        [adapter_argument_encoder setBuffers:empty_argument_buffers offsets:empty_argument_offsets withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setTextures:empty_argument_textures withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setSamplerStates:empty_argument_samplers withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setRenderPipelineStates:empty_argument_render_pipelines withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setComputePipelineStates:empty_argument_compute_pipelines withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setIndirectCommandBuffers:empty_argument_command_buffers withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setVisibleFunctionTables:empty_argument_visible_tables withRange:NSMakeRange(0, 0)];
+        [adapter_argument_encoder setIntersectionFunctionTables:empty_argument_intersection_tables withRange:NSMakeRange(0, 0)];
         [adapter_argument_encoder setBuffer:adapter_copy_buffer offset:0 atIndex:0];
         [adapter_argument_encoder setTexture:adapter_compute_icb_texture atIndex:1];
         [adapter_argument_encoder setSamplerState:adapter_sampler atIndex:4];
@@ -16647,6 +16694,32 @@ int main(void) {
         [adapter_encoder setRenderPipelineState:adapter_pipeline];
         [adapter_encoder setViewport:(MTLViewport){0.0, 0.0, width, height, 0.0, 1.0}];
         [adapter_encoder setScissorRect:(MTLScissorRect){0, 0, width, height}];
+        const id<MTLBuffer> *empty_render_buffers = NULL;
+        const NSUInteger *empty_render_offsets = NULL;
+        const NSUInteger *empty_render_strides = NULL;
+        const id<MTLTexture> *empty_render_textures = NULL;
+        const id<MTLSamplerState> *empty_render_samplers = NULL;
+        const float *empty_render_lod_clamps = NULL;
+        [adapter_encoder setVertexBuffers:empty_render_buffers offsets:empty_render_offsets withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setVertexTextures:empty_render_textures withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setVertexSamplerStates:empty_render_samplers withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setVertexSamplerStates:empty_render_samplers
+                                lodMinClamps:empty_render_lod_clamps
+                                lodMaxClamps:empty_render_lod_clamps
+                                    withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setFragmentBuffers:empty_render_buffers offsets:empty_render_offsets withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setFragmentTextures:empty_render_textures withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setFragmentSamplerStates:empty_render_samplers withRange:NSMakeRange(0, 0)];
+        [adapter_encoder setFragmentSamplerStates:empty_render_samplers
+                                  lodMinClamps:empty_render_lod_clamps
+                                  lodMaxClamps:empty_render_lod_clamps
+                                      withRange:NSMakeRange(0, 0)];
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            [adapter_encoder setVertexBuffers:empty_render_buffers
+                                       offsets:empty_render_offsets
+                              attributeStrides:empty_render_strides
+                                     withRange:NSMakeRange(0, 0)];
+        }
         [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [adapter_encoder endEncoding];
