@@ -115,7 +115,10 @@ static const char *const kShaderSource =
     "float3 qvec = cross(tvec, edge1); float v = dot(direction, qvec) * inv_det; "
     "float t = dot(edge2, qvec) * inv_det; "
     "hit = u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t >= 0.0; } "
-    "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n";
+    "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n"
+    "kernel void zpu_cpu_ml_add_f32_oracle(device const float *left [[buffer(0)]], "
+    "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n";
 
 static void fail_with_error(const char *message, NSError *error) {
     if (error != nil) {
@@ -19356,6 +19359,157 @@ int main(void) {
             metal4_ml_add_wrong_type_command_buffer == nil || metal4_ml_add_wrong_type_feedback_error == nil) {
             fail_with_error("Metal 4 CPU ML add accepted a non-UInt8 tensor", metal4_ml_add_error);
             return 156;
+        }
+
+        /* Float32 addition uses the same CPU-owned tensor path, with native
+         * Metal's ordinary compute encoder serving only as an arithmetic
+         * oracle. The adapter never submits this operation to that encoder;
+         * changing the left tensor after encoding proves that the deferred
+         * operation reads ZPU storage at command-buffer execution time. */
+        NSError *metal4_ml_add_f32_error = nil;
+        MTL4LibraryFunctionDescriptor *metal4_ml_add_f32_function_descriptor =
+            [MTL4LibraryFunctionDescriptor new];
+        metal4_ml_add_f32_function_descriptor.library = metal4_ml_identity_library;
+        metal4_ml_add_f32_function_descriptor.name = @"zpu_cpu_ml_add_f32";
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_add_f32_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_add_f32_descriptor.label = @"zpu-cpu-ml-add-f32";
+        metal4_ml_add_f32_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_add_f32_function_descriptor;
+        [metal4_ml_add_f32_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:0];
+        [metal4_ml_add_f32_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:1];
+        [metal4_ml_add_f32_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:2];
+        id<MTL4MachineLearningPipelineState> metal4_ml_add_f32_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_add_f32_descriptor error:&metal4_ml_add_f32_error];
+        MTLTensorDescriptor *metal4_ml_add_f32_tensor_descriptor =
+            [metal4_ml_identity_tensor_descriptor copy];
+        metal4_ml_add_f32_tensor_descriptor.dataType = MTLTensorDataTypeFloat32;
+        id<MTLTensor> metal4_ml_add_f32_left =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_f32_tensor_descriptor
+                                               error:&metal4_ml_add_f32_error];
+        id<MTLTensor> metal4_ml_add_f32_right =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_f32_tensor_descriptor
+                                               error:&metal4_ml_add_f32_error];
+        id<MTLTensor> metal4_ml_add_f32_output =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_f32_tensor_descriptor
+                                               error:&metal4_ml_add_f32_error];
+        NSArray *metal4_ml_add_f32_resources = @[
+            (id)metal4_ml_add_f32_left,
+            (id)metal4_ml_add_f32_right,
+            (id)metal4_ml_add_f32_output,
+        ];
+        const float metal4_ml_add_f32_left_initial[] = {
+            -9.5f, 2.25f, 0.125f, 17.0f, 1.0f / 3.0f, -4.75f,
+            32.0f, -0.5f, 7.25f, 0.0f, 1000.5f, -81.25f,
+        };
+        const float metal4_ml_add_f32_left_committed[] = {
+            1.25f, -2.5f, 3.75f, -4.0f, 5.5f, -6.25f,
+            7.0f, -8.125f, 9.5f, -10.75f, 11.0f, -12.5f,
+        };
+        const float metal4_ml_add_f32_right_values[] = {
+            0.5f, 2.0f, -3.0f, 4.5f, -5.25f, 6.0f,
+            -7.75f, 8.0f, -9.25f, 10.5f, -11.0f, 12.25f,
+        };
+        const float metal4_ml_add_f32_sentinel[] = {
+            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+        };
+        float metal4_ml_add_f32_values[12] = {0};
+        [metal4_ml_add_f32_left replaceSliceOrigin:metal4_ml_identity_zero
+                                    sliceDimensions:metal4_ml_identity_dimensions
+                                          withBytes:metal4_ml_add_f32_left_initial
+                                            strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_add_f32_right replaceSliceOrigin:metal4_ml_identity_zero
+                                     sliceDimensions:metal4_ml_identity_dimensions
+                                           withBytes:metal4_ml_add_f32_right_values
+                                             strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_add_f32_output replaceSliceOrigin:metal4_ml_identity_zero
+                                      sliceDimensions:metal4_ml_identity_dimensions
+                                            withBytes:metal4_ml_add_f32_sentinel
+                                              strides:metal4_ml_identity_packed_strides];
+        MTL4ArgumentTableDescriptor *metal4_ml_add_f32_table_descriptor =
+            [MTL4ArgumentTableDescriptor new];
+        metal4_ml_add_f32_table_descriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> metal4_ml_add_f32_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_ml_add_f32_table_descriptor
+                                                       error:&metal4_ml_add_f32_error];
+        [metal4_ml_add_f32_table setResource:metal4_ml_add_f32_left.gpuResourceID atBufferIndex:0];
+        [metal4_ml_add_f32_table setResource:metal4_ml_add_f32_right.gpuResourceID atBufferIndex:1];
+        [metal4_ml_add_f32_table setResource:metal4_ml_add_f32_output.gpuResourceID atBufferIndex:2];
+        id<MTL4CommandBuffer> metal4_ml_add_f32_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_add_f32_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_add_f32_encoder =
+            [metal4_ml_add_f32_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_add_f32_encoder setPipelineState:metal4_ml_add_f32_pipeline];
+        [metal4_ml_add_f32_encoder setArgumentTable:metal4_ml_add_f32_table];
+        [metal4_ml_add_f32_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_add_f32_left replaceSliceOrigin:metal4_ml_identity_zero
+                                    sliceDimensions:metal4_ml_identity_dimensions
+                                          withBytes:metal4_ml_add_f32_left_committed
+                                            strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_add_f32_encoder endEncoding];
+        [metal4_ml_add_f32_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_add_f32_command_buffers[] = {
+            metal4_ml_add_f32_command_buffer,
+        };
+        MTL4CommitOptions *metal4_ml_add_f32_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_add_f32_feedback_error = nil;
+        [metal4_ml_add_f32_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_add_f32_feedback_error = feedback.error;
+        }];
+
+        id<MTLFunction> native_ml_add_f32_function =
+            [library newFunctionWithName:@"zpu_cpu_ml_add_f32_oracle"];
+        NSError *native_ml_add_f32_error = nil;
+        id<MTLComputePipelineState> native_ml_add_f32_pipeline =
+            [device newComputePipelineStateWithFunction:native_ml_add_f32_function
+                                                   error:&native_ml_add_f32_error];
+        id<MTLBuffer> native_ml_add_f32_left =
+            [device newBufferWithBytes:metal4_ml_add_f32_left_committed
+                                 length:sizeof(metal4_ml_add_f32_left_committed)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_ml_add_f32_right =
+            [device newBufferWithBytes:metal4_ml_add_f32_right_values
+                                 length:sizeof(metal4_ml_add_f32_right_values)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_ml_add_f32_output =
+            [device newBufferWithLength:sizeof(metal4_ml_add_f32_values)
+                                options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> native_ml_add_f32_queue = [device newCommandQueue];
+        id<MTLCommandBuffer> native_ml_add_f32_command_buffer = [native_ml_add_f32_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_ml_add_f32_encoder =
+            [native_ml_add_f32_command_buffer computeCommandEncoder];
+        [native_ml_add_f32_encoder setComputePipelineState:native_ml_add_f32_pipeline];
+        [native_ml_add_f32_encoder setBuffer:native_ml_add_f32_left offset:0 atIndex:0];
+        [native_ml_add_f32_encoder setBuffer:native_ml_add_f32_right offset:0 atIndex:1];
+        [native_ml_add_f32_encoder setBuffer:native_ml_add_f32_output offset:0 atIndex:2];
+        [native_ml_add_f32_encoder dispatchThreads:MTLSizeMake(12, 1, 1)
+                              threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [native_ml_add_f32_encoder endEncoding];
+        [native_ml_add_f32_command_buffer commit];
+        [metal4_queue commit:metal4_ml_add_f32_command_buffers
+                        count:1
+                       options:metal4_ml_add_f32_options];
+        [native_ml_add_f32_command_buffer waitUntilCompleted];
+        [metal4_ml_add_f32_output getBytes:metal4_ml_add_f32_values
+                                  strides:metal4_ml_identity_packed_strides
+                         fromSliceOrigin:metal4_ml_identity_zero
+                         sliceDimensions:metal4_ml_identity_dimensions];
+        const float *native_ml_add_f32_values = (const float *)native_ml_add_f32_output.contents;
+        if (metal4_ml_add_f32_pipeline == nil || metal4_ml_add_f32_error != nil ||
+            metal4_ml_identity_library == nil ||
+            [metal4_ml_identity_library newFunctionWithName:@"zpu_cpu_ml_add_f32"] == nil ||
+            metal4_ml_add_f32_resources.count != 3 ||
+            metal4_ml_add_f32_table == nil || metal4_ml_add_f32_encoder == nil ||
+            metal4_ml_add_f32_command_buffer == nil || metal4_ml_add_f32_feedback_error != nil ||
+            native_ml_add_f32_function == nil || native_ml_add_f32_pipeline == nil ||
+            native_ml_add_f32_error != nil || native_ml_add_f32_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_ml_add_f32_values, metal4_ml_add_f32_values,
+                   sizeof(metal4_ml_add_f32_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML Float32 add profile failed",
+                            metal4_ml_add_f32_error ?: metal4_ml_add_f32_feedback_error ?: native_ml_add_f32_error);
+            return 163;
         }
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
