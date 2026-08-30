@@ -69,9 +69,15 @@ jobs:
           python3 - <<'PY'
           import json
           r=json.load(open('benchmark.json'))
+          expected_ops = {
+              'clear', 'pixel_write', 'clipped_rectangle',
+              'vulkan_host_memory_fill', 'vulkan_host_memory_copy',
+              'source_over_blend', 'sprite_draw', 'frame',
+              'desktop_windows', 'terminal_cells', 'game_scene', 'design_canvas',
+          }
           checks = [
-              (r['schema_version']==4 and r['workload_id']=='zpu-2d-kernels-v4-240x240-seed-151521030', 'schema/workload'),
-              ({'clear','pixel_write','clipped_rectangle','vulkan_host_memory_fill','vulkan_host_memory_copy','source_over_blend','sprite_draw','frame'} == {m['name'] for m in r['metrics']}, 'operations'),
+              (r['schema_version']==5 and r['workload_id']=='zpu-2d-app-scenes-v5-240x240-seed-151521030', 'schema/workload'),
+              (expected_ops == {m['name'] for m in r['metrics']}, 'operations'),
               (all(m['checksum'] and m['bytes_s'] > 0 and m['frame']['p50_ns'] <= m['frame']['p95_ns'] <= m['frame']['p99_ns'] for m in r['metrics']), 'metrics'),
               (r['fingerprint']['max_threads'] <= 8, 'thread cap'),
               (r['fingerprint']['compiler']=='0.16.0' and r['fingerprint']['build_mode']=='ReleaseFast', 'compiler/mode'),
