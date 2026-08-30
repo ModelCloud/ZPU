@@ -5427,6 +5427,178 @@ static int test_layered_patch_against_native(
     return 0;
 }
 
+API_AVAILABLE(macos(11.0), ios(11.0))
+static int test_layered_patch_msaa_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_layered_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_patch_vertex_function, id<MTLFunction> adapter_patch_fragment_function) {
+    enum { width = 9, height = 7, layers = 3, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+    };
+    const uint16_t factors[] = {
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+    };
+    if (native_layered_vertex_function == nil || native_fragment_function == nil ||
+        adapter_patch_vertex_function == nil || adapter_patch_fragment_function == nil) return 238;
+
+    const NSUInteger sample_counts[] = {2, 4};
+    for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
+        const NSUInteger sample_count = sample_counts[sample_index];
+        if (![native_device supportsTextureSampleCount:sample_count] ||
+            ![adapter_device supportsTextureSampleCount:sample_count]) continue;
+
+        MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+        native_descriptor.vertexFunction = native_layered_vertex_function;
+        native_descriptor.fragmentFunction = native_fragment_function;
+        native_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        native_descriptor.rasterSampleCount = sample_count;
+        native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *native_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+
+        MTLRenderPipelineDescriptor *adapter_descriptor = [MTLRenderPipelineDescriptor new];
+        adapter_descriptor.vertexFunction = adapter_patch_vertex_function;
+        adapter_descriptor.fragmentFunction = adapter_patch_fragment_function;
+        adapter_descriptor.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+        adapter_descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        adapter_descriptor.tessellationFactorStepFunction =
+            MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+        adapter_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
+        adapter_descriptor.tessellationFactorScaleEnabled = NO;
+        adapter_descriptor.maxTessellationFactor = 1.0f;
+        adapter_descriptor.rasterSampleCount = sample_count;
+        adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_descriptor error:&adapter_error];
+
+        MTLTextureDescriptor *sample_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        sample_descriptor.textureType = MTLTextureType2DMultisampleArray;
+        sample_descriptor.arrayLength = layers;
+        sample_descriptor.sampleCount = sample_count;
+        sample_descriptor.storageMode = MTLStorageModeShared;
+        sample_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *resolve_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        resolve_descriptor.textureType = MTLTextureType2DArray;
+        resolve_descriptor.arrayLength = layers;
+        resolve_descriptor.storageMode = MTLStorageModeShared;
+        resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_samples = [native_device newTextureWithDescriptor:sample_descriptor];
+        id<MTLTexture> adapter_samples = [adapter_device newTextureWithDescriptor:sample_descriptor];
+        id<MTLTexture> native_resolve = [native_device newTextureWithDescriptor:resolve_descriptor];
+        id<MTLTexture> adapter_resolve = [adapter_device newTextureWithDescriptor:resolve_descriptor];
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_factor_buffer =
+            [adapter_device newBufferWithBytes:factors length:sizeof(factors) options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+        id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.renderTargetArrayLength = layers;
+        native_pass.colorAttachments[0].texture = native_samples;
+        native_pass.colorAttachments[0].resolveTexture = native_resolve;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+        MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+        adapter_pass.colorAttachments[0].texture = adapter_samples;
+        adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
+        const MTLSamplePosition positions_2x[] = {{0.75f, 0.75f}, {0.25f, 0.25f}};
+        const MTLSamplePosition positions_4x[] = {
+            {0.375f, 0.125f}, {0.875f, 0.375f}, {0.125f, 0.625f}, {0.625f, 0.875f},
+        };
+        if (sample_count == 2) {
+            [native_pass setSamplePositions:positions_2x count:sample_count];
+            [adapter_pass setSamplePositions:positions_2x count:sample_count];
+        } else {
+            [native_pass setSamplePositions:positions_4x count:sample_count];
+            [adapter_pass setSamplePositions:positions_4x count:sample_count];
+        }
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTLRenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        const MTLViewport viewport = {1.0, 1.0, width - 2.0, height - 2.0, 0.0, 1.0};
+        const MTLScissorRect scissor = {1, 1, width - 2, height - 2};
+        if (native_encoder != nil) {
+            [native_encoder setViewport:viewport];
+            [native_encoder setScissorRect:scissor];
+            [native_encoder setRenderPipelineState:native_pipeline];
+            [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+            [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                             instanceCount:layers baseInstance:0];
+            [native_encoder endEncoding];
+        }
+        if (adapter_encoder != nil) {
+            [adapter_encoder setViewport:viewport];
+            [adapter_encoder setScissorRect:scissor];
+            [adapter_encoder setRenderPipelineState:adapter_pipeline];
+            [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+            [adapter_encoder setTessellationFactorBuffer:adapter_factor_buffer offset:0
+                                            instanceStride:sizeof(uint16_t) * 4];
+            [adapter_encoder drawPatches:3 patchStart:0 patchCount:1 patchIndexBuffer:nil
+                     patchIndexBufferOffset:0 instanceCount:layers baseInstance:0];
+            [adapter_encoder endEncoding];
+        }
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+
+        uint8_t native_pixels[layers][max_byte_count] = {{0}};
+        uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+        BOOL exact = native_pipeline != nil && adapter_pipeline != nil && native_samples != nil &&
+            adapter_samples != nil && native_resolve != nil && adapter_resolve != nil && native_buffer != nil &&
+            adapter_buffer != nil && adapter_factor_buffer != nil && native_queue != nil && adapter_queue != nil &&
+            native_command_buffer != nil && adapter_command_buffer != nil && native_encoder != nil &&
+            adapter_encoder != nil && native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted;
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            if (native_resolve != nil) {
+                [native_resolve getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                              fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                             mipmapLevel:0 slice:layer];
+            }
+            if (adapter_resolve != nil) {
+                [adapter_resolve getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                               fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                              mipmapLevel:0 slice:layer];
+            }
+            if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+                size_t mismatch = 0;
+                while (mismatch < max_byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+                fprintf(stderr, "metal-pixel: layered patch %zux MSAA slice %zu mismatch at byte %zu pixel=(%zu,%zu) channel=%zu native=%u adapter=%u\n",
+                        sample_count, layer, mismatch, mismatch / 4 % width, mismatch / 4 / width, mismatch % 4,
+                        mismatch < max_byte_count ? native_pixels[layer][mismatch] : 0,
+                        mismatch < max_byte_count ? adapter_pixels[layer][mismatch] : 0);
+                fail_with_error("native layered patch MSAA oracle failed", native_command_buffer.error);
+                fail_with_error("adapter layered patch MSAA failed", adapter_command_buffer.error);
+                return 239;
+            }
+        }
+        if (!exact) {
+            fail_with_error("native layered patch MSAA completion failed", native_command_buffer.error);
+            fail_with_error("adapter layered patch MSAA completion failed", adapter_command_buffer.error);
+            return 240;
+        }
+    }
+    return 0;
+}
+
 static int test_layered_depth_stencil_render_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -8890,6 +9062,12 @@ int main(void) {
             device, adapter_device, layered_vertex_function, fragment_function,
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);
         if (layered_patch_result != 0) return layered_patch_result;
+        if (@available(macOS 11.0, iOS 11.0, *)) {
+            const int layered_patch_msaa_result = test_layered_patch_msaa_against_native(
+                device, adapter_device, layered_vertex_function, fragment_function,
+                adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);
+            if (layered_patch_msaa_result != 0) return layered_patch_msaa_result;
+        }
         const int layered_icb_base_instance_result = test_layered_icb_base_instance_render_against_native(
             device, adapter_device, layered_vertex_function, layered_fragment_function,
             adapter_layered_vertex_function, adapter_layered_fragment_function);

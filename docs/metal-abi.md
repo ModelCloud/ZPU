@@ -104,7 +104,8 @@ triangle path:
   planes and resolves them through the CPU path; the registered tile profile
   supports the same sample-plane and resolve path; arbitrary mesh shader execution remains explicitly rejected, while
   factor-one triangle patches select layers
-  by `baseInstance`.
+  by `baseInstance` and use the same CPU sample-plane and resolve path for
+  supported 2x/4x multisample attachments.
 - CPU-owned 2D multisample and 2D multisample-array textures with
   Apple-verified 2x and 4x default sample locations, represented as
   independent ZPU sample planes per layer. Ordered
@@ -316,7 +317,9 @@ triangle path:
   `zpu_cpu_tessellated_triangle_vertex` plus
   `zpu_cpu_tessellated_triangle_fragment` profile accepts factor-one triangle
   patches and rasterizes their three control points through the ordinary
-  top-left-origin ZPU triangle path
+  top-left-origin ZPU triangle path, including per-sample coverage and
+  attachment-global 8-bit subpixel interpolation for 2x/4x multisample
+  targets
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
