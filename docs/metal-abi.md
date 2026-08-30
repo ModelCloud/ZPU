@@ -290,8 +290,10 @@ triangle path:
   dynamic libraries preserve registered symbol names and install names through
   a deterministic CPU serialization format; the registered
   `zpu_cpu_ml_identity` tensor pipeline executes through deferred CPU/ZPU
-  copies, while arbitrary ML graphs and arbitrary-MSL compiler requests remain
-  fail-closed; the registered `zpu_cpu_tile_gradient_rgba8` tile profile is
+  copies, and the registered `zpu_cpu_ml_add_u8` profile performs deferred
+  elementwise UInt8 tensor addition through ZPU-owned storage, while arbitrary
+  ML graphs and arbitrary-MSL compiler requests remain fail-closed; the registered
+  `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
   exact attachment-global upper-left `(0,0)` coordinates, recorded scissor
   clipping, fixed profile depth 0.5, and RGBA8/BGRA8 storage ordering; the
@@ -315,10 +317,11 @@ triangle path:
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
-- the registered `zpu_cpu_ml_identity` Metal 4 machine-learning profile also
-  preserves CPU fence update/wait ordering and interleaves tensor copies with
-  other commands at their encoded position in the deferred ZPU command
-  buffer; arbitrary ML graphs remain fail-closed
+- the registered `zpu_cpu_ml_identity` and `zpu_cpu_ml_add_u8` Metal 4
+  machine-learning profiles preserve CPU fence update/wait ordering and
+  interleave tensor copies and arithmetic with other commands at their encoded
+  position in the deferred ZPU command buffer; arbitrary ML graphs remain
+  fail-closed
 - owner-checked CPU function handles expose registered compute and visible
   callable names/types plus synthetic CPU resource IDs; visible function-table
   invocation remains unsupported because the fixed CPU kernels do not execute
