@@ -7261,7 +7261,9 @@ int main(void) {
             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
+            "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_test_stage_in_vertex() {}\n"
+            "fragment float4 zpu_test_fragment() { return float4(1.0); }\n"
             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
              "kernel void zpu_cpu_mesh_gradient_rgba8() {}\n"
              "fragment float4 zpu_cpu_mesh_gradient_fragment() { return float4(1.0); }\n"
@@ -7342,8 +7344,102 @@ int main(void) {
                 adapter_alias_position.attributeIndex == 0 &&
                 adapter_alias_position.attributeType == MTLDataTypeFloat4 &&
                 [adapter_alias_stage_position.name isEqualToString:@"position"] &&
-                adapter_alias_stage_position.attributeIndex == 0 &&
-                adapter_alias_stage_position.attributeType == MTLDataTypeFloat4;
+            adapter_alias_stage_position.attributeIndex == 0 &&
+            adapter_alias_stage_position.attributeType == MTLDataTypeFloat4;
+        }
+        BOOL adapter_specialized_render_exact = YES;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MTLFunctionDescriptor *native_render_vertex_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_render_vertex_descriptor.name = @"zpu_test_vertex";
+            native_render_vertex_descriptor.specializedName = @"zpu_test_vertex_alias";
+            NSError *native_render_vertex_error = nil;
+            id<MTLFunction> native_render_vertex_alias =
+                [library newFunctionWithDescriptor:native_render_vertex_descriptor
+                                               error:&native_render_vertex_error];
+            MTLFunctionDescriptor *native_render_fragment_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_render_fragment_descriptor.name = @"zpu_test_fragment";
+            native_render_fragment_descriptor.specializedName = @"zpu_test_fragment_alias";
+            NSError *native_render_fragment_error = nil;
+            id<MTLFunction> native_render_fragment_alias =
+                [library newFunctionWithDescriptor:native_render_fragment_descriptor
+                                               error:&native_render_fragment_error];
+            MTLFunctionDescriptor *adapter_render_vertex_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_render_vertex_descriptor.name = @"zpu_test_vertex";
+            adapter_render_vertex_descriptor.specializedName = @"zpu_test_vertex_alias";
+            NSError *adapter_render_vertex_error = nil;
+            id<MTLFunction> adapter_render_vertex_alias =
+                [adapter_library newFunctionWithDescriptor:adapter_render_vertex_descriptor
+                                                       error:&adapter_render_vertex_error];
+            MTLFunctionDescriptor *adapter_render_fragment_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_render_fragment_descriptor.name = @"zpu_test_fragment";
+            adapter_render_fragment_descriptor.specializedName = @"zpu_test_fragment_alias";
+            NSError *adapter_render_fragment_error = nil;
+            id<MTLFunction> adapter_render_fragment_alias =
+                [adapter_library newFunctionWithDescriptor:adapter_render_fragment_descriptor
+                                                       error:&adapter_render_fragment_error];
+            MTLRenderPipelineDescriptor *native_render_descriptor = [pipeline_descriptor copy];
+            native_render_descriptor.vertexFunction = native_render_vertex_alias;
+            native_render_descriptor.fragmentFunction = native_render_fragment_alias;
+            NSError *native_render_pipeline_error = nil;
+            id<MTLRenderPipelineState> native_render_pipeline_alias =
+                [device newRenderPipelineStateWithDescriptor:native_render_descriptor
+                                                        error:&native_render_pipeline_error];
+            MTLRenderPipelineDescriptor *adapter_render_descriptor = [pipeline_descriptor copy];
+            adapter_render_descriptor.vertexFunction = adapter_render_vertex_alias;
+            adapter_render_descriptor.fragmentFunction = adapter_render_fragment_alias;
+            NSError *adapter_render_pipeline_error = nil;
+            id<MTLRenderPipelineState> adapter_render_pipeline_alias =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_render_descriptor
+                                                                error:&adapter_render_pipeline_error];
+            MTLTextureDescriptor *native_alias_texture_descriptor = [texture_descriptor copy];
+            native_alias_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+            MTLTextureDescriptor *adapter_alias_texture_descriptor = [native_alias_texture_descriptor copy];
+            id<MTLTexture> native_alias_texture = [device newTextureWithDescriptor:native_alias_texture_descriptor];
+            id<MTLTexture> adapter_alias_texture = [adapter_device newTextureWithDescriptor:adapter_alias_texture_descriptor];
+            MTLRenderPassDescriptor *native_alias_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_alias_pass.colorAttachments[0].texture = native_alias_texture;
+            native_alias_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_alias_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_alias_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            MTLRenderPassDescriptor *adapter_alias_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            adapter_alias_pass.colorAttachments[0].texture = adapter_alias_texture;
+            adapter_alias_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            adapter_alias_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            adapter_alias_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            id<MTLCommandBuffer> native_alias_command_buffer = [queue commandBuffer];
+            id<MTLRenderCommandEncoder> native_alias_encoder =
+                [native_alias_command_buffer renderCommandEncoderWithDescriptor:native_alias_pass];
+            [native_alias_encoder setRenderPipelineState:native_render_pipeline_alias];
+            [native_alias_encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+            [native_alias_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [native_alias_encoder endEncoding];
+            [native_alias_command_buffer commit];
+            [native_alias_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_alias_command_buffer = [adapter_queue commandBuffer];
+            id<MTLRenderCommandEncoder> adapter_alias_encoder =
+                [adapter_alias_command_buffer renderCommandEncoderWithDescriptor:adapter_alias_pass];
+            [adapter_alias_encoder setRenderPipelineState:adapter_render_pipeline_alias];
+            [adapter_alias_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+            [adapter_alias_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [adapter_alias_encoder endEncoding];
+            [adapter_alias_command_buffer commit];
+            [adapter_alias_command_buffer waitUntilCompleted];
+            uint8_t native_alias_pixels[byte_count] = {0};
+            uint8_t adapter_alias_pixels[byte_count] = {0};
+            [native_alias_texture getBytes:native_alias_pixels bytesPerRow:(NSUInteger)width * 4
+                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_alias_texture getBytes:adapter_alias_pixels bytesPerRow:(NSUInteger)width * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            adapter_specialized_render_exact =
+                native_render_vertex_alias != nil && native_render_vertex_error == nil &&
+                native_render_fragment_alias != nil && native_render_fragment_error == nil &&
+                adapter_render_vertex_alias != nil && adapter_render_vertex_error == nil &&
+                adapter_render_fragment_alias != nil && adapter_render_fragment_error == nil &&
+                native_render_pipeline_alias != nil && native_render_pipeline_error == nil &&
+                adapter_render_pipeline_alias != nil && adapter_render_pipeline_error == nil &&
+                native_alias_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_alias_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(native_alias_pixels, adapter_alias_pixels, sizeof(native_alias_pixels)) == 0;
         }
         BOOL adapter_stitched_library_ok = YES;
         if (@available(macOS 12.0, iOS 15.0, *)) {
@@ -7629,13 +7725,14 @@ int main(void) {
             adapter_constant_function == nil ||
             !adapter_stage_input_attributes_ok ||
             !adapter_specialized_metadata_ok ||
+            !adapter_specialized_render_exact ||
             !adapter_stitched_library_ok ||
             !adapter_function_descriptor_ok ||
             !adapter_function_options_ok ||
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 10 ||
+            adapter_library.functionNames.count != 12 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
