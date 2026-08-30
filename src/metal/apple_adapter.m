@@ -81,6 +81,9 @@ static BOOL zpu_cpu_ml_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_identity_function_name] ||
         zpu_cpu_ml_add_function_name_supported(name);
 }
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName);
 static NSString *const zpu_cpu_trace_triangles_function_name = @"zpu_cpu_trace_triangles_rgba8";
 static NSString *const zpu_cpu_tile_gradient_function_name = @"zpu_cpu_tile_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_function_name = @"zpu_cpu_mesh_gradient_rgba8";
@@ -7632,7 +7635,43 @@ static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *ver
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
+    if (!zpu_cpu_ml_function_name_supported(name)) return nil;
+    const BOOL identity = [name isEqualToString:zpu_cpu_ml_identity_function_name];
+    const MTLTensorDataType tensorDataType = zpu_mtl4_ml_tensor_data_type(name);
+    if (identity) {
+        ZPUTensorBinding *input = [[ZPUTensorBinding alloc] initWithName:@"input"
+                                                                     type:zpu_mtl_binding_type_tensor
+                                                                   access:MTLBindingAccessReadOnly index:0];
+        [input setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:nil];
+        ZPUTensorBinding *output = [[ZPUTensorBinding alloc] initWithName:@"output"
+                                                                      type:zpu_mtl_binding_type_tensor
+                                                                    access:MTLBindingAccessWriteOnly index:1];
+        [output setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:nil];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[input, output] userAnnotation:nil];
+    }
+    ZPUTensorBinding *left = [[ZPUTensorBinding alloc] initWithName:@"left"
+                                                                type:zpu_mtl_binding_type_tensor
+                                                              access:MTLBindingAccessReadOnly index:0];
+    [left setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:nil];
+    ZPUTensorBinding *right = [[ZPUTensorBinding alloc] initWithName:@"right"
+                                                                 type:zpu_mtl_binding_type_tensor
+                                                               access:MTLBindingAccessReadOnly index:1];
+    [right setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:nil];
+    ZPUTensorBinding *output = [[ZPUTensorBinding alloc] initWithName:@"output"
+                                                                  type:zpu_mtl_binding_type_tensor
+                                                                access:MTLBindingAccessWriteOnly index:2];
+    [output setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:nil];
+    return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+        initWithBindings:@[left, right, output] userAnnotation:nil];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
+    MTLFunctionReflection *mlReflection = zpu_mtl4_ml_function_reflection(name);
+    if (mlReflection != nil) return mlReflection;
     if ([name isEqualToString:@"zpu_test_no_raster_vertex"]) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];

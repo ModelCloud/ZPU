@@ -21346,6 +21346,12 @@ int main(void) {
                     (const uint8_t *)packed_add_native_output.contents;
                 id<MTLTensorBinding> packed_add_binding = packed_add_pipeline.reflection.bindings.count > 0 ?
                     (id<MTLTensorBinding>)packed_add_pipeline.reflection.bindings[0] : nil;
+                MTLFunctionReflection *packed_add_function_reflection =
+                    [metal4_ml_identity_library reflectionForFunctionWithName:
+                        [NSString stringWithUTF8String:packed_add_names[packed_add_index]]];
+                id<MTLTensorBinding> packed_add_function_binding =
+                    packed_add_function_reflection.bindings.count > 0 ?
+                        (id<MTLTensorBinding>)packed_add_function_reflection.bindings[0] : nil;
                 if (packed_add_pipeline == nil || packed_add_error != nil ||
                     packed_add_left == nil || packed_add_right == nil || packed_add_output == nil ||
                     packed_add_table == nil || packed_add_encoder == nil ||
@@ -21353,6 +21359,11 @@ int main(void) {
                     packed_add_binding == nil || packed_add_binding.tensorDataType !=
                         (packed_add_signed[packed_add_index] ? MTLTensorDataTypeInt4 : MTLTensorDataTypeUInt4) ||
                     packed_add_binding.indexType != MTLDataTypeInt ||
+                    packed_add_function_reflection == nil || packed_add_function_reflection.bindings.count != 3 ||
+                    packed_add_function_binding == nil || packed_add_function_binding.tensorDataType !=
+                        (packed_add_signed[packed_add_index] ? MTLTensorDataTypeInt4 : MTLTensorDataTypeUInt4) ||
+                    packed_add_function_binding.indexType != MTLDataTypeInt ||
+                    packed_add_function_binding.dimensions != nil ||
                     packed_add_native_function == nil || packed_add_native_pipeline == nil ||
                     packed_add_native_error != nil || packed_add_native_command_buffer.status !=
                         MTLCommandBufferStatusCompleted || packed_add_native_values == NULL ||
