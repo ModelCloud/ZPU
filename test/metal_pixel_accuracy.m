@@ -4171,6 +4171,113 @@ static int test_layered_patch_against_native(
         }
     }
 
+    /* The indirect patch arguments are also deferred. Keep the adapter
+     * arguments zero while encoding, update them before endEncoding, and
+     * compare the resulting layered CPU/ZPU pass with the same native
+     * ordinary instanced triangle. */
+    {
+        const uint32_t initial_patch_indirect_arguments[] = {0, 0, 0, 0};
+        const uint32_t committed_patch_indirect_arguments[] = {1, layers - 1, 0, 1};
+        id<MTLBuffer> adapter_patch_indirect_buffer =
+            [adapter_device newBufferWithBytes:initial_patch_indirect_arguments
+                                         length:sizeof(initial_patch_indirect_arguments)
+                                        options:MTLResourceStorageModeShared];
+        MTLTextureDescriptor *native_indirect_texture_descriptor = [MTLTextureDescriptor new];
+        native_indirect_texture_descriptor.textureType = MTLTextureType2DArray;
+        native_indirect_texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_indirect_texture_descriptor.width = width;
+        native_indirect_texture_descriptor.height = height;
+        native_indirect_texture_descriptor.arrayLength = layers;
+        native_indirect_texture_descriptor.mipmapLevelCount = 1;
+        native_indirect_texture_descriptor.sampleCount = 1;
+        native_indirect_texture_descriptor.storageMode = MTLStorageModeShared;
+        native_indirect_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_indirect_texture =
+            [native_device newTextureWithDescriptor:native_indirect_texture_descriptor];
+        id<MTLTexture> adapter_indirect_texture =
+            [adapter_device newTextureWithDescriptor:native_indirect_texture_descriptor];
+        MTLRenderPassDescriptor *native_indirect_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_indirect_pass.renderTargetArrayLength = layers;
+        native_indirect_pass.colorAttachments[0].texture = native_indirect_texture;
+        native_indirect_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_indirect_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_indirect_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+        MTLRenderPassDescriptor *adapter_indirect_pass = [native_indirect_pass copy];
+        adapter_indirect_pass.colorAttachments[0].texture = adapter_indirect_texture;
+        id<MTLCommandQueue> native_indirect_queue = [native_device newCommandQueue];
+        id<MTLCommandQueue> adapter_indirect_queue = [adapter_device newCommandQueue];
+        id<MTLCommandBuffer> native_indirect_command_buffer = [native_indirect_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_indirect_command_buffer = [adapter_indirect_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_indirect_encoder =
+            [native_indirect_command_buffer renderCommandEncoderWithDescriptor:native_indirect_pass];
+        id<MTLRenderCommandEncoder> adapter_indirect_encoder =
+            [adapter_indirect_command_buffer renderCommandEncoderWithDescriptor:adapter_indirect_pass];
+        if (adapter_patch_indirect_buffer == nil || native_indirect_texture == nil ||
+            adapter_indirect_texture == nil || native_indirect_encoder == nil ||
+            adapter_indirect_encoder == nil) {
+            fail_with_error("layered indirect patch resource allocation", adapter_error);
+            return 233;
+        }
+        const MTLViewport indirect_viewport = {1.0, 1.0, width - 2.0, height - 2.0, 0.0, 1.0};
+        const MTLScissorRect indirect_scissor = {1, 1, width - 2, height - 2};
+        [native_indirect_encoder setViewport:indirect_viewport];
+        [native_indirect_encoder setScissorRect:indirect_scissor];
+        [native_indirect_encoder setRenderPipelineState:native_pipeline];
+        [native_indirect_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+        [native_indirect_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                                  instanceCount:layers - 1 baseInstance:1];
+        [native_indirect_encoder endEncoding];
+        [adapter_indirect_encoder setViewport:indirect_viewport];
+        [adapter_indirect_encoder setScissorRect:indirect_scissor];
+        [adapter_indirect_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_indirect_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_indirect_encoder setTessellationFactorBuffer:adapter_factor_buffer offset:0
+                                                  instanceStride:sizeof(uint16_t) * 4];
+        [adapter_indirect_encoder drawPatches:3 patchIndexBuffer:nil patchIndexBufferOffset:0
+                                indirectBuffer:adapter_patch_indirect_buffer indirectBufferOffset:0];
+        memcpy(adapter_patch_indirect_buffer.contents, committed_patch_indirect_arguments,
+               sizeof(committed_patch_indirect_arguments));
+        uint8_t adapter_indirect_before[layers][max_byte_count] = {{0}};
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            [adapter_indirect_texture getBytes:adapter_indirect_before[layer]
+                                   bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                                    fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                   mipmapLevel:0 slice:layer];
+        }
+        [adapter_indirect_encoder endEncoding];
+        [native_indirect_command_buffer commit];
+        [adapter_indirect_command_buffer commit];
+        [native_indirect_command_buffer waitUntilCompleted];
+        [adapter_indirect_command_buffer waitUntilCompleted];
+        uint8_t native_indirect_pixels[layers][max_byte_count] = {{0}};
+        uint8_t adapter_indirect_pixels[layers][max_byte_count] = {{0}};
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            [native_indirect_texture getBytes:native_indirect_pixels[layer]
+                                  bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                                   fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                  mipmapLevel:0 slice:layer];
+            [adapter_indirect_texture getBytes:adapter_indirect_pixels[layer]
+                                    bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                    mipmapLevel:0 slice:layer];
+            if (memcmp(adapter_indirect_before[layer],
+                       (const uint8_t[max_byte_count]){0}, max_byte_count) != 0 ||
+                memcmp(native_indirect_pixels[layer], adapter_indirect_pixels[layer], max_byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: layered indirect patch slice %zu mismatch\n", layer);
+                fail_with_error("native layered indirect patch error", native_indirect_command_buffer.error);
+                fail_with_error("adapter layered indirect patch error", adapter_indirect_command_buffer.error);
+                return 234;
+            }
+        }
+        if (native_indirect_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_indirect_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_indirect_pixels[0], native_indirect_pixels[1], max_byte_count) == 0 ||
+            memcmp(native_indirect_pixels[1], native_indirect_pixels[2], max_byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: layered indirect patch base-instance routing failed\n");
+            return 235;
+        }
+    }
+
     if (@available(macOS 14.0, iOS 17.0, *)) {
         MTLIndirectCommandBufferDescriptor *native_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
         native_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
