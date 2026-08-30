@@ -876,6 +876,8 @@ int main(void) {
     if (base_vertex_buffer == NULL || base_index_buffer == NULL ||
         base_vertex_command_buffer == NULL || base_vertex_encoder == NULL ||
         zpu_metal_render_encoder_set_vertex_buffer(base_vertex_encoder, base_vertex_buffer, 0, 0) != 0 ||
+        zpu_metal_render_encoder_draw_primitives_base_instance(
+            base_vertex_encoder, ZPU_METAL_TRIANGLE, 1, 3, 1, 0) != 0 ||
         zpu_metal_render_encoder_draw_indexed_primitives_base_vertex_instance(
             base_vertex_encoder, ZPU_METAL_TRIANGLE, 3, ZPU_METAL_INDEX_UINT16,
             base_index_buffer, 0, 1, 1, 0) != 0 ||
