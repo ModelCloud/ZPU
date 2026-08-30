@@ -78,7 +78,26 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_fill_gradient_rgba16_float(texture2d<float, access::write> output [[texture(0)]], "
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
-    "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n";
+    "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+    "kernel void zpu_cpu_trace_triangles_rgba8(device const float *vertices [[buffer(0)]], "
+    "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height()); "
+    "float3 origin = float3(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y, 1.0); "
+    "float3 direction = float3(0.0, 0.0, -1.0); "
+    "float3 v0 = float3(vertices[0], vertices[1], vertices[2]); "
+    "float3 v1 = float3(vertices[3], vertices[4], vertices[5]); "
+    "float3 v2 = float3(vertices[6], vertices[7], vertices[8]); "
+    "float3 edge1 = v1 - v0; float3 edge2 = v2 - v0; "
+    "float3 pvec = cross(direction, edge2); float det = dot(edge1, pvec); "
+    "bool hit = false; "
+    "if (fabs(det) > 0.000001) { "
+    "float inv_det = 1.0 / det; float3 tvec = origin - v0; "
+    "float u = dot(tvec, pvec) * inv_det; "
+    "float3 qvec = cross(tvec, edge1); float v = dot(direction, qvec) * inv_det; "
+    "float t = dot(edge2, qvec) * inv_det; "
+    "hit = u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t >= 0.0; } "
+    "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n";
 
 static void fail_with_error(const char *message, NSError *error) {
     if (error != nil) {
@@ -8176,6 +8195,7 @@ int main(void) {
             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
+            "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_test_stage_in_vertex() {}\n"
             "fragment float4 zpu_test_fragment() { return float4(1.0); }\n"
@@ -8280,6 +8300,7 @@ int main(void) {
                 adapter_alias_stage_position.attributeType == MTLDataTypeFloat4;
         }
         BOOL adapter_function_reflection_ok = YES;
+        BOOL adapter_trace_reflection_ok = YES;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             NSArray<NSString *> *reflection_names = @[
                 @"zpu_test_stage_in_vertex", @"zpu_test_fragment",
@@ -8303,6 +8324,16 @@ int main(void) {
                     native_reflection != nil && adapter_reflection != nil &&
                     native_reflection.bindings.count == 0 && adapter_reflection.bindings.count == 0;
             }
+            MTLFunctionReflection *adapter_trace_reflection =
+                [adapter_library reflectionForFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
+            adapter_trace_reflection_ok = adapter_trace_reflection != nil &&
+                adapter_trace_reflection.bindings.count == 2 &&
+                [adapter_trace_reflection.bindings[0].name isEqualToString:@"accelerationStructure"] &&
+                adapter_trace_reflection.bindings[0].type == MTLBindingTypeBuffer &&
+                adapter_trace_reflection.bindings[0].index == 0 &&
+                [adapter_trace_reflection.bindings[1].name isEqualToString:@"output"] &&
+                adapter_trace_reflection.bindings[1].type == MTLBindingTypeTexture &&
+                adapter_trace_reflection.bindings[1].index == 0;
         }
         BOOL adapter_specialized_render_exact = YES;
         if (@available(macOS 11.0, iOS 14.0, *)) {
@@ -8683,6 +8714,7 @@ int main(void) {
             !adapter_stage_input_attributes_ok ||
             !adapter_specialized_metadata_ok ||
             !adapter_function_reflection_ok ||
+            !adapter_trace_reflection_ok ||
             !adapter_specialized_render_exact ||
             !adapter_stitched_library_ok ||
             !adapter_function_descriptor_ok ||
@@ -8690,9 +8722,10 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 29 ||
+            adapter_library.functionNames.count != 30 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
@@ -11544,6 +11577,149 @@ int main(void) {
         if (!adapter_metal4_resource_bindings_ok) {
             fprintf(stderr, "metal-pixel: Metal 4 CPU resource bindings failed\n");
             return 154;
+        }
+
+        /* The bounded triangle-trace profile is CPU/ZPU execution. Apple
+         * Metal runs only the equivalent direct-triangle kernel as the pixel
+         * oracle. The odd 7x5 extent makes an accidental bottom-left or
+         * zero-based coordinate convention visible in the byte comparison. */
+        BOOL adapter_ray_trace_exact = YES;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            const NSUInteger ray_width = 7;
+            const NSUInteger ray_height = 5;
+            const NSUInteger ray_byte_count = ray_width * ray_height * 4;
+            const float ray_vertices[] = {
+                -0.80f, -0.65f, 0.0f,
+                 0.80f, -0.65f, 0.0f,
+                -0.05f,  0.65f, 0.0f,
+            };
+            const float ray_strided_vertices[] = {
+                -0.80f, -0.65f, 0.0f, 11.0f,
+                 0.80f, -0.65f, 0.0f, 22.0f,
+                -0.05f,  0.65f, 0.0f, 33.0f,
+            };
+            const uint16_t ray_indices[] = {0, 1, 2};
+            id<MTLBuffer> native_ray_vertices =
+                [device newBufferWithBytes:ray_vertices length:sizeof(ray_vertices)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_ray_vertices =
+                [adapter_device newBufferWithBytes:ray_strided_vertices length:sizeof(ray_strided_vertices)
+                                            options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_ray_indices =
+                [adapter_device newBufferWithBytes:ray_indices length:sizeof(ray_indices)
+                                            options:MTLResourceStorageModeShared];
+            MTLPrimitiveAccelerationStructureDescriptor *ray_descriptor =
+                [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+            MTLAccelerationStructureTriangleGeometryDescriptor *ray_geometry =
+                [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+            ray_geometry.vertexBuffer = adapter_ray_vertices;
+            ray_geometry.vertexBufferOffset = 0;
+            ray_geometry.vertexStride = 4 * sizeof(float);
+            ray_geometry.indexBuffer = adapter_ray_indices;
+            ray_geometry.indexBufferOffset = 0;
+            ray_geometry.indexType = MTLIndexTypeUInt16;
+            ray_geometry.triangleCount = 1;
+            if (@available(macOS 13.0, iOS 16.0, *)) {
+                ray_geometry.vertexFormat = MTLAttributeFormatFloat3;
+            }
+            ray_descriptor.geometryDescriptors = @[ray_geometry];
+            MTLAccelerationStructureSizes ray_sizes =
+                [adapter_device accelerationStructureSizesWithDescriptor:ray_descriptor];
+            const NSUInteger ray_allocation_size = ray_sizes.accelerationStructureSize == 0 ?
+                256 : ray_sizes.accelerationStructureSize;
+            id<MTLAccelerationStructure> adapter_ray_acceleration_structure =
+                [adapter_device newAccelerationStructureWithSize:ray_allocation_size];
+            id<MTLBuffer> adapter_ray_scratch =
+                [adapter_device newBufferWithLength:ray_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                           ray_sizes.buildScratchBufferSize
+                                            options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> adapter_ray_build_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_ray_build_encoder =
+                [adapter_ray_build_command_buffer accelerationStructureCommandEncoder];
+            [adapter_ray_build_encoder buildAccelerationStructure:adapter_ray_acceleration_structure
+                                                         descriptor:ray_descriptor
+                                                      scratchBuffer:adapter_ray_scratch
+                                                scratchBufferOffset:0];
+            [adapter_ray_build_encoder endEncoding];
+            [adapter_ray_build_command_buffer commit];
+            [adapter_ray_build_command_buffer waitUntilCompleted];
+
+            MTLTextureDescriptor *ray_texture_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                    width:ray_width height:ray_height
+                                                                 mipmapped:NO];
+            ray_texture_descriptor.storageMode = MTLStorageModeShared;
+            ray_texture_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> native_ray_texture = [device newTextureWithDescriptor:ray_texture_descriptor];
+            id<MTLTexture> adapter_ray_texture = [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+            NSError *native_ray_error = nil;
+            NSError *adapter_ray_error = nil;
+            id<MTLFunction> native_ray_function =
+                [library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
+            id<MTLComputePipelineState> native_ray_pipeline =
+                [device newComputePipelineStateWithFunction:native_ray_function error:&native_ray_error];
+            id<MTLFunction> adapter_ray_function =
+                ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_trace_triangles_rgba8");
+            id<MTLComputePipelineState> adapter_ray_pipeline =
+                [adapter_device newComputePipelineStateWithFunction:adapter_ray_function
+                                                               error:&adapter_ray_error];
+
+            id<MTLCommandBuffer> native_ray_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_ray_encoder =
+                [native_ray_command_buffer computeCommandEncoder];
+            [native_ray_encoder setComputePipelineState:native_ray_pipeline];
+            [native_ray_encoder setBuffer:native_ray_vertices offset:0 atIndex:0];
+            [native_ray_encoder setTexture:native_ray_texture atIndex:0];
+            [native_ray_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                              threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+            [native_ray_encoder endEncoding];
+            [native_ray_command_buffer commit];
+            [native_ray_command_buffer waitUntilCompleted];
+
+            id<MTLCommandBuffer> adapter_ray_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_ray_encoder =
+                [adapter_ray_command_buffer computeCommandEncoder];
+            [adapter_ray_encoder setComputePipelineState:adapter_ray_pipeline];
+            [adapter_ray_encoder setAccelerationStructure:adapter_ray_acceleration_structure
+                                             atBufferIndex:0];
+            [adapter_ray_encoder setTexture:adapter_ray_texture atIndex:0];
+            [adapter_ray_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                               threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+            [adapter_ray_encoder endEncoding];
+            [adapter_ray_command_buffer commit];
+            [adapter_ray_command_buffer waitUntilCompleted];
+
+            uint8_t native_ray_pixels[ray_byte_count];
+            uint8_t adapter_ray_pixels[ray_byte_count];
+            [native_ray_texture getBytes:native_ray_pixels bytesPerRow:ray_width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+            [adapter_ray_texture getBytes:adapter_ray_pixels bytesPerRow:ray_width * 4
+                               fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+            adapter_ray_trace_exact =
+                native_ray_vertices != nil && adapter_ray_vertices != nil && adapter_ray_indices != nil &&
+                ray_geometry != nil &&
+                adapter_ray_acceleration_structure != nil && adapter_ray_scratch != nil &&
+                adapter_ray_build_command_buffer != nil && adapter_ray_build_encoder != nil &&
+                adapter_ray_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                native_ray_texture != nil && adapter_ray_texture != nil &&
+                native_ray_function != nil && native_ray_pipeline != nil &&
+                adapter_ray_function != nil && adapter_ray_pipeline != nil &&
+                native_ray_command_buffer != nil && native_ray_encoder != nil &&
+                native_ray_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_ray_command_buffer != nil && adapter_ray_encoder != nil &&
+                adapter_ray_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(native_ray_pixels, adapter_ray_pixels, ray_byte_count) == 0 &&
+                native_ray_pixels[(0 * ray_width + 3) * 4] == 0 &&
+                adapter_ray_pixels[(0 * ray_width + 3) * 4] == 0 &&
+                native_ray_pixels[(1 * ray_width + 3) * 4] == 255 &&
+                adapter_ray_pixels[(1 * ray_width + 3) * 4] == 255 &&
+                native_ray_pixels[(3 * ray_width + 3) * 4] == 255 &&
+                adapter_ray_pixels[(3 * ray_width + 3) * 4] == 255;
+            if (!adapter_ray_trace_exact) {
+                fail_with_error("CPU triangle trace pixel oracle failed", adapter_ray_error != nil ?
+                                adapter_ray_error : native_ray_error);
+                return 155;
+            }
         }
 
         const MTLPixelFormat compute_float_formats[] = {

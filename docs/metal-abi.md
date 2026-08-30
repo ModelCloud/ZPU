@@ -219,12 +219,19 @@ triangle path:
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY` and
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D`,
   `ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT`, and
-  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT` kernels; they operate directly
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT`, and the bounded
+  `ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8` kernel; they operate directly
   on ZPU-owned buffers/textures and never invoke Apple's Metal runtime. Array
   dispatches expand the logical z grid into ordered per-slice ZPU commands;
   3D dispatches expand z into plane commands while preserving the z coordinate
   in the CPU kernel; indirect array/3D dispatches resolve the deferred z
-  extent at commit and skip slices outside that extent
+  extent at commit and skip slices outside that extent. The triangle trace
+  profile consumes a CPU-serialized legacy `MTLPrimitiveAccelerationStructureDescriptor`
+  containing Float3 triangle geometry, casts one orthographic primary ray per
+  output texel, and writes exact RGBA8 hit/miss values on Metal's top-left grid;
+  indexed UInt16/UInt32 geometry and explicit vertex strides are supported,
+  while transforms, instances, curves, motion, custom intersection functions,
+  and arbitrary ray tracing remain fail-closed
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
@@ -402,12 +409,14 @@ triangle path:
   they expose deterministic CPU resource metadata and IDs; valid table and
   acceleration-structure bindings on legacy compute encoders retain the same
   CPU resources and preserve command ordering, while arbitrary function-pointer
-  dispatch and ray tracing remain unsupported
+  dispatch and arbitrary ray tracing remain unsupported; the bounded triangle
+  trace profile is the explicit fixed-function exception
 - CPU acceleration-structure resources expose deterministic ZPU-backed storage,
   heap placement, resource IDs, and descriptor-derived size queries. Their CPU
   command encoder supports build, refit, copy, compact-size, and compaction
-  metadata/storage operations; ray-intersection execution remains fail-closed
-  until a CPU traversal implementation is available
+  metadata/storage operations; the fixed Float3 triangle trace profile
+  traverses CPU-serialized legacy primitive geometry, while arbitrary ray
+  intersection execution remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level
@@ -451,13 +460,14 @@ triangle path:
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
   transfers. Acceleration-structure build/refit/copy/compaction commands use
-  the same CPU-owned storage path. An explicit `ZPUMetalCreateCPUDrawable`
+  the same CPU-owned storage path, and the bounded Float3 triangle trace
+  profile executes from that storage. An explicit `ZPUMetalCreateCPUDrawable`
   factory wraps a ZPU texture in a CPU-owned `MTLDrawable`; ordinary command
   buffers defer presentation until synchronous CPU completion, deliver
   presented handlers, and expose host-time/monotonic-ID metadata. Metal 4
   drawable signal/wait validates the same ownership graph and remains a CPU
-  no-op. Tensor shader binding, arbitrary ML graph execution, ray-intersection
-  execution, opaque native 3D sparse-tail backing layout, and arbitrary
+  no-op. Tensor shader binding, arbitrary ML graph execution, arbitrary
+  ray-intersection execution, opaque native 3D sparse-tail backing layout, and arbitrary
   tile/mesh render-pass features remain explicit fail-closed
   boundaries. The registered tile and mesh profiles are the bounded
   exceptions. Suspending/resuming render
@@ -468,7 +478,7 @@ triangle path:
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
   arbitrary shader compilation, unregistered or arbitrary binary linking, opaque
-  native sparse-texture tail layouts, CAMetalLayer drawable acquisition, ray tracing,
+  native sparse-texture tail layouts, CAMetalLayer drawable acquisition, arbitrary ray tracing,
   tensor shader and arbitrary ML execution, and unsupported
   Metal 4 advanced families return nil or a stable error. They never fall through to Apple's
   native Metal runtime
@@ -582,7 +592,7 @@ through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
 pipeline-data serializer; the registered factor-one triangle-patch profile is
 CPU/ZPU-owned through the legacy render encoder and ICB path. Arbitrary
 tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
-synchronization families, ray-tracing execution, opaque native 3D sparse-texture tail
+synchronization families, arbitrary ray-tracing execution, opaque native 3D sparse-texture tail
 backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
 execution. A strict completeness claim belongs only after the Apple SDK

@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "zpu/metal.h"
 
-_Static_assert(ZPU_METAL_ABI_VERSION == 29u, "Metal ABI version drift");
+_Static_assert(ZPU_METAL_ABI_VERSION == 30u, "Metal ABI version drift");
 _Static_assert(sizeof(zpu_metal_sparse_texture_mapping_arguments) == 32, "Metal sparse mapping arguments drift");
 _Static_assert(ZPU_METAL_DEPTH16_UNORM == 250, "Depth16Unorm value drift");
 _Static_assert(ZPU_METAL_DEPTH24_UNORM_STENCIL8 == 255, "Depth24Unorm_Stencil8 value drift");
@@ -18,6 +18,8 @@ _Static_assert(sizeof(zpu_metal_draw_state) == 44, "draw state layout drift");
 _Static_assert(sizeof(zpu_metal_surface) == 40, "surface layout drift");
 _Static_assert(sizeof(zpu_metal_stats) == 48, "stats layout drift");
 _Static_assert(sizeof(zpu_metal_texture_descriptor) == 12, "texture descriptor layout drift");
+_Static_assert(sizeof(zpu_metal_cpu_acceleration_structure_header) == 32, "CPU acceleration header layout drift");
+_Static_assert(sizeof(zpu_metal_cpu_acceleration_triangle) == 36, "CPU acceleration triangle layout drift");
 
 int main(void) {
     return zpu_metal_max_cpu_cores(ZPU_METAL_2D) == 1 &&

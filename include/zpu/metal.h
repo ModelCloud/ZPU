@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 29u
+#define ZPU_METAL_ABI_VERSION 30u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -383,7 +383,31 @@ enum {
     ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D = 4,
     ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT = 5,
     ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT = 6,
+    /* Fixed CPU ray-query profile: orthographic primary rays against the
+     * triangle payload produced by the ZPU acceleration encoder. */
+    ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8 = 7,
 };
+
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION 1u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_HEADER_BYTES 32u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET 256u
+
+/* Stable little-endian CPU payload shared by the Objective-C adapter and the
+ * ZPU runtime. The payload is intentionally a registered profile rather than
+ * an Apple hardware BVH representation. */
+typedef struct zpu_metal_cpu_acceleration_structure_header {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t triangle_count;
+    uint32_t flags;
+    uint32_t triangle_offset;
+    uint32_t reserved[3];
+} zpu_metal_cpu_acceleration_structure_header;
+
+typedef struct zpu_metal_cpu_acceleration_triangle {
+    float positions[9];
+} zpu_metal_cpu_acceleration_triangle;
 
 /* Tile kernels are explicit CPU/ZPU operations. They are not MSL and do not
  * invoke Apple's Metal tile encoder. */
@@ -637,6 +661,7 @@ void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *
 zpu_metal_compute_encoder *zpu_metal_command_buffer_compute_encoder(zpu_metal_command_buffer *command_buffer);
 int zpu_metal_compute_encoder_set_kernel(zpu_metal_compute_encoder *encoder, zpu_metal_compute_kernel kernel);
 int zpu_metal_compute_encoder_set_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, uint32_t index);
+int zpu_metal_compute_encoder_set_acceleration_structure(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *acceleration_structure, uint32_t index);
 int zpu_metal_compute_encoder_set_buffer_offset(zpu_metal_compute_encoder *encoder, size_t offset, uint32_t index);
 int zpu_metal_compute_encoder_set_bytes(zpu_metal_compute_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_compute_encoder_set_texture(zpu_metal_compute_encoder *encoder, zpu_metal_texture *texture, uint32_t index);

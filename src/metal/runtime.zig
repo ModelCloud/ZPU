@@ -28,6 +28,11 @@ const heap_magic: u64 = 0x5a50555f48454150; // ZPU_HEAP
 const fence_magic: u64 = 0x5a50555f46454e43; // ZPU_FENC
 const shared_event_magic: u64 = 0x5a50555f53455654; // ZPU_SEVT
 
+const cpu_acceleration_structure_magic: u32 = 0x5a505541;
+const cpu_acceleration_structure_version: u32 = 1;
+const cpu_acceleration_structure_header_bytes: usize = 32;
+const cpu_acceleration_structure_triangle_bytes: usize = 9 * @sizeOf(f32);
+
 pub const TextureFormat = enum {
     a8_unorm,
     r8_unorm,
@@ -672,6 +677,8 @@ const ComputeCommand = struct {
     texture_index: u32,
     buffer: ?*Buffer,
     buffer_offset: usize,
+    acceleration_structure: ?*Buffer = null,
+    acceleration_structure_index: u32 = 0,
     threads_per_grid: abi.Size,
     threads_per_threadgroup: abi.Size = .{ .width = 0, .height = 0, .depth = 0 },
     indirect_buffer: ?*Buffer = null,
@@ -1581,10 +1588,12 @@ pub const CommandBuffer = struct {
             },
             .compute => |compute| {
                 sparseSyncOptionalBuffer(compute.buffer);
+                sparseSyncOptionalBuffer(compute.acceleration_structure);
                 sparseSyncOptionalBuffer(compute.indirect_buffer);
                 sparseSyncTexture(compute.texture);
                 defer {
                     sparseFlushOptionalBuffer(compute.buffer);
+                    sparseFlushOptionalBuffer(compute.acceleration_structure);
                     sparseFlushOptionalBuffer(compute.indirect_buffer);
                     sparseFlushTexture(compute.texture);
                 }
@@ -3252,6 +3261,8 @@ pub const ComputeEncoder = struct {
     array_slice: ?u32 = null,
     buffer: ?*Buffer = null,
     buffer_offset: usize = 0,
+    acceleration_structure: ?*Buffer = null,
+    acceleration_structure_index: u32 = 0,
 
     pub fn deinit(self: *ComputeEncoder) void {
         self.magic = 0;
@@ -3263,7 +3274,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6) return error.UnsupportedOperation;
+        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6 and kernel != 7) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -3280,6 +3291,15 @@ pub const ComputeEncoder = struct {
         if (!self.open() or index != 0) return error.UnsupportedOperation;
         const buffer = self.buffer orelse return error.InvalidCommand;
         try self.setBuffer(buffer, offset, index);
+    }
+
+    pub fn setAccelerationStructure(self: *ComputeEncoder, structure: ?*Buffer, index: u32) Error!void {
+        if (!self.open()) return error.UnsupportedOperation;
+        if (structure) |value| {
+            if (!validBuffer(value) or value.device != self.command_buffer.queue.device) return error.InvalidResource;
+        }
+        self.acceleration_structure = structure;
+        self.acceleration_structure_index = index;
     }
 
     pub fn setBytes(self: *ComputeEncoder, bytes: ?[*]const u8, length: usize, index: u32) Error!void {
@@ -3382,6 +3402,7 @@ pub const ComputeEncoder = struct {
         if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
         if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
             (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
+        if (self.kernel == 7 and (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
         if ((self.kernel != 3 and self.kernel != 4 and threads_per_grid.depth != 1) or
             threads_per_threadgroup.width == 0 or
             threads_per_threadgroup.height == 0 or threads_per_threadgroup.depth == 0) return error.InvalidArgument;
@@ -3392,6 +3413,8 @@ pub const ComputeEncoder = struct {
             .texture_index = self.texture_index,
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
+            .acceleration_structure = self.acceleration_structure,
+            .acceleration_structure_index = self.acceleration_structure_index,
             .threads_per_grid = threads_per_grid,
             .array_slice = self.array_slice,
         } });
@@ -3427,6 +3450,8 @@ pub const ComputeEncoder = struct {
             .texture_index = self.texture_index,
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
+            .acceleration_structure = self.acceleration_structure,
+            .acceleration_structure_index = self.acceleration_structure_index,
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 1 },
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
@@ -3452,6 +3477,8 @@ pub const ComputeEncoder = struct {
             .texture_index = self.texture_index,
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
+            .acceleration_structure = self.acceleration_structure,
+            .acceleration_structure_index = self.acceleration_structure_index,
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 1 },
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
@@ -3726,6 +3753,101 @@ fn writeSnormMipmapCode(texture: *Texture, x: usize, y: usize, codes: [4]i128) v
     }
 }
 
+const CpuRayVec3 = struct {
+    x: f32,
+    y: f32,
+    z: f32,
+};
+
+fn cpuRaySub(left: CpuRayVec3, right: CpuRayVec3) CpuRayVec3 {
+    return .{ .x = left.x - right.x, .y = left.y - right.y, .z = left.z - right.z };
+}
+
+fn cpuRayCross(left: CpuRayVec3, right: CpuRayVec3) CpuRayVec3 {
+    return .{
+        .x = left.y * right.z - left.z * right.y,
+        .y = left.z * right.x - left.x * right.z,
+        .z = left.x * right.y - left.y * right.x,
+    };
+}
+
+fn cpuRayDot(left: CpuRayVec3, right: CpuRayVec3) f32 {
+    return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+fn readF32Little(bytes: []const u8, offset: usize) f32 {
+    return @bitCast(readU32Little(bytes, offset));
+}
+
+fn cpuRayTriangleHit(origin: CpuRayVec3, direction: CpuRayVec3, v0: CpuRayVec3, v1: CpuRayVec3, v2: CpuRayVec3) ?f32 {
+    const edge1 = cpuRaySub(v1, v0);
+    const edge2 = cpuRaySub(v2, v0);
+    const pvec = cpuRayCross(direction, edge2);
+    const determinant = cpuRayDot(edge1, pvec);
+    if (!std.math.isFinite(determinant) or @abs(determinant) < 0.0000001) return null;
+    const inverse_determinant = 1.0 / determinant;
+    const tvec = cpuRaySub(origin, v0);
+    const u = cpuRayDot(tvec, pvec) * inverse_determinant;
+    if (u < 0.0 or u > 1.0) return null;
+    const qvec = cpuRayCross(tvec, edge1);
+    const v = cpuRayDot(direction, qvec) * inverse_determinant;
+    if (v < 0.0 or u + v > 1.0) return null;
+    const distance = cpuRayDot(edge2, qvec) * inverse_determinant;
+    if (!std.math.isFinite(distance) or distance < 0.0) return null;
+    return distance;
+}
+
+fn executeTraceTriangles(command: ComputeCommand) Error!void {
+    if (command.texture.format != .rgba8_unorm) return error.UnsupportedFormat;
+    const acceleration_structure = command.acceleration_structure orelse return error.InvalidCommand;
+    if (!validBuffer(acceleration_structure) or acceleration_structure.device != command.texture.device) return error.InvalidResource;
+    if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
+    if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or
+        readU32Little(acceleration_structure.bytes, 4) != cpu_acceleration_structure_version) return error.InvalidResource;
+    const triangle_count: usize = @intCast(readU32Little(acceleration_structure.bytes, 8));
+    const triangle_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 16));
+    const triangle_bytes = std.math.mul(usize, triangle_count, cpu_acceleration_structure_triangle_bytes) catch return error.InvalidArgument;
+    if (triangle_offset < cpu_acceleration_structure_header_bytes or
+        !rangeValid(acceleration_structure.bytes.len, triangle_offset, triangle_bytes)) return error.InvalidArgument;
+    const width = @min(command.threads_per_grid.width, command.texture.width);
+    const height = @min(command.threads_per_grid.height, command.texture.height);
+    var target = command.texture.asTarget();
+    for (0..height) |y| for (0..width) |x| {
+        // Metal's texture grid is top-left: row zero is the upper edge and
+        // clip/world +Y therefore maps toward decreasing pixel rows.
+        const origin = CpuRayVec3{
+            .x = 2.0 * ((@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(command.texture.width))) - 1.0,
+            .y = 1.0 - 2.0 * ((@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(command.texture.height))),
+            .z = 1.0,
+        };
+        const direction = CpuRayVec3{ .x = 0.0, .y = 0.0, .z = -1.0 };
+        var nearest: ?f32 = null;
+        var triangle_index: usize = 0;
+        while (triangle_index < triangle_count) : (triangle_index += 1) {
+            const base = triangle_offset + triangle_index * cpu_acceleration_structure_triangle_bytes;
+            const v0 = CpuRayVec3{
+                .x = readF32Little(acceleration_structure.bytes, base),
+                .y = readF32Little(acceleration_structure.bytes, base + 4),
+                .z = readF32Little(acceleration_structure.bytes, base + 8),
+            };
+            const v1 = CpuRayVec3{
+                .x = readF32Little(acceleration_structure.bytes, base + 12),
+                .y = readF32Little(acceleration_structure.bytes, base + 16),
+                .z = readF32Little(acceleration_structure.bytes, base + 20),
+            };
+            const v2 = CpuRayVec3{
+                .x = readF32Little(acceleration_structure.bytes, base + 24),
+                .y = readF32Little(acceleration_structure.bytes, base + 28),
+                .z = readF32Little(acceleration_structure.bytes, base + 32),
+            };
+            if (cpuRayTriangleHit(origin, direction, v0, v1, v2)) |distance| {
+                if (nearest == null or distance < nearest.?) nearest = distance;
+            }
+        }
+        target.storeColor(x, y, if (nearest != null) .{ 1.0, 0.0, 0.0, 1.0 } else .{ 0.0, 0.0, 0.0, 1.0 });
+    };
+}
+
 fn executeCompute(command: ComputeCommand) Error!void {
     if (!validTexture(command.texture) or !command.texture.format.isColor()) return error.InvalidResource;
     if (command.kernel != 3 and command.kernel != 4 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
@@ -3788,6 +3910,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                 1,
             });
         },
+        7 => return executeTraceTriangles(command),
         else => return error.UnsupportedOperation,
     }
 }
@@ -6558,6 +6681,51 @@ test "CPU compute is deferred, bounded, and pixel deterministic" {
     try std.testing.expectError(error.InvalidCommand, beginCompute(command_buffer));
 }
 
+test "CPU triangle trace uses the Metal top-left pixel grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 7, 5, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const acceleration_structure = try createBuffer(device, 512, null);
+    defer destroyBuffer(acceleration_structure);
+
+    writeU32Little(acceleration_structure.bytes, 0, cpu_acceleration_structure_magic);
+    writeU32Little(acceleration_structure.bytes, 4, cpu_acceleration_structure_version);
+    writeU32Little(acceleration_structure.bytes, 8, 1);
+    writeU32Little(acceleration_structure.bytes, 12, 1);
+    writeU32Little(acceleration_structure.bytes, 16, cpu_acceleration_structure_header_bytes);
+    const vertices = [_]f32{
+        -0.80, -0.65, 0.0,
+        0.80,  -0.65, 0.0,
+        -0.05, 0.65,  0.0,
+    };
+    for (vertices, 0..) |value, index| {
+        std.mem.writeInt(u32, acceleration_structure.bytes[cpu_acceleration_structure_header_bytes + index * 4 ..][0..4], @bitCast(value), .little);
+    }
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(7);
+    try encoder.setTexture(texture, 0);
+    try encoder.setAccelerationStructure(acceleration_structure, 0);
+    try encoder.dispatchThreads(.{ .width = 7, .height = 5, .depth = 1 }, .{ .width = 7, .height = 5, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0), texture.bytes[0]);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+
+    // Row zero is the upper edge. This triangle misses it, intersects the
+    // upper interior row, and also intersects a lower interior row.
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[(0 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, texture.bytes[(1 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, texture.bytes[(3 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[(4 * texture.stride + 3 * 4)..][0..4]);
+}
+
 test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -8998,6 +9166,11 @@ pub export fn zpu_metal_compute_encoder_set_kernel(encoder: ?*ComputeEncoder, ke
 
 pub export fn zpu_metal_compute_encoder_set_buffer(encoder: ?*ComputeEncoder, buffer: ?*Buffer, offset: usize, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setBuffer(buffer, offset, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_set_acceleration_structure(encoder: ?*ComputeEncoder, structure: ?*Buffer, index: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setAccelerationStructure(structure, index) catch |err| return errorCode(err);
     return 0;
 }
 
