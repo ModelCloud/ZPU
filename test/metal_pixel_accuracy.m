@@ -1412,8 +1412,7 @@ static int test_multisample_resolve_against_native(
         native_pass.colorAttachments[0].texture = native_msaa;
         native_pass.colorAttachments[0].resolveTexture = native_resolve;
         native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-        native_pass.colorAttachments[0].storeAction = sample_index == 0 ?
-            MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionUnknown;
         native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
         MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
         adapter_pass.colorAttachments[0].texture = adapter_msaa_view;
@@ -2379,7 +2378,7 @@ static int test_multisample_depth_stencil_against_native(
     native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
     native_pass.depthAttachment.texture = native_depth;
     native_pass.depthAttachment.loadAction = MTLLoadActionClear;
-    native_pass.depthAttachment.storeAction = depth_store_action;
+    native_pass.depthAttachment.storeAction = MTLStoreActionUnknown;
     native_pass.depthAttachment.storeActionOptions = MTLStoreActionOptionCustomSamplePositions;
     native_pass.depthAttachment.clearDepth = 1.0;
     native_pass.stencilAttachment.texture = native_depth;
@@ -2411,6 +2410,7 @@ static int test_multisample_depth_stencil_against_native(
     [native_encoder setRenderPipelineState:native_pipeline];
     [native_encoder setColorStoreActionOptions:MTLStoreActionOptionCustomSamplePositions atIndex:0];
     [native_encoder setDepthStoreActionOptions:MTLStoreActionOptionCustomSamplePositions];
+    [native_encoder setDepthStoreAction:depth_store_action];
     [native_encoder setDepthStencilState:native_depth_stencil_state];
     [native_encoder setStencilReferenceValue:7];
     [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
@@ -2419,6 +2419,7 @@ static int test_multisample_depth_stencil_against_native(
     [adapter_encoder setRenderPipelineState:adapter_pipeline];
     [adapter_encoder setColorStoreActionOptions:MTLStoreActionOptionCustomSamplePositions atIndex:0];
     [adapter_encoder setDepthStoreActionOptions:MTLStoreActionOptionCustomSamplePositions];
+    [adapter_encoder setDepthStoreAction:depth_store_action];
     [adapter_encoder setDepthStencilState:adapter_depth_stencil_state];
     [adapter_encoder setStencilReferenceValue:7];
     [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];

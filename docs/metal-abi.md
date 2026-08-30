@@ -125,9 +125,10 @@ triangle path:
   Custom sample positions are accepted for
   1x/2x/4x passes after finite `[0, 1]` validation, quantized to Apple's
   1/16-pixel sample grid, and interpreted in Metal's top-left, pixel-local
-  coordinates; custom-sample store options are validated and retained as
-  CPU metadata, while depth-only `CustomSampleDepthStore` maps to a full
-  per-sample ZPU depth store; other sample counts remain unsupported.
+  coordinates; custom-sample store options are validated as CPU metadata,
+  while deferred `Unknown` actions are finalized by the
+  encoder and depth-only `CustomSampleDepthStore` maps to a full per-sample
+  ZPU depth store; other sample counts remain unsupported.
 - buffer and texture resource options preserve the requested storage mode, CPU
   cache mode, hazard mode, texture usage, optimization flag, compression mode,
   and swizzle metadata; indirect command buffers preserve their resource
