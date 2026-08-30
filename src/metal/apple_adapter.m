@@ -997,7 +997,6 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _ended;
     BOOL _submitted;
     BOOL _failed;
-    NSMutableArray *_machineLearningOperations;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner;
 - (void)markError;
@@ -11287,7 +11286,6 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
 - (instancetype)initWithOwner:(ZPUDevice *)owner {
     if ((self = [super init])) {
         _owner = owner;
-        _machineLearningOperations = [NSMutableArray array];
         id queue = [owner newCommandQueue];
         if ([queue isKindOfClass:[ZPUCommandQueue class]]) _legacyQueue = (ZPUCommandQueue *)queue;
         else _failed = YES;
@@ -11336,36 +11334,6 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         [self markError];
         return NO;
     }
-    ZPUBlitEncoder *fenceEncoder = nil;
-    for (id operation in _machineLearningOperations) {
-        if ([operation isKindOfClass:[ZPUMTL4MachineLearningIdentityOperation class]]) {
-            if (![(ZPUMTL4MachineLearningIdentityOperation *)operation execute]) {
-                [self markError];
-                return NO;
-            }
-            continue;
-        }
-        if ([operation isKindOfClass:[ZPUMTL4MachineLearningFenceOperation class]]) {
-            if (fenceEncoder == nil) {
-                zpu_metal_blit_encoder *rawEncoder =
-                    zpu_metal_command_buffer_blit_encoder(_legacyBuffer->_zpuCommandBuffer);
-                fenceEncoder = rawEncoder == NULL ? nil :
-                    [[ZPUBlitEncoder alloc] initWithOwner:_legacyBuffer encoder:rawEncoder];
-            }
-            if (fenceEncoder == nil || ![(ZPUMTL4MachineLearningFenceOperation *)operation appendToEncoder:fenceEncoder]) {
-                if (fenceEncoder != nil) [fenceEncoder endEncoding];
-                [self markError];
-                return NO;
-            }
-            continue;
-        }
-        if (operation != nil) {
-            if (fenceEncoder != nil) [fenceEncoder endEncoding];
-            [self markError];
-            return NO;
-        }
-    }
-    if (fenceEncoder != nil) [fenceEncoder endEncoding];
     [_legacyBuffer commit];
     _submitted = YES;
     if ([_legacyBuffer status] == MTLCommandBufferStatusError) {
@@ -11597,8 +11565,18 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         [_owner markError];
         return;
     }
-    [_owner->_machineLearningOperations addObject:
-        [[ZPUMTL4MachineLearningFenceOperation alloc] initWithFence:zpuFence update:YES]];
+    ZPUMTL4MachineLearningFenceOperation *operation =
+        [[ZPUMTL4MachineLearningFenceOperation alloc] initWithFence:zpuFence update:YES];
+    zpu_metal_blit_encoder *rawEncoder =
+        zpu_metal_command_buffer_blit_encoder(_owner->_legacyBuffer->_zpuCommandBuffer);
+    ZPUBlitEncoder *fenceEncoder = rawEncoder == NULL ? nil :
+        [[ZPUBlitEncoder alloc] initWithOwner:_owner->_legacyBuffer encoder:rawEncoder];
+    const BOOL appended = fenceEncoder != nil && [operation appendToEncoder:fenceEncoder];
+    if (fenceEncoder != nil) [fenceEncoder endEncoding];
+    if (!appended) {
+        [_owner markError];
+        return;
+    }
     [_owner->_legacyBuffer retainResource:zpuFence];
 }
 - (void)waitForFence:(id<MTLFence>)fence beforeEncoderStages:(MTLStages)beforeEncoderStages {
@@ -11609,8 +11587,18 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         [_owner markError];
         return;
     }
-    [_owner->_machineLearningOperations addObject:
-        [[ZPUMTL4MachineLearningFenceOperation alloc] initWithFence:zpuFence update:NO]];
+    ZPUMTL4MachineLearningFenceOperation *operation =
+        [[ZPUMTL4MachineLearningFenceOperation alloc] initWithFence:zpuFence update:NO];
+    zpu_metal_blit_encoder *rawEncoder =
+        zpu_metal_command_buffer_blit_encoder(_owner->_legacyBuffer->_zpuCommandBuffer);
+    ZPUBlitEncoder *fenceEncoder = rawEncoder == NULL ? nil :
+        [[ZPUBlitEncoder alloc] initWithOwner:_owner->_legacyBuffer encoder:rawEncoder];
+    const BOOL appended = fenceEncoder != nil && [operation appendToEncoder:fenceEncoder];
+    if (fenceEncoder != nil) [fenceEncoder endEncoding];
+    if (!appended) {
+        [_owner markError];
+        return;
+    }
     [_owner->_legacyBuffer retainResource:zpuFence];
 }
 - (void)insertDebugSignpost:(NSString *)string { (void)string; }
@@ -11667,7 +11655,12 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     ZPUMTL4MachineLearningIdentityOperation *operation =
         [[ZPUMTL4MachineLearningIdentityOperation alloc] initWithSource:source destination:destination];
-    [_owner->_machineLearningOperations addObject:operation];
+    if (!zpu_defer_operation(_owner->_legacyBuffer, ^BOOL {
+        return [operation execute];
+    })) {
+        [_owner markError];
+        return;
+    }
     [_owner->_legacyBuffer retainResource:source];
     [_owner->_legacyBuffer retainResource:destination];
     [_owner->_legacyBuffer retainResource:zpuHeap];

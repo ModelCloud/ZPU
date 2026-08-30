@@ -16665,6 +16665,70 @@ int main(void) {
             return 63;
         }
 
+        /* ML operations share the command buffer's ordered ZPU stream. Put a
+         * tensor copy before the identity dispatch, then change its source
+         * after encoding. If ML work were still drained out-of-band at commit,
+         * the identity operation would read the destination sentinel before
+         * the preceding copy ran. */
+        id<MTLTensor> metal4_ml_order_output =
+            [adapter_device newTensorWithDescriptor:metal4_ml_identity_tensor_descriptor
+                                               error:&metal4_ml_identity_error];
+        [metal4_ml_identity_source replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:metal4_ml_identity_initial
+                                               strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_identity_destination replaceSliceOrigin:metal4_ml_identity_zero
+                                           sliceDimensions:metal4_ml_identity_dimensions
+                                                 withBytes:metal4_ml_identity_sentinel
+                                                   strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_order_output replaceSliceOrigin:metal4_ml_identity_zero
+                                   sliceDimensions:metal4_ml_identity_dimensions
+                                         withBytes:metal4_ml_identity_sentinel
+                                           strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_identity_table setResource:metal4_ml_identity_destination.gpuResourceID atBufferIndex:0];
+        [metal4_ml_identity_table setResource:metal4_ml_order_output.gpuResourceID atBufferIndex:1];
+        id<MTL4CommandBuffer> metal4_ml_order_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_order_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_ml_order_copy_encoder =
+            [metal4_ml_order_command_buffer computeCommandEncoder];
+        [metal4_ml_order_copy_encoder copyFromTensor:metal4_ml_identity_source
+                                        sourceOrigin:metal4_ml_identity_zero
+                                    sourceDimensions:metal4_ml_identity_dimensions
+                                            toTensor:metal4_ml_identity_destination
+                                   destinationOrigin:metal4_ml_identity_zero
+                                destinationDimensions:metal4_ml_identity_dimensions];
+        [metal4_ml_order_copy_encoder endEncoding];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_order_encoder =
+            [metal4_ml_order_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_order_encoder setPipelineState:metal4_ml_identity_pipeline];
+        [metal4_ml_order_encoder setArgumentTable:metal4_ml_identity_table];
+        [metal4_ml_order_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_order_encoder endEncoding];
+        [metal4_ml_order_command_buffer endCommandBuffer];
+        [metal4_ml_identity_source replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:metal4_ml_identity_committed
+                                               strides:metal4_ml_identity_packed_strides];
+        id<MTL4CommandBuffer> metal4_ml_order_command_buffers[] = {metal4_ml_order_command_buffer};
+        MTL4CommitOptions *metal4_ml_order_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_order_feedback_error = nil;
+        [metal4_ml_order_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_order_feedback_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_order_command_buffers count:1 options:metal4_ml_order_options];
+        uint8_t metal4_ml_order_values[sizeof(metal4_ml_identity_committed)] = {0};
+        [metal4_ml_order_output getBytes:metal4_ml_order_values
+                                 strides:metal4_ml_identity_packed_strides
+                        fromSliceOrigin:metal4_ml_identity_zero
+                         sliceDimensions:metal4_ml_identity_dimensions];
+        if (metal4_ml_order_output == nil || metal4_ml_order_copy_encoder == nil ||
+            metal4_ml_order_encoder == nil || metal4_ml_order_feedback_error != nil ||
+            memcmp(metal4_ml_order_values, metal4_ml_identity_committed,
+                   sizeof(metal4_ml_order_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML ordering was not preserved", metal4_ml_order_feedback_error);
+            return 154;
+        }
+
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
          * role in this test suite is to define the page-size and mapping
