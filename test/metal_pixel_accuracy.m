@@ -284,6 +284,132 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     return result;
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static int test_adapter_metal4_object_protocols(id<MTLDevice> adapter_device,
+                                                id<MTLTexture> adapter_texture) {
+    MTL4CommandAllocatorDescriptor *allocator_descriptor = [MTL4CommandAllocatorDescriptor new];
+    NSError *error = nil;
+    id<MTL4CommandAllocator> allocator =
+        [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&error];
+    MTL4CommandQueueDescriptor *queue_descriptor = [MTL4CommandQueueDescriptor new];
+    id<MTL4CommandQueue> queue =
+        [adapter_device newMTL4CommandQueueWithDescriptor:queue_descriptor error:&error];
+    id<MTL4ArgumentTable> argument_table = nil;
+    {
+        MTL4ArgumentTableDescriptor *descriptor = [MTL4ArgumentTableDescriptor new];
+        descriptor.maxBufferBindCount = 1;
+        descriptor.maxTextureBindCount = 1;
+        descriptor.maxSamplerStateBindCount = 1;
+        descriptor.initializeBindings = YES;
+        descriptor.supportAttributeStrides = YES;
+        argument_table = [adapter_device newArgumentTableWithDescriptor:descriptor error:&error];
+    }
+    id<MTL4CounterHeap> counter_heap = nil;
+    {
+        MTL4CounterHeapDescriptor *descriptor = [MTL4CounterHeapDescriptor new];
+        descriptor.type = MTL4CounterHeapTypeTimestamp;
+        descriptor.count = 2;
+        counter_heap = [adapter_device newCounterHeapWithDescriptor:descriptor error:&error];
+    }
+    MTL4CompilerDescriptor *compiler_descriptor = [MTL4CompilerDescriptor new];
+    id<MTL4Compiler> compiler =
+        [adapter_device newCompilerWithDescriptor:compiler_descriptor error:&error];
+    MTL4LibraryFunctionDescriptor *compute_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+    compute_function_descriptor.library = [adapter_device newDefaultLibrary];
+    compute_function_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+    MTL4ComputePipelineDescriptor *compute_descriptor = [MTL4ComputePipelineDescriptor new];
+    compute_descriptor.computeFunctionDescriptor = compute_function_descriptor;
+    id<MTLComputePipelineState> compute_pipeline =
+        [compiler newComputePipelineStateWithDescriptor:compute_descriptor
+                                   compilerTaskOptions:nil error:&error];
+    MTL4LibraryFunctionDescriptor *ml_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+    ml_function_descriptor.library = [adapter_device newDefaultLibrary];
+    ml_function_descriptor.name = @"zpu_cpu_ml_identity";
+    MTL4MachineLearningPipelineDescriptor *ml_descriptor =
+        [MTL4MachineLearningPipelineDescriptor new];
+    ml_descriptor.machineLearningFunctionDescriptor = ml_function_descriptor;
+    id<MTL4MachineLearningPipelineState> ml_pipeline =
+        [compiler newMachineLearningPipelineStateWithDescriptor:ml_descriptor error:&error];
+
+    id<MTL4CommandBuffer> command_buffer = [adapter_device newCommandBuffer];
+    id<MTL4ComputeCommandEncoder> compute_encoder = nil;
+    if (command_buffer != nil && allocator != nil) {
+        [command_buffer beginCommandBufferWithAllocator:allocator];
+        compute_encoder = [command_buffer computeCommandEncoder];
+        [compute_encoder endEncoding];
+        [command_buffer endCommandBuffer];
+    }
+    id<MTL4CommandBuffer> machine_learning_command_buffer = [adapter_device newCommandBuffer];
+    id<MTL4MachineLearningCommandEncoder> machine_learning_encoder = nil;
+    id<MTL4CommandAllocator> machine_learning_allocator =
+        [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&error];
+    if (machine_learning_command_buffer != nil && machine_learning_allocator != nil) {
+        [machine_learning_command_buffer beginCommandBufferWithAllocator:machine_learning_allocator];
+        machine_learning_encoder = [machine_learning_command_buffer machineLearningCommandEncoder];
+        [machine_learning_encoder endEncoding];
+        [machine_learning_command_buffer endCommandBuffer];
+    }
+    id<MTL4CommandBuffer> render_command_buffer = [adapter_device newCommandBuffer];
+    id<MTL4RenderCommandEncoder> render_encoder = nil;
+    id<MTL4CommandAllocator> render_allocator =
+        [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&error];
+    if (render_command_buffer != nil && render_allocator != nil && adapter_texture != nil) {
+        MTL4RenderPassDescriptor *pass = [MTL4RenderPassDescriptor new];
+        pass.colorAttachments[0].texture = adapter_texture;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+        [render_command_buffer beginCommandBufferWithAllocator:render_allocator];
+        render_encoder = [render_command_buffer renderCommandEncoderWithDescriptor:pass];
+        [render_encoder endEncoding];
+        [render_command_buffer endCommandBuffer];
+    }
+    MTL4LibraryDescriptor *binary_library_descriptor = [MTL4LibraryDescriptor new];
+    binary_library_descriptor.source = @"zpu_test_visible";
+    id<MTLLibrary> binary_library =
+        [compiler newLibraryWithDescriptor:binary_library_descriptor error:&error];
+    MTL4LibraryFunctionDescriptor *binary_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+    binary_function_descriptor.library = binary_library;
+    binary_function_descriptor.name = @"zpu_test_visible";
+    MTL4BinaryFunctionDescriptor *binary_descriptor = [MTL4BinaryFunctionDescriptor new];
+    binary_descriptor.name = @"zpu_test_visible";
+    binary_descriptor.functionDescriptor = binary_function_descriptor;
+    binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
+    id<MTL4BinaryFunction> binary_function =
+        [compiler newBinaryFunctionWithDescriptor:binary_descriptor
+                              compilerTaskOptions:nil error:&error];
+    MTL4LibraryDescriptor *task_library_descriptor = [MTL4LibraryDescriptor new];
+    task_library_descriptor.source = @"zpu_cpu_fill_gradient_rgba8";
+    id<MTL4CompilerTask> compiler_task =
+        [compiler newLibraryWithDescriptor:task_library_descriptor
+                         completionHandler:^(id<MTLLibrary> task_library, NSError *task_error) {
+                             (void)task_library;
+                             (void)task_error;
+                         }];
+    int result = 0;
+#define ZPU_AUDIT_MTL4_OBJECT(object, protocol_type, name) \
+    do { if (result == 0) result = test_adapter_object_protocol_selector_coverage( \
+        (object), @protocol(protocol_type), (name)); } while (0)
+    ZPU_AUDIT_MTL4_OBJECT(allocator, MTL4CommandAllocator, "MTL4CommandAllocator");
+    ZPU_AUDIT_MTL4_OBJECT(queue, MTL4CommandQueue, "MTL4CommandQueue");
+    ZPU_AUDIT_MTL4_OBJECT(argument_table, MTL4ArgumentTable, "MTL4ArgumentTable");
+    ZPU_AUDIT_MTL4_OBJECT(counter_heap, MTL4CounterHeap, "MTL4CounterHeap");
+    ZPU_AUDIT_MTL4_OBJECT(compiler, MTL4Compiler, "MTL4Compiler");
+    ZPU_AUDIT_MTL4_OBJECT(compiler_task, MTL4CompilerTask, "MTL4CompilerTask");
+    ZPU_AUDIT_MTL4_OBJECT(binary_function, MTL4BinaryFunction, "MTL4BinaryFunction");
+    ZPU_AUDIT_MTL4_OBJECT(ml_pipeline, MTL4MachineLearningPipelineState, "MTL4MachineLearningPipelineState");
+    ZPU_AUDIT_MTL4_OBJECT(command_buffer, MTL4CommandBuffer, "MTL4CommandBuffer");
+    ZPU_AUDIT_MTL4_OBJECT(compute_encoder, MTL4ComputeCommandEncoder, "MTL4ComputeCommandEncoder");
+    ZPU_AUDIT_MTL4_OBJECT(machine_learning_encoder, MTL4MachineLearningCommandEncoder,
+                           "MTL4MachineLearningCommandEncoder");
+    ZPU_AUDIT_MTL4_OBJECT(render_encoder, MTL4RenderCommandEncoder, "MTL4RenderCommandEncoder");
+#undef ZPU_AUDIT_MTL4_OBJECT
+    if (result == 0 && (error != nil || compute_pipeline == nil || binary_library == nil)) {
+        fprintf(stderr, "metal-pixel: CPU adapter Metal 4 protocol audit object creation failed\n");
+        return 165;
+    }
+    return result;
+}
+
 /* The CPU adapter keeps Metal 4 tile/object/mesh bindings as deterministic
  * stage metadata. Inspect that private representation here so an argument
  * table replacement test can distinguish an explicit null from a stale
@@ -8990,6 +9116,11 @@ int main(void) {
         const int adapter_core_object_protocol_result =
             test_adapter_core_object_protocols(adapter_device, adapter_vertex_buffer, adapter_texture);
         if (adapter_core_object_protocol_result != 0) return adapter_core_object_protocol_result;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            const int adapter_metal4_object_protocol_result =
+                test_adapter_metal4_object_protocols(adapter_device, adapter_texture);
+            if (adapter_metal4_object_protocol_result != 0) return adapter_metal4_object_protocol_result;
+        }
         const NSUInteger adapter_initial_allocated_size =
             adapter_texture.allocatedSize + adapter_vertex_buffer.length + adapter_private_buffer.length;
         if (adapter_device.currentAllocatedSize != adapter_initial_allocated_size) {
