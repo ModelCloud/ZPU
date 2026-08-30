@@ -569,6 +569,9 @@ triangle path:
   tensors; buffer-backed tensor views enforce Apple's 64-byte ML row and
   128-byte sub-byte outer-stride/offset rules, including exact higher-rank ML
   stride continuation; direct tensors reject buffer-only stride descriptors;
+  invalid tensor creation returns Apple's `MTLTensorDomain` with
+  `MTLTensorErrorInvalidDescriptor` (allocation failure uses
+  `MTLTensorErrorInternalError`);
   legacy and Metal 4 tensor copy commands defer packed sub-byte transfers
   through the CPU/ZPU command stream. Acceleration-structure build/refit/copy/compaction commands use
   the same CPU-owned storage path, and the bounded Float3 triangle trace
