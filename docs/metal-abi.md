@@ -399,8 +399,10 @@ triangle path:
   than importing native storage
 - CPU visible/intersection function tables retain ZPU-owned function handles,
   buffer bindings, opaque-intersection signatures, and visible-table links;
-  they expose deterministic CPU resource metadata and IDs, while arbitrary
-  function-pointer dispatch and ray tracing remain unsupported
+  they expose deterministic CPU resource metadata and IDs; valid table and
+  acceleration-structure bindings on legacy compute encoders retain the same
+  CPU resources and preserve command ordering, while arbitrary function-pointer
+  dispatch and ray tracing remain unsupported
 - CPU acceleration-structure resources expose deterministic ZPU-backed storage,
   heap placement, resource IDs, and descriptor-derived size queries. Their CPU
   command encoder supports build, refit, copy, compact-size, and compaction

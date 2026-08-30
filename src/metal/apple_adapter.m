@@ -113,6 +113,9 @@ static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 @class ZPUMTL4MachineLearningFenceOperation;
 @class ZPUIOCommandQueue;
 
+static BOOL zpu_acceleration_structure_belongs_to_device(ZPUDevice *owner,
+                                                          id<MTLAccelerationStructure> structure);
+
 @interface ZPUBuffer : NSObject <MTLBuffer> {
 @public
     zpu_metal_buffer *_zpuBuffer;
@@ -12983,24 +12986,67 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setVisibleFunctionTable:(id<MTLVisibleFunctionTable>)visibleFunctionTable atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)bufferIndex;
-    if (visibleFunctionTable != nil) [_owner markError];
+    if (bufferIndex > UINT32_MAX) {
+        [_owner markError];
+        return;
+    }
+    ZPUVisibleFunctionTable *table = (ZPUVisibleFunctionTable *)visibleFunctionTable;
+    if (visibleFunctionTable != nil &&
+        (![table isKindOfClass:[ZPUVisibleFunctionTable class]] || table->_owner != [_owner device])) {
+        [_owner markError];
+        return;
+    }
+    /* The registered CPU kernels do not perform function-pointer dispatch,
+     * but a valid table binding is still part of the Metal command state.
+     * Retain the CPU metadata for command-buffer lifetime without invoking
+     * Apple's function-table machinery. */
+    if (visibleFunctionTable != nil) [_owner retainResource:visibleFunctionTable];
 }
 - (void)setVisibleFunctionTables:(const id<MTLVisibleFunctionTable> __nullable [__nonnull])visibleFunctionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)visibleFunctionTables;
-    if (range.length != 0) [_owner markError];
+    if ((range.length != 0 && visibleFunctionTables == NULL) || !zpu_u32_range_indices_fit(range)) {
+        [_owner markError];
+        return;
+    }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setVisibleFunctionTable:visibleFunctionTables[index] atBufferIndex:range.location + index];
+    }
 }
 - (void)setIntersectionFunctionTable:(id<MTLIntersectionFunctionTable>)intersectionFunctionTable atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)bufferIndex;
-    if (intersectionFunctionTable != nil) [_owner markError];
+    if (bufferIndex > UINT32_MAX) {
+        [_owner markError];
+        return;
+    }
+    ZPUIntersectionFunctionTable *table = (ZPUIntersectionFunctionTable *)intersectionFunctionTable;
+    if (intersectionFunctionTable != nil &&
+        (![table isKindOfClass:[ZPUIntersectionFunctionTable class]] || table->_owner != [_owner device])) {
+        [_owner markError];
+        return;
+    }
+    if (intersectionFunctionTable != nil) [_owner retainResource:intersectionFunctionTable];
 }
 - (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [__nonnull])intersectionFunctionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)intersectionFunctionTables;
-    if (range.length != 0) [_owner markError];
+    if ((range.length != 0 && intersectionFunctionTables == NULL) || !zpu_u32_range_indices_fit(range)) {
+        [_owner markError];
+        return;
+    }
+    for (NSUInteger index = 0; index < range.length; ++index) {
+        [self setIntersectionFunctionTable:intersectionFunctionTables[index] atBufferIndex:range.location + index];
+    }
 }
 - (void)setAccelerationStructure:(id<MTLAccelerationStructure>)accelerationStructure atBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)bufferIndex;
-    if (accelerationStructure != nil) [_owner markError];
+    if (bufferIndex > UINT32_MAX) {
+        [_owner markError];
+        return;
+    }
+    if (accelerationStructure != nil &&
+        !zpu_acceleration_structure_belongs_to_device([_owner device], accelerationStructure)) {
+        [_owner markError];
+        return;
+    }
+    /* Acceleration structures are CPU-owned resources. Binding one is valid
+     * for a fixed CPU kernel even though arbitrary ray traversal remains
+     * unsupported and therefore never reaches a native Metal encoder. */
+    if (accelerationStructure != nil) [_owner retainResource:accelerationStructure];
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index {
     (void)index;

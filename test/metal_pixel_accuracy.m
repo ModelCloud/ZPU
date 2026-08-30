@@ -11426,6 +11426,56 @@ int main(void) {
             return 102;
         }
 
+        /* Binding CPU-owned function tables and acceleration structures to a
+         * legacy compute encoder is valid command state even for a registered
+         * kernel that does not consume those resources. The adapter must keep
+         * the resources alive and preserve the dispatch result, while still
+         * refusing foreign objects. */
+        BOOL adapter_compute_resource_bindings_ok = YES;
+        if (@available(macOS 11.0, iOS 14.0, tvOS 16.0, *)) {
+            id<MTLAccelerationStructure> adapter_bound_acceleration_structure =
+                [adapter_device newAccelerationStructureWithSize:256];
+            id<MTLCommandBuffer> adapter_binding_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_binding_encoder =
+                [adapter_binding_command_buffer computeCommandEncoder];
+            id<MTLVisibleFunctionTable> adapter_visible_tables[] = {
+                adapter_visible_function_table, nil,
+            };
+            id<MTLIntersectionFunctionTable> adapter_intersection_tables[] = {
+                adapter_intersection_function_table, nil,
+            };
+            [adapter_binding_encoder setComputePipelineState:adapter_compute_pipeline];
+            [adapter_binding_encoder setTexture:adapter_compute_texture atIndex:0];
+            [adapter_binding_encoder setVisibleFunctionTable:adapter_visible_function_table atBufferIndex:0];
+            [adapter_binding_encoder setVisibleFunctionTables:adapter_visible_tables
+                                             withBufferRange:NSMakeRange(0, 2)];
+            [adapter_binding_encoder setIntersectionFunctionTable:adapter_intersection_function_table
+                                                    atBufferIndex:0];
+            [adapter_binding_encoder setIntersectionFunctionTables:adapter_intersection_tables
+                                                     withBufferRange:NSMakeRange(0, 2)];
+            [adapter_binding_encoder setAccelerationStructure:adapter_bound_acceleration_structure
+                                                atBufferIndex:0];
+            [adapter_binding_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [adapter_binding_encoder endEncoding];
+            [adapter_binding_command_buffer commit];
+            [adapter_binding_command_buffer waitUntilCompleted];
+            uint8_t adapter_binding_pixels[byte_count];
+            [adapter_compute_texture getBytes:adapter_binding_pixels
+                                   bytesPerRow:(NSUInteger)width * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                mipmapLevel:0];
+            adapter_compute_resource_bindings_ok =
+                adapter_bound_acceleration_structure != nil &&
+                adapter_binding_command_buffer != nil && adapter_binding_encoder != nil &&
+                adapter_binding_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                memcmp(native_compute_pixels, adapter_binding_pixels, byte_count) == 0;
+        }
+        if (!adapter_compute_resource_bindings_ok) {
+            fprintf(stderr, "metal-pixel: CPU compute resource bindings failed\n");
+            return 153;
+        }
+
         const MTLPixelFormat compute_float_formats[] = {
             MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
         };
