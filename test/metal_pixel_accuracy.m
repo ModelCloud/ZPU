@@ -793,6 +793,122 @@ static int test_vertex_attribute_stride_against_native(
     return 0;
 }
 
+static zpu_metal_vertex zpu_line_vertex(float x, float y) {
+    const float nx = (x - 1.0f) / 7.0f * 2.0f - 1.0f;
+    const float ny = 1.0f - (y - 1.0f) / 5.0f * 2.0f;
+    return (zpu_metal_vertex){{nx, ny, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}};
+}
+
+static int test_line_diamond_exit_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    enum { width = 9, height = 7, byte_count = width * height * 4 };
+    /* Coordinates are attachment-global: the non-zero viewport origin makes
+     * an accidental lower-left or viewport-local Y origin visible. */
+    static const float lines[][2][2] = {
+        {{1.0f, 1.5f}, {7.0f, 1.5f}},
+        {{1.0f, 1.0f}, {7.0f, 1.0f}},
+        {{1.5f, 1.0f}, {1.5f, 5.01f}},
+        {{1.0f, 1.0f}, {7.0f, 7.0f}},
+        {{1.0f, 7.0f}, {7.0f, 1.0f}},
+        {{1.0f, 1.0f}, {7.0f, 4.0f}},
+        {{1.0f, 1.0f}, {7.0f, 3.0f}},
+        {{1.0f, 1.0f}, {3.0f, 7.0f}},
+        {{1.0f, 1.0f}, {4.0f, 7.0f}},
+    };
+    MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+    native_descriptor.vertexFunction = native_vertex_function;
+    native_descriptor.fragmentFunction = native_fragment_function;
+    native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    MTLRenderPipelineDescriptor *adapter_descriptor = [native_descriptor copy];
+    adapter_descriptor.vertexFunction = adapter_vertex_function;
+    adapter_descriptor.fragmentFunction = adapter_fragment_function;
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_descriptor error:&adapter_error];
+    MTLTextureDescriptor *native_texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    native_texture_descriptor.storageMode = MTLStorageModeShared;
+    native_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    MTLTextureDescriptor *adapter_texture_descriptor = [native_texture_descriptor copy];
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+    if (native_pipeline == nil || adapter_pipeline == nil || native_queue == nil || adapter_queue == nil) {
+        fail_with_error("line oracle pipeline allocation failed", adapter_error ?: native_error);
+        return 156;
+    }
+    const MTLViewport viewport = {1.0, 1.0, 7.0, 5.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {1, 1, 7, 5};
+    for (NSUInteger line = 0; line < sizeof(lines) / sizeof(lines[0]); ++line) {
+        const zpu_metal_vertex vertices[] = {
+            zpu_line_vertex(lines[line][0][0], lines[line][0][1]),
+            zpu_line_vertex(lines[line][1][0], lines[line][1][1]),
+        };
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:native_texture_descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.colorAttachments[0].texture = native_texture;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        MTLRenderPassDescriptor *adapter_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_pass.colorAttachments[0].texture = adapter_texture;
+        adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTLRenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setViewport:viewport];
+        [native_encoder setScissorRect:scissor];
+        [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:2];
+        [native_encoder endEncoding];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setViewport:viewport];
+        [adapter_encoder setScissorRect:scissor];
+        [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+        [adapter_encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:2];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+        uint8_t native_pixels[byte_count];
+        uint8_t adapter_pixels[byte_count];
+        [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            native_encoder == nil || adapter_encoder == nil ||
+            memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: line diamond-exit mismatch at line %zu ((%g,%g)->(%g,%g)) byte %zu Metal=%u ZPU=%u\n",
+                    line, lines[line][0][0], lines[line][0][1], lines[line][1][0], lines[line][1][1], mismatch,
+                    mismatch < byte_count ? native_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+            return 157;
+        }
+    }
+    return 0;
+}
+
 static int test_mip_sampler_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -10927,6 +11043,11 @@ int main(void) {
                 return 105;
             }
         }
+
+        const int line_diamond_exit_result = test_line_diamond_exit_against_native(
+            device, adapter_device, vertex_function, fragment_function,
+            adapter_vertex_function, adapter_fragment_function);
+        if (line_diamond_exit_result != 0) return line_diamond_exit_result;
 
         /* Clipping happens in homogeneous clip space before the perspective
          * divide. A projected-space-only implementation cannot safely handle

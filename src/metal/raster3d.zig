@@ -1647,6 +1647,38 @@ fn lineSampleFilter(job: *const Job, a: ProjectedVertex, b: ProjectedVertex) abi
     return lineSampleSelection(job, a, b).filter;
 }
 
+fn clipLineDiamondAxis(start: f32, delta: f32, lower: f32, upper: f32, enter: *f32, exit: *f32) bool {
+    const epsilon: f32 = 0.000001;
+    if (@abs(delta) < epsilon) return start >= lower - epsilon and start <= upper + epsilon;
+    const first = (lower - start) / delta;
+    const last = (upper - start) / delta;
+    const axis_enter = @min(first, last);
+    const axis_exit = @max(first, last);
+    enter.* = @max(enter.*, axis_enter);
+    exit.* = @min(exit.*, axis_exit);
+    return enter.* <= exit.* + epsilon;
+}
+
+/// Metal's one-pixel line rule is an aliased diamond-exit rule: a fragment is
+/// emitted when the segment enters and exits the pixel-center diamond. A
+/// segment which merely terminates inside a diamond does not emit that pixel.
+/// The diamond is expressed in the attachment-global, top-left pixel grid.
+fn lineExitsPixelDiamond(a: ProjectedVertex, b: ProjectedVertex, x: usize, y: usize) bool {
+    const center_x = @as(f32, @floatFromInt(x)) + 0.5;
+    const center_y = @as(f32, @floatFromInt(y)) + 0.5;
+    const delta_x = b.x - a.x;
+    const delta_y = b.y - a.y;
+    var diamond_enter: f32 = -std.math.inf(f32);
+    var diamond_exit: f32 = std.math.inf(f32);
+    if (!clipLineDiamondAxis(a.x + a.y, delta_x + delta_y, center_x + center_y - 0.5, center_x + center_y + 0.5, &diamond_enter, &diamond_exit) or
+        !clipLineDiamondAxis(a.x - a.y, delta_x - delta_y, center_x - center_y - 0.5, center_x - center_y + 0.5, &diamond_enter, &diamond_exit)) return false;
+    const enter = @max(diamond_enter, 0);
+    const exit = @min(diamond_exit, 1);
+    // The segment must have positive-length coverage and must actually leave
+    // the diamond before its endpoint; merely ending inside it is excluded.
+    return exit >= enter + 0.000001 and diamond_exit <= 1.000001;
+}
+
 fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: usize, stats: *Stats) void {
     const bounds = scissorBounds(job.options, job.target.width, job.target.height);
     const steps_float = @ceil(@max(@abs(b.x - a.x), @abs(b.y - a.y)));
@@ -1661,21 +1693,49 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
     const delta_x = b.x - a.x;
     const delta_y = b.y - a.y;
     const delta_length_squared = delta_x * delta_x + delta_y * delta_y;
+    var recent_pixels: [8][2]usize = undefined;
+    var recent_count: usize = 0;
+    var recent_cursor: usize = 0;
     for (0..steps + 1) |step| {
         const t = @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(steps));
         const x_value = a.x + (b.x - a.x) * t;
         const y_value = a.y + (b.y - a.y) * t;
-        const x = pixelCoordinate(x_value, bounds.x1) orelse continue;
-        const y = pixelCoordinate(y_value, bounds.y1) orelse continue;
-        if (x < bounds.x0 or y < @max(bounds.y0, y0) or y >= @min(bounds.y1, y1)) continue;
-        const pixel_center_x = @as(f32, @floatFromInt(x)) + 0.5;
-        const pixel_center_y = @as(f32, @floatFromInt(y)) + 0.5;
-        const center_t = if (delta_length_squared > 0)
-            std.math.clamp(((pixel_center_x - a.x) * delta_x + (pixel_center_y - a.y) * delta_y) /
-                delta_length_squared, 0, 1)
-        else
-            t;
-        writePixel(job, x, y, a.z + (b.z - a.z) * center_t, depth_adjust, interpolateLineColor(a, b, center_t), lineSampleSelection(job, a, b), stats, true);
+        if (!std.math.isFinite(x_value) or !std.math.isFinite(y_value) or
+            x_value < -1 or y_value < -1 or
+            x_value >= @as(f32, @floatFromInt(job.target.width)) + 1 or
+            y_value >= @as(f32, @floatFromInt(job.target.height)) + 1) continue;
+        const base_x: i64 = @intFromFloat(@floor(x_value));
+        const base_y: i64 = @intFromFloat(@floor(y_value));
+        var offset_y: i64 = -1;
+        while (offset_y <= 1) : (offset_y += 1) {
+            const candidate_y = base_y + offset_y;
+            if (candidate_y < 0 or candidate_y >= @as(i64, @intCast(job.target.height))) continue;
+            const y = @as(usize, @intCast(candidate_y));
+            if (y < bounds.y0 or y < y0 or y >= bounds.y1 or y >= y1) continue;
+            var offset_x: i64 = -1;
+            while (offset_x <= 1) : (offset_x += 1) {
+                const candidate_x = base_x + offset_x;
+                if (candidate_x < 0 or candidate_x >= @as(i64, @intCast(job.target.width))) continue;
+                const x = @as(usize, @intCast(candidate_x));
+                if (x < bounds.x0 or x >= bounds.x1 or !lineExitsPixelDiamond(a, b, x, y)) continue;
+                var seen = false;
+                for (recent_pixels[0..recent_count]) |pixel| {
+                    if (pixel[0] == x and pixel[1] == y) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen) continue;
+                recent_pixels[recent_cursor] = .{ x, y };
+                recent_cursor = (recent_cursor + 1) % recent_pixels.len;
+                if (recent_count < recent_pixels.len) recent_count += 1;
+                const pixel_center_x = @as(f32, @floatFromInt(x)) + 0.5;
+                const pixel_center_y = @as(f32, @floatFromInt(y)) + 0.5;
+                const center_t = std.math.clamp(((pixel_center_x - a.x) * delta_x + (pixel_center_y - a.y) * delta_y) /
+                    delta_length_squared, 0, 1);
+                writePixel(job, x, y, a.z + (b.z - a.z) * center_t, depth_adjust, interpolateLineColor(a, b, center_t), lineSampleSelection(job, a, b), stats, true);
+            }
+        }
     }
 }
 
@@ -1984,6 +2044,39 @@ test "Apple raster coordinates use an 8-bit fractional screen grid" {
     try std.testing.expectEqual(@as(f32, 1.25), quantizeRasterCoordinate(1.251));
     try std.testing.expectEqual(@as(f32, 1.25390625), quantizeRasterCoordinate(1.25390625));
     try std.testing.expectEqual(@as(f32, -0.75), quantizeRasterCoordinate(-0.751));
+}
+
+test "Metal aliased lines use diamond exit on the top-left pixel grid" {
+    const make_vertex = struct {
+        fn call(x: f32, y: f32) ProjectedVertex {
+            return .{ .x = x, .y = y, .z = 0.5, .inverse_w = 1, .color = .{ 1, 0, 0, 1 } };
+        }
+    }.call;
+    const horizontal_start = make_vertex(1, 1.5);
+    const horizontal_end = make_vertex(7, 1.5);
+    for (1..7) |x| try std.testing.expect(lineExitsPixelDiamond(horizontal_start, horizontal_end, x, 1));
+    try std.testing.expect(!lineExitsPixelDiamond(horizontal_start, horizontal_end, 0, 1));
+    try std.testing.expect(!lineExitsPixelDiamond(horizontal_start, horizontal_end, 7, 1));
+
+    // A segment that terminates inside the next diamond does not emit that
+    // pixel; extending it to the diamond boundary does.
+    const short_horizontal = make_vertex(1.25, 1.5);
+    const inside_end = make_vertex(1.75, 1.5);
+    try std.testing.expect(!lineExitsPixelDiamond(short_horizontal, inside_end, 1, 1));
+    const boundary_end = make_vertex(2, 1.5);
+    try std.testing.expect(lineExitsPixelDiamond(short_horizontal, boundary_end, 1, 1));
+
+    // The ordinary-line oracle exercises these asymmetric slopes on M4 Max.
+    const shallow_start = make_vertex(1, 1);
+    const shallow_end = make_vertex(7, 4);
+    try std.testing.expect(lineExitsPixelDiamond(shallow_start, shallow_end, 1, 1));
+    try std.testing.expect(lineExitsPixelDiamond(shallow_start, shallow_end, 2, 1));
+    try std.testing.expect(lineExitsPixelDiamond(shallow_start, shallow_end, 3, 2));
+    try std.testing.expect(lineExitsPixelDiamond(shallow_start, shallow_end, 4, 2));
+    try std.testing.expect(lineExitsPixelDiamond(shallow_start, shallow_end, 5, 3));
+    try std.testing.expect(lineExitsPixelDiamond(shallow_start, shallow_end, 6, 3));
+    try std.testing.expect(!lineExitsPixelDiamond(shallow_start, shallow_end, 1, 0));
+    try std.testing.expect(!lineExitsPixelDiamond(shallow_start, shallow_end, 6, 4));
 }
 
 test "Metal viewport and scissor origins use the top-left pixel grid" {
