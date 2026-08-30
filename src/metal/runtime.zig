@@ -119,10 +119,15 @@ pub const TextureFormat = enum {
     fn isColor(self: TextureFormat) bool {
         return self == .a8_unorm or self == .r8_unorm or self == .r8_unorm_srgb or self == .r8_snorm or self == .r16_unorm or self == .r16_snorm or self == .r16_float or
             self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg8_snorm or self == .rg16_unorm or self == .rg16_snorm or self == .rg16_float or
-            self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .rgba8_snorm or self == .bgra8_unorm or self == .bgra8_unorm_srgb or
+            self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .rgba8_snorm or self == .rgba8_uint or self == .rgba8_sint or
+            self == .bgra8_unorm or self == .bgra8_unorm_srgb or
             self == .b5g6r5_unorm or self == .a1bgr5_unorm or self == .abgr4_unorm or self == .bgr5a1_unorm or
             self == .rgb10a2_unorm or self == .bgr10a2_unorm or self == .rg11b10_float or self == .rgb9e5_float or
             self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
+    }
+
+    fn isIntegerColor(self: TextureFormat) bool {
+        return self == .rgba8_uint or self == .rgba8_sint;
     }
 };
 
@@ -371,7 +376,8 @@ pub const Texture = struct {
                 .rgba8_unorm => .rgba8_unorm,
                 .rgba8_unorm_srgb => .rgba8_unorm_srgb,
                 .rgba8_snorm => .rgba8_snorm,
-                .rgba8_uint, .rgba8_sint => unreachable,
+                .rgba8_uint => .rgba8_uint,
+                .rgba8_sint => .rgba8_sint,
                 .bgra8_unorm => .bgra8_unorm,
                 .bgra8_unorm_srgb => .bgra8_unorm_srgb,
                 .b5g6r5_unorm => .b5g6r5_unorm,
@@ -1899,6 +1905,8 @@ pub const RenderEncoder = struct {
                         @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb) => abi.PixelFormat.rgba8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.rgba8_snorm) => abi.PixelFormat.rgba8_snorm,
+                        @intFromEnum(abi.PixelFormat.rgba8_uint) => abi.PixelFormat.rgba8_uint,
+                        @intFromEnum(abi.PixelFormat.rgba8_sint) => abi.PixelFormat.rgba8_sint,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm) => abi.PixelFormat.bgra8_unorm,
                         @intFromEnum(abi.PixelFormat.bgra8_unorm_srgb) => abi.PixelFormat.bgra8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.b5g6r5_unorm) => abi.PixelFormat.b5g6r5_unorm,
@@ -2672,6 +2680,7 @@ pub const BlitEncoder = struct {
     pub fn generateMipmap(self: *BlitEncoder, source: *Texture, destination: *Texture) Error!void {
         if (!self.open() or !validTexture(source) or !validTexture(destination)) return error.InvalidArgument;
         if (source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
+        if (source.format.isIntegerColor()) return error.UnsupportedFormat;
         _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
     }
 
@@ -2683,6 +2692,7 @@ pub const BlitEncoder = struct {
     pub fn generateMipmap3DWeighted(self: *BlitEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) Error!void {
         if (!self.open() or !validTexture(source0) or !validTexture(destination)) return error.InvalidArgument;
         if (source0.device != destination.device or source0.format != destination.format) return error.InvalidArgument;
+        if (source0.format.isIntegerColor()) return error.UnsupportedFormat;
         if (source1) |value| {
             if (!validTexture(value) or value.device != destination.device or value.format != destination.format) return error.InvalidArgument;
         }
@@ -2699,6 +2709,7 @@ pub const BlitEncoder = struct {
 
     pub fn generateMipmap3DArray(self: *BlitEncoder, sources: []const *Texture, destination: *Texture) Error!void {
         if (!self.open() or !validTexture(destination) or sources.len == 0) return error.InvalidArgument;
+        if (destination.format.isIntegerColor()) return error.UnsupportedFormat;
         for (sources) |source| {
             if (!validTexture(source) or source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
         }
@@ -2977,6 +2988,7 @@ pub const ComputeEncoder = struct {
     pub fn generateMipmap(self: *ComputeEncoder, source: *Texture, destination: *Texture) Error!void {
         if (!self.open() or !validTexture(source) or !validTexture(destination)) return error.InvalidArgument;
         if (source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
+        if (source.format.isIntegerColor()) return error.UnsupportedFormat;
         _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
     }
 
@@ -2988,6 +3000,7 @@ pub const ComputeEncoder = struct {
     pub fn generateMipmap3DWeighted(self: *ComputeEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture, source1_weight_numerator: u32, source1_weight_denominator: u32) Error!void {
         if (!self.open() or !validTexture(source0) or !validTexture(destination)) return error.InvalidArgument;
         if (source0.device != destination.device or source0.format != destination.format) return error.InvalidArgument;
+        if (source0.format.isIntegerColor()) return error.UnsupportedFormat;
         if (source1) |value| {
             if (!validTexture(value) or value.device != destination.device or value.format != destination.format) return error.InvalidArgument;
         }
@@ -3004,6 +3017,7 @@ pub const ComputeEncoder = struct {
 
     pub fn generateMipmap3DArray(self: *ComputeEncoder, sources: []const *Texture, destination: *Texture) Error!void {
         if (!self.open() or !validTexture(destination) or sources.len == 0) return error.InvalidArgument;
+        if (destination.format.isIntegerColor()) return error.UnsupportedFormat;
         for (sources) |source| {
             if (!validTexture(source) or source.device != destination.device or source.format != destination.format) return error.InvalidArgument;
         }
@@ -4598,7 +4612,7 @@ fn generateSnormMipmap(command: MipmapCommand) Error!void {
 }
 
 fn generateMipmap(command: MipmapCommand) Error!void {
-    if (command.source == command.destination or !command.source.format.isColor()) return error.UnsupportedFormat;
+    if (command.source == command.destination or !command.source.format.isColor() or command.source.format.isIntegerColor()) return error.UnsupportedFormat;
     if (command.source.format == .r8_unorm_srgb or command.source.format == .rg8_unorm_srgb or
         command.source.format == .rgba8_unorm_srgb or command.source.format == .bgra8_unorm_srgb) return generateSrgb8Mipmap(command);
     if (command.source.format == .r8_snorm or command.source.format == .rg8_snorm or command.source.format == .rgba8_snorm or
@@ -5049,7 +5063,7 @@ fn generatePackedUnormMipmap3D(command: Mipmap3DCommand) Error!void {
 }
 
 fn generateMipmap3D(command: Mipmap3DCommand) Error!void {
-    if (command.source0 == command.destination or !command.source0.format.isColor()) return error.UnsupportedFormat;
+    if (command.source0 == command.destination or !command.source0.format.isColor() or command.source0.format.isIntegerColor()) return error.UnsupportedFormat;
     if (command.source0.format == .r8_unorm_srgb or command.source0.format == .rg8_unorm_srgb or
         command.source0.format == .rgba8_unorm_srgb or command.source0.format == .bgra8_unorm_srgb) return generateSrgb8Mipmap3D(command);
     if (command.source0.format == .r8_snorm or command.source0.format == .rg8_snorm or command.source0.format == .rgba8_snorm or

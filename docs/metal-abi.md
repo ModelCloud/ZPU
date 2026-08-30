@@ -49,15 +49,18 @@ triangle path:
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
   RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,
   RGBA16Float, RG11B10Float, RGB9E5Float, R32Float, RG32Float, and RGBA32Float
-  as CPU color targets; RGBA32Uint and RGBA32Sint remain transfer-only while
-  preserving their native 16-byte texel widths;
+  as CPU color targets; the registered `zpu_cpu_rgba8_uint_fragment` and
+  `zpu_cpu_rgba8_sint_fragment` profiles additionally target RGBA8Uint and
+  RGBA8Sint with raw integer clears and exact native fragment conversion;
+  the remaining Uint/Sint formats, including RGBA32Uint and RGBA32Sint, remain
+  transfer-only while preserving their native texel widths;
   sRGB RGB channels
   use Apple's 12-bit linear fixed-point transfer profile for CPU sampling,
   attachment stores, clears, and mip generation; 2D mip levels are filtered
   from the base level while 3D mip levels are filtered recursively, matching
   the Apple GPU profile exercised by the native oracle; signed-normalized
   attachment stores and 2D/3D mip generation use integer-domain normalized
-  filtering with native-oracle quantization; all Uint/Sint formats remain
+  filtering with native-oracle quantization; all other Uint/Sint formats remain
   transfer-only; packed normalized B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2
   and packed RG11B10Float/RGB9E5Float formats use CPU decode/encode profiles
   for sampling, render targets, and 2D/3D mip generation, including the
@@ -111,6 +114,8 @@ triangle path:
   B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10Float/RGB9E5Float/BGR10A2Unorm/
   R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments can be
   described and cleared by a CPU render pass; the explicit
+  RGBA8Uint/RGBA8Sint attachments are available through their matching
+  registered CPU fragment profiles;
   `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
   extra target, while ordinary single-output profiles leave extra targets at
   their load/clear value

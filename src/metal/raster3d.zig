@@ -108,6 +108,8 @@ pub const TargetFormat = enum {
     rgba8_unorm,
     rgba8_unorm_srgb,
     rgba8_snorm,
+    rgba8_uint,
+    rgba8_sint,
     bgra8_unorm,
     bgra8_unorm_srgb,
     r32_float,
@@ -144,7 +146,7 @@ pub const Target = struct {
             .rg8_unorm, .rg8_unorm_srgb, .rg8_snorm => 2,
             .rg16_unorm, .rg16_snorm => 4,
             .rg16_float => 4,
-            .rgba8_unorm, .rgba8_unorm_srgb, .rgba8_snorm, .bgra8_unorm, .bgra8_unorm_srgb, .r32_float => 4,
+            .rgba8_unorm, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .bgra8_unorm, .bgra8_unorm_srgb, .r32_float => 4,
             .rgba16_unorm, .rgba16_snorm, .rgba16_float => 8,
             .rg32_float => 8,
             .rgba32_float => 16,
@@ -322,6 +324,28 @@ pub const Target = struct {
         std.mem.writeInt(i16, row_bytes[offset..][0..2], @intCast(std.math.clamp(quantized, -32768, 32767)), .little);
     }
 
+    fn writeIntegerClearU8(row_bytes: []u8, offset: usize, value: f32) void {
+        const quantized: u8 = @intFromFloat(std.math.clamp(value, 0, 255));
+        row_bytes[offset] = quantized;
+    }
+
+    fn writeIntegerClearS8(row_bytes: []u8, offset: usize, value: f32) void {
+        const quantized: i8 = @intFromFloat(std.math.clamp(value, -128, 127));
+        row_bytes[offset] = @bitCast(quantized);
+    }
+
+    fn writeIntegerFragmentU8(row_bytes: []u8, offset: usize, value: f32) void {
+        // The registered CPU uint fragment returns uint4(color * 255.0), so
+        // its normalized vertex color is converted back to raw integer texel
+        // units here. MSL's explicit float-to-uint conversion truncates.
+        writeIntegerClearU8(row_bytes, offset, std.math.clamp(value, 0, 1) * 255.0);
+    }
+
+    fn writeIntegerFragmentS8(row_bytes: []u8, offset: usize, value: f32) void {
+        // The registered CPU sint fragment returns int4(color * 127.0).
+        writeIntegerClearS8(row_bytes, offset, std.math.clamp(value, -1, 1) * 127.0);
+    }
+
     fn srgbToLinear(value: u8) f32 {
         const normalized = @as(f32, @floatFromInt(value)) / 255.0;
         const decoded = if (normalized <= 0.04045)
@@ -394,6 +418,16 @@ pub const Target = struct {
             .rgba8_snorm => .{
                 readS8(row_bytes, offset),     readS8(row_bytes, offset + 1),
                 readS8(row_bytes, offset + 2), readS8(row_bytes, offset + 3),
+            },
+            .rgba8_uint => .{
+                @floatFromInt(row_bytes[offset]),     @floatFromInt(row_bytes[offset + 1]),
+                @floatFromInt(row_bytes[offset + 2]), @floatFromInt(row_bytes[offset + 3]),
+            },
+            .rgba8_sint => .{
+                @floatFromInt(@as(i8, @bitCast(row_bytes[offset]))),
+                @floatFromInt(@as(i8, @bitCast(row_bytes[offset + 1]))),
+                @floatFromInt(@as(i8, @bitCast(row_bytes[offset + 2]))),
+                @floatFromInt(@as(i8, @bitCast(row_bytes[offset + 3]))),
             },
             .rgba8_unorm, .rgba8_unorm_srgb, .bgra8_unorm, .bgra8_unorm_srgb => blk: {
                 const format: surface.Format = if (self.format == .rgba8_unorm or self.format == .rgba8_unorm_srgb)
@@ -543,6 +577,18 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(color[3]);
                 surface.Surface.write(row_bytes, offset, format, output);
             },
+            .rgba8_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU8(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentU8(row_bytes, offset + 1, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeIntegerFragmentU8(row_bytes, offset + 2, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeIntegerFragmentU8(row_bytes, offset + 3, color[3]);
+            },
+            .rgba8_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS8(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentS8(row_bytes, offset + 1, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeIntegerFragmentS8(row_bytes, offset + 2, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeIntegerFragmentS8(row_bytes, offset + 3, color[3]);
+            },
             .r32_float => if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF32(row_bytes, offset, color[0]),
             .rgba16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
@@ -640,6 +686,26 @@ pub const Target = struct {
     pub fn storeColorWithNativeSrgb(self: *Target, x: usize, y: usize, color: [4]f32) void {
         if (x >= self.width or y >= self.height) return;
         self.writeColorWithSrgbEncoding(x, y, color, @intFromEnum(abi.ColorWriteMask.all), .native_float);
+    }
+
+    fn clearColor(self: *Target, x: usize, y: usize, color: [4]f32) void {
+        const row_bytes = self.row(@intCast(y));
+        const offset = x * bytesPerPixel(self.format);
+        switch (self.format) {
+            .rgba8_uint => {
+                writeIntegerClearU8(row_bytes, offset, color[0]);
+                writeIntegerClearU8(row_bytes, offset + 1, color[1]);
+                writeIntegerClearU8(row_bytes, offset + 2, color[2]);
+                writeIntegerClearU8(row_bytes, offset + 3, color[3]);
+            },
+            .rgba8_sint => {
+                writeIntegerClearS8(row_bytes, offset, color[0]);
+                writeIntegerClearS8(row_bytes, offset + 1, color[1]);
+                writeIntegerClearS8(row_bytes, offset + 2, color[2]);
+                writeIntegerClearS8(row_bytes, offset + 3, color[3]);
+            },
+            else => self.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all)),
+        }
     }
 
     fn addressCoordinate(value: f32, mode: abi.SamplerAddressMode) ?f32 {
@@ -1373,7 +1439,7 @@ fn clearSurfaceBand(target: *surface.Surface, color: surface.Color, y0: usize, y
 
 pub fn clearTarget(target: *Target, color: [4]f32) void {
     for (0..target.height) |y| {
-        for (0..target.width) |x| target.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all));
+        for (0..target.width) |x| target.clearColor(x, y, color);
     }
 }
 
@@ -1597,6 +1663,28 @@ test "narrow unorm color targets retain channel width and masks" {
     rg8.storeColor(0, 0, .{ 0.25, 0.5, 0.75, 1 });
     try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 128, 0, 0 }, &rg8_bytes);
     try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), rg8.readColor(0, 0)[1], 0.0001);
+}
+
+test "integer color targets separate raw clears from fragment conversion" {
+    var uint_pixels = [_]u8{0} ** 4;
+    var uint_target = try Target.init(&uint_pixels, 1, 1, 4, .rgba8_uint);
+    clearTarget(&uint_target, .{ 17, 34, 51, 68 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 17, 34, 51, 68 }, &uint_pixels);
+    uint_target.storeColor(0, 0, .{ 0.125, 0.5, 0.875, 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 31, 127, 223, 255 }, &uint_pixels);
+    const uint_preserved = uint_pixels;
+    uint_target.writeColor(0, 0, .{ 0, 0, 0, 0 }, @intFromEnum(abi.ColorWriteMask.red));
+    try std.testing.expectEqual(uint_preserved[1], uint_pixels[1]);
+    try std.testing.expectEqual(uint_preserved[2], uint_pixels[2]);
+    try std.testing.expectEqual(uint_preserved[3], uint_pixels[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, 127), uint_target.readColor(0, 0)[1], 0.001);
+
+    var sint_pixels = [_]u8{0} ** 4;
+    var sint_target = try Target.init(&sint_pixels, 1, 1, 4, .rgba8_sint);
+    clearTarget(&sint_target, .{ -17, -34, 51, 68 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xef, 0xde, 0x33, 0x44 }, &sint_pixels);
+    sint_target.storeColor(0, 0, .{ 0.125, 0.5, 0.875, 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 15, 63, 111, 127 }, &sint_pixels);
 }
 
 test "packed normalized color targets preserve component bits and masks" {

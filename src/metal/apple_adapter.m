@@ -1796,7 +1796,19 @@ static void zpu_set_error(NSError **error, NSString *description) {
 }
 
 static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
-    return format == MTLPixelFormatInvalid || zpu_color_texture_format_supported(format);
+    return format == MTLPixelFormatInvalid || zpu_color_texture_format_supported(format) ||
+        format == MTLPixelFormatRGBA8Uint || format == MTLPixelFormatRGBA8Sint;
+}
+
+static BOOL zpu_render_pipeline_format_supported_for_fragment(MTLPixelFormat format, NSString *fragmentName) {
+    if (format == MTLPixelFormatInvalid) return YES;
+    if (zpu_color_texture_format_supported(format)) {
+        return ![fragmentName isEqualToString:@"zpu_cpu_rgba8_uint_fragment"] &&
+            ![fragmentName isEqualToString:@"zpu_cpu_rgba8_sint_fragment"];
+    }
+    if ([fragmentName isEqualToString:@"zpu_cpu_rgba8_uint_fragment"]) return format == MTLPixelFormatRGBA8Uint;
+    if ([fragmentName isEqualToString:@"zpu_cpu_rgba8_sint_fragment"]) return format == MTLPixelFormatRGBA8Sint;
+    return NO;
 }
 
 static BOOL zpu_srgb_texture_format(MTLPixelFormat format) {
@@ -6054,6 +6066,8 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     if ([name isEqualToString:@"zpu_test_stage_in_vertex"] ||
         [name isEqualToString:@"zpu_test_visible"] ||
         [name isEqualToString:@"zpu_test_visible_secondary"] ||
+        [name isEqualToString:@"zpu_cpu_rgba8_uint_fragment"] ||
+        [name isEqualToString:@"zpu_cpu_rgba8_sint_fragment"] ||
         [name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
         [name isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
         [name isEqualToString:zpu_cpu_ml_identity_function_name]) {
@@ -6163,6 +6177,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_mesh_gradient_fragment_name,
         zpu_cpu_patch_triangle_vertex_name,
         zpu_cpu_patch_triangle_fragment_name,
+        @"zpu_cpu_rgba8_uint_fragment",
+        @"zpu_cpu_rgba8_sint_fragment",
         zpu_cpu_ml_identity_function_name,
     ] containsObject:name];
 }
@@ -7526,9 +7542,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal supports only the registered factor-one triangle patch profile");
         return nil;
     }
+    NSString *fragmentImplementationName = zpu_cpu_function_implementation_name(fragmentFunction);
     for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
-        if (!zpu_render_pipeline_format_supported(descriptor.colorAttachments[index].pixelFormat)) {
-            zpu_set_error(error, @"ZPU Metal supports only R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments");
+        if (!zpu_render_pipeline_format_supported_for_fragment(
+                descriptor.colorAttachments[index].pixelFormat, fragmentImplementationName) ||
+            (descriptor.colorAttachments[index].blendingEnabled &&
+             (descriptor.colorAttachments[index].pixelFormat == MTLPixelFormatRGBA8Uint ||
+              descriptor.colorAttachments[index].pixelFormat == MTLPixelFormatRGBA8Sint))) {
+            zpu_set_error(error, @"ZPU Metal supports the registered RGBA8Uint/RGBA8Sint CPU fragment profiles without blending, plus the normalized and float CPU color targets");
             return nil;
         }
     }
@@ -7734,7 +7755,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_ml_identity"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -8380,6 +8401,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             zpu_cpu_mesh_gradient_fragment_name,
             zpu_cpu_patch_triangle_vertex_name,
             zpu_cpu_patch_triangle_fragment_name,
+            @"zpu_cpu_rgba8_uint_fragment",
+            @"zpu_cpu_rgba8_sint_fragment",
             zpu_cpu_ml_identity_function_name,
         ]) {
             if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
