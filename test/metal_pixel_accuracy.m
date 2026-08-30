@@ -5467,9 +5467,9 @@ static int test_layered_patch_msaa_against_native(
         {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
     };
     const uint16_t factors[] = {
-        0x3c00, 0x3c00, 0x3c00, 0x3c00,
-        0x3c00, 0x3c00, 0x3c00, 0x3c00,
-        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x4000, 0x4000, 0x4000, 0x4000,
+        0x4000, 0x4000, 0x4000, 0x4000,
+        0x4000, 0x4000, 0x4000, 0x4000,
     };
     if (native_layered_vertex_function == nil || native_fragment_function == nil ||
         adapter_patch_vertex_function == nil || adapter_patch_fragment_function == nil) return 238;
@@ -5499,7 +5499,7 @@ static int test_layered_patch_msaa_against_native(
             MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
         adapter_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
         adapter_descriptor.tessellationFactorScaleEnabled = NO;
-        adapter_descriptor.maxTessellationFactor = 1.0f;
+        adapter_descriptor.maxTessellationFactor = 16.0f;
         adapter_descriptor.rasterSampleCount = sample_count;
         adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         NSError *adapter_error = nil;
