@@ -28009,7 +28009,7 @@ int main(void) {
             {{0.9995f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
         };
         const MTLViewport precise_viewport = {
-            -8192.00001, -8192.00001, 8199.50001, 8199.50001, 0.0, 1.0};
+            -8191.99995, -8191.99995, 8199.50005, 8199.50005, 0.0, 1.0};
         id<MTLBuffer> native_precise_viewport_vertex_buffer =
             [device newBufferWithBytes:precise_viewport_vertices
                                   length:sizeof(precise_viewport_vertices)

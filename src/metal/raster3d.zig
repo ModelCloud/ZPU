@@ -2073,6 +2073,41 @@ test "Apple raster coordinates use an 8-bit fractional screen grid" {
     try std.testing.expectEqual(@as(f32, -0.75), quantizeRasterCoordinate(-0.751));
 }
 
+test "Metal precise viewport coordinates survive the raster-grid boundary" {
+    const viewport = PreciseViewport{
+        .origin_x = -8191.99995,
+        .origin_y = -8191.99995,
+        .width = 8199.50005,
+        .height = 8199.50005,
+        .znear = 0,
+        .zfar = 1,
+    };
+    const narrowed_viewport = PreciseViewport{
+        .origin_x = @floatCast(@as(f32, @floatCast(viewport.origin_x))),
+        .origin_y = @floatCast(@as(f32, @floatCast(viewport.origin_y))),
+        .width = @floatCast(@as(f32, @floatCast(viewport.width))),
+        .height = @floatCast(@as(f32, @floatCast(viewport.height))),
+        .znear = @floatCast(@as(f32, @floatCast(viewport.znear))),
+        .zfar = @floatCast(@as(f32, @floatCast(viewport.zfar))),
+    };
+    const vertex = abi.Vertex{
+        .position = .{ 0.99999, -0.99999, 0.5, 1 },
+        .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 },
+    };
+    const precise = project(vertex, viewport) orelse unreachable;
+    const narrowed = project(vertex, narrowed_viewport) orelse unreachable;
+
+    // The double-valued Apple viewport lands on a different 1/256th screen
+    // coordinate than the historical float ABI would. This is the exact
+    // X/Y zero-point boundary that the Objective-C private bridge preserves.
+    try std.testing.expectEqual(@as(f32, 7.4609375), precise.x);
+    try std.testing.expectEqual(@as(f32, 7.4609375), precise.y);
+    try std.testing.expectEqual(@as(f32, 7.45703125), narrowed.x);
+    try std.testing.expectEqual(@as(f32, 7.45703125), narrowed.y);
+    try std.testing.expect(precise.x != narrowed.x);
+    try std.testing.expect(precise.y != narrowed.y);
+}
+
 test "Metal aliased lines use diamond exit on the top-left pixel grid" {
     const make_vertex = struct {
         fn call(x: f32, y: f32) ProjectedVertex {
