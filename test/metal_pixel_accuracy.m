@@ -14970,7 +14970,11 @@ int main(void) {
         id<MTLCommandBuffer> native_compute_command_buffer = [queue commandBuffer];
         id<MTLComputeCommandEncoder> native_compute_encoder =
             [native_compute_command_buffer computeCommandEncoder];
+        id<MTLBuffer> native_compute_extra_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
         [native_compute_encoder setComputePipelineState:native_compute_pipeline];
+        [native_compute_encoder setBuffer:native_compute_extra_buffer offset:8 atIndex:1];
+        [native_compute_encoder setBuffer:native_compute_extra_buffer offset:16 atIndex:2];
         [native_compute_encoder setTexture:native_compute_texture atIndex:0];
         [native_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                           threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -15226,6 +15230,8 @@ int main(void) {
         id<MTLCommandBuffer> adapter_compute_command_buffer = [adapter_queue commandBuffer];
         id<MTLComputeCommandEncoder> adapter_compute_encoder =
             [adapter_compute_command_buffer computeCommandEncoder];
+        id<MTLBuffer> adapter_compute_extra_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
         const id<MTLBuffer> *empty_compute_buffers = NULL;
         const NSUInteger *empty_compute_offsets = NULL;
         const NSUInteger *empty_compute_strides = NULL;
@@ -15246,6 +15252,8 @@ int main(void) {
                                attributeStrides:empty_compute_strides
                                       withRange:NSMakeRange(0, 0)];
         }
+        [adapter_compute_encoder setBuffer:adapter_compute_extra_buffer offset:8 atIndex:1];
+        [adapter_compute_encoder setBuffer:adapter_compute_extra_buffer offset:16 atIndex:2];
         [adapter_compute_encoder setTexture:adapter_compute_texture atIndex:0];
         [adapter_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                             threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];

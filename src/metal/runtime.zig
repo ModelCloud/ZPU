@@ -4768,11 +4768,18 @@ pub const ResourceStateEncoder = struct {
 };
 
 pub const ComputeEncoder = struct {
+    // Metal exposes 31 buffer bindings per compute stage on the Apple targets
+    // covered by this adapter. Registered CPU kernels only consume the slots
+    // described by their profile, but valid extra slots remain part of the
+    // encoder state and must not poison a command before dispatch.
+    const max_buffer_bindings: usize = 31;
     magic: u64 = compute_encoder_magic,
     command_buffer: *CommandBuffer,
     kernel: u8 = 0,
     textures: [2]?*Texture = .{ null, null },
     array_slices: [2]?u32 = .{ null, null },
+    buffers: [max_buffer_bindings]?*Buffer = [_]?*Buffer{null} ** max_buffer_bindings,
+    buffer_offsets: [max_buffer_bindings]usize = [_]usize{0} ** max_buffer_bindings,
     buffer: ?*Buffer = null,
     buffer_offset: usize = 0,
     acceleration_structure: ?*Buffer = null,
@@ -4801,17 +4808,23 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn setBuffer(self: *ComputeEncoder, buffer: ?*Buffer, offset: usize, index: u32) Error!void {
-        if (!self.open() or index != 0) return error.UnsupportedOperation;
+        if (!self.open() or index >= max_buffer_bindings) return error.UnsupportedOperation;
         if (buffer) |value| {
             if (!validBuffer(value) or value.device != self.command_buffer.queue.device or offset > value.bytes.len) return error.InvalidArgument;
         }
-        self.buffer = buffer;
-        self.buffer_offset = offset;
+        const slot: usize = @intCast(index);
+        self.buffers[slot] = buffer;
+        self.buffer_offsets[slot] = offset;
+        if (slot == 0) {
+            self.buffer = buffer;
+            self.buffer_offset = offset;
+        }
     }
 
     pub fn setBufferOffset(self: *ComputeEncoder, offset: usize, index: u32) Error!void {
-        if (!self.open() or index != 0) return error.UnsupportedOperation;
-        const buffer = self.buffer orelse return error.InvalidCommand;
+        if (!self.open() or index >= max_buffer_bindings) return error.UnsupportedOperation;
+        const slot: usize = @intCast(index);
+        const buffer = self.buffers[slot] orelse return error.InvalidCommand;
         try self.setBuffer(buffer, offset, index);
     }
 
@@ -4829,6 +4842,8 @@ pub const ComputeEncoder = struct {
         const buffer = try createBuffer(self.command_buffer.queue.device, length, bytes);
         errdefer destroyBuffer(buffer);
         self.command_buffer.owned_compute_buffers.append(allocator, buffer) catch return error.OutOfMemory;
+        self.buffers[0] = buffer;
+        self.buffer_offsets[0] = 0;
         self.buffer = buffer;
         self.buffer_offset = 0;
     }
@@ -8303,10 +8318,14 @@ test "CPU compute is deferred, bounded, and pixel deterministic" {
     defer destroyQueue(queue);
     const texture = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
     defer destroyTexture(texture);
+    const extra_buffer = try createBuffer(device, 64, null);
+    defer destroyBuffer(extra_buffer);
     var command_buffer = try createCommandBuffer(queue);
     defer destroyCommandBuffer(command_buffer);
     var encoder = try beginCompute(command_buffer);
     try encoder.setKernel(1);
+    try encoder.setBuffer(extra_buffer, 8, 1);
+    try encoder.setBufferOffset(16, 1);
     try encoder.setTexture(texture, 0);
     try encoder.dispatchThreads(.{ .width = 4, .height = 3, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
     try encoder.endEncoding();

@@ -263,6 +263,9 @@ triangle path:
   `ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8` kernel; they operate directly
   on ZPU-owned buffers/textures and never invoke Apple's Metal runtime. Array
   dispatches expand the logical z grid into ordered per-slice ZPU commands;
+  compute encoder state also validates and retains Metal's 31 buffer binding
+  slots; each registered CPU profile consumes only the slots in its profile,
+  while unused valid slots remain harmless CPU-side state.
   3D dispatches expand z into plane commands while preserving the z coordinate
   in the CPU kernel; indirect array/3D dispatches resolve the deferred z
   extent at commit and skip slices outside that extent. The triangle trace
