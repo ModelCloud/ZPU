@@ -96,14 +96,22 @@ pub const TargetFormat = enum {
     r8_unorm,
     r8_unorm_srgb,
     r8_snorm,
+    r8_uint,
+    r8_sint,
     r16_unorm,
     r16_snorm,
+    r16_uint,
+    r16_sint,
     r16_float,
     rg8_unorm,
     rg8_unorm_srgb,
     rg8_snorm,
+    rg8_uint,
+    rg8_sint,
     rg16_unorm,
     rg16_snorm,
+    rg16_uint,
+    rg16_sint,
     rg16_float,
     rgba8_unorm,
     rgba8_unorm_srgb,
@@ -115,6 +123,8 @@ pub const TargetFormat = enum {
     r32_float,
     rgba16_unorm,
     rgba16_snorm,
+    rgba16_uint,
+    rgba16_sint,
     rgba16_float,
     rg32_float,
     rgba32_float,
@@ -123,6 +133,7 @@ pub const TargetFormat = enum {
     abgr4_unorm,
     bgr5a1_unorm,
     rgb10a2_unorm,
+    rgb10a2_uint,
     bgr10a2_unorm,
     rg11b10_float,
     rgb9e5_float,
@@ -140,18 +151,18 @@ pub const Target = struct {
     fn bytesPerPixel(format: TargetFormat) usize {
         return switch (format) {
             .a8_unorm => 1,
-            .r8_unorm, .r8_unorm_srgb, .r8_snorm => 1,
-            .r16_unorm, .r16_snorm => 2,
+            .r8_unorm, .r8_unorm_srgb, .r8_snorm, .r8_uint, .r8_sint => 1,
+            .r16_unorm, .r16_snorm, .r16_uint, .r16_sint => 2,
             .r16_float => 2,
-            .rg8_unorm, .rg8_unorm_srgb, .rg8_snorm => 2,
-            .rg16_unorm, .rg16_snorm => 4,
+            .rg8_unorm, .rg8_unorm_srgb, .rg8_snorm, .rg8_uint, .rg8_sint => 2,
+            .rg16_unorm, .rg16_snorm, .rg16_uint, .rg16_sint => 4,
             .rg16_float => 4,
             .rgba8_unorm, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .bgra8_unorm, .bgra8_unorm_srgb, .r32_float => 4,
-            .rgba16_unorm, .rgba16_snorm, .rgba16_float => 8,
+            .rgba16_unorm, .rgba16_snorm, .rgba16_uint, .rgba16_sint, .rgba16_float => 8,
             .rg32_float => 8,
             .rgba32_float => 16,
             .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => 2,
-            .rgb10a2_unorm, .bgr10a2_unorm, .rg11b10_float, .rgb9e5_float => 4,
+            .rgb10a2_unorm, .rgb10a2_uint, .bgr10a2_unorm, .rg11b10_float, .rgb9e5_float => 4,
         };
     }
 
@@ -334,6 +345,16 @@ pub const Target = struct {
         row_bytes[offset] = @bitCast(quantized);
     }
 
+    fn writeIntegerClearU16(row_bytes: []u8, offset: usize, value: f32) void {
+        const quantized: u16 = @intFromFloat(std.math.clamp(value, 0, 65535));
+        std.mem.writeInt(u16, row_bytes[offset..][0..2], quantized, .little);
+    }
+
+    fn writeIntegerClearS16(row_bytes: []u8, offset: usize, value: f32) void {
+        const quantized: i16 = @intFromFloat(std.math.clamp(value, -32768, 32767));
+        std.mem.writeInt(i16, row_bytes[offset..][0..2], quantized, .little);
+    }
+
     fn writeIntegerFragmentU8(row_bytes: []u8, offset: usize, value: f32) void {
         // The registered CPU uint fragment returns uint4(color * 255.0), so
         // its normalized vertex color is converted back to raw integer texel
@@ -344,6 +365,30 @@ pub const Target = struct {
     fn writeIntegerFragmentS8(row_bytes: []u8, offset: usize, value: f32) void {
         // The registered CPU sint fragment returns int4(color * 127.0).
         writeIntegerClearS8(row_bytes, offset, std.math.clamp(value, -1, 1) * 127.0);
+    }
+
+    fn writeIntegerFragmentU16(row_bytes: []u8, offset: usize, value: f32) void {
+        writeIntegerClearU16(row_bytes, offset, std.math.clamp(value, 0, 1) * 65535.0);
+    }
+
+    fn writeIntegerFragmentS16(row_bytes: []u8, offset: usize, value: f32) void {
+        writeIntegerClearS16(row_bytes, offset, std.math.clamp(value, -1, 1) * 32767.0);
+    }
+
+    fn integerPackedU10(value: f32) u32 {
+        return @intFromFloat(std.math.clamp(value, 0, 1) * 1023.0);
+    }
+
+    fn integerPackedU2(value: f32) u32 {
+        return @intFromFloat(std.math.clamp(value, 0, 1) * 3.0);
+    }
+
+    fn clearPackedU10(value: f32) u32 {
+        return @intFromFloat(std.math.clamp(value, 0, 1023));
+    }
+
+    fn clearPackedU2(value: f32) u32 {
+        return @intFromFloat(std.math.clamp(value, 0, 3));
     }
 
     fn srgbToLinear(value: u8) f32 {
@@ -401,8 +446,12 @@ pub const Target = struct {
             .r8_unorm => .{ @as(f32, @floatFromInt(row_bytes[offset])) / 255.0, 0, 0, 1 },
             .r8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), 0, 0, 1 },
             .r8_snorm => .{ readS8(row_bytes, offset), 0, 0, 1 },
+            .r8_uint => .{ @floatFromInt(row_bytes[offset]), 0, 0, 1 },
+            .r8_sint => .{ @floatFromInt(@as(i8, @bitCast(row_bytes[offset]))), 0, 0, 1 },
             .r16_unorm => .{ readU16(row_bytes, offset), 0, 0, 1 },
             .r16_snorm => .{ readS16(row_bytes, offset), 0, 0, 1 },
+            .r16_uint => .{ @floatFromInt(std.mem.readInt(u16, row_bytes[offset..][0..2], .little)), 0, 0, 1 },
+            .r16_sint => .{ @floatFromInt(std.mem.readInt(i16, row_bytes[offset..][0..2], .little)), 0, 0, 1 },
             .r16_float => .{ readF16(row_bytes, offset), 0, 0, 1 },
             .rg8_unorm => .{
                 @as(f32, @floatFromInt(row_bytes[offset])) / 255.0,
@@ -412,8 +461,27 @@ pub const Target = struct {
             },
             .rg8_unorm_srgb => .{ srgbToLinear(row_bytes[offset]), srgbToLinear(row_bytes[offset + 1]), 0, 1 },
             .rg8_snorm => .{ readS8(row_bytes, offset), readS8(row_bytes, offset + 1), 0, 1 },
+            .rg8_uint => .{ @floatFromInt(row_bytes[offset]), @floatFromInt(row_bytes[offset + 1]), 0, 1 },
+            .rg8_sint => .{
+                @floatFromInt(@as(i8, @bitCast(row_bytes[offset]))),
+                @floatFromInt(@as(i8, @bitCast(row_bytes[offset + 1]))),
+                0,
+                1,
+            },
             .rg16_unorm => .{ readU16(row_bytes, offset), readU16(row_bytes, offset + 2), 0, 1 },
             .rg16_snorm => .{ readS16(row_bytes, offset), readS16(row_bytes, offset + 2), 0, 1 },
+            .rg16_uint => .{
+                @floatFromInt(std.mem.readInt(u16, row_bytes[offset..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(u16, row_bytes[offset + 2 ..][0..2], .little)),
+                0,
+                1,
+            },
+            .rg16_sint => .{
+                @floatFromInt(std.mem.readInt(i16, row_bytes[offset..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(i16, row_bytes[offset + 2 ..][0..2], .little)),
+                0,
+                1,
+            },
             .rg16_float => .{ readF16(row_bytes, offset), readF16(row_bytes, offset + 2), 0, 1 },
             .rgba8_snorm => .{
                 readS8(row_bytes, offset),     readS8(row_bytes, offset + 1),
@@ -445,6 +513,18 @@ pub const Target = struct {
             .r32_float => .{ readF32(row_bytes, offset), 0, 0, 1 },
             .rgba16_unorm => .{ readU16(row_bytes, offset), readU16(row_bytes, offset + 2), readU16(row_bytes, offset + 4), readU16(row_bytes, offset + 6) },
             .rgba16_snorm => .{ readS16(row_bytes, offset), readS16(row_bytes, offset + 2), readS16(row_bytes, offset + 4), readS16(row_bytes, offset + 6) },
+            .rgba16_uint => .{
+                @floatFromInt(std.mem.readInt(u16, row_bytes[offset..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(u16, row_bytes[offset + 2 ..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(u16, row_bytes[offset + 4 ..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(u16, row_bytes[offset + 6 ..][0..2], .little)),
+            },
+            .rgba16_sint => .{
+                @floatFromInt(std.mem.readInt(i16, row_bytes[offset..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(i16, row_bytes[offset + 2 ..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(i16, row_bytes[offset + 4 ..][0..2], .little)),
+                @floatFromInt(std.mem.readInt(i16, row_bytes[offset + 6 ..][0..2], .little)),
+            },
             .rgba16_float => .{
                 readF16(row_bytes, offset),     readF16(row_bytes, offset + 2),
                 readF16(row_bytes, offset + 4), readF16(row_bytes, offset + 6),
@@ -499,6 +579,13 @@ pub const Target = struct {
                     packedUnormValue(blue_bits, 1023), packedUnormValue((bits >> 30) & 3, 3),
                 };
             },
+            .rgb10a2_uint => blk: {
+                const bits = readPacked32(row_bytes, offset);
+                break :blk .{
+                    @floatFromInt(bits & 0x3ff),         @floatFromInt((bits >> 10) & 0x3ff),
+                    @floatFromInt((bits >> 20) & 0x3ff), @floatFromInt((bits >> 30) & 3),
+                };
+            },
             .rg11b10_float => blk: {
                 const bits = readPacked32(row_bytes, offset);
                 break :blk .{
@@ -529,11 +616,23 @@ pub const Target = struct {
             .r8_snorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
             },
+            .r8_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU8(row_bytes, offset, color[0]);
+            },
+            .r8_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS8(row_bytes, offset, color[0]);
+            },
             .r16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
             },
             .r16_snorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS16(row_bytes, offset, color[0]);
+            },
+            .r16_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU16(row_bytes, offset, color[0]);
+            },
+            .r16_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS16(row_bytes, offset, color[0]);
             },
             .r16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
@@ -546,6 +645,14 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS8(row_bytes, offset + 1, color[1]);
             },
+            .rg8_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU8(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentU8(row_bytes, offset + 1, color[1]);
+            },
+            .rg8_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS8(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentS8(row_bytes, offset + 1, color[1]);
+            },
             .rg16_unorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeU16(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeU16(row_bytes, offset + 2, color[1]);
@@ -553,6 +660,14 @@ pub const Target = struct {
             .rg16_snorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS16(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS16(row_bytes, offset + 2, color[1]);
+            },
+            .rg16_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentU16(row_bytes, offset + 2, color[1]);
+            },
+            .rg16_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentS16(row_bytes, offset + 2, color[1]);
             },
             .rg16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
@@ -601,6 +716,18 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeS16(row_bytes, offset + 2, color[1]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeS16(row_bytes, offset + 4, color[2]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeS16(row_bytes, offset + 6, color[3]);
+            },
+            .rgba16_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentU16(row_bytes, offset + 2, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeIntegerFragmentU16(row_bytes, offset + 4, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeIntegerFragmentU16(row_bytes, offset + 6, color[3]);
+            },
+            .rgba16_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS16(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentS16(row_bytes, offset + 2, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeIntegerFragmentS16(row_bytes, offset + 4, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeIntegerFragmentS16(row_bytes, offset + 6, color[3]);
             },
             .rgba16_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
@@ -661,6 +788,14 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u32, 0xc0000000)) | (packedUnorm(color[3], 3) << 30);
                 writePacked32(row_bytes, offset, bits);
             },
+            .rgb10a2_uint => {
+                var bits = readPacked32(row_bytes, offset);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u32, 0x000003ff)) | integerPackedU10(color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) bits = (bits & ~@as(u32, 0x000ffc00)) | (integerPackedU10(color[1]) << 10);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) bits = (bits & ~@as(u32, 0x3ff00000)) | (integerPackedU10(color[2]) << 20);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) bits = (bits & ~@as(u32, 0xc0000000)) | (integerPackedU2(color[3]) << 30);
+                writePacked32(row_bytes, offset, bits);
+            },
             .rg11b10_float => {
                 var bits = readPacked32(row_bytes, offset);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) bits = (bits & ~@as(u32, 0x000007ff)) | writeUnsignedFloat(color[0], 6);
@@ -692,6 +827,26 @@ pub const Target = struct {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         switch (self.format) {
+            .r8_uint => writeIntegerClearU8(row_bytes, offset, color[0]),
+            .r8_sint => writeIntegerClearS8(row_bytes, offset, color[0]),
+            .r16_uint => writeIntegerClearU16(row_bytes, offset, color[0]),
+            .r16_sint => writeIntegerClearS16(row_bytes, offset, color[0]),
+            .rg8_uint => {
+                writeIntegerClearU8(row_bytes, offset, color[0]);
+                writeIntegerClearU8(row_bytes, offset + 1, color[1]);
+            },
+            .rg8_sint => {
+                writeIntegerClearS8(row_bytes, offset, color[0]);
+                writeIntegerClearS8(row_bytes, offset + 1, color[1]);
+            },
+            .rg16_uint => {
+                writeIntegerClearU16(row_bytes, offset, color[0]);
+                writeIntegerClearU16(row_bytes, offset + 2, color[1]);
+            },
+            .rg16_sint => {
+                writeIntegerClearS16(row_bytes, offset, color[0]);
+                writeIntegerClearS16(row_bytes, offset + 2, color[1]);
+            },
             .rgba8_uint => {
                 writeIntegerClearU8(row_bytes, offset, color[0]);
                 writeIntegerClearU8(row_bytes, offset + 1, color[1]);
@@ -703,6 +858,25 @@ pub const Target = struct {
                 writeIntegerClearS8(row_bytes, offset + 1, color[1]);
                 writeIntegerClearS8(row_bytes, offset + 2, color[2]);
                 writeIntegerClearS8(row_bytes, offset + 3, color[3]);
+            },
+            .rgba16_uint => {
+                writeIntegerClearU16(row_bytes, offset, color[0]);
+                writeIntegerClearU16(row_bytes, offset + 2, color[1]);
+                writeIntegerClearU16(row_bytes, offset + 4, color[2]);
+                writeIntegerClearU16(row_bytes, offset + 6, color[3]);
+            },
+            .rgba16_sint => {
+                writeIntegerClearS16(row_bytes, offset, color[0]);
+                writeIntegerClearS16(row_bytes, offset + 2, color[1]);
+                writeIntegerClearS16(row_bytes, offset + 4, color[2]);
+                writeIntegerClearS16(row_bytes, offset + 6, color[3]);
+            },
+            .rgb10a2_uint => {
+                const bits = clearPackedU10(color[0]) |
+                    (clearPackedU10(color[1]) << 10) |
+                    (clearPackedU10(color[2]) << 20) |
+                    (clearPackedU2(color[3]) << 30);
+                writePacked32(row_bytes, offset, bits);
             },
             else => self.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all)),
         }
@@ -1685,6 +1859,31 @@ test "integer color targets separate raw clears from fragment conversion" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xef, 0xde, 0x33, 0x44 }, &sint_pixels);
     sint_target.storeColor(0, 0, .{ 0.125, 0.5, 0.875, 1 });
     try std.testing.expectEqualSlices(u8, &[_]u8{ 15, 63, 111, 127 }, &sint_pixels);
+}
+
+test "registered integer color targets encode every channel width" {
+    const color = [4]f32{ 0.125, 0.5, 0.875, 1 };
+    const formats = [_]struct { format: TargetFormat, bytes_per_pixel: usize, expected: u64 }{
+        .{ .format = .r8_uint, .bytes_per_pixel = 1, .expected = 0x1f },
+        .{ .format = .r8_sint, .bytes_per_pixel = 1, .expected = 0x0f },
+        .{ .format = .r16_uint, .bytes_per_pixel = 2, .expected = 0x1fff },
+        .{ .format = .r16_sint, .bytes_per_pixel = 2, .expected = 0x0fff },
+        .{ .format = .rg8_uint, .bytes_per_pixel = 2, .expected = 0x7f1f },
+        .{ .format = .rg8_sint, .bytes_per_pixel = 2, .expected = 0x3f0f },
+        .{ .format = .rg16_uint, .bytes_per_pixel = 4, .expected = 0x7fff1fff },
+        .{ .format = .rg16_sint, .bytes_per_pixel = 4, .expected = 0x3fff0fff },
+        .{ .format = .rgba8_uint, .bytes_per_pixel = 4, .expected = 0xffdf7f1f },
+        .{ .format = .rgba8_sint, .bytes_per_pixel = 4, .expected = 0x7f6f3f0f },
+        .{ .format = .rgb10a2_uint, .bytes_per_pixel = 4, .expected = 0xf7f7fc7f },
+        .{ .format = .rgba16_uint, .bytes_per_pixel = 8, .expected = 0xffffdfff7fff1fff },
+        .{ .format = .rgba16_sint, .bytes_per_pixel = 8, .expected = 0x7fff6fff3fff0fff },
+    };
+    for (formats) |case| {
+        var pixels = [_]u8{0} ** 8;
+        var target = try Target.init(&pixels, 1, 1, case.bytes_per_pixel, case.format);
+        target.storeColor(0, 0, color);
+        try std.testing.expectEqual(case.expected, std.mem.readInt(u64, &pixels, .little));
+    }
 }
 
 test "packed normalized color targets preserve component bits and masks" {

@@ -117,17 +117,20 @@ pub const TextureFormat = enum {
     }
 
     fn isColor(self: TextureFormat) bool {
-        return self == .a8_unorm or self == .r8_unorm or self == .r8_unorm_srgb or self == .r8_snorm or self == .r16_unorm or self == .r16_snorm or self == .r16_float or
-            self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg8_snorm or self == .rg16_unorm or self == .rg16_snorm or self == .rg16_float or
+        return self == .a8_unorm or self == .r8_unorm or self == .r8_unorm_srgb or self == .r8_snorm or self == .r8_uint or self == .r8_sint or self == .r16_unorm or self == .r16_snorm or self == .r16_uint or self == .r16_sint or self == .r16_float or
+            self == .rg8_unorm or self == .rg8_unorm_srgb or self == .rg8_snorm or self == .rg8_uint or self == .rg8_sint or self == .rg16_unorm or self == .rg16_snorm or self == .rg16_uint or self == .rg16_sint or self == .rg16_float or
             self == .rgba8_unorm or self == .rgba8_unorm_srgb or self == .rgba8_snorm or self == .rgba8_uint or self == .rgba8_sint or
             self == .bgra8_unorm or self == .bgra8_unorm_srgb or
             self == .b5g6r5_unorm or self == .a1bgr5_unorm or self == .abgr4_unorm or self == .bgr5a1_unorm or
-            self == .rgb10a2_unorm or self == .bgr10a2_unorm or self == .rg11b10_float or self == .rgb9e5_float or
-            self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
+            self == .rgb10a2_unorm or self == .rgb10a2_uint or self == .bgr10a2_unorm or self == .rg11b10_float or self == .rgb9e5_float or
+            self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_uint or self == .rgba16_sint or self == .rgba16_float or self == .rg32_float or self == .rgba32_float;
     }
 
     fn isIntegerColor(self: TextureFormat) bool {
-        return self == .rgba8_uint or self == .rgba8_sint;
+        return self == .r8_uint or self == .r8_sint or self == .r16_uint or self == .r16_sint or
+            self == .rg8_uint or self == .rg8_sint or self == .rg16_uint or self == .rg16_sint or
+            self == .rgba8_uint or self == .rgba8_sint or self == .rgb10a2_uint or
+            self == .rgba16_uint or self == .rgba16_sint;
     }
 };
 
@@ -359,18 +362,22 @@ pub const Texture = struct {
                 .r8_unorm => .r8_unorm,
                 .r8_unorm_srgb => .r8_unorm_srgb,
                 .r8_snorm => .r8_snorm,
-                .r8_uint, .r8_sint => unreachable,
+                .r8_uint => .r8_uint,
+                .r8_sint => .r8_sint,
                 .r16_unorm => .r16_unorm,
                 .r16_snorm => .r16_snorm,
-                .r16_uint, .r16_sint => unreachable,
+                .r16_uint => .r16_uint,
+                .r16_sint => .r16_sint,
                 .r16_float => .r16_float,
                 .rg8_unorm => .rg8_unorm,
                 .rg8_unorm_srgb => .rg8_unorm_srgb,
                 .rg8_snorm => .rg8_snorm,
-                .rg8_uint, .rg8_sint => unreachable,
+                .rg8_uint => .rg8_uint,
+                .rg8_sint => .rg8_sint,
                 .rg16_unorm => .rg16_unorm,
                 .rg16_snorm => .rg16_snorm,
-                .rg16_uint, .rg16_sint => unreachable,
+                .rg16_uint => .rg16_uint,
+                .rg16_sint => .rg16_sint,
                 .rg16_float => .rg16_float,
                 .r32_uint, .r32_sint => unreachable,
                 .rgba8_unorm => .rgba8_unorm,
@@ -385,14 +392,15 @@ pub const Texture = struct {
                 .abgr4_unorm => .abgr4_unorm,
                 .bgr5a1_unorm => .bgr5a1_unorm,
                 .rgb10a2_unorm => .rgb10a2_unorm,
-                .rgb10a2_uint => unreachable,
+                .rgb10a2_uint => .rgb10a2_uint,
                 .rg11b10_float => .rg11b10_float,
                 .rgb9e5_float => .rgb9e5_float,
                 .bgr10a2_unorm => .bgr10a2_unorm,
                 .r32_float => .r32_float,
                 .rgba16_unorm => .rgba16_unorm,
                 .rgba16_snorm => .rgba16_snorm,
-                .rgba16_uint, .rgba16_sint => unreachable,
+                .rgba16_uint => .rgba16_uint,
+                .rgba16_sint => .rgba16_sint,
                 .rgba16_float => .rgba16_float,
                 .rg32_uint, .rg32_sint => unreachable,
                 .rg32_float => .rg32_float,
@@ -1891,17 +1899,27 @@ pub const RenderEncoder = struct {
                         @intFromEnum(abi.PixelFormat.r8_unorm) => abi.PixelFormat.r8_unorm,
                         @intFromEnum(abi.PixelFormat.r8_unorm_srgb) => abi.PixelFormat.r8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.r8_snorm) => abi.PixelFormat.r8_snorm,
+                        @intFromEnum(abi.PixelFormat.r8_uint) => abi.PixelFormat.r8_uint,
+                        @intFromEnum(abi.PixelFormat.r8_sint) => abi.PixelFormat.r8_sint,
                         @intFromEnum(abi.PixelFormat.r16_unorm) => abi.PixelFormat.r16_unorm,
                         @intFromEnum(abi.PixelFormat.r16_snorm) => abi.PixelFormat.r16_snorm,
+                        @intFromEnum(abi.PixelFormat.r16_uint) => abi.PixelFormat.r16_uint,
+                        @intFromEnum(abi.PixelFormat.r16_sint) => abi.PixelFormat.r16_sint,
                         @intFromEnum(abi.PixelFormat.r16_float) => abi.PixelFormat.r16_float,
                         @intFromEnum(abi.PixelFormat.rg8_unorm) => abi.PixelFormat.rg8_unorm,
                         @intFromEnum(abi.PixelFormat.rg8_unorm_srgb) => abi.PixelFormat.rg8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.rg8_snorm) => abi.PixelFormat.rg8_snorm,
+                        @intFromEnum(abi.PixelFormat.rg8_uint) => abi.PixelFormat.rg8_uint,
+                        @intFromEnum(abi.PixelFormat.rg8_sint) => abi.PixelFormat.rg8_sint,
                         @intFromEnum(abi.PixelFormat.rg16_unorm) => abi.PixelFormat.rg16_unorm,
                         @intFromEnum(abi.PixelFormat.rg16_snorm) => abi.PixelFormat.rg16_snorm,
+                        @intFromEnum(abi.PixelFormat.rg16_uint) => abi.PixelFormat.rg16_uint,
+                        @intFromEnum(abi.PixelFormat.rg16_sint) => abi.PixelFormat.rg16_sint,
                         @intFromEnum(abi.PixelFormat.rg16_float) => abi.PixelFormat.rg16_float,
                         @intFromEnum(abi.PixelFormat.rgba16_unorm) => abi.PixelFormat.rgba16_unorm,
                         @intFromEnum(abi.PixelFormat.rgba16_snorm) => abi.PixelFormat.rgba16_snorm,
+                        @intFromEnum(abi.PixelFormat.rgba16_uint) => abi.PixelFormat.rgba16_uint,
+                        @intFromEnum(abi.PixelFormat.rgba16_sint) => abi.PixelFormat.rgba16_sint,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm) => abi.PixelFormat.rgba8_unorm,
                         @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb) => abi.PixelFormat.rgba8_unorm_srgb,
                         @intFromEnum(abi.PixelFormat.rgba8_snorm) => abi.PixelFormat.rgba8_snorm,
@@ -1914,6 +1932,7 @@ pub const RenderEncoder = struct {
                         @intFromEnum(abi.PixelFormat.abgr4_unorm) => abi.PixelFormat.abgr4_unorm,
                         @intFromEnum(abi.PixelFormat.bgr5a1_unorm) => abi.PixelFormat.bgr5a1_unorm,
                         @intFromEnum(abi.PixelFormat.rgb10a2_unorm) => abi.PixelFormat.rgb10a2_unorm,
+                        @intFromEnum(abi.PixelFormat.rgb10a2_uint) => abi.PixelFormat.rgb10a2_uint,
                         @intFromEnum(abi.PixelFormat.rg11b10_float) => abi.PixelFormat.rg11b10_float,
                         @intFromEnum(abi.PixelFormat.rgb9e5_float) => abi.PixelFormat.rgb9e5_float,
                         @intFromEnum(abi.PixelFormat.bgr10a2_unorm) => abi.PixelFormat.bgr10a2_unorm,

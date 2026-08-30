@@ -51,9 +51,13 @@ triangle path:
   RGBA16Float, RG11B10Float, RGB9E5Float, R32Float, RG32Float, and RGBA32Float
   as CPU color targets; the registered `zpu_cpu_rgba8_uint_fragment` and
   `zpu_cpu_rgba8_sint_fragment` profiles additionally target RGBA8Uint and
-  RGBA8Sint with raw integer clears and exact native fragment conversion;
-  the remaining Uint/Sint formats, including RGBA32Uint and RGBA32Sint, remain
-  transfer-only while preserving their native texel widths;
+  RGBA8Sint, while the matching registered profiles cover R8/R16/RG8/RG16
+  Uint/Sint, RGB10A2Uint, and RGBA16Uint/RGBA16Sint. These integer render
+  profiles use raw integer clears and exact native fragment conversion; integer
+  mipmap generation remains rejected because no integer filtering profile is
+  registered. The remaining Uint/Sint formats, including R32Uint/R32Sint,
+  RG32Uint/RG32Sint, and RGBA32Uint/RGBA32Sint, remain transfer-only while
+  preserving their native texel widths;
   sRGB RGB channels
   use Apple's 12-bit linear fixed-point transfer profile for CPU sampling,
   attachment stores, clears, and mip generation; 2D mip levels are filtered
@@ -114,8 +118,9 @@ triangle path:
   B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10Float/RGB9E5Float/BGR10A2Unorm/
   R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments can be
   described and cleared by a CPU render pass; the explicit
-  RGBA8Uint/RGBA8Sint attachments are available through their matching
-  registered CPU fragment profiles;
+  R8/R16/RG8/RG16/RGBA8 Uint/Sint, RGB10A2Uint, and RGBA16 Uint/Sint
+  attachments are available through their matching registered CPU fragment
+  profiles;
   `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
   extra target, while ordinary single-output profiles leave extra targets at
   their load/clear value
