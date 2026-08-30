@@ -3063,13 +3063,25 @@ static void zpu_metal4_clear_render_argument_slot(ZPURenderEncoder *legacy,
                                                     BOOL clearSampler) {
     if (legacy == nil) return;
     if (stage == MTLRenderStageVertex) {
-        if (clearBuffer) [(id)legacy setVertexBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
-        if (clearTexture) [(id)legacy setVertexTexture:(id<MTLTexture>)nil atIndex:index];
-        if (clearSampler) [(id)legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+        if (clearBuffer && (index == 0 || index < 31)) {
+            [(id)legacy setVertexBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        }
+        if (clearTexture && (index == 0 || index < 128)) {
+            [(id)legacy setVertexTexture:(id<MTLTexture>)nil atIndex:index];
+        }
+        if (clearSampler && (index == 0 || index < 16)) {
+            [(id)legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+        }
     } else if (stage == MTLRenderStageFragment) {
-        if (clearBuffer) [(id)legacy setFragmentBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
-        if (clearTexture) [(id)legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:index];
-        if (clearSampler) [(id)legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+        if (clearBuffer && (index == 0 || index < 31)) {
+            [(id)legacy setFragmentBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        }
+        if (clearTexture && (index == 0 || index < 128)) {
+            [(id)legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:index];
+        }
+        if (clearSampler && (index == 0 || index < 16)) {
+            [(id)legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+        }
     } else if (stage == MTLRenderStageTile) {
         if (clearBuffer) [(id)legacy setTileBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
         if (clearTexture) [(id)legacy setTileTexture:(id<MTLTexture>)nil atIndex:index];
@@ -13560,17 +13572,26 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
         if (index != 0) {
             ZPUBuffer *buffer = nil;
             NSUInteger bufferOffset = 0;
-            if (!zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index) &&
+            const BOOL empty = zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index);
+            if (!empty &&
                 !zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
                                                    &buffer, &bufferOffset)) {
                 [_owner markError];
                 return;
             }
+            if (!empty && (stages & (MTLRenderStageVertex | MTLRenderStageFragment)) != 0 && index >= 31) {
+                [_owner markError];
+                return;
+            }
             if ((stages & MTLRenderStageVertex) != 0) {
-                [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                if (index < 31) {
+                    [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                }
             }
             if ((stages & MTLRenderStageFragment) != 0) {
-                [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                if (index < 31) {
+                    [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                }
             }
             if ((stages & MTLRenderStageTile) != 0) {
                 [(id)_legacy setTileBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
@@ -13614,10 +13635,20 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
         if (index != 0 && textureIDs[index] == 0) {
+            if ((stages & MTLRenderStageVertex) != 0 && index < 128) {
+                [(id)_legacy setVertexTexture:(id<MTLTexture>)nil atIndex:index];
+            }
+            if ((stages & MTLRenderStageFragment) != 0 && index < 128) {
+                [(id)_legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:index];
+            }
             if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileTexture:(id<MTLTexture>)nil atIndex:index];
             if ((stages & zpu_mtl_render_stage_object) != 0) [(id)_legacy setObjectTexture:(id<MTLTexture>)nil atIndex:index];
             if ((stages & zpu_mtl_render_stage_mesh) != 0) [(id)_legacy setMeshTexture:(id<MTLTexture>)nil atIndex:index];
             continue;
+        }
+        if (index >= 128 && (stages & (MTLRenderStageVertex | MTLRenderStageFragment)) != 0) {
+            [_owner markError];
+            return;
         }
         id resource = zpu_resource_for_id(textureIDs[index]);
         if (textureIDs[index] != 0 &&
@@ -13634,10 +13665,20 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
         if (index != 0 && samplerIDs[index] == 0) {
+            if ((stages & MTLRenderStageVertex) != 0 && index < 16) {
+                [(id)_legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+            }
+            if ((stages & MTLRenderStageFragment) != 0 && index < 16) {
+                [(id)_legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+            }
             if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileSamplerState:(id<MTLSamplerState>)nil atIndex:index];
             if ((stages & zpu_mtl_render_stage_object) != 0) [(id)_legacy setObjectSamplerState:(id<MTLSamplerState>)nil atIndex:index];
             if ((stages & zpu_mtl_render_stage_mesh) != 0) [(id)_legacy setMeshSamplerState:(id<MTLSamplerState>)nil atIndex:index];
             continue;
+        }
+        if (index >= 16 && (stages & (MTLRenderStageVertex | MTLRenderStageFragment)) != 0) {
+            [_owner markError];
+            return;
         }
         id resource = zpu_resource_for_id(samplerIDs[index]);
         if (samplerIDs[index] != 0 &&
