@@ -2372,7 +2372,7 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
         const NSUInteger arrayLength = descriptor.renderTargetArrayLength == 0 ? 1 : descriptor.renderTargetArrayLength;
         if (arrayLength > 1 && !multisample) {
             if (texture->_textureType != MTLTextureType2DArray || hasResolve ||
-                !zpu_deferred_store_action_supported([attachment storeAction]) ||
+                !zpu_store_action_supported([attachment storeAction]) ||
                 [attachment slice] > texture->_sliceMipmapTextures.count ||
                 arrayLength > texture->_sliceMipmapTextures.count - [attachment slice]) return NO;
             zpu_metal_texture *targets[ZPU_METAL_MAX_COLOR_ATTACHMENTS] = {NULL};
@@ -2401,7 +2401,7 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
                     [attachment level] != 0 || arrayLength == 0 || arrayLength > ZPU_METAL_MAX_COLOR_ATTACHMENTS ||
                     [attachment slice] > texture->_sliceMipmapTextures.count ||
                     arrayLength > texture->_sliceMipmapTextures.count - [attachment slice] ||
-                    !zpu_color_store_action_supported([attachment storeAction], YES, hasResolve) ||
+                    !zpu_color_store_action_mutable_supported([attachment storeAction], YES, hasResolve) ||
                     ([attachment storeAction] != MTLStoreActionUnknown &&
                      zpu_store_action_requests_resolve([attachment storeAction]) != hasResolve) ||
                     (hasResolve && (![resolve isKindOfClass:[ZPUTexture class]] || resolve.sampleCount != 1 ||
@@ -2441,7 +2441,7 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
             }
             if (texture.sampleCount != sampleCount || texture->_textureType != MTLTextureType2DMultisample ||
                 (sampleCount != 2 && sampleCount != 4) || [attachment level] != 0 || [attachment slice] != 0 ||
-                !zpu_color_store_action_supported([attachment storeAction], YES, hasResolve) ||
+                !zpu_color_store_action_mutable_supported([attachment storeAction], YES, hasResolve) ||
                 ([attachment storeAction] != MTLStoreActionUnknown &&
                  zpu_store_action_requests_resolve([attachment storeAction]) != hasResolve) ||
                 (hasResolve && (![resolve isKindOfClass:[ZPUTexture class]] || resolve.sampleCount != 1 ||
@@ -2470,7 +2470,7 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
             if (hasResolve) [owner retainResource:resolve];
             continue;
         }
-        if (hasResolve || !zpu_deferred_store_action_supported([attachment storeAction]) ||
+        if (hasResolve || !zpu_store_action_supported([attachment storeAction]) ||
             !zpu_store_action_options_supported([attachment storeActionOptions])) return NO;
         zpu_metal_texture *zpuTexture = [texture zpuTextureAtLevel:[attachment level] slice:[attachment slice]];
         if (zpuTexture == NULL) return NO;
@@ -2771,7 +2771,7 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
         !zpu_render_pipeline_format_supported(hasColor ? color->_pixelFormat : MTLPixelFormatRGBA8Unorm)) return NO;
     const BOOL multisample = color.sampleCount > 1;
     MTLRenderPassColorAttachmentDescriptor *colorAttachment = descriptor.colorAttachments[0];
-    if (hasColor && !zpu_color_store_action_supported(colorAttachment.storeAction, multisample,
+    if (hasColor && !zpu_color_store_action_mutable_supported(colorAttachment.storeAction, multisample,
                                                        colorAttachment.resolveTexture != nil)) return NO;
     if (hasColor && !zpu_store_action_options_supported(colorAttachment.storeActionOptions)) return NO;
     zpu_metal_texture *colorTexture = [color zpuTextureAtLevel:hasColor ? descriptor.colorAttachments[0].level : 0
@@ -2797,7 +2797,7 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     ZPUTexture *depth = (ZPUTexture *)descriptor.depthAttachment.texture;
     if (depth != nil) {
         if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_depth_texture_format_supported(depth->_pixelFormat) ||
-            !zpu_depth_store_action_supported(descriptor.depthAttachment.storeAction) ||
+            !zpu_depth_store_action_mutable_supported(descriptor.depthAttachment.storeAction) ||
             !zpu_store_action_options_supported(descriptor.depthAttachment.storeActionOptions)) return NO;
         if (multisample && (depth.sampleCount != color.sampleCount ||
                             (depth->_textureType != MTLTextureType2DMultisample &&
@@ -2814,7 +2814,7 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     ZPUTexture *stencil = (ZPUTexture *)descriptor.stencilAttachment.texture;
     if (stencil != nil) {
         if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_stencil_texture_format_supported(stencil->_pixelFormat) ||
-            !zpu_deferred_store_action_supported(descriptor.stencilAttachment.storeAction) ||
+            !zpu_store_action_supported(descriptor.stencilAttachment.storeAction) ||
             !zpu_store_action_options_supported(descriptor.stencilAttachment.storeActionOptions)) return NO;
         if (multisample && (stencil.sampleCount != color.sampleCount ||
                             (stencil->_textureType != MTLTextureType2DMultisample &&
