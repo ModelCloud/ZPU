@@ -527,6 +527,46 @@ API_AVAILABLE(macos(26.0), ios(26.0))
  * reflection state. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@class ZPUStructType;
+@class ZPUPointerType;
+
+@interface ZPUStructMember : MTLStructMember {
+@public
+    NSString *_name;
+    NSUInteger _offset;
+    MTLDataType _dataType;
+    NSUInteger _argumentIndex;
+}
+- (instancetype)initWithName:(NSString *)name offset:(NSUInteger)offset
+                     dataType:(MTLDataType)dataType argumentIndex:(NSUInteger)argumentIndex;
+@end
+
+@interface ZPUStructType : MTLStructType {
+@public
+    MTLDataType _dataType;
+    NSArray *_members;
+}
+- (instancetype)initWithMembers:(NSArray *)members;
+@end
+
+API_AVAILABLE(macos(10.13), ios(11.0))
+@interface ZPUPointerType : MTLPointerType {
+@public
+    MTLDataType _elementType;
+    MTLBindingAccess _access;
+    NSUInteger _alignment;
+    NSUInteger _dataSize;
+    BOOL _elementIsArgumentBuffer;
+    MTLStructType *_elementStructType;
+    MTLArrayType *_elementArrayType;
+}
+- (instancetype)initWithElementType:(MTLDataType)elementType
+                              access:(MTLBindingAccess)access
+                           alignment:(NSUInteger)alignment
+                            dataSize:(NSUInteger)dataSize
+                         structType:(MTLStructType *)structType;
+@end
+
 @interface ZPUArgument : MTLArgument {
 @public
     NSString *_name;
@@ -537,6 +577,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _bufferAlignment;
     NSUInteger _bufferDataSize;
     MTLDataType _bufferDataType;
+    MTLStructType *_bufferStructType;
+    MTLPointerType *_bufferPointerType;
     MTLTextureType _textureType;
     MTLDataType _textureDataType;
     BOOL _depthTexture;
@@ -558,6 +600,8 @@ API_AVAILABLE(macos(13.0), ios(16.0))
     NSUInteger _bufferAlignment;
     NSUInteger _bufferDataSize;
     MTLDataType _bufferDataType;
+    MTLStructType *_bufferStructType;
+    MTLPointerType *_bufferPointerType;
     MTLTextureType _textureType;
     MTLDataType _textureDataType;
     BOOL _depthTexture;
@@ -5535,6 +5579,74 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 @end
 #pragma clang diagnostic pop
 
+@implementation ZPUStructMember
+- (instancetype)initWithName:(NSString *)name offset:(NSUInteger)offset
+                     dataType:(MTLDataType)dataType argumentIndex:(NSUInteger)argumentIndex {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _offset = offset;
+        _dataType = dataType;
+        _argumentIndex = argumentIndex;
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (NSUInteger)offset { return _offset; }
+- (MTLDataType)dataType { return _dataType; }
+- (MTLStructType *)structType { return nil; }
+- (MTLArrayType *)arrayType { return nil; }
+- (MTLTextureReferenceType *)textureReferenceType API_AVAILABLE(macos(10.13), ios(11.0)) { return nil; }
+- (MTLPointerType *)pointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return nil; }
+- (MTLTensorReferenceType *)tensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
+- (NSUInteger)argumentIndex API_AVAILABLE(macos(10.13), ios(11.0)) { return _argumentIndex; }
+@end
+
+@implementation ZPUStructType
+- (instancetype)initWithMembers:(NSArray *)members {
+    if ((self = [super init])) {
+        _dataType = MTLDataTypeStruct;
+        _members = [members copy] ?: @[];
+    }
+    return self;
+}
+- (MTLDataType)dataType { return _dataType; }
+- (NSArray<MTLStructMember *> *)members { return _members; }
+- (MTLStructMember *)memberByName:(NSString *)name {
+    for (MTLStructMember *member in _members) {
+        if ([member.name isEqualToString:name]) return member;
+    }
+    return nil;
+}
+@end
+
+API_AVAILABLE(macos(10.13), ios(11.0))
+@implementation ZPUPointerType
+- (instancetype)initWithElementType:(MTLDataType)elementType
+                              access:(MTLBindingAccess)access
+                           alignment:(NSUInteger)alignment
+                            dataSize:(NSUInteger)dataSize
+                         structType:(MTLStructType *)structType {
+    if ((self = [super init])) {
+        _elementType = elementType;
+        _access = access;
+        _alignment = alignment;
+        _dataSize = dataSize;
+        _elementIsArgumentBuffer = NO;
+        _elementStructType = structType;
+        _elementArrayType = nil;
+    }
+    return self;
+}
+- (MTLDataType)dataType { return MTLDataTypePointer; }
+- (MTLDataType)elementType { return _elementType; }
+- (MTLBindingAccess)access { return _access; }
+- (NSUInteger)alignment { return _alignment; }
+- (NSUInteger)dataSize { return _dataSize; }
+- (BOOL)elementIsArgumentBuffer { return _elementIsArgumentBuffer; }
+- (MTLStructType *)elementStructType { return _elementStructType; }
+- (MTLArrayType *)elementArrayType { return _elementArrayType; }
+@end
+
 @implementation ZPUArgument
 - (instancetype)initWithName:(NSString *)name type:(MTLArgumentType)type
                        access:(MTLBindingAccess)access index:(NSUInteger)index {
@@ -5559,8 +5671,8 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 - (NSUInteger)bufferAlignment { return _bufferAlignment; }
 - (NSUInteger)bufferDataSize { return _bufferDataSize; }
 - (MTLDataType)bufferDataType { return _bufferDataType; }
-- (MTLStructType *)bufferStructType { return nil; }
-- (MTLPointerType *)bufferPointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return nil; }
+- (MTLStructType *)bufferStructType { return _bufferStructType; }
+- (MTLPointerType *)bufferPointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return _bufferPointerType; }
 - (NSUInteger)threadgroupMemoryAlignment { return 0; }
 - (NSUInteger)threadgroupMemoryDataSize { return 0; }
 - (MTLTextureType)textureType { return _textureType; }
@@ -5570,6 +5682,19 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 - (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType {
     _bufferDataSize = size;
     _bufferDataType = dataType;
+    _bufferAlignment = dataType == MTLDataTypeStruct || dataType == MTLDataTypeFloat4 ? 16 : 4;
+    _bufferStructType = dataType == MTLDataTypeStruct && size == sizeof(zpu_metal_vertex) ?
+        [[ZPUStructType alloc] initWithMembers:@[
+            [[ZPUStructMember alloc] initWithName:@"position" offset:0
+                                         dataType:MTLDataTypeFloat4 argumentIndex:NSNotFound],
+            [[ZPUStructMember alloc] initWithName:@"color" offset:sizeof(float) * 4
+                                         dataType:MTLDataTypeFloat4 argumentIndex:NSNotFound],
+        ]] : nil;
+    _bufferPointerType = [[ZPUPointerType alloc] initWithElementType:dataType
+                                                                access:_access
+                                                             alignment:_bufferAlignment
+                                                              dataSize:size
+                                                           structType:_bufferStructType];
 }
 - (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength {
     _textureType = textureType;
@@ -5602,8 +5727,8 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 - (NSUInteger)bufferAlignment { return _bufferAlignment; }
 - (NSUInteger)bufferDataSize { return _bufferDataSize; }
 - (MTLDataType)bufferDataType { return _bufferDataType; }
-- (MTLStructType *)bufferStructType { return nil; }
-- (MTLPointerType *)bufferPointerType { return nil; }
+- (MTLStructType *)bufferStructType { return _bufferStructType; }
+- (MTLPointerType *)bufferPointerType { return _bufferPointerType; }
 - (MTLTextureType)textureType { return _textureType; }
 - (MTLDataType)textureDataType { return _textureDataType; }
 - (BOOL)isDepthTexture { return _depthTexture; }
@@ -5611,6 +5736,19 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 - (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType {
     _bufferDataSize = size;
     _bufferDataType = dataType;
+    _bufferAlignment = dataType == MTLDataTypeStruct || dataType == MTLDataTypeFloat4 ? 16 : 4;
+    _bufferStructType = dataType == MTLDataTypeStruct && size == sizeof(zpu_metal_vertex) ?
+        [[ZPUStructType alloc] initWithMembers:@[
+            [[ZPUStructMember alloc] initWithName:@"position" offset:0
+                                         dataType:MTLDataTypeFloat4 argumentIndex:NSNotFound],
+            [[ZPUStructMember alloc] initWithName:@"color" offset:sizeof(float) * 4
+                                         dataType:MTLDataTypeFloat4 argumentIndex:NSNotFound],
+        ]] : nil;
+    _bufferPointerType = [[ZPUPointerType alloc] initWithElementType:dataType
+                                                                access:_access
+                                                             alignment:_bufferAlignment
+                                                              dataSize:size
+                                                           structType:_bufferStructType];
 }
 - (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength {
     _textureType = textureType;

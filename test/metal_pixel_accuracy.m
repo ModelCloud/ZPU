@@ -4488,13 +4488,34 @@ int main(void) {
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor
                                                           options:MTLPipelineOptionBindingInfo
                                                        reflection:&adapter_legacy_render_reflection
-                                                            error:&adapter_pipeline_error];
+                                                    error:&adapter_pipeline_error];
         }
+        id<MTLBufferBinding> adapter_vertex_binding =
+            (id<MTLBufferBinding>)(adapter_legacy_render_reflection.vertexBindings.count == 0 ? nil :
+                                   adapter_legacy_render_reflection.vertexBindings[0]);
+        MTLStructType *adapter_vertex_struct = adapter_vertex_binding.bufferStructType;
+        MTLPointerType *adapter_vertex_pointer = adapter_vertex_binding.bufferPointerType;
+        MTLStructMember *adapter_position_member = [adapter_vertex_struct memberByName:@"position"];
+        MTLStructMember *adapter_color_member = [adapter_vertex_struct memberByName:@"color"];
+        const BOOL adapter_vertex_type_metadata_ok =
+            adapter_vertex_binding != nil && adapter_vertex_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_vertex_binding.bufferDataSize == sizeof(zpu_metal_vertex) &&
+            adapter_vertex_struct != nil && adapter_vertex_struct.dataType == MTLDataTypeStruct &&
+            adapter_vertex_struct.members.count == 2 && adapter_position_member != nil &&
+            adapter_position_member.offset == 0 && adapter_position_member.dataType == MTLDataTypeFloat4 &&
+            adapter_color_member != nil && adapter_color_member.offset == sizeof(float) * 4 &&
+            adapter_color_member.dataType == MTLDataTypeFloat4 && adapter_vertex_pointer != nil &&
+            adapter_vertex_pointer.dataType == MTLDataTypePointer &&
+            adapter_vertex_pointer.elementType == MTLDataTypeStruct &&
+            adapter_vertex_pointer.elementStructType == adapter_vertex_struct &&
+            adapter_vertex_pointer.alignment == 16 &&
+            adapter_vertex_pointer.dataSize == sizeof(zpu_metal_vertex);
         const BOOL adapter_legacy_render_reflection_ok =
             adapter_legacy_render_reflection != nil &&
             adapter_legacy_render_reflection.vertexBindings.count == 1 &&
             [adapter_legacy_render_reflection.vertexBindings[0].name isEqualToString:@"vertices"] &&
             adapter_legacy_render_reflection.vertexBindings[0].type == MTLBindingTypeBuffer &&
+            adapter_vertex_type_metadata_ok &&
             adapter_legacy_render_reflection.fragmentBindings.count == 0 &&
             (native_legacy_render_reflection == nil ||
              (native_legacy_render_reflection.vertexBindings.count == 1 &&
