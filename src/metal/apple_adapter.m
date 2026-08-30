@@ -567,6 +567,35 @@ API_AVAILABLE(macos(10.13), ios(11.0))
                          structType:(MTLStructType *)structType;
 @end
 
+@interface ZPUVertexAttribute : MTLVertexAttribute {
+@public
+    NSString *_name;
+    NSUInteger _attributeIndex;
+    MTLDataType _attributeType;
+    BOOL _active;
+    BOOL _patchData;
+    BOOL _patchControlPointData;
+}
+- (instancetype)initWithName:(NSString *)name index:(NSUInteger)index
+                         type:(MTLDataType)type active:(BOOL)active
+                    patchData:(BOOL)patchData patchControlPointData:(BOOL)patchControlPointData;
+@end
+
+API_AVAILABLE(macos(10.12), ios(10.0))
+@interface ZPUStageInputAttribute : MTLAttribute {
+@public
+    NSString *_name;
+    NSUInteger _attributeIndex;
+    MTLDataType _attributeType;
+    BOOL _active;
+    BOOL _patchData;
+    BOOL _patchControlPointData;
+}
+- (instancetype)initWithName:(NSString *)name index:(NSUInteger)index
+                         type:(MTLDataType)type active:(BOOL)active
+                    patchData:(BOOL)patchData patchControlPointData:(BOOL)patchControlPointData;
+@end
+
 @interface ZPUArgument : MTLArgument {
 @public
     NSString *_name;
@@ -1148,6 +1177,8 @@ static uint64_t zpu_next_cpu_drawable_id;
 @public
     ZPUDevice *_owner;
     NSString *_name;
+    NSArray *_vertexAttributes;
+    NSArray *_stageInputAttributes;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
 @end
@@ -5649,6 +5680,51 @@ API_AVAILABLE(macos(10.13), ios(11.0))
 - (MTLArrayType *)elementArrayType { return _elementArrayType; }
 @end
 
+@implementation ZPUVertexAttribute
+- (instancetype)initWithName:(NSString *)name index:(NSUInteger)index
+                         type:(MTLDataType)type active:(BOOL)active
+                    patchData:(BOOL)patchData patchControlPointData:(BOOL)patchControlPointData {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _attributeIndex = index;
+        _attributeType = type;
+        _active = active;
+        _patchData = patchData;
+        _patchControlPointData = patchControlPointData;
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (NSUInteger)attributeIndex { return _attributeIndex; }
+- (MTLDataType)attributeType API_AVAILABLE(macos(10.11), ios(8.3)) { return _attributeType; }
+- (BOOL)isActive { return _active; }
+- (BOOL)isPatchData API_AVAILABLE(macos(10.12), ios(10.0)) { return _patchData; }
+- (BOOL)isPatchControlPointData API_AVAILABLE(macos(10.12), ios(10.0)) { return _patchControlPointData; }
+@end
+
+API_AVAILABLE(macos(10.12), ios(10.0))
+@implementation ZPUStageInputAttribute
+- (instancetype)initWithName:(NSString *)name index:(NSUInteger)index
+                         type:(MTLDataType)type active:(BOOL)active
+                    patchData:(BOOL)patchData patchControlPointData:(BOOL)patchControlPointData {
+    if ((self = [super init])) {
+        _name = [name copy];
+        _attributeIndex = index;
+        _attributeType = type;
+        _active = active;
+        _patchData = patchData;
+        _patchControlPointData = patchControlPointData;
+    }
+    return self;
+}
+- (NSString *)name { return _name; }
+- (NSUInteger)attributeIndex { return _attributeIndex; }
+- (MTLDataType)attributeType { return _attributeType; }
+- (BOOL)isActive { return _active; }
+- (BOOL)isPatchData { return _patchData; }
+- (BOOL)isPatchControlPointData { return _patchControlPointData; }
+@end
+
 @implementation ZPUArgument
 - (instancetype)initWithName:(NSString *)name type:(MTLArgumentType)type
                        access:(MTLBindingAccess)access index:(NSUInteger)index {
@@ -8079,6 +8155,29 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     if ((self = [super init])) {
         _owner = owner;
         _name = [name copy];
+        _vertexAttributes = @[];
+        _stageInputAttributes = @[];
+        if ([_name isEqualToString:@"zpu_test_stage_in_vertex"]) {
+            NSArray *attributes = @[
+                [[ZPUVertexAttribute alloc] initWithName:@"position" index:0
+                                                     type:MTLDataTypeFloat4 active:YES
+                                                patchData:NO patchControlPointData:NO],
+                [[ZPUVertexAttribute alloc] initWithName:@"color" index:1
+                                                     type:MTLDataTypeFloat4 active:YES
+                                                patchData:NO patchControlPointData:NO],
+            ];
+            _vertexAttributes = attributes;
+            if (@available(macOS 10.12, iOS 10.0, *)) {
+                _stageInputAttributes = @[
+                    [[ZPUStageInputAttribute alloc] initWithName:@"position" index:0
+                                                             type:MTLDataTypeFloat4 active:YES
+                                                        patchData:NO patchControlPointData:NO],
+                    [[ZPUStageInputAttribute alloc] initWithName:@"color" index:1
+                                                             type:MTLDataTypeFloat4 active:YES
+                                                        patchData:NO patchControlPointData:NO],
+                ];
+            }
+        }
     }
     return self;
 }
@@ -8099,8 +8198,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (NSInteger)patchControlPointCount API_AVAILABLE(macos(10.12), ios(10.0)) {
     return [_name isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? 3 : -1;
 }
-- (NSArray *)vertexAttributes { return @[]; }
-- (NSArray *)stageInputAttributes API_AVAILABLE(macos(10.12), ios(10.0)) { return @[]; }
+- (NSArray *)vertexAttributes { return _vertexAttributes; }
+- (NSArray *)stageInputAttributes API_AVAILABLE(macos(10.12), ios(10.0)) { return _stageInputAttributes; }
 - (NSDictionary *)functionConstantsDictionary API_AVAILABLE(macos(10.12), ios(10.0)) { return @{}; }
 - (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return MTLFunctionOptionNone; }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(10.13), ios(11.0)) {

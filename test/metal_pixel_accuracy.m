@@ -7258,10 +7258,11 @@ int main(void) {
         NSError *adapter_library_error = nil;
         NSString *adapter_cpu_source =
             @"kernel void zpu_cpu_fill_gradient_rgba8() {}\n"
-             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
-             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
-             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
-             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
+            "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
+            "vertex void zpu_test_stage_in_vertex() {}\n"
+            "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
              "kernel void zpu_cpu_mesh_gradient_rgba8() {}\n"
              "fragment float4 zpu_cpu_mesh_gradient_fragment() { return float4(1.0); }\n"
              "[[visible]] float4 zpu_test_visible(float4 value) { return value; }\n"
@@ -7270,8 +7271,46 @@ int main(void) {
             [adapter_device newLibraryWithSource:adapter_cpu_source options:nil error:&adapter_library_error];
         id<MTLFunction> adapter_library_function =
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        id<MTLFunction> adapter_stage_input_function =
+            [adapter_library newFunctionWithName:@"zpu_test_stage_in_vertex"];
         id<MTLFunction> adapter_tile_function =
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"];
+        id<MTLFunction> native_stage_input_function =
+            [library newFunctionWithName:@"zpu_test_stage_in_vertex"];
+        MTLVertexAttribute *adapter_position_attribute =
+            adapter_stage_input_function.vertexAttributes.count == 0 ? nil :
+            adapter_stage_input_function.vertexAttributes[0];
+        MTLVertexAttribute *adapter_color_attribute =
+            adapter_stage_input_function.vertexAttributes.count < 2 ? nil :
+            adapter_stage_input_function.vertexAttributes[1];
+        MTLAttribute *adapter_stage_position_attribute =
+            adapter_stage_input_function.stageInputAttributes.count == 0 ? nil :
+            adapter_stage_input_function.stageInputAttributes[0];
+        MTLAttribute *adapter_stage_color_attribute =
+            adapter_stage_input_function.stageInputAttributes.count < 2 ? nil :
+            adapter_stage_input_function.stageInputAttributes[1];
+        const BOOL adapter_stage_input_attributes_ok =
+            adapter_stage_input_function != nil && native_stage_input_function != nil &&
+            adapter_stage_input_function.vertexAttributes.count == 2 &&
+            adapter_stage_input_function.stageInputAttributes.count == 2 &&
+            [adapter_position_attribute.name isEqualToString:@"position"] &&
+            adapter_position_attribute.attributeIndex == 0 &&
+            adapter_position_attribute.attributeType == MTLDataTypeFloat4 &&
+            adapter_position_attribute.isActive &&
+            [adapter_color_attribute.name isEqualToString:@"color"] &&
+            adapter_color_attribute.attributeIndex == 1 &&
+            adapter_color_attribute.attributeType == MTLDataTypeFloat4 &&
+            adapter_color_attribute.isActive &&
+            [adapter_stage_position_attribute.name isEqualToString:@"position"] &&
+            adapter_stage_position_attribute.attributeIndex == 0 &&
+            adapter_stage_position_attribute.attributeType == MTLDataTypeFloat4 &&
+            adapter_stage_position_attribute.isActive &&
+            [adapter_stage_color_attribute.name isEqualToString:@"color"] &&
+            adapter_stage_color_attribute.attributeIndex == 1 &&
+            adapter_stage_color_attribute.attributeType == MTLDataTypeFloat4 &&
+            adapter_stage_color_attribute.isActive &&
+            native_stage_input_function.vertexAttributes.count == 2 &&
+            native_stage_input_function.stageInputAttributes.count == 2;
         id<MTLFunction> adapter_constant_function =
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"
                                   constantValues:[MTLFunctionConstantValues new]
@@ -7284,9 +7323,10 @@ int main(void) {
             [adapter_device newLibraryWithSource:@"kernel void arbitrary_msl() {}" options:nil error:&adapter_library_error];
         if (adapter_library == nil || adapter_library_function == nil ||
             adapter_constant_function == nil ||
+            !adapter_stage_input_attributes_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 9 ||
+            adapter_library.functionNames.count != 10 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
