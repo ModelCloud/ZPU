@@ -24521,6 +24521,42 @@ int main(void) {
         [sparse_upload_encoder endEncoding];
         [sparse_upload_command_buffer commit];
         [sparse_upload_command_buffer waitUntilCompleted];
+        /* Metal 4 mapping arrays are one logical operation. A bad later
+         * entry must not leave an earlier unmap applied to the CPU page map.
+         * Use a separate queue so this negative test cannot suppress the
+         * positive copy/move checks below. */
+        id<MTL4CommandQueue> atomic_sparse_buffer_queue = [adapter_device newMTL4CommandQueue];
+        MTL4UpdateSparseBufferMappingOperation atomic_sparse_buffer_operations[2] = {
+            {
+                .mode = MTLSparseTextureMappingModeUnmap,
+                .bufferRange = NSMakeRange(0, 1),
+                .heapOffset = 17,
+            },
+            {
+                .mode = MTLSparseTextureMappingModeMap,
+                .bufferRange = NSMakeRange(1, 1),
+                .heapOffset = 0,
+            },
+        };
+        [atomic_sparse_buffer_queue updateBufferMappings:sparse_source
+                                                     heap:sparse_heap
+                                                operations:atomic_sparse_buffer_operations
+                                                     count:2];
+        id<MTLCommandBuffer> atomic_sparse_buffer_read_command = [sparse_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> atomic_sparse_buffer_read_encoder =
+            [atomic_sparse_buffer_read_command blitCommandEncoder];
+        [atomic_sparse_buffer_read_encoder copyFromBuffer:sparse_source sourceOffset:0
+                                                  toBuffer:sparse_output destinationOffset:0
+                                                     size:sparse_page_bytes];
+        [atomic_sparse_buffer_read_encoder endEncoding];
+        [atomic_sparse_buffer_read_command commit];
+        [atomic_sparse_buffer_read_command waitUntilCompleted];
+        if (atomic_sparse_buffer_queue == nil || atomic_sparse_buffer_read_command == nil ||
+            atomic_sparse_buffer_read_command.status != MTLCommandBufferStatusCompleted ||
+            memcmp(sparse_output.contents, sparse_input_data.bytes, sparse_page_bytes) != 0) {
+            fprintf(stderr, "metal-pixel: Metal 4 sparse buffer mapping batch was partially applied\n");
+            return 180;
+        }
         MTL4CopySparseBufferMappingOperation metal4_sparse_copy_operation = {
             .sourceRange = NSMakeRange(0, 1),
             .destinationOffset = 0,
@@ -24814,6 +24850,42 @@ int main(void) {
             adapter_sparse_texture_wide_mapped != nil && sparse_texture_wide_tail_level == 0 &&
             memcmp(sparse_texture_wide_output.bytes, sparse_texture_wide_input.bytes,
                    sparse_texture_wide_input.length) == 0;
+        /* The same all-or-nothing contract applies to packed texture tails.
+         * The first entry would unmap the complete tail; the second uses an
+         * out-of-range tile coordinate. If preflight is missing, the level-0
+         * bytes below become zero even though the batch is rejected. */
+        id<MTL4CommandQueue> atomic_sparse_texture_queue = [adapter_device newMTL4CommandQueue];
+        MTL4UpdateSparseTextureMappingOperation atomic_sparse_texture_operations[2] = {
+            {
+                .mode = MTLSparseTextureMappingModeMap,
+                .textureRegion = MTLRegionMake2D(0, 0, 1, 1),
+                .heapOffset = 0,
+                .textureLevel = sparse_texture_wide_tail_level,
+                .textureSlice = 0,
+            },
+            {
+                .mode = MTLSparseTextureMappingModeMap,
+                .textureRegion = MTLRegionMake2D(8, 0, 1, 1),
+                .heapOffset = 0,
+                .textureLevel = sparse_texture_wide_tail_level,
+                .textureSlice = 0,
+            },
+        };
+        [atomic_sparse_texture_queue updateTextureMappings:adapter_sparse_texture_wide_mapped
+                                                       heap:adapter_sparse_texture_wide_heap
+                                                  operations:atomic_sparse_texture_operations count:2];
+        NSMutableData *atomic_sparse_texture_output = [NSMutableData dataWithLength:sparse_texture_wide_input.length];
+        [adapter_sparse_texture_wide_mapped getBytes:atomic_sparse_texture_output.mutableBytes
+                                          bytesPerRow:1024 * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, 1024, 64)
+                                        mipmapLevel:sparse_texture_wide_tail_level];
+        BOOL atomic_sparse_texture_exact = atomic_sparse_texture_queue != nil &&
+            memcmp(atomic_sparse_texture_output.bytes, sparse_texture_wide_input.bytes,
+                   sparse_texture_wide_input.length) == 0;
+        if (!atomic_sparse_texture_exact) {
+            fprintf(stderr, "metal-pixel: Metal 4 sparse texture mapping batch was partially applied\n");
+            return 181;
+        }
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_wide_tail_unmap =
             adapter_sparse_texture_wide_tail_map;
         adapter_sparse_texture_wide_tail_unmap.mode = MTLSparseTextureMappingModeUnmap;

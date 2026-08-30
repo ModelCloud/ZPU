@@ -4348,13 +4348,54 @@ static BOOL zpu_sparse_heap_range(ZPUHeap *heap, NSInteger pageSize,
     return heapOffset + tileCount <= zpu_metal_heap_size(heap->_zpuHeap) / pageBytes;
 }
 
+/* Validate a complete mapping operation without touching the CPU page map.
+ * Metal 4 submits mapping arrays as one queue operation.  A malformed entry
+ * must therefore fail the batch before an earlier entry can change visible
+ * resource state; otherwise a failed queue call could still partially remap
+ * a texture or buffer. */
+static BOOL zpu_sparse_update_texture_mapping_valid(
+    ZPUTexture *texture, ZPUHeap *heap, MTLSparseTextureMappingMode mode,
+    MTLRegion region, NSUInteger level, NSUInteger slice, NSUInteger heapOffset) {
+    if (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap) return NO;
+    if (texture != nil && texture->_sparseFirstMipmapInTail < texture->_mipmapTextures.count &&
+        level >= texture->_sparseFirstMipmapInTail) {
+        if (!zpu_sparse_texture_tail_region_valid(texture, level, slice, region) ||
+            texture->_sparsePageBytes == 0 || texture->_sparseTailBytes == 0 ||
+            texture->_sparseTailBytes % texture->_sparsePageBytes != 0) return NO;
+        const NSUInteger pageCount = texture->_sparseTailBytes / texture->_sparsePageBytes;
+        if (heap != nil) return zpu_sparse_heap_range(heap, texture->_sparsePageSize, heapOffset, pageCount);
+        return heapOffset == 0;
+    }
+    if (!zpu_sparse_texture_region_valid(texture, level, slice, region)) return NO;
+    if (mode == MTLSparseTextureMappingModeMap) {
+        if (region.size.height != 0 && region.size.width > NSUIntegerMax / region.size.height) return NO;
+        const NSUInteger pageCountXY = region.size.width * region.size.height;
+        if (region.size.depth != 0 && pageCountXY > NSUIntegerMax / region.size.depth) return NO;
+        const NSUInteger pageCount = pageCountXY * region.size.depth;
+        if (heap != nil) return zpu_sparse_heap_range(heap, texture->_sparsePageSize, heapOffset, pageCount);
+        return heapOffset == 0;
+    }
+    /* Metal ignores heapOffset for unmap operations. */
+    return YES;
+}
+
+static BOOL zpu_sparse_update_buffer_mapping_valid(ZPUBuffer *buffer, ZPUHeap *heap,
+                                                   MTLSparseTextureMappingMode mode,
+                                                   NSRange range, NSUInteger heapOffset) {
+    if (!zpu_sparse_buffer_range(buffer, range) ||
+        (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap)) return NO;
+    if (mode == MTLSparseTextureMappingModeMap) {
+        if (heap != nil) return zpu_sparse_heap_range(heap, buffer->_sparsePageSize, heapOffset, range.length);
+        return heapOffset == 0;
+    }
+    /* Metal ignores heapOffset for unmap operations. */
+    return YES;
+}
+
 static BOOL zpu_sparse_update_buffer_mapping(ZPUBuffer *buffer, ZPUHeap *heap,
                                              MTLSparseTextureMappingMode mode,
                                              NSRange range, NSUInteger heapOffset) {
-    if (!zpu_sparse_buffer_range(buffer, range) ||
-        (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap)) return NO;
-    if (mode == MTLSparseTextureMappingModeMap &&
-        !zpu_sparse_heap_range(heap, buffer->_sparsePageSize, heapOffset, range.length)) return NO;
+    if (!zpu_sparse_update_buffer_mapping_valid(buffer, heap, mode, range, heapOffset)) return NO;
     NSMutableArray *mappedPages = nil;
     if (mode == MTLSparseTextureMappingModeMap) {
         mappedPages = [NSMutableArray arrayWithCapacity:range.length];
@@ -4430,19 +4471,7 @@ static BOOL zpu_sparse_update_texture_mapping(ZPUTexture *texture, ZPUHeap *heap
         level >= texture->_sparseFirstMipmapInTail) {
         return zpu_sparse_update_texture_tail_mapping(texture, heap, mode, region, level, slice, heapOffset);
     }
-    if (!zpu_sparse_texture_region_valid(texture, level, slice, region) ||
-        (mode != MTLSparseTextureMappingModeMap && mode != MTLSparseTextureMappingModeUnmap)) return NO;
-    if (mode == MTLSparseTextureMappingModeMap) {
-        if (region.size.height != 0 && region.size.width > NSUIntegerMax / region.size.height) return NO;
-        const NSUInteger pageCount = region.size.width * region.size.height;
-        if (region.size.depth != 0 && pageCount > NSUIntegerMax / region.size.depth) return NO;
-        if (heap != nil) {
-            if (!zpu_sparse_heap_range(heap, texture->_sparsePageSize, heapOffset,
-                                       pageCount * region.size.depth)) return NO;
-        } else if (heapOffset != 0) {
-            return NO;
-        }
-    }
+    if (!zpu_sparse_update_texture_mapping_valid(texture, heap, mode, region, level, slice, heapOffset)) return NO;
     NSMutableArray *mappedPages = nil;
     if (mode == MTLSparseTextureMappingModeMap) {
         const NSUInteger pageCount = region.size.width * region.size.height * region.size.depth;
@@ -14144,6 +14173,15 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     zpu_sparse_synchronize_resources();
     for (NSUInteger index = 0; index < count; ++index) {
         const MTL4UpdateSparseTextureMappingOperation operation = operations[index];
+        if (!zpu_sparse_update_texture_mapping_valid(zpuTexture, zpuHeap, operation.mode,
+                                                     operation.textureRegion, operation.textureLevel,
+                                                     operation.textureSlice, operation.heapOffset)) {
+            _failed = YES;
+            return;
+        }
+    }
+    for (NSUInteger index = 0; index < count; ++index) {
+        const MTL4UpdateSparseTextureMappingOperation operation = operations[index];
         if (!zpu_sparse_update_texture_mapping(zpuTexture, zpuHeap, operation.mode,
                                                operation.textureRegion, operation.textureLevel,
                                                operation.textureSlice, operation.heapOffset)) {
@@ -14184,6 +14222,14 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         return;
     }
     zpu_sparse_synchronize_resources();
+    for (NSUInteger index = 0; index < count; ++index) {
+        const MTL4UpdateSparseBufferMappingOperation operation = operations[index];
+        if (!zpu_sparse_update_buffer_mapping_valid(zpuBuffer, zpuHeap, operation.mode,
+                                                    operation.bufferRange, operation.heapOffset)) {
+            _failed = YES;
+            return;
+        }
+    }
     for (NSUInteger index = 0; index < count; ++index) {
         const MTL4UpdateSparseBufferMappingOperation operation = operations[index];
         if (!zpu_sparse_update_buffer_mapping(zpuBuffer, zpuHeap, operation.mode,
