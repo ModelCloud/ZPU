@@ -12612,6 +12612,48 @@ int main(void) {
             return 65;
         }
 
+        /* Replacing an address binding with a zero resource ID must clear the
+         * prior CPU buffer binding as well. The first dispatch is valid; the
+         * second one must fail because the fixed copy profile has no source
+         * buffer. This catches accidental retention of an address selected by
+         * the preceding table update. */
+        MTL4ArgumentTableDescriptor *metal4_address_clear_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        metal4_address_clear_table_descriptor.maxBufferBindCount = 1;
+        metal4_address_clear_table_descriptor.maxTextureBindCount = 2;
+        id<MTL4ArgumentTable> metal4_address_clear_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_address_clear_table_descriptor error:&metal4_error];
+        id<MTLTexture> metal4_address_clear_texture =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        [metal4_address_clear_table setAddress:adapter_copy_buffer.gpuAddress atIndex:0];
+        [metal4_address_clear_table setTexture:metal4_address_clear_texture.gpuResourceID atIndex:1];
+        id<MTL4CommandBuffer> metal4_address_clear_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_address_clear_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_address_clear_encoder =
+            [metal4_address_clear_command_buffer computeCommandEncoder];
+        [metal4_address_clear_encoder setComputePipelineState:adapter_copy_pipeline];
+        [metal4_address_clear_encoder setArgumentTable:metal4_address_clear_table];
+        [metal4_address_clear_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [metal4_address_clear_table setResource:(MTLResourceID){0} atBufferIndex:0];
+        [metal4_address_clear_encoder setArgumentTable:metal4_address_clear_table];
+        [metal4_address_clear_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [metal4_address_clear_encoder endEncoding];
+        [metal4_address_clear_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_address_clear_buffers[] = {metal4_address_clear_command_buffer};
+        MTL4CommitOptions *metal4_address_clear_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_address_clear_error = nil;
+        [metal4_address_clear_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_address_clear_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_address_clear_buffers count:1 options:metal4_address_clear_options];
+        if (metal4_address_clear_table == nil || metal4_address_clear_texture == nil ||
+            metal4_address_clear_command_buffer == nil || metal4_address_clear_encoder == nil ||
+            metal4_address_clear_error == nil) {
+            fprintf(stderr, "metal-pixel: Metal 4 address/resource binding replacement was not fail-closed\n");
+            return 151;
+        }
+
         MTLTextureDescriptor *bgra_copy_texture_descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                 width:width
