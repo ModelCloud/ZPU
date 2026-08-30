@@ -17421,6 +17421,7 @@ static void zpu_cpu_acceleration_retain_metal4_range(
     }
 }
 
+API_AVAILABLE(macos(14.0), ios(17.0))
 static void zpu_cpu_acceleration_retain_indirect_child_ids(
     ZPUCommandBuffer *owner, ZPUBuffer *instanceBuffer, NSUInteger instanceOffset,
     NSUInteger instanceStride, NSUInteger instanceCount) {
@@ -17480,19 +17481,21 @@ static void zpu_cpu_acceleration_retain_descriptor_ranges(
             }
         }
     }
-    if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
-        MTLIndirectInstanceAccelerationStructureDescriptor *instances =
-            (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor;
-        ZPUBuffer *instanceBuffer = nil;
-        NSUInteger instanceOffset = 0;
-        NSUInteger instanceRangeLength = 0;
-        NSUInteger instanceStride = 0;
-        NSUInteger instanceCount = 0;
-        if (zpu_cpu_acceleration_indirect_instance_buffer(
-                instances, (ZPUDevice *)[owner device], &instanceBuffer, &instanceOffset,
-                &instanceRangeLength, &instanceStride, &instanceCount)) {
-            zpu_cpu_acceleration_retain_indirect_child_ids(
-                owner, instanceBuffer, instanceOffset, instanceStride, instances.maxInstanceCount);
+    if (@available(macOS 14.0, iOS 17.0, *)) {
+        if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
+            MTLIndirectInstanceAccelerationStructureDescriptor *instances =
+                (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor;
+            ZPUBuffer *instanceBuffer = nil;
+            NSUInteger instanceOffset = 0;
+            NSUInteger instanceRangeLength = 0;
+            NSUInteger instanceStride = 0;
+            NSUInteger instanceCount = 0;
+            if (zpu_cpu_acceleration_indirect_instance_buffer(
+                    instances, (ZPUDevice *)[owner device], &instanceBuffer, &instanceOffset,
+                    &instanceRangeLength, &instanceStride, &instanceCount)) {
+                zpu_cpu_acceleration_retain_indirect_child_ids(
+                    owner, instanceBuffer, instanceOffset, instanceStride, instances.maxInstanceCount);
+            }
         }
     }
 }
