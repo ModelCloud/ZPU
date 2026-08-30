@@ -13618,8 +13618,11 @@ int main(void) {
             adapter_mapped_tile_pipeline_descriptor.maxTotalThreadsPerThreadgroup = 4;
             adapter_mapped_tile_pipeline_descriptor.threadgroupSizeMatchesTileSize = YES;
             adapter_mapped_tile_pipeline_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(2, 2, 1);
-            adapter_mapped_tile_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-            adapter_mapped_tile_pipeline_descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            /* Pipeline formats are logical. With logical output 0 mapped to
+             * physical slot 1, logical 0 is BGRA8 and logical 1 is RGBA8 so
+             * the pre-pipeline map validates the physical formats exactly. */
+            adapter_mapped_tile_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            adapter_mapped_tile_pipeline_descriptor.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA8Unorm;
             id<MTLRenderPipelineState> adapter_mapped_tile_pipeline =
                 [adapter_mtl4_compiler newRenderPipelineStateWithDescriptor:
                     adapter_mapped_tile_pipeline_descriptor compilerTaskOptions:nil
@@ -13669,8 +13672,8 @@ int main(void) {
                 [adapter_mapped_tile_map setPhysicalIndex:index forLogicalIndex:index];
             }
             if (adapter_mapped_tile_encoder != nil && adapter_mapped_tile_pipeline != nil) {
-                [adapter_mapped_tile_encoder setRenderPipelineState:adapter_mapped_tile_pipeline];
                 [adapter_mapped_tile_encoder setColorAttachmentMap:adapter_mapped_tile_map];
+                [adapter_mapped_tile_encoder setRenderPipelineState:adapter_mapped_tile_pipeline];
                 [adapter_mapped_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
                 [adapter_mapped_tile_encoder endEncoding];
                 [adapter_mapped_tile_command_buffer endCommandBuffer];
