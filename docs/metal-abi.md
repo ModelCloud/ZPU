@@ -610,8 +610,10 @@ draws, render and compute indirect command buffers, the CPU compute path
   normalized 2D/3D mipmap raw-byte exactness, 2D float mipmap raw-byte exactness, and
   legacy/Metal 4 visibility result byte exactness, and CPU depth-bounds output
   against an equivalent native Metal fragment-discard oracle,
-and the explicit adapter; it is not a claim that every Metal feature is
-implemented.
+  and the explicit adapter. The suite enumerates every selector in the current
+  SDK protocol hierarchies for the core adapter objects before running these
+  semantic checks; this is an API-surface gate, not a claim that every Metal
+  feature is implemented.
 
 Use `zig build metal-install` to install the standalone static library without
 requiring the repository's Linux Vulkan/XCB install artifacts.

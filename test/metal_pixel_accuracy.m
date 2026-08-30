@@ -177,6 +177,113 @@ static int test_adapter_protocol_selector_coverage(id<MTLDevice> adapter_device)
     return 0;
 }
 
+static int test_adapter_object_protocol_selector_coverage(id object, Protocol *protocol,
+                                                          const char *protocol_name) {
+    if (object == nil || protocol == NULL) return 165;
+    NSMutableSet<NSString *> *selectors = [NSMutableSet set];
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    collect_protocol_selectors(protocol, selectors, visited);
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (NSString *selector_name in [selectors allObjects]) {
+        if (![object respondsToSelector:NSSelectorFromString(selector_name)]) {
+            [missing addObject:selector_name];
+        }
+    }
+    if (missing.count != 0) {
+        [missing sortUsingSelector:@selector(compare:)];
+        fprintf(stderr, "metal-pixel: CPU adapter %s object missing %lu Metal protocol selectors:\n",
+                protocol_name, (unsigned long)missing.count);
+        for (NSString *selector_name in missing) fprintf(stderr, "  %s\n", selector_name.UTF8String);
+        return 165;
+    }
+    return 0;
+}
+
+static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
+                                              id<MTLBuffer> adapter_buffer,
+                                              id<MTLTexture> adapter_texture) {
+    id<MTLCommandQueue> queue = [adapter_device newCommandQueue];
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLLibrary> library = [adapter_device newDefaultLibrary];
+    id<MTLFunction> function = ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
+    MTLComputePipelineDescriptor *compute_descriptor = [MTLComputePipelineDescriptor new];
+    compute_descriptor.computeFunction = function;
+    id<MTLComputePipelineState> compute_pipeline =
+        [adapter_device newComputePipelineStateWithDescriptor:compute_descriptor
+                                                       options:0 reflection:nil error:NULL];
+    MTLRenderPipelineDescriptor *render_descriptor = [MTLRenderPipelineDescriptor new];
+    render_descriptor.vertexFunction = ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_vertex");
+    render_descriptor.fragmentFunction = ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_fragment");
+    render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> render_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:render_descriptor error:NULL];
+    MTLSamplerDescriptor *sampler_descriptor = [MTLSamplerDescriptor new];
+    id<MTLSamplerState> sampler = [adapter_device newSamplerStateWithDescriptor:sampler_descriptor];
+    MTLDepthStencilDescriptor *depth_descriptor = [MTLDepthStencilDescriptor new];
+    id<MTLDepthStencilState> depth = [adapter_device newDepthStencilStateWithDescriptor:depth_descriptor];
+    id<MTLFence> fence = [adapter_device newFence];
+    id<MTLSharedEvent> shared_event = nil;
+    if (@available(macOS 10.14, iOS 12.0, *)) shared_event = [adapter_device newSharedEvent];
+    id<MTLArgumentEncoder> argument_encoder =
+        [adapter_device newArgumentEncoderWithArguments:@[]];
+    id<MTLCommandBuffer> compute_command_buffer = [queue commandBuffer];
+    id<MTLCommandBuffer> blit_command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> compute_encoder = [compute_command_buffer computeCommandEncoder];
+    id<MTLBlitCommandEncoder> blit_encoder = [blit_command_buffer blitCommandEncoder];
+    id<MTLRenderCommandEncoder> render_encoder = nil;
+    id<MTLParallelRenderCommandEncoder> parallel_encoder = nil;
+    if (adapter_texture != nil) {
+        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = adapter_texture;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+        render_encoder = [[queue commandBuffer] renderCommandEncoderWithDescriptor:pass];
+        parallel_encoder = [[queue commandBuffer] parallelRenderCommandEncoderWithDescriptor:pass];
+    }
+    if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
+        library == nil || function == nil || compute_pipeline == nil || render_pipeline == nil ||
+        sampler == nil || depth == nil || fence == nil || argument_encoder == nil ||
+        compute_encoder == nil || blit_encoder == nil || render_encoder == nil || parallel_encoder == nil) {
+        fprintf(stderr, "metal-pixel: CPU adapter core protocol audit object allocation failed "
+                "buffer=%p texture=%p queue=%p command=%p library=%p function=%p compute=%p render=%p "
+                "sampler=%p depth=%p fence=%p argument=%p computeEncoder=%p blitEncoder=%p "
+                "renderEncoder=%p parallelEncoder=%p\n",
+                adapter_buffer, adapter_texture, queue, command_buffer, library, function,
+                compute_pipeline, render_pipeline, sampler, depth, fence, argument_encoder,
+                compute_encoder, blit_encoder, render_encoder, parallel_encoder);
+        return 165;
+    }
+    int result = 0;
+#define ZPU_AUDIT_OBJECT(object, protocol_type, name) \
+    do { if (result == 0) result = test_adapter_object_protocol_selector_coverage( \
+        (object), @protocol(protocol_type), (name)); } while (0)
+    ZPU_AUDIT_OBJECT(adapter_buffer, MTLBuffer, "MTLBuffer");
+    ZPU_AUDIT_OBJECT(adapter_texture, MTLTexture, "MTLTexture");
+    ZPU_AUDIT_OBJECT(queue, MTLCommandQueue, "MTLCommandQueue");
+    ZPU_AUDIT_OBJECT(command_buffer, MTLCommandBuffer, "MTLCommandBuffer");
+    ZPU_AUDIT_OBJECT(library, MTLLibrary, "MTLLibrary");
+    ZPU_AUDIT_OBJECT(function, MTLFunction, "MTLFunction");
+    ZPU_AUDIT_OBJECT(compute_pipeline, MTLComputePipelineState, "MTLComputePipelineState");
+    ZPU_AUDIT_OBJECT(render_pipeline, MTLRenderPipelineState, "MTLRenderPipelineState");
+    ZPU_AUDIT_OBJECT(sampler, MTLSamplerState, "MTLSamplerState");
+    ZPU_AUDIT_OBJECT(depth, MTLDepthStencilState, "MTLDepthStencilState");
+    ZPU_AUDIT_OBJECT(fence, MTLFence, "MTLFence");
+    if (@available(macOS 10.14, iOS 12.0, *)) {
+        ZPU_AUDIT_OBJECT(shared_event, MTLSharedEvent, "MTLSharedEvent");
+    }
+    ZPU_AUDIT_OBJECT(argument_encoder, MTLArgumentEncoder, "MTLArgumentEncoder");
+    ZPU_AUDIT_OBJECT(compute_encoder, MTLComputeCommandEncoder, "MTLComputeCommandEncoder");
+    ZPU_AUDIT_OBJECT(blit_encoder, MTLBlitCommandEncoder, "MTLBlitCommandEncoder");
+    ZPU_AUDIT_OBJECT(render_encoder, MTLRenderCommandEncoder, "MTLRenderCommandEncoder");
+    ZPU_AUDIT_OBJECT(parallel_encoder, MTLParallelRenderCommandEncoder, "MTLParallelRenderCommandEncoder");
+#undef ZPU_AUDIT_OBJECT
+    [compute_encoder endEncoding];
+    [blit_encoder endEncoding];
+    [render_encoder endEncoding];
+    [parallel_encoder endEncoding];
+    return result;
+}
+
 /* The CPU adapter keeps Metal 4 tile/object/mesh bindings as deterministic
  * stage metadata. Inspect that private representation here so an argument
  * table replacement test can distinguish an explicit null from a stale
@@ -8880,6 +8987,9 @@ int main(void) {
                     native_private_buffer.contents, adapter_private_buffer.contents);
             return 77;
         }
+        const int adapter_core_object_protocol_result =
+            test_adapter_core_object_protocols(adapter_device, adapter_vertex_buffer, adapter_texture);
+        if (adapter_core_object_protocol_result != 0) return adapter_core_object_protocol_result;
         const NSUInteger adapter_initial_allocated_size =
             adapter_texture.allocatedSize + adapter_vertex_buffer.length + adapter_private_buffer.length;
         if (adapter_device.currentAllocatedSize != adapter_initial_allocated_size) {
