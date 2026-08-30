@@ -8622,19 +8622,37 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal tile required threadgroup size is invalid");
         return nil;
     }
+    NSUInteger color_attachment_count = 1;
     for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
-        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
-            zpu_set_error(error, @"ZPU CPU Metal supports only one tile color attachment");
+        MTLTileRenderPipelineColorAttachmentDescriptor *additional = descriptor.colorAttachments[index];
+        if (additional.pixelFormat == MTLPixelFormatInvalid) {
+            for (NSUInteger later = index + 1; later < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++later) {
+                if (descriptor.colorAttachments[later].pixelFormat != MTLPixelFormatInvalid) {
+                    zpu_set_error(error, @"ZPU CPU Metal tile attachments must be contiguous");
+                    return nil;
+                }
+            }
+            break;
+        }
+        if (additional.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+            additional.pixelFormat != MTLPixelFormatBGRA8Unorm) {
+            zpu_set_error(error, @"ZPU CPU Metal supports only RGBA8 or BGRA8 CPU tile attachments");
             return nil;
         }
+        color_attachment_count = index + 1;
     }
     if (error != NULL) *error = nil;
-    return (id<MTLRenderPipelineState>)[[ZPURenderPipelineState alloc]
+    ZPURenderPipelineState *pipeline = [[ZPURenderPipelineState alloc]
         initWithOwner:self tileFunctionName:tileFunction.name label:descriptor.label
         colorFormat:attachment.pixelFormat
         maxTotalThreadsPerThreadgroup:max_threads
         threadgroupSizeMatchesTileSize:descriptor.threadgroupSizeMatchesTileSize
         requiredThreadsPerThreadgroup:required_threads];
+    for (NSUInteger index = 0; index < color_attachment_count; ++index) {
+        pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
+    }
+    pipeline->_colorAttachmentCount = color_attachment_count;
+    return (id<MTLRenderPipelineState>)pipeline;
 }
 - (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
     if (completionHandler == nil) return;
@@ -9812,11 +9830,24 @@ static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered RGBA8 CPU tile profile");
         return nil;
     }
+    NSUInteger color_attachment_count = 1;
     for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
-        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
-            zpu_set_error(error, @"ZPU CPU Metal 4 supports only one tile color attachment");
+        MTLTileRenderPipelineColorAttachmentDescriptor *additional = descriptor.colorAttachments[index];
+        if (additional.pixelFormat == MTLPixelFormatInvalid) {
+            for (NSUInteger later = index + 1; later < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++later) {
+                if (descriptor.colorAttachments[later].pixelFormat != MTLPixelFormatInvalid) {
+                    zpu_set_error(error, @"ZPU CPU Metal 4 tile attachments must be contiguous");
+                    return nil;
+                }
+            }
+            break;
+        }
+        if (additional.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+            additional.pixelFormat != MTLPixelFormatBGRA8Unorm) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 supports only RGBA8 or BGRA8 CPU tile attachments");
             return nil;
         }
+        color_attachment_count = index + 1;
     }
     NSUInteger max_threads = descriptor.maxTotalThreadsPerThreadgroup;
     if (max_threads == 0) max_threads = 1024;
@@ -9837,6 +9868,13 @@ static id<MTLRenderPipelineState> zpu_mtl4_tile_pipeline_for_descriptor(
         colorFormat:attachment.pixelFormat maxTotalThreadsPerThreadgroup:max_threads
         threadgroupSizeMatchesTileSize:descriptor.threadgroupSizeMatchesTileSize
         requiredThreadsPerThreadgroup:required];
+    for (NSUInteger index = 0; index < color_attachment_count; ++index) {
+        pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
+    }
+    pipeline->_colorAttachmentCount = color_attachment_count;
+    /* MTL4 tile descriptors do not expose a pipeline mapping-state property;
+     * their encoder map is the authoritative state when the pass opts in. */
+    pipeline->_colorAttachmentMappingInherited = YES;
     pipeline->_specializationDescriptor = [descriptor copy];
     return (id<MTLRenderPipelineState>)pipeline;
 }

@@ -96,9 +96,11 @@ triangle path:
   Depth/stencil array planes are also staged as independent CPU arrays and
   participate in per-layer clears, load/store, depth tests, and stencil
   operations. The registered tile profile broadcasts its deterministic
-  upper-left-grid output to every layer; layered mesh draws and layered
-  multisample passes remain explicitly rejected, while factor-one triangle
-  patches select layers by `baseInstance`.
+  upper-left-grid output to every layer, accepts a contiguous RGBA8/BGRA8
+  attachment signature, and routes its logical output through an opted-in
+  logical-to-physical map; layered mesh draws and layered multisample passes
+  remain explicitly rejected, while factor-one triangle patches select layers
+  by `baseInstance`.
 - CPU-owned 2D multisample textures with Apple-verified 2x and 4x default
   sample locations, represented as independent ZPU sample planes. Ordered
   render encoders can store those planes or resolve them into a matching
@@ -306,7 +308,9 @@ triangle path:
 - legacy and Metal 4 color attachment maps validate an eight-entry unique
   logical-to-physical permutation, preserve the physical attachment order,
   and route registered CPU fragment outputs without translating through native
-  Metal. Non-identity maps require the render-pass opt-in; Metal 4 pipelines
+  Metal. The registered CPU tile profile also routes its single logical output
+  through the opted-in map, including across 2D-array slices. Non-identity
+  maps require the render-pass opt-in; ordinary Metal 4 render pipelines
   additionally require inherited mapping state, and deferred render ICBs must
   set `supportColorAttachmentMapping` before a non-identity map can be replayed.
   Missing or unrepresentable physical targets fail closed
