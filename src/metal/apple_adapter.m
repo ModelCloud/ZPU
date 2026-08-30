@@ -615,14 +615,14 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLArrayType *_arrayType;
     MTLPointerType *_pointerType;
     MTLTextureReferenceType *_textureReferenceType;
-    MTLTensorReferenceType *_tensorReferenceType;
+    id _tensorReferenceType;
 }
 - (instancetype)initWithName:(NSString *)name offset:(NSUInteger)offset
                      dataType:(MTLDataType)dataType argumentIndex:(NSUInteger)argumentIndex;
 - (void)setPointerType:(MTLPointerType *)pointerType
  textureReferenceType:(MTLTextureReferenceType *)textureReferenceType;
 - (void)setStructType:(MTLStructType *)structType arrayType:(MTLArrayType *)arrayType
-         tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType;
+         tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0));
 @end
 
 @interface ZPUStructType : MTLStructType {
@@ -645,7 +645,7 @@ API_AVAILABLE(macos(10.11), ios(8.0))
     MTLArrayType *_elementArrayType;
     MTLTextureReferenceType *_elementTextureReferenceType;
     MTLPointerType *_elementPointerType;
-    MTLTensorReferenceType *_elementTensorReferenceType;
+    id _elementTensorReferenceType;
 }
 - (instancetype)initWithElementType:(MTLDataType)elementType
                          arrayLength:(NSUInteger)arrayLength
@@ -655,7 +655,7 @@ API_AVAILABLE(macos(10.11), ios(8.0))
                          arrayType:(MTLArrayType *)arrayType
                   textureReferenceType:(MTLTextureReferenceType *)textureReferenceType
                          pointerType:(MTLPointerType *)pointerType
-                  tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType;
+                  tensorReferenceType:(id)tensorReferenceType;
 @end
 
 API_AVAILABLE(macos(10.13), ios(11.0))
@@ -7442,7 +7442,7 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
     _textureReferenceType = textureReferenceType;
 }
 - (void)setStructType:(MTLStructType *)structType arrayType:(MTLArrayType *)arrayType
-         tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType {
+         tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0)) {
     _structType = structType;
     _arrayType = arrayType;
     _tensorReferenceType = tensorReferenceType;
@@ -7477,7 +7477,7 @@ API_AVAILABLE(macos(10.11), ios(8.0))
                          arrayType:(MTLArrayType *)arrayType
                   textureReferenceType:(MTLTextureReferenceType *)textureReferenceType
                          pointerType:(MTLPointerType *)pointerType
-                  tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType {
+                  tensorReferenceType:(id)tensorReferenceType {
     if ((self = [super init])) {
         _dataType = MTLDataTypeArray;
         _elementType = elementType;
