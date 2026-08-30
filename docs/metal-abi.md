@@ -98,8 +98,8 @@ triangle path:
   operations. The registered tile profile broadcasts its deterministic
   upper-left-grid output to every layer, accepts a contiguous RGBA8/BGRA8
   attachment signature, and routes its logical output through an opted-in
-  logical-to-physical map; layered mesh draws and layered multisample passes
-  remain explicitly rejected, while factor-one triangle patches select layers
+  logical-to-physical map; layered mesh draws remain explicitly rejected, while
+  factor-one triangle patches select layers
   by `baseInstance`.
 - CPU-owned 2D multisample and 2D multisample-array textures with
   Apple-verified 2x and 4x default sample locations, represented as
@@ -196,8 +196,8 @@ triangle path:
   broadcasts to each layer, and both the tile and registered mesh profiles
   support contiguous RGBA8/BGRA8 attachments with an opted-in
   logical-to-physical map. Factor-one triangle patches select layers by
-  `baseInstance`, while layered mesh draws and layered multisample passes
-  remain explicitly rejected
+  `baseInstance`, while layered mesh draws remain explicitly rejected; layered
+  multisample color passes use independent per-layer sample planes and resolves
 - buffer-backed 2D and texture-buffer views that alias ZPU storage with checked
   offsets/row strides and preserve the backing resource lifetime
 - compatible pixel-format views for all supported color and integer formats

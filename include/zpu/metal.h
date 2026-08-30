@@ -572,8 +572,9 @@ int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *e
  * through an opted-in color attachment map. The registered mesh profile
  * accepts the same contiguous RGBA8/BGRA8 attachment signature and routes its
  * logical outputs through an opted-in map. Factor-one triangle patches honor
- * baseInstance, while layered mesh draws and layered multisample passes
- * remain rejected. Direct and indirect primitive/indexed draws honor
+ * baseInstance, while layered mesh draws remain rejected. Layered multisample
+ * color attachments use the explicit per-layer sample-plane entry point below.
+ * Direct and indirect primitive/indexed draws honor
  * baseInstance and select the corresponding slices. */
 int zpu_metal_render_encoder_set_render_target_array(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count);
 int zpu_metal_render_encoder_set_color_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
@@ -582,6 +583,10 @@ int zpu_metal_render_encoder_set_stencil_texture_array(zpu_metal_render_encoder 
 /* Installs per-sample CPU-owned color planes for an additional 2x/4x MRT
  * attachment and its optional matching single-sample resolve target. */
 int zpu_metal_render_encoder_set_multisample_color_attachment_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count, zpu_metal_texture *resolve_texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
+/* Installs flattened [array-slice][sample] CPU-owned color planes for a
+ * layered 2x/4x render pass. resolve_textures may be NULL when no resolve is
+ * requested; otherwise it contains one resolve target per array slice. */
+int zpu_metal_render_encoder_set_multisample_color_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t array_count, size_t sample_count, zpu_metal_texture *const *resolve_textures, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 /* Installs per-sample CPU-owned depth planes for a 2x/4x render pass. */
 int zpu_metal_render_encoder_set_multisample_depth_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count);
 /* Installs per-sample CPU-owned stencil planes and their pass actions for a 2x/4x render pass. */

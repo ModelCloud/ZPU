@@ -95,6 +95,7 @@
       "zpu_metal_render_encoder_set_depth_texture_array",
       "zpu_metal_render_encoder_set_stencil_texture_array",
       "zpu_metal_render_encoder_set_multisample_color_attachment_targets",
+      "zpu_metal_render_encoder_set_multisample_color_attachment_array_targets",
       "zpu_metal_render_encoder_set_multisample_depth_targets",
       "zpu_metal_render_encoder_set_multisample_stencil_targets",
       "zpu_metal_render_encoder_set_color_attachment",
