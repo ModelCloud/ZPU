@@ -9423,9 +9423,10 @@ int main(void) {
             fprintf(stderr, "metal-pixel: invalid CPU render state did not fail closed\n");
             return 55;
         }
-        /* Mesh/object/tile shader stages have no CPU/ZPU execution path yet.
-         * Their resource setters must not masquerade as fragment bindings,
-         * because doing so can silently produce the wrong pixels. */
+        /* Arbitrary mesh/object/tile shader stages still have no CPU/ZPU
+         * execution path. Their resource setters must not masquerade as
+         * fragment bindings, because doing so can silently produce the wrong
+         * pixels; the separately registered bounded profiles are tested below. */
         id<MTLCommandBuffer> adapter_unsupported_stage_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderCommandEncoder> adapter_unsupported_stage_encoder =
             [adapter_unsupported_stage_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
