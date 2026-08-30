@@ -305,7 +305,8 @@ triangle path:
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
 - the registered `zpu_cpu_ml_identity` Metal 4 machine-learning profile also
-  preserves CPU fence update/wait ordering through the deferred ZPU command
+  preserves CPU fence update/wait ordering and interleaves tensor copies with
+  other commands at their encoded position in the deferred ZPU command
   buffer; arbitrary ML graphs remain fail-closed
 - owner-checked CPU function handles expose registered compute and visible
   callable names/types plus synthetic CPU resource IDs; visible function-table
