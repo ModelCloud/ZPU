@@ -4948,14 +4948,17 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn setBytes(self: *ComputeEncoder, bytes: ?[*]const u8, length: usize, index: u32) Error!void {
-        if (!self.open() or index != 0 or (length != 0 and bytes == null)) return error.InvalidArgument;
+        if (!self.open() or index >= max_buffer_bindings or (length != 0 and bytes == null)) return error.InvalidArgument;
         const buffer = try createBuffer(self.command_buffer.queue.device, length, bytes);
         errdefer destroyBuffer(buffer);
         self.command_buffer.owned_compute_buffers.append(allocator, buffer) catch return error.OutOfMemory;
-        self.buffers[0] = buffer;
-        self.buffer_offsets[0] = 0;
-        self.buffer = buffer;
-        self.buffer_offset = 0;
+        const slot: usize = @intCast(index);
+        self.buffers[slot] = buffer;
+        self.buffer_offsets[slot] = 0;
+        if (slot == 0) {
+            self.buffer = buffer;
+            self.buffer_offset = 0;
+        }
     }
 
     pub fn setTexture(self: *ComputeEncoder, texture: ?*Texture, index: u32) Error!void {

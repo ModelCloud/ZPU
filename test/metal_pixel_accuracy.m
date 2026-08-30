@@ -15646,6 +15646,65 @@ int main(void) {
             return 186;
         }
 
+        /* Metal's inline-byte setter is a buffer binding, not a special
+         * texture/slot-zero path. Verify nonzero slots with the native GPU
+         * oracle while the adapter snapshots all bytes into ZPU-owned CPU
+         * buffers. */
+        enum { buffer_inline_count = 4 };
+        const float buffer_inline_left_values[buffer_inline_count] = { 1.5f, -2.0f, 3.25f, 4.0f };
+        const float buffer_inline_right_values[buffer_inline_count] = { 2.0f, -0.5f, 4.0f, -3.0f };
+        id<MTLBuffer> native_buffer_inline_output =
+            [device newBufferWithLength:sizeof(buffer_inline_left_values) options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> native_buffer_inline_command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_buffer_inline_encoder =
+            [native_buffer_inline_command_buffer computeCommandEncoder];
+        if (native_buffer_inline_output != nil) memset(native_buffer_inline_output.contents, 0xa5,
+                                                       native_buffer_inline_output.length);
+        if (native_buffer_add_pipeline != nil && native_buffer_inline_output != nil) {
+            [native_buffer_inline_encoder setComputePipelineState:native_buffer_add_pipeline];
+            [native_buffer_inline_encoder setBytes:buffer_inline_left_values
+                                           length:sizeof(buffer_inline_left_values) atIndex:0];
+            [native_buffer_inline_encoder setBytes:buffer_inline_right_values
+                                           length:sizeof(buffer_inline_right_values) atIndex:1];
+            [native_buffer_inline_encoder setBuffer:native_buffer_inline_output offset:0 atIndex:2];
+            [native_buffer_inline_encoder dispatchThreads:MTLSizeMake(buffer_inline_count, 1, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+            [native_buffer_inline_encoder endEncoding];
+            [native_buffer_inline_command_buffer commit];
+            [native_buffer_inline_command_buffer waitUntilCompleted];
+        }
+        id<MTLBuffer> adapter_buffer_inline_output =
+            [adapter_device newBufferWithLength:sizeof(buffer_inline_left_values) options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> adapter_buffer_inline_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_buffer_inline_encoder =
+            [adapter_buffer_inline_command_buffer computeCommandEncoder];
+        if (adapter_buffer_inline_output != nil) memset(adapter_buffer_inline_output.contents, 0xa5,
+                                                        adapter_buffer_inline_output.length);
+        if (adapter_buffer_add_pipeline != nil && adapter_buffer_inline_output != nil) {
+            [adapter_buffer_inline_encoder setComputePipelineState:adapter_buffer_add_pipeline];
+            [adapter_buffer_inline_encoder setBytes:buffer_inline_left_values
+                                            length:sizeof(buffer_inline_left_values) atIndex:0];
+            [adapter_buffer_inline_encoder setBytes:buffer_inline_right_values
+                                            length:sizeof(buffer_inline_right_values) atIndex:1];
+            [adapter_buffer_inline_encoder setBuffer:adapter_buffer_inline_output offset:0 atIndex:2];
+            [adapter_buffer_inline_encoder dispatchThreads:MTLSizeMake(buffer_inline_count, 1, 1)
+                                   threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+            [adapter_buffer_inline_encoder endEncoding];
+            [adapter_buffer_inline_command_buffer commit];
+            [adapter_buffer_inline_command_buffer waitUntilCompleted];
+        }
+        const BOOL buffer_inline_exact =
+            native_buffer_inline_output != nil &&
+            native_buffer_inline_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_buffer_inline_output != nil &&
+            adapter_buffer_inline_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_buffer_inline_output.contents, adapter_buffer_inline_output.contents,
+                   sizeof(buffer_inline_left_values)) == 0;
+        if (!buffer_inline_exact) {
+            fail_with_error("CPU buffer inline-byte binding exactness failed", nil);
+            return 188;
+        }
+
         /* The matching multiply profile uses the same three ordinary buffer
          * slots, but exercises a distinct CPU/ZPU opcode. Compare raw bytes
          * with native Metal so no tolerance can hide a binding or arithmetic

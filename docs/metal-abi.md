@@ -282,7 +282,9 @@ triangle path:
   The bounded `zpu_cpu_add_f32` profile consumes ZPU-owned Float32 buffers at
   bindings 0/1/2 and performs deferred elementwise addition on the CPU for
   direct and indirect one-dimensional dispatches; Metal 4 argument tables can
-  provide the same three buffer bindings without changing CPU ownership.
+  provide the same three buffer bindings without changing CPU ownership, and
+  `setBytes:length:atIndex:` snapshots are accepted in any of those profile
+  slots with the same ZPU-owned lifetime semantics.
   The matching `zpu_cpu_mul_f32` profile performs deferred elementwise Float32
   multiplication through the same three ZPU-owned buffer slots and direct,
   indirect, and Metal 4 argument-table dispatch paths.
