@@ -3416,6 +3416,171 @@ static int test_rgba32_integer_transfers_against_native(id<MTLDevice> native_dev
     return 0;
 }
 
+static int test_metal4_multisample_mrt_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_mrt_fragment_function,
+    id<MTL4Compiler> adapter_compiler, MTL4RenderPipelineDescriptor *adapter_base_pipeline_descriptor,
+    id<MTL4CommandAllocator> adapter_allocator, id<MTL4CommandQueue> adapter_queue) {
+    enum { width = 9, height = 7, max_byte_count = width * height * 4 };
+    const NSUInteger sample_counts[] = {2, 4};
+    const MTLPixelFormat formats[] = {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm};
+    const MTLClearColor clear_colors[] = {
+        MTLClearColorMake(0.05, 0.10, 0.15, 0.20), MTLClearColorMake(0.15, 0.10, 0.05, 0.30),
+    };
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.89f, 0.21f, 0.71f, 0.79f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.89f, 0.21f, 0.71f, 0.79f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.89f, 0.21f, 0.71f, 0.79f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.19f, 0.81f, 0.31f, 0.59f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.19f, 0.81f, 0.31f, 0.59f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.19f, 0.81f, 0.31f, 0.59f}},
+    };
+    for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
+        const NSUInteger sample_count = sample_counts[sample_index];
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_mrt_fragment_function;
+        native_pipeline_descriptor.rasterSampleCount = sample_count;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = formats[0];
+        native_pipeline_descriptor.colorAttachments[1].pixelFormat = formats[1];
+        MTL4RenderPipelineDescriptor *adapter_pipeline_descriptor = [adapter_base_pipeline_descriptor copy];
+        adapter_pipeline_descriptor.rasterSampleCount = sample_count;
+        adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = formats[0];
+        adapter_pipeline_descriptor.colorAttachments[1].pixelFormat = formats[1];
+        MTL4LibraryFunctionDescriptor *adapter_fragment_descriptor =
+            [adapter_base_pipeline_descriptor.fragmentFunctionDescriptor copy];
+        adapter_fragment_descriptor.name = @"zpu_test_mrt_fragment";
+        adapter_pipeline_descriptor.fragmentFunctionDescriptor = adapter_fragment_descriptor;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_compiler newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor
+                                                   compilerTaskOptions:nil error:&adapter_error];
+        MTLTextureDescriptor *native_msaa_descriptor = [MTLTextureDescriptor new];
+        native_msaa_descriptor.textureType = MTLTextureType2DMultisample;
+        native_msaa_descriptor.width = width;
+        native_msaa_descriptor.height = height;
+        native_msaa_descriptor.mipmapLevelCount = 1;
+        native_msaa_descriptor.sampleCount = sample_count;
+        native_msaa_descriptor.storageMode = MTLStorageModePrivate;
+        native_msaa_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *native_resolve_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[0]
+                                                                width:width height:height mipmapped:NO];
+        native_resolve_descriptor.storageMode = MTLStorageModeShared;
+        native_resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_msaa[2] = {nil, nil};
+        id<MTLTexture> adapter_msaa[2] = {nil, nil};
+        id<MTLTexture> native_resolve[2] = {nil, nil};
+        id<MTLTexture> adapter_resolve[2] = {nil, nil};
+        for (NSUInteger attachment = 0; attachment < 2; ++attachment) {
+            MTLTextureDescriptor *native_msaa_format_descriptor = [native_msaa_descriptor copy];
+            native_msaa_format_descriptor.pixelFormat = formats[attachment];
+            MTLTextureDescriptor *native_resolve_format_descriptor = [native_resolve_descriptor copy];
+            native_resolve_format_descriptor.pixelFormat = formats[attachment];
+            native_msaa[attachment] = [native_device newTextureWithDescriptor:native_msaa_format_descriptor];
+            adapter_msaa[attachment] = [adapter_device newTextureWithDescriptor:native_msaa_format_descriptor];
+            native_resolve[attachment] = [native_device newTextureWithDescriptor:native_resolve_format_descriptor];
+            adapter_resolve[attachment] = [adapter_device newTextureWithDescriptor:native_resolve_format_descriptor];
+        }
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_msaa[0] == nil || native_msaa[1] == nil ||
+            adapter_msaa[0] == nil || adapter_msaa[1] == nil || native_resolve[0] == nil || native_resolve[1] == nil ||
+            adapter_resolve[0] == nil || adapter_resolve[1] == nil || native_buffer == nil || adapter_buffer == nil) {
+            fail_with_error("Metal 4 multisample MRT allocation", adapter_error ?: native_error);
+            return 179;
+        }
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        for (NSUInteger attachment = 0; attachment < 2; ++attachment) {
+            native_pass.colorAttachments[attachment].texture = native_msaa[attachment];
+            native_pass.colorAttachments[attachment].resolveTexture = native_resolve[attachment];
+            native_pass.colorAttachments[attachment].loadAction = MTLLoadActionClear;
+            native_pass.colorAttachments[attachment].storeAction = MTLStoreActionMultisampleResolve;
+            native_pass.colorAttachments[attachment].clearColor = clear_colors[attachment];
+        }
+        const MTLSamplePosition sample_positions[] = {
+            {0.25f, 0.25f}, {0.75f, 0.75f}, {0.125f, 0.125f}, {0.875f, 0.875f},
+        };
+        [native_pass setSamplePositions:sample_positions count:sample_count];
+        MTL4RenderPassDescriptor *adapter_pass = [MTL4RenderPassDescriptor new];
+        for (NSUInteger attachment = 0; attachment < 2; ++attachment) {
+            adapter_pass.colorAttachments[attachment].texture = adapter_msaa[attachment];
+            adapter_pass.colorAttachments[attachment].resolveTexture = adapter_resolve[attachment];
+            adapter_pass.colorAttachments[attachment].loadAction = MTLLoadActionClear;
+            adapter_pass.colorAttachments[attachment].storeAction = MTLStoreActionMultisampleResolve;
+            adapter_pass.colorAttachments[attachment].clearColor = clear_colors[attachment];
+        }
+        [adapter_pass setSamplePositions:sample_positions count:sample_count];
+        id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTL4CommandBuffer> adapter_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_command_buffer beginCommandBufferWithAllocator:adapter_allocator];
+        id<MTL4RenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        MTL4ArgumentTableDescriptor *table_descriptor = [MTL4ArgumentTableDescriptor new];
+        table_descriptor.maxBufferBindCount = 1;
+        NSError *table_error = nil;
+        id<MTL4ArgumentTable> table = [adapter_device newArgumentTableWithDescriptor:table_descriptor error:&table_error];
+        [table setAddress:adapter_buffer.gpuAddress atIndex:0];
+        if (native_encoder == nil || adapter_command_buffer == nil || adapter_encoder == nil || table == nil) {
+            fail_with_error("Metal 4 multisample MRT encoder allocation", table_error ?: native_error);
+            return 180;
+        }
+        [native_encoder setColorStoreAction:MTLStoreActionStoreAndMultisampleResolve atIndex:0];
+        [native_encoder setColorStoreAction:MTLStoreActionStoreAndMultisampleResolve atIndex:1];
+        [native_encoder setViewport:(MTLViewport){0.0, 0.0, width, height, 0.0, 1.0}];
+        [native_encoder setScissorRect:(MTLScissorRect){0, 0, width, height}];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_encoder endEncoding];
+        [adapter_encoder setColorStoreAction:MTLStoreActionStoreAndMultisampleResolve atIndex:0];
+        [adapter_encoder setColorStoreAction:MTLStoreActionStoreAndMultisampleResolve atIndex:1];
+        [adapter_encoder setViewport:(MTLViewport){0.0, 0.0, width, height, 0.0, 1.0}];
+        [adapter_encoder setScissorRect:(MTLScissorRect){0, 0, width, height}];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setArgumentTable:table atStages:MTLRenderStageVertex];
+        [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_command_buffers[] = {adapter_command_buffer};
+        [adapter_queue commit:adapter_command_buffers count:1];
+        uint8_t native_pixels[2][max_byte_count] = {{0}};
+        uint8_t adapter_pixels[2][max_byte_count] = {{0}};
+        for (NSUInteger attachment = 0; attachment < 2; ++attachment) {
+            [native_resolve[attachment] getBytes:native_pixels[attachment] bytesPerRow:width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_resolve[attachment] getBytes:adapter_pixels[attachment] bytesPerRow:width * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            if (memcmp(native_pixels[attachment], adapter_pixels[attachment], max_byte_count) != 0) {
+                size_t mismatch = 0;
+                while (mismatch < max_byte_count && native_pixels[attachment][mismatch] == adapter_pixels[attachment][mismatch]) mismatch += 1;
+                fprintf(stderr, "metal-pixel: Metal 4 %zux MSAA MRT attachment %zu mismatch at byte %zu native=%u adapter=%u native_status=%ld\n",
+                        sample_count, attachment, mismatch,
+                        mismatch < max_byte_count ? native_pixels[attachment][mismatch] : 0,
+                        mismatch < max_byte_count ? adapter_pixels[attachment][mismatch] : 0,
+                        (long)native_command_buffer.status);
+                fail_with_error("native Metal 4 multisample MRT error", native_command_buffer.error);
+                return 181;
+            }
+        }
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: Metal 4 %zux native multisample MRT command did not complete\n", sample_count);
+            return 182;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -13387,6 +13552,10 @@ int main(void) {
             device, adapter_device, vertex_function, fragment_function, adapter_mtl4_compiler,
             adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
         if (metal4_multisample_result != 0) return metal4_multisample_result;
+        const int metal4_multisample_mrt_result = test_metal4_multisample_mrt_against_native(
+            device, adapter_device, vertex_function, mrt_fragment_function, adapter_mtl4_compiler,
+            adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
+        if (metal4_multisample_mrt_result != 0) return metal4_multisample_mrt_result;
 
         /* Replacing an argument table must clear null entries. In particular,
          * a CPU encoder cannot retain a prior texture binding just because a
