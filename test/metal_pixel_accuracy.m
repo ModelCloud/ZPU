@@ -524,6 +524,46 @@ static int test_texture_view_format_compatibility(
                 native_texture_buffer_accepts, adapter_texture_buffer_accepts);
         return 146;
     }
+
+    MTLTextureDescriptor *multisample_array_descriptor = [MTLTextureDescriptor new];
+    multisample_array_descriptor.textureType = MTLTextureType2DMultisampleArray;
+    multisample_array_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    multisample_array_descriptor.width = 2;
+    multisample_array_descriptor.height = 2;
+    multisample_array_descriptor.arrayLength = 2;
+    multisample_array_descriptor.mipmapLevelCount = 1;
+    multisample_array_descriptor.sampleCount = 2;
+    multisample_array_descriptor.storageMode = MTLStorageModePrivate;
+    multisample_array_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_multisample_array =
+        [native_device newTextureWithDescriptor:multisample_array_descriptor];
+    id<MTLTexture> adapter_multisample_array =
+        [adapter_device newTextureWithDescriptor:multisample_array_descriptor];
+    const BOOL native_multisample_array_accepts = native_multisample_array != nil;
+    const BOOL adapter_multisample_array_accepts = adapter_multisample_array != nil;
+    if (native_multisample_array_accepts != adapter_multisample_array_accepts ||
+        (native_multisample_array != nil &&
+         (adapter_multisample_array.textureType != native_multisample_array.textureType ||
+          adapter_multisample_array.arrayLength != native_multisample_array.arrayLength ||
+          adapter_multisample_array.sampleCount != native_multisample_array.sampleCount ||
+          adapter_multisample_array.width != native_multisample_array.width ||
+          adapter_multisample_array.height != native_multisample_array.height))) {
+        fprintf(stderr, "metal-pixel: multisample-array resource mismatch native=%d adapter=%d\n",
+                native_multisample_array_accepts, adapter_multisample_array_accepts);
+        return 147;
+    }
+    id<MTLTexture> native_multisample_array_view =
+        [native_multisample_array newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+    id<MTLTexture> adapter_multisample_array_view =
+        [adapter_multisample_array newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+    if ((native_multisample_array_view != nil) != (adapter_multisample_array_view != nil) ||
+        (native_multisample_array_view != nil &&
+         (adapter_multisample_array_view.textureType != native_multisample_array_view.textureType ||
+          adapter_multisample_array_view.arrayLength != native_multisample_array_view.arrayLength ||
+          adapter_multisample_array_view.sampleCount != native_multisample_array_view.sampleCount))) {
+        fprintf(stderr, "metal-pixel: multisample-array view mismatch\n");
+        return 148;
+    }
     return mismatch ? 143 : 0;
 }
 

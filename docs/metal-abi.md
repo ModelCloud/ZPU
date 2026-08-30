@@ -101,8 +101,9 @@ triangle path:
   logical-to-physical map; layered mesh draws and layered multisample passes
   remain explicitly rejected, while factor-one triangle patches select layers
   by `baseInstance`.
-- CPU-owned 2D multisample textures with Apple-verified 2x and 4x default
-  sample locations, represented as independent ZPU sample planes. Ordered
+- CPU-owned 2D multisample and 2D multisample-array textures with
+  Apple-verified 2x and 4x default sample locations, represented as
+  independent ZPU sample planes per layer. Ordered
   render encoders can store those planes or resolve them into a matching
   single-sample color texture using `MultisampleResolve` or
   `StoreAndMultisampleResolve`; the resolver averages logical sample colors
@@ -113,9 +114,9 @@ triangle path:
   semantics. Legacy, parallel, and Metal 4 render encoders also support 2x/4x
   MRT with independent CPU sample planes and per-attachment resolves. Sparse
   placement and direct CPU transfers remain rejected.
-  2D multisample texture
-  views are CPU-owned aliases of every sample plane, including same-size
-  compatible color-format reinterpretations.
+  2D multisample and 2D multisample-array views are CPU-owned aliases of
+  every sample plane, including same-size compatible color-format
+  reinterpretations.
   Custom sample positions are accepted for
   1x/2x/4x passes after finite `[0, 1]` validation and are interpreted in
   Metal's top-left, pixel-local coordinates; other sample counts remain unsupported.
