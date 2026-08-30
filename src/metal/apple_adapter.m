@@ -7361,8 +7361,19 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 #pragma clang diagnostic pop
 - (BOOL)supportsTextureSampleCount:(NSUInteger)sampleCount { return sampleCount == 1; }
-- (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format { return format == MTLPixelFormatInvalid ? 0 : 4; }
-- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format { return format == MTLPixelFormatInvalid ? 0 : 4; }
+- (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format {
+    /* Apple devices require a 16-byte base/row alignment for linear texture
+     * storage. Keep invalid, depth/stencil, and compressed formats at zero:
+     * Metal rejects those formats for linear textures rather than assigning a
+     * usable alignment. */
+    return (zpu_color_texture_format_supported(format) || zpu_integer_texture_format_supported(format)) ? 16 : 0;
+}
+- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format {
+    /* Texture-buffer views have the same 16-byte alignment requirement on the
+     * Apple oracle. Depth/stencil and compressed formats are not valid
+     * texture-buffer formats, so report no usable alignment for them. */
+    return (zpu_color_texture_format_supported(format) || zpu_integer_texture_format_supported(format)) ? 16 : 0;
+}
 - (id<MTLCommandQueue>)newCommandQueue {
     zpu_metal_command_queue *queue = zpu_metal_device_new_command_queue(_zpuDevice);
     if (queue == NULL) return nil;

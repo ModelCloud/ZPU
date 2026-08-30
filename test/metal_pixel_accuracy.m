@@ -186,6 +186,73 @@ static int test_texture_view_format_compatibility(
     return mismatch ? 143 : 0;
 }
 
+static int test_device_texture_alignment_queries(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device)
+    API_AVAILABLE(macos(10.14), ios(12.0)) {
+    const struct {
+        MTLPixelFormat format;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatA8Unorm, "A8Unorm"},
+        {MTLPixelFormatR8Unorm, "R8Unorm"},
+        {MTLPixelFormatR8Unorm_sRGB, "R8Unorm_sRGB"},
+        {MTLPixelFormatR8Snorm, "R8Snorm"},
+        {MTLPixelFormatR8Uint, "R8Uint"},
+        {MTLPixelFormatR8Sint, "R8Sint"},
+        {MTLPixelFormatR16Unorm, "R16Unorm"},
+        {MTLPixelFormatR16Snorm, "R16Snorm"},
+        {MTLPixelFormatR16Float, "R16Float"},
+        {MTLPixelFormatR16Uint, "R16Uint"},
+        {MTLPixelFormatR16Sint, "R16Sint"},
+        {MTLPixelFormatR32Float, "R32Float"},
+        {MTLPixelFormatR32Uint, "R32Uint"},
+        {MTLPixelFormatR32Sint, "R32Sint"},
+        {MTLPixelFormatRG8Unorm, "RG8Unorm"},
+        {MTLPixelFormatRG8Unorm_sRGB, "RG8Unorm_sRGB"},
+        {MTLPixelFormatRG8Snorm, "RG8Snorm"},
+        {MTLPixelFormatRG8Uint, "RG8Uint"},
+        {MTLPixelFormatRG8Sint, "RG8Sint"},
+        {MTLPixelFormatRG16Unorm, "RG16Unorm"},
+        {MTLPixelFormatRG16Snorm, "RG16Snorm"},
+        {MTLPixelFormatRG16Float, "RG16Float"},
+        {MTLPixelFormatRG16Uint, "RG16Uint"},
+        {MTLPixelFormatRG16Sint, "RG16Sint"},
+        {MTLPixelFormatRG32Float, "RG32Float"},
+        {MTLPixelFormatRG32Uint, "RG32Uint"},
+        {MTLPixelFormatRG32Sint, "RG32Sint"},
+        {MTLPixelFormatRGBA8Unorm, "RGBA8Unorm"},
+        {MTLPixelFormatRGBA8Unorm_sRGB, "RGBA8Unorm_sRGB"},
+        {MTLPixelFormatRGBA8Snorm, "RGBA8Snorm"},
+        {MTLPixelFormatRGBA8Uint, "RGBA8Uint"},
+        {MTLPixelFormatRGBA8Sint, "RGBA8Sint"},
+        {MTLPixelFormatBGRA8Unorm, "BGRA8Unorm"},
+        {MTLPixelFormatBGRA8Unorm_sRGB, "BGRA8Unorm_sRGB"},
+        {MTLPixelFormatRGBA16Unorm, "RGBA16Unorm"},
+        {MTLPixelFormatRGBA16Snorm, "RGBA16Snorm"},
+        {MTLPixelFormatRGBA16Float, "RGBA16Float"},
+        {MTLPixelFormatRGBA16Uint, "RGBA16Uint"},
+        {MTLPixelFormatRGBA16Sint, "RGBA16Sint"},
+        {MTLPixelFormatRGBA32Float, "RGBA32Float"},
+        {MTLPixelFormatRGBA32Uint, "RGBA32Uint"},
+        {MTLPixelFormatRGBA32Sint, "RGBA32Sint"},
+        {MTLPixelFormatRGB10A2Uint, "RGB10A2Uint"},
+    };
+    for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); index++) {
+        const MTLPixelFormat format = formats[index].format;
+        const NSUInteger native_linear = [native_device minimumLinearTextureAlignmentForPixelFormat:format];
+        const NSUInteger adapter_linear = [adapter_device minimumLinearTextureAlignmentForPixelFormat:format];
+        const NSUInteger native_buffer = [native_device minimumTextureBufferAlignmentForPixelFormat:format];
+        const NSUInteger adapter_buffer = [adapter_device minimumTextureBufferAlignmentForPixelFormat:format];
+        if (native_linear != adapter_linear || native_buffer != adapter_buffer) {
+            fprintf(stderr, "metal-pixel: %s alignment mismatch linear=%lu/%lu buffer=%lu/%lu\n",
+                    formats[index].name, (unsigned long)native_linear, (unsigned long)adapter_linear,
+                    (unsigned long)native_buffer, (unsigned long)adapter_buffer);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_vertex_attribute_stride_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -5577,6 +5644,12 @@ int main(void) {
             adapter_heap_size_align.align != 4) {
             fprintf(stderr, "metal-pixel: adapter device capability query failed\n");
             return 41;
+        }
+        if (@available(macOS 10.14, iOS 12.0, *)) {
+            if (test_device_texture_alignment_queries(device, adapter_device) != 0) {
+                fprintf(stderr, "metal-pixel: device texture alignment query failed\n");
+                return 42;
+            }
         }
 
         /* Resource options are observable Metal state even though the ZPU
