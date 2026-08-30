@@ -454,8 +454,8 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 @public
     __weak ZPUIndirectCommandBuffer *_owner;
     id _pipelineState;
-    ZPUBuffer *_kernelBuffer;
-    NSUInteger _kernelBufferOffset;
+    NSMutableDictionary *_kernelBuffers;
+    NSMutableDictionary *_kernelBufferOffsets;
     BOOL _hasDispatchThreads;
     MTLSize _threadsPerGrid;
     MTLSize _threadsPerThreadgroup;
@@ -18720,8 +18720,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
                 (computeCommand->_hasDispatchThreadgroups && (_commandTypes & MTLIndirectCommandTypeConcurrentDispatch) == 0)) return NO;
             ZPUIndirectComputeCommand *copy = [[ZPUIndirectComputeCommand alloc] initWithOwner:self];
             copy->_pipelineState = computeCommand->_pipelineState;
-            copy->_kernelBuffer = computeCommand->_kernelBuffer;
-            copy->_kernelBufferOffset = computeCommand->_kernelBufferOffset;
+            copy->_kernelBuffers = [computeCommand->_kernelBuffers mutableCopy];
+            copy->_kernelBufferOffsets = [computeCommand->_kernelBufferOffsets mutableCopy];
             copy->_hasDispatchThreads = computeCommand->_hasDispatchThreads;
             copy->_threadsPerGrid = computeCommand->_threadsPerGrid;
             copy->_threadsPerThreadgroup = computeCommand->_threadsPerThreadgroup;
@@ -18734,7 +18734,9 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
             copy->_stageInRegion = computeCommand->_stageInRegion;
             copy->_hasStageInRegion = computeCommand->_hasStageInRegion;
             copy->_unsupportedCommand = computeCommand->_unsupportedCommand;
-            if (computeCommand->_kernelBuffer != nil && _maxKernelBufferBindCount == 0) return NO;
+            for (NSNumber *bufferIndex in computeCommand->_kernelBuffers) {
+                if (bufferIndex.unsignedIntegerValue >= _maxKernelBufferBindCount) return NO;
+            }
             for (NSNumber *memoryIndex in computeCommand->_threadgroupMemoryLengths) {
                 if (memoryIndex.unsignedIntegerValue >= _maxKernelThreadgroupMemoryBindCount) return NO;
             }
@@ -19287,14 +19289,16 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner {
     if ((self = [super init])) {
         _owner = owner;
+        _kernelBuffers = [NSMutableDictionary dictionary];
+        _kernelBufferOffsets = [NSMutableDictionary dictionary];
         _threadgroupMemoryLengths = [NSMutableDictionary dictionary];
     }
     return self;
 }
 - (void)reset {
     _pipelineState = nil;
-    _kernelBuffer = nil;
-    _kernelBufferOffset = 0;
+    [_kernelBuffers removeAllObjects];
+    [_kernelBufferOffsets removeAllObjects];
     _hasDispatchThreads = NO;
     _threadsPerGrid = MTLSizeMake(0, 0, 0);
     _threadsPerThreadgroup = MTLSizeMake(0, 0, 0);
@@ -19323,13 +19327,13 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
 }
 - (void)setKernelBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index != 0 || index >= _owner->_maxKernelBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (index >= _owner->_maxKernelBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                                          zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
         return;
     }
-    _kernelBuffer = zpuBuffer;
-    _kernelBufferOffset = buffer == nil ? 0 : offset;
+    _kernelBuffers[@(index)] = buffer == nil ? [NSNull null] : zpuBuffer;
+    _kernelBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
 }
 - (void)setKernelBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
     if (stride != 0) {
@@ -19397,10 +19401,19 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         return;
     }
     if (_pipelineState != nil) [encoder setComputePipelineState:(id<MTLComputePipelineState>)_pipelineState];
-    if (_kernelBuffer != nil) {
-        [encoder setBuffer:(id<MTLBuffer>)_kernelBuffer offset:_kernelBufferOffset atIndex:0];
-    } else if (!_owner->_inheritBuffers) {
+    if (!_owner->_inheritBuffers) {
         [encoder setBuffer:nil offset:0 atIndex:0];
+        if (pipeline->_kernel == ZPU_METAL_COMPUTE_ADD_F32 ||
+            pipeline->_kernel == ZPU_METAL_COMPUTE_MUL_F32) {
+            [encoder setBuffer:nil offset:0 atIndex:1];
+            [encoder setBuffer:nil offset:0 atIndex:2];
+        }
+    }
+    for (NSNumber *bufferIndex in _kernelBuffers) {
+        id buffer = _kernelBuffers[bufferIndex];
+        NSUInteger offset = [_kernelBufferOffsets[bufferIndex] unsignedIntegerValue];
+        [encoder setBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
+                    offset:offset atIndex:bufferIndex.unsignedIntegerValue];
     }
     if (_hasDispatchThreads) {
         [encoder dispatchThreads:_threadsPerGrid threadsPerThreadgroup:_threadsPerThreadgroup];

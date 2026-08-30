@@ -24663,6 +24663,63 @@ int main(void) {
             }
         }
 
+        /* Registered three-buffer arithmetic profiles must retain all kernel
+         * buffer slots in an indirect command. Exercise recording, ICB copy,
+         * and replay with inheritance disabled so stale encoder bindings
+         * cannot satisfy a missing slot. */
+        MTLIndirectCommandBufferDescriptor *buffer_mul_icb_descriptor =
+            [MTLIndirectCommandBufferDescriptor new];
+        buffer_mul_icb_descriptor.commandTypes = MTLIndirectCommandTypeConcurrentDispatchThreads;
+        buffer_mul_icb_descriptor.inheritPipelineState = NO;
+        buffer_mul_icb_descriptor.inheritBuffers = NO;
+        buffer_mul_icb_descriptor.maxKernelBufferBindCount = 3;
+        id<MTLIndirectCommandBuffer> buffer_mul_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:buffer_mul_icb_descriptor
+                                                     maxCommandCount:1 options:MTLResourceStorageModeShared];
+        id<MTLIndirectComputeCommand> buffer_mul_icb_command =
+            [buffer_mul_icb indirectComputeCommandAtIndex:0];
+        id<MTLBuffer> buffer_mul_icb_output =
+            [adapter_device newBufferWithLength:sizeof(buffer_mul_left_values)
+                                         options:MTLResourceStorageModeShared];
+        [buffer_mul_icb_command setComputePipelineState:adapter_buffer_mul_pipeline];
+        [buffer_mul_icb_command setKernelBuffer:adapter_buffer_mul_left offset:0 atIndex:0];
+        [buffer_mul_icb_command setKernelBuffer:adapter_buffer_mul_right offset:0 atIndex:1];
+        [buffer_mul_icb_command setKernelBuffer:buffer_mul_icb_output offset:0 atIndex:2];
+        [buffer_mul_icb_command concurrentDispatchThreads:MTLSizeMake(buffer_mul_count, 1, 1)
+                                       threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+        id<MTLIndirectCommandBuffer> buffer_mul_icb_copy =
+            [adapter_device newIndirectCommandBufferWithDescriptor:buffer_mul_icb_descriptor
+                                                     maxCommandCount:1 options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> buffer_mul_icb_copy_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> buffer_mul_icb_copy_encoder =
+            [buffer_mul_icb_copy_command_buffer blitCommandEncoder];
+        [buffer_mul_icb_copy_encoder copyIndirectCommandBuffer:buffer_mul_icb
+                                                   sourceRange:NSMakeRange(0, 1)
+                                                  destination:buffer_mul_icb_copy
+                                             destinationIndex:0];
+        [buffer_mul_icb_copy_encoder endEncoding];
+        [buffer_mul_icb_copy_command_buffer commit];
+        [buffer_mul_icb_copy_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> buffer_mul_icb_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> buffer_mul_icb_encoder =
+            [buffer_mul_icb_command_buffer computeCommandEncoder];
+        [buffer_mul_icb_encoder executeCommandsInBuffer:buffer_mul_icb_copy withRange:NSMakeRange(0, 1)];
+        [buffer_mul_icb_encoder endEncoding];
+        [buffer_mul_icb_command_buffer commit];
+        [buffer_mul_icb_command_buffer waitUntilCompleted];
+        const BOOL buffer_mul_icb_exact =
+            buffer_mul_icb != nil && buffer_mul_icb_command != nil && buffer_mul_icb_copy != nil &&
+            buffer_mul_icb_output != nil && buffer_mul_icb_copy_encoder != nil &&
+            buffer_mul_icb_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            buffer_mul_icb_encoder != nil &&
+            buffer_mul_icb_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_buffer_mul_output.contents, buffer_mul_icb_output.contents,
+                   sizeof(buffer_mul_left_values)) == 0;
+        if (!buffer_mul_icb_exact) {
+            fail_with_error("CPU indirect buffer multiply slot replay failed", adapter_compute_error);
+            return 189;
+        }
+
         /* With buffer inheritance disabled, a command that omits its kernel
          * buffer must not accidentally consume the compute encoder's prior
          * binding. Native Metal rejects this dispatch; keep the CPU adapter
