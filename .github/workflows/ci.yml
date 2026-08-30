@@ -52,8 +52,8 @@ jobs:
       - name: Install build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64
-          dpkg-query -W -f='${Package}=${Version}\n' libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64
+          sudo apt-get install -y --no-install-recommends libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 ripgrep
+          dpkg-query -W -f='${Package}=${Version}\n' libvulkan1 libvulkan-dev libxcb1-dev libxcb1-dev:arm64 libvulkan-dev:arm64 ripgrep
       - run: tools/limited-cpus.sh zig build
       - run: test "$(realpath zig-out/share/vulkan/icd.d/../../../lib/libvulkan_zpu.so)" = "$(realpath zig-out/lib/libvulkan_zpu.so)"
       - run: tools/limited-cpus.sh zig build test
