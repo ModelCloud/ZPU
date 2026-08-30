@@ -266,6 +266,9 @@ triangle path:
   compute encoder state also validates and retains Metal's 31 buffer binding
   slots; each registered CPU profile consumes only the slots in its profile,
   while unused valid slots remain harmless CPU-side state.
+  The bounded `zpu_cpu_add_f32` profile consumes ZPU-owned Float32 buffers at
+  bindings 0/1/2 and performs deferred elementwise addition on the CPU for
+  direct and indirect one-dimensional dispatches.
   3D dispatches expand z into plane commands while preserving the z coordinate
   in the CPU kernel; indirect array/3D dispatches resolve the deferred z
   extent at commit and skip slices outside that extent. The triangle trace
