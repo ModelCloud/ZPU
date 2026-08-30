@@ -708,6 +708,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLColorWriteMask _writeMask;
     NSString *_vertexFunctionName;
     NSString *_fragmentFunctionName;
+    NSString *_vertexImplementationName;
+    NSString *_fragmentImplementationName;
     MTLRenderPipelineReflection *_reflection;
     MTLRenderPipelineReflection *_legacyReflection;
     id _specializationDescriptor;
@@ -1391,6 +1393,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUDevice *_owner;
     uint64_t _resourceID;
     zpu_metal_compute_kernel _kernel;
+    NSString *_kernelFunctionName;
     NSArray *_linkedFunctionNames;
     BOOL _supportsAddingBinaryFunctions;
     NSUInteger _maxTotalThreadsPerThreadgroup;
@@ -6164,6 +6167,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
         _vertexFunctionName = [descriptor.vertexFunction.name copy];
         _fragmentFunctionName = [descriptor.fragmentFunction.name copy];
+        _vertexImplementationName = [zpu_cpu_function_implementation_name((ZPUCPUFunction *)descriptor.vertexFunction) copy];
+        _fragmentImplementationName = [zpu_cpu_function_implementation_name((ZPUCPUFunction *)descriptor.fragmentFunction) copy];
         _vertexLinkedFunctionNames = @[];
         _fragmentLinkedFunctionNames = @[];
         _vertexBinaryFunctionNames = @[];
@@ -6174,15 +6179,15 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
             _colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
             if (_colorPixelFormats[index] != MTLPixelFormatInvalid) _colorAttachmentCount = index + 1;
         }
-        _multiTargetOutput = [descriptor.fragmentFunction.name rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
-        _sampleTexture = [descriptor.fragmentFunction.name rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        _multiTargetOutput = [_fragmentImplementationName rangeOfString:@"mrt" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        _sampleTexture = [_fragmentImplementationName rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
         (void)zpu_vertex_layout_supported(descriptor.vertexDescriptor, &_vertexStride, &_vertexStrideDynamic);
-        _fragmentUniform = [descriptor.fragmentFunction.name isEqualToString:@"zpu_cpu_uniform_color_fragment"];
+        _fragmentUniform = [_fragmentImplementationName isEqualToString:@"zpu_cpu_uniform_color_fragment"];
         _rasterizationEnabled = descriptor.rasterizationEnabled;
         _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
-        _isPatchPipeline = [_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name];
+        _isPatchPipeline = [_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name];
         _patchType = _isPatchPipeline ? MTLPatchTypeTriangle : MTLPatchTypeNone;
         _patchControlPointCount = _isPatchPipeline ? 3 : -1;
         _tessellationControlPointIndexType = descriptor.tessellationControlPointIndexType;
@@ -6318,6 +6323,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _writeMask = pipeline->_writeMask;
         _vertexFunctionName = [pipeline->_vertexFunctionName copy];
         _fragmentFunctionName = [pipeline->_fragmentFunctionName copy];
+        _vertexImplementationName = [pipeline->_vertexImplementationName copy];
+        _fragmentImplementationName = [pipeline->_fragmentImplementationName copy];
         _vertexLinkedFunctionNames = [vertexFunctionNames copy];
         _fragmentLinkedFunctionNames = [fragmentFunctionNames copy];
         _vertexBinaryFunctionNames = [vertexBinaryNames copy];
@@ -7485,8 +7492,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal render pipelines require ZPU-owned CPU vertex and fragment functions");
         return nil;
     }
-    const BOOL patchPipeline = [vertexFunction.name isEqualToString:zpu_cpu_patch_triangle_vertex_name];
-    if ([fragmentFunction.name isEqualToString:zpu_cpu_patch_triangle_fragment_name] != patchPipeline ||
+    const BOOL patchPipeline = [zpu_cpu_function_implementation_name(vertexFunction)
+        isEqualToString:zpu_cpu_patch_triangle_vertex_name];
+    if ([zpu_cpu_function_implementation_name(fragmentFunction)
+             isEqualToString:zpu_cpu_patch_triangle_fragment_name] != patchPipeline ||
         (patchPipeline &&
          (vertexFunction.patchType != MTLPatchTypeTriangle || vertexFunction.patchControlPointCount != 3 ||
           descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
@@ -7520,7 +7529,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         (options & (MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo)) != 0) {
         if (@available(macOS 26.0, iOS 26.0, *)) {
             pipeline->_legacyReflection = zpu_render_pipeline_reflection(
-                pipeline->_vertexFunctionName, pipeline->_fragmentFunctionName);
+                pipeline->_vertexImplementationName, pipeline->_fragmentImplementationName);
             *reflection = pipeline->_legacyReflection;
         }
     }
@@ -12029,6 +12038,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         _owner = owner;
         _resourceID = zpu_register_resource(self);
         _kernel = 0;
+        _kernelFunctionName = nil;
         _linkedFunctionNames = @[];
         _supportsAddingBinaryFunctions = NO;
         _maxTotalThreadsPerThreadgroup = 1024;
@@ -12040,7 +12050,8 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
             zpu_set_error(error, @"ZPU CPU Metal compute pipelines require a ZPU-owned CPU kernel function");
             return nil;
         }
-        NSString *name = cpuFunction->_name;
+        NSString *name = zpu_cpu_function_implementation_name(cpuFunction);
+        _kernelFunctionName = [cpuFunction->_name copy];
         BOOL is_kernel = YES;
         if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"]) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
@@ -12068,6 +12079,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         _owner = pipeline->_owner;
         _resourceID = zpu_register_resource(self);
         _kernel = pipeline->_kernel;
+        _kernelFunctionName = [pipeline->_kernelFunctionName copy];
         _linkedFunctionNames = [linkedFunctionNames copy];
         _supportsAddingBinaryFunctions = pipeline->_supportsAddingBinaryFunctions;
         _maxTotalThreadsPerThreadgroup = pipeline->_maxTotalThreadsPerThreadgroup;
@@ -12092,9 +12104,9 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 - (MTLComputePipelineReflection *)reflection API_AVAILABLE(macos(26.0), ios(26.0)) { return _reflection; }
 - (id<MTLFunctionHandle>)functionHandleWithName:(NSString *)name API_AVAILABLE(macos(26.0), ios(26.0)) {
     NSString *kernelName = zpu_compute_kernel_name(_kernel);
-    if (kernelName == nil || ![kernelName isEqualToString:name]) return nil;
+    if (kernelName == nil || ![_kernelFunctionName isEqualToString:name]) return nil;
     return (id<MTLFunctionHandle>)[[ZPUFunctionHandle alloc] initWithOwner:_owner
-                                                                        name:kernelName
+                                                                        name:name
                                                                  functionType:MTLFunctionTypeKernel];
 }
 - (id<MTLFunctionHandle>)functionHandleWithBinaryFunction:(id<MTL4BinaryFunction>)function API_AVAILABLE(macos(26.0), ios(26.0)) {
@@ -12147,7 +12159,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         (cpuFunction.functionType != MTLFunctionTypeKernel && cpuFunction.functionType != MTLFunctionTypeVisible)) return nil;
     NSString *kernelName = zpu_compute_kernel_name(_kernel);
     const BOOL isBaseKernel = cpuFunction.functionType == MTLFunctionTypeKernel &&
-        kernelName != nil && [kernelName isEqualToString:cpuFunction->_name];
+        kernelName != nil && [kernelName isEqualToString:zpu_cpu_function_implementation_name(cpuFunction)];
     const BOOL isLinkedVisible = cpuFunction.functionType == MTLFunctionTypeVisible &&
         [_linkedFunctionNames containsObject:cpuFunction->_name];
     if (!isBaseKernel && !isLinkedVisible) return nil;
@@ -14938,8 +14950,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     ZPURenderPipelineState *state = _pipelineState;
     ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
     if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
-        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
-        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] ||
                                      patchIndex->_owner != [_owner device]))) {
@@ -14960,8 +14972,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
     ZPUBuffer *indirect = (ZPUBuffer *)indirectBuffer;
     if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
-        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
-        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
         ![indirect isKindOfClass:[ZPUBuffer class]] || indirect->_owner != [_owner device]) {
@@ -14982,8 +14994,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     ZPUBuffer *patchIndex = (ZPUBuffer *)patchIndexBuffer;
     ZPUBuffer *controlPointIndex = (ZPUBuffer *)controlPointIndexBuffer;
     if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
-        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
-        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 || state->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
         ![controlPointIndex isKindOfClass:[ZPUBuffer class]] || controlPointIndex->_owner != [_owner device]) {
@@ -15005,8 +15017,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     ZPUBuffer *controlPointIndex = (ZPUBuffer *)controlPointIndexBuffer;
     ZPUBuffer *indirect = (ZPUBuffer *)indirectBuffer;
     if (![state isKindOfClass:[ZPURenderPipelineState class]] || !state->_isPatchPipeline ||
-        ![state->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
-        ![state->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+        ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+        ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 || state->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
         ![controlPointIndex isKindOfClass:[ZPUBuffer class]] || controlPointIndex->_owner != [_owner device] ||
@@ -15928,8 +15940,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
              effectiveState->_owner != [encoder->_owner device] ||
              !effectiveState->_isPatchPipeline ||
              !effectiveState->_supportsIndirectCommandBuffers ||
-             ![effectiveState->_vertexFunctionName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
-             ![effectiveState->_fragmentFunctionName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
+             ![effectiveState->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
+             ![effectiveState->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
              effectiveState->_patchType != MTLPatchTypeTriangle ||
              effectiveState->_patchControlPointCount != 3 ||
              (!_owner->_inheritPipelineState && state == nil) ||

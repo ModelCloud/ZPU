@@ -7824,6 +7824,75 @@ int main(void) {
         [native_compute_texture getBytes:native_compute_pixels bytesPerRow:(NSUInteger)width * 4
                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
 
+        BOOL adapter_specialized_compute_exact = YES;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MTLFunctionDescriptor *native_specialized_compute_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_specialized_compute_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+            native_specialized_compute_descriptor.specializedName = @"zpu_cpu_fill_gradient_rgba8_alias";
+            NSError *native_specialized_compute_error = nil;
+            id<MTLFunction> native_specialized_compute_function =
+                [library newFunctionWithDescriptor:native_specialized_compute_descriptor
+                                               error:&native_specialized_compute_error];
+            MTLFunctionDescriptor *adapter_specialized_compute_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_specialized_compute_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+            adapter_specialized_compute_descriptor.specializedName = @"zpu_cpu_fill_gradient_rgba8_alias";
+            NSError *adapter_specialized_compute_error = nil;
+            id<MTLFunction> adapter_specialized_compute_function =
+                [adapter_library newFunctionWithDescriptor:adapter_specialized_compute_descriptor
+                                                       error:&adapter_specialized_compute_error];
+            id<MTLComputePipelineState> native_specialized_compute_pipeline =
+                [device newComputePipelineStateWithFunction:native_specialized_compute_function
+                                                       error:&native_specialized_compute_error];
+            id<MTLComputePipelineState> adapter_specialized_compute_pipeline =
+                [adapter_device newComputePipelineStateWithFunction:adapter_specialized_compute_function
+                                                               error:&adapter_specialized_compute_error];
+            id<MTLTexture> native_specialized_compute_texture =
+                [device newTextureWithDescriptor:compute_texture_descriptor];
+            id<MTLTexture> adapter_specialized_compute_texture =
+                [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+            id<MTLCommandBuffer> native_specialized_compute_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_specialized_compute_encoder =
+                [native_specialized_compute_command_buffer computeCommandEncoder];
+            [native_specialized_compute_encoder setComputePipelineState:native_specialized_compute_pipeline];
+            [native_specialized_compute_encoder setTexture:native_specialized_compute_texture atIndex:0];
+            [native_specialized_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                             threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [native_specialized_compute_encoder endEncoding];
+            [native_specialized_compute_command_buffer commit];
+            [native_specialized_compute_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_specialized_compute_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_specialized_compute_encoder =
+                [adapter_specialized_compute_command_buffer computeCommandEncoder];
+            [adapter_specialized_compute_encoder setComputePipelineState:adapter_specialized_compute_pipeline];
+            [adapter_specialized_compute_encoder setTexture:adapter_specialized_compute_texture atIndex:0];
+            [adapter_specialized_compute_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                              threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [adapter_specialized_compute_encoder endEncoding];
+            [adapter_specialized_compute_command_buffer commit];
+            [adapter_specialized_compute_command_buffer waitUntilCompleted];
+            uint8_t native_specialized_compute_pixels[byte_count] = {0};
+            uint8_t adapter_specialized_compute_pixels[byte_count] = {0};
+            [native_specialized_compute_texture getBytes:native_specialized_compute_pixels
+                                             bytesPerRow:(NSUInteger)width * 4
+                                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            [adapter_specialized_compute_texture getBytes:adapter_specialized_compute_pixels
+                                              bytesPerRow:(NSUInteger)width * 4
+                                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+            adapter_specialized_compute_exact =
+                native_specialized_compute_function != nil && native_specialized_compute_error == nil &&
+                adapter_specialized_compute_function != nil && adapter_specialized_compute_error == nil &&
+                native_specialized_compute_pipeline != nil && adapter_specialized_compute_pipeline != nil &&
+                native_specialized_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_specialized_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                [adapter_specialized_compute_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_alias"] &&
+                memcmp(native_specialized_compute_pixels, adapter_specialized_compute_pixels,
+                       sizeof(native_specialized_compute_pixels)) == 0;
+        }
+        if (!adapter_specialized_compute_exact) {
+            fail_with_error("CPU specialized compute execution failed", error);
+            return 148;
+        }
+
         NSError *adapter_compute_error = nil;
         id<MTLFunction> adapter_compute_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
