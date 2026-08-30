@@ -292,7 +292,10 @@ triangle path:
   CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,
   clips it with the recorded scissor rectangle, applies fixed profile depth
   0.5 through ZPU depth/stencil/color-write state, and supports contiguous
-  RGBA8/BGRA8 logical attachments through the opted-in color map; the registered
+  RGBA8/BGRA8 logical attachments through the opted-in color map. Tile and mesh
+  visibility results use those same ZPU fragment outcomes: boolean results report
+  whether any pixel passed, while counting results accumulate passed pixels;
+  the registered
   `zpu_cpu_tessellated_triangle_vertex` plus
   `zpu_cpu_tessellated_triangle_fragment` profile accepts factor-one triangle
   patches and rasterizes their three control points through the ordinary
