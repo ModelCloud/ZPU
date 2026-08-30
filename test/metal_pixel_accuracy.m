@@ -12935,6 +12935,30 @@ int main(void) {
             fprintf(stderr, "metal-pixel: invalid CPU render state did not fail closed\n");
             return 55;
         }
+        /* Direct vertex slot zero follows the same atomic validation rule as
+         * fragment and extra-stage bindings: an out-of-range offset must not
+         * replace the last valid CPU-owned binding before the command buffer
+         * is failed. Inspect only the adapter's private state; no native
+         * encoder participates in this validation test. */
+        id<MTLCommandBuffer> adapter_invalid_vertex_offset_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_invalid_vertex_offset_encoder =
+            [adapter_invalid_vertex_offset_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        [adapter_invalid_vertex_offset_encoder setVertexBuffer:adapter_vertex_buffer offset:adapter_vertex_buffer.length atIndex:0];
+        [adapter_invalid_vertex_offset_encoder setVertexBuffer:adapter_vertex_buffer
+                                                          offset:adapter_vertex_buffer.length + 1
+                                                        atIndex:0];
+        Ivar vertex_buffer_ivar = class_getInstanceVariable(object_getClass((id)adapter_invalid_vertex_offset_encoder),
+                                                             "_vertexBuffer");
+        id retained_vertex_buffer = vertex_buffer_ivar == NULL ? nil :
+            object_getIvar((id)adapter_invalid_vertex_offset_encoder, vertex_buffer_ivar);
+        [adapter_invalid_vertex_offset_encoder endEncoding];
+        [adapter_invalid_vertex_offset_command_buffer commit];
+        [adapter_invalid_vertex_offset_command_buffer waitUntilCompleted];
+        if (vertex_buffer_ivar == NULL || retained_vertex_buffer != adapter_vertex_buffer ||
+            adapter_invalid_vertex_offset_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: invalid CPU vertex-buffer offset was not rejected atomically\n");
+            return 170;
+        }
         /* Arbitrary mesh/object/tile shader stages still have no CPU/ZPU
          * execution path. Their resource setters must not masquerade as
          * fragment bindings, because doing so can silently produce the wrong

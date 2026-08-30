@@ -17690,7 +17690,8 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         return;
     }
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if ((buffer != nil && !zpu_buffer_belongs_to_device([_owner device], zpuBuffer)) || index > UINT32_MAX) {
+    if ((buffer != nil && (!zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || offset > zpuBuffer.length)) ||
+        index > UINT32_MAX) {
         [_owner markError];
         return;
     }
