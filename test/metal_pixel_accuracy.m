@@ -24557,6 +24557,50 @@ int main(void) {
             fprintf(stderr, "metal-pixel: Metal 4 sparse buffer mapping batch was partially applied\n");
             return 180;
         }
+        /* Copy mapping arrays have the same all-or-nothing contract as update
+         * arrays. The first copy would map the destination; the invalid
+         * second source range must prevent that mutation. */
+        id<MTL4CommandQueue> atomic_sparse_buffer_copy_queue = [adapter_device newMTL4CommandQueue];
+        MTL4CopySparseBufferMappingOperation atomic_sparse_buffer_copy_operations[2] = {
+            {
+                .sourceRange = NSMakeRange(0, 1),
+                .destinationOffset = 0,
+            },
+            {
+                .sourceRange = NSMakeRange(1, 1),
+                .destinationOffset = 0,
+            },
+        };
+        [atomic_sparse_buffer_copy_queue copyBufferMappingsFromBuffer:sparse_source
+                                                              toBuffer:sparse_destination
+                                                            operations:atomic_sparse_buffer_copy_operations
+                                                                  count:2];
+        memset(sparse_output.contents, 0xa5, sparse_output.length);
+        id<MTLCommandBuffer> atomic_sparse_copy_read_command = [sparse_legacy_queue commandBuffer];
+        id<MTLBlitCommandEncoder> atomic_sparse_copy_read_encoder =
+            [atomic_sparse_copy_read_command blitCommandEncoder];
+        [atomic_sparse_copy_read_encoder copyFromBuffer:sparse_destination sourceOffset:0
+                                                toBuffer:sparse_output destinationOffset:0
+                                                   size:sparse_page_bytes];
+        [atomic_sparse_copy_read_encoder endEncoding];
+        [atomic_sparse_copy_read_command commit];
+        [atomic_sparse_copy_read_command waitUntilCompleted];
+        BOOL atomic_sparse_buffer_copy_exact = atomic_sparse_buffer_copy_queue != nil &&
+            atomic_sparse_copy_read_command != nil &&
+            atomic_sparse_copy_read_command.status == MTLCommandBufferStatusCompleted;
+        if (atomic_sparse_buffer_copy_exact) {
+            const uint8_t *bytes = sparse_output.contents;
+            for (NSUInteger index = 0; index < sparse_page_bytes; ++index) {
+                if (bytes[index] != 0) {
+                    atomic_sparse_buffer_copy_exact = NO;
+                    break;
+                }
+            }
+        }
+        if (!atomic_sparse_buffer_copy_exact) {
+            fprintf(stderr, "metal-pixel: Metal 4 sparse buffer copy batch was partially applied\n");
+            return 182;
+        }
         MTL4CopySparseBufferMappingOperation metal4_sparse_copy_operation = {
             .sourceRange = NSMakeRange(0, 1),
             .destinationOffset = 0,
@@ -25312,6 +25356,53 @@ int main(void) {
             !adapter_sparse_texture.isSparse) {
             fprintf(stderr, "metal-pixel: CPU placement-sparse texture mapping exactness failed\n");
             return 87;
+        }
+        /* A copy array with a valid nonzero X/Y tile origin followed by an
+         * out-of-grid origin must leave the destination entirely unmapped. */
+        id<MTL4CommandQueue> atomic_sparse_texture_copy_queue = [adapter_device newMTL4CommandQueue];
+        MTL4CopySparseTextureMappingOperation atomic_sparse_texture_copy_operations[2] = {
+            {
+                .sourceRegion = MTLRegionMake2D(0, 0, 1, 1),
+                .sourceLevel = 0,
+                .sourceSlice = 0,
+                .destinationOrigin = MTLOriginMake(1, 1, 0),
+                .destinationLevel = 0,
+                .destinationSlice = 0,
+            },
+            {
+                .sourceRegion = MTLRegionMake2D(0, 0, 1, 1),
+                .sourceLevel = 0,
+                .sourceSlice = 0,
+                .destinationOrigin = MTLOriginMake(2, 0, 0),
+                .destinationLevel = 0,
+                .destinationSlice = 0,
+            },
+        };
+        [atomic_sparse_texture_copy_queue copyTextureMappingsFromTexture:adapter_sparse_texture
+                                                                  toTexture:adapter_sparse_texture_copy
+                                                                operations:atomic_sparse_texture_copy_operations
+                                                                      count:2];
+        NSMutableData *atomic_sparse_texture_copy_output =
+            [NSMutableData dataWithLength:sparse_texture_tile_bytes];
+        memset(atomic_sparse_texture_copy_output.mutableBytes, 0xa5,
+               atomic_sparse_texture_copy_output.length);
+        [adapter_sparse_texture_copy getBytes:atomic_sparse_texture_copy_output.mutableBytes
+                                  bytesPerRow:128 * 4
+                                   fromRegion:MTLRegionMake2D(128, 128, 128, 128)
+                                  mipmapLevel:0];
+        BOOL atomic_sparse_texture_copy_exact = atomic_sparse_texture_copy_queue != nil;
+        if (atomic_sparse_texture_copy_exact) {
+            const uint8_t *bytes = atomic_sparse_texture_copy_output.bytes;
+            for (NSUInteger index = 0; index < atomic_sparse_texture_copy_output.length; ++index) {
+                if (bytes[index] != 0) {
+                    atomic_sparse_texture_copy_exact = NO;
+                    break;
+                }
+            }
+        }
+        if (!atomic_sparse_texture_copy_exact) {
+            fprintf(stderr, "metal-pixel: Metal 4 sparse texture copy batch was partially applied\n");
+            return 183;
         }
         MTL4CopySparseTextureMappingOperation adapter_sparse_texture_copy_operation = {
             .sourceRegion = MTLRegionMake2D(0, 0, 1, 1),

@@ -4422,13 +4422,18 @@ static BOOL zpu_sparse_update_buffer_mapping(ZPUBuffer *buffer, ZPUHeap *heap,
     return YES;
 }
 
+static BOOL zpu_sparse_copy_buffer_mapping_valid(ZPUBuffer *source, ZPUBuffer *destination,
+                                                  NSRange sourceRange, NSUInteger destinationOffset) {
+    return source != nil && destination != nil && source->_sparsePageBytes != 0 &&
+        destination->_sparsePageBytes == source->_sparsePageBytes &&
+        zpu_sparse_buffer_range(source, sourceRange) &&
+        destinationOffset <= NSUIntegerMax - sourceRange.length &&
+        zpu_sparse_buffer_range(destination, NSMakeRange(destinationOffset, sourceRange.length));
+}
+
 static BOOL zpu_sparse_copy_buffer_mapping(ZPUBuffer *source, ZPUBuffer *destination,
                                             NSRange sourceRange, NSUInteger destinationOffset) {
-    if (source == nil || destination == nil || source->_sparsePageBytes == 0 ||
-        destination->_sparsePageBytes != source->_sparsePageBytes ||
-        !zpu_sparse_buffer_range(source, sourceRange) ||
-        destinationOffset > NSUIntegerMax - sourceRange.length ||
-        !zpu_sparse_buffer_range(destination, NSMakeRange(destinationOffset, sourceRange.length))) return NO;
+    if (!zpu_sparse_copy_buffer_mapping_valid(source, destination, sourceRange, destinationOffset)) return NO;
     NSMutableArray *pages = [NSMutableArray arrayWithCapacity:sourceRange.length];
     for (NSUInteger index = 0; index < sourceRange.length; ++index) {
         ZPUSparsePage *page = source->_sparseMappings[@(sourceRange.location + index)];
@@ -4610,6 +4615,32 @@ static BOOL zpu_sparse_texture_tail_copy_compatible(ZPUTexture *source, ZPUTextu
     return YES;
 }
 
+static BOOL zpu_sparse_copy_texture_mapping_valid(ZPUTexture *source, ZPUTexture *destination,
+                                                   MTLRegion sourceRegion, NSUInteger sourceLevel,
+                                                   NSUInteger sourceSlice, MTLOrigin destinationOrigin,
+                                                   NSUInteger destinationLevel, NSUInteger destinationSlice) {
+    if ((source != nil && source->_sparseFirstMipmapInTail < source->_mipmapTextures.count &&
+         sourceLevel >= source->_sparseFirstMipmapInTail) ||
+        (destination != nil && destination->_sparseFirstMipmapInTail < destination->_mipmapTextures.count &&
+         destinationLevel >= destination->_sparseFirstMipmapInTail)) {
+        return zpu_sparse_texture_tail_copy_compatible(source, destination, sourceRegion, sourceLevel,
+                                                        sourceSlice, destinationOrigin, destinationLevel,
+                                                        destinationSlice);
+    }
+    if (!zpu_sparse_texture_mapping_copy_compatible(source, destination) ||
+        !zpu_sparse_texture_region_valid(source, sourceLevel, sourceSlice, sourceRegion) ||
+        destinationOrigin.x > NSUIntegerMax - sourceRegion.size.width ||
+        destinationOrigin.y > NSUIntegerMax - sourceRegion.size.height ||
+        destinationOrigin.z > NSUIntegerMax - sourceRegion.size.depth ||
+        !zpu_sparse_texture_region_valid(destination, destinationLevel, destinationSlice,
+            MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, destinationOrigin.z,
+                            sourceRegion.size.width, sourceRegion.size.height, sourceRegion.size.depth))) return NO;
+    if (sourceRegion.size.height != 0 && sourceRegion.size.width > NSUIntegerMax / sourceRegion.size.height) return NO;
+    const NSUInteger planePageCount = sourceRegion.size.width * sourceRegion.size.height;
+    if (sourceRegion.size.depth != 0 && planePageCount > NSUIntegerMax / sourceRegion.size.depth) return NO;
+    return YES;
+}
+
 static BOOL zpu_sparse_copy_texture_tail_mapping(ZPUTexture *source, ZPUTexture *destination,
                                                  MTLRegion sourceRegion, NSUInteger sourceLevel,
                                                  NSUInteger sourceSlice, MTLOrigin destinationOrigin,
@@ -4691,17 +4722,10 @@ static BOOL zpu_sparse_copy_texture_mapping(ZPUTexture *source, ZPUTexture *dest
                                                      sourceSlice, destinationOrigin, destinationLevel,
                                                      destinationSlice);
     }
-    if (!zpu_sparse_texture_mapping_copy_compatible(source, destination) ||
-        !zpu_sparse_texture_region_valid(source, sourceLevel, sourceSlice, sourceRegion) ||
-        destinationOrigin.x > NSUIntegerMax - sourceRegion.size.width ||
-        destinationOrigin.y > NSUIntegerMax - sourceRegion.size.height ||
-        destinationOrigin.z > NSUIntegerMax - sourceRegion.size.depth ||
-        !zpu_sparse_texture_region_valid(destination, destinationLevel, destinationSlice,
-            MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, destinationOrigin.z,
-                            sourceRegion.size.width, sourceRegion.size.height, sourceRegion.size.depth))) return NO;
-    if (sourceRegion.size.height != 0 && sourceRegion.size.width > NSUIntegerMax / sourceRegion.size.height) return NO;
+    if (!zpu_sparse_copy_texture_mapping_valid(source, destination, sourceRegion, sourceLevel,
+                                                sourceSlice, destinationOrigin, destinationLevel,
+                                                destinationSlice)) return NO;
     const NSUInteger planePageCount = sourceRegion.size.width * sourceRegion.size.height;
-    if (sourceRegion.size.depth != 0 && planePageCount > NSUIntegerMax / sourceRegion.size.depth) return NO;
     NSMutableArray *pages = [NSMutableArray arrayWithCapacity:planePageCount * sourceRegion.size.depth];
     for (NSUInteger z = 0; z < sourceRegion.size.depth; ++z) {
         for (NSUInteger y = 0; y < sourceRegion.size.height; ++y) {
@@ -14203,6 +14227,16 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     zpu_sparse_synchronize_resources();
     for (NSUInteger index = 0; index < count; ++index) {
         const MTL4CopySparseTextureMappingOperation operation = operations[index];
+        if (!zpu_sparse_copy_texture_mapping_valid(source, destination, operation.sourceRegion,
+                                                    operation.sourceLevel, operation.sourceSlice,
+                                                    operation.destinationOrigin, operation.destinationLevel,
+                                                    operation.destinationSlice)) {
+            _failed = YES;
+            return;
+        }
+    }
+    for (NSUInteger index = 0; index < count; ++index) {
+        const MTL4CopySparseTextureMappingOperation operation = operations[index];
         if (!zpu_sparse_copy_texture_mapping(source, destination, operation.sourceRegion,
                                               operation.sourceLevel, operation.sourceSlice,
                                               operation.destinationOrigin, operation.destinationLevel,
@@ -14249,6 +14283,14 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         return;
     }
     zpu_sparse_synchronize_resources();
+    for (NSUInteger index = 0; index < count; ++index) {
+        const MTL4CopySparseBufferMappingOperation operation = operations[index];
+        if (!zpu_sparse_copy_buffer_mapping_valid(source, destination, operation.sourceRange,
+                                                  operation.destinationOffset)) {
+            _failed = YES;
+            return;
+        }
+    }
     for (NSUInteger index = 0; index < count; ++index) {
         const MTL4CopySparseBufferMappingOperation operation = operations[index];
         if (!zpu_sparse_copy_buffer_mapping(source, destination, operation.sourceRange,
