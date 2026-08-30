@@ -207,6 +207,17 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_ml_mul_i32_oracle(device const int *left [[buffer(0)]], "
     "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_i4_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; uint value = 0; "
+    "for (uint shift = 0; shift < 8; shift += 4) { int l = int((left[gid] >> shift) & 0xfu); "
+    "int r = int((right[gid] >> shift) & 0xfu); if (l >= 8) l -= 16; if (r >= 8) r -= 16; "
+    "value |= uint((l * r) & 0xf) << shift; } output[gid] = uchar(value); }\n"
+    "kernel void zpu_cpu_ml_mul_u4_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; "
+    "output[gid] = uchar((uint(left[gid] & 0xfu) * uint(right[gid] & 0xfu)) & 0xfu) | "
+    "uchar(((uint(left[gid] >> 4) * uint(right[gid] >> 4)) & 0xfu) << 4); }\n"
     "kernel void zpu_cpu_ml_matmul_f32_oracle(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= 3 || gid.y >= 2) return; "
@@ -10029,6 +10040,7 @@ typedef struct {
     const char *oracleName;
     MTLTensorDataType dataType;
     NSUInteger elementSize;
+    NSUInteger elementBits;
 } ZPUIntegerMultiplyProfile;
 
 /* Native Metal is used only as the arithmetic oracle here. Every adapter
@@ -10042,12 +10054,14 @@ static int test_metal4_cpu_integer_multiply_profiles(
     id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
     id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
     const ZPUIntegerMultiplyProfile profiles[] = {
-        {"zpu_cpu_ml_mul_u8", "zpu_cpu_ml_mul_u8_oracle", MTLTensorDataTypeUInt8, 1},
-        {"zpu_cpu_ml_mul_i8", "zpu_cpu_ml_mul_i8_oracle", MTLTensorDataTypeInt8, 1},
-        {"zpu_cpu_ml_mul_u16", "zpu_cpu_ml_mul_u16_oracle", MTLTensorDataTypeUInt16, 2},
-        {"zpu_cpu_ml_mul_i16", "zpu_cpu_ml_mul_i16_oracle", MTLTensorDataTypeInt16, 2},
-        {"zpu_cpu_ml_mul_u32", "zpu_cpu_ml_mul_u32_oracle", MTLTensorDataTypeUInt32, 4},
-        {"zpu_cpu_ml_mul_i32", "zpu_cpu_ml_mul_i32_oracle", MTLTensorDataTypeInt32, 4},
+        {"zpu_cpu_ml_mul_u8", "zpu_cpu_ml_mul_u8_oracle", MTLTensorDataTypeUInt8, 1, 8},
+        {"zpu_cpu_ml_mul_i8", "zpu_cpu_ml_mul_i8_oracle", MTLTensorDataTypeInt8, 1, 8},
+        {"zpu_cpu_ml_mul_u16", "zpu_cpu_ml_mul_u16_oracle", MTLTensorDataTypeUInt16, 2, 16},
+        {"zpu_cpu_ml_mul_i16", "zpu_cpu_ml_mul_i16_oracle", MTLTensorDataTypeInt16, 2, 16},
+        {"zpu_cpu_ml_mul_u32", "zpu_cpu_ml_mul_u32_oracle", MTLTensorDataTypeUInt32, 4, 32},
+        {"zpu_cpu_ml_mul_i32", "zpu_cpu_ml_mul_i32_oracle", MTLTensorDataTypeInt32, 4, 32},
+        {"zpu_cpu_ml_mul_i4", "zpu_cpu_ml_mul_i4_oracle", MTLTensorDataTypeInt4, 1, 4},
+        {"zpu_cpu_ml_mul_u4", "zpu_cpu_ml_mul_u4_oracle", MTLTensorDataTypeUInt4, 1, 4},
     };
     const uint32_t leftValuesBySize[3][12] = {
         {3u, 249u, 12u, 245u, 31u, 2u, 7u, 248u, 17u, 32u, 30u, 0u},
@@ -10073,18 +10087,28 @@ static int test_metal4_cpu_integer_multiply_profiles(
         const ZPUIntegerMultiplyProfile profile = profiles[profileIndex];
         const NSUInteger sizeIndex = profile.elementSize == 1 ? 0 :
             (profile.elementSize == 2 ? 1 : 2);
-        const NSUInteger byteCount = 12 * profile.elementSize;
+        const NSUInteger byteCount = profile.elementBits == 4 ? 6 : 12 * profile.elementSize;
         uint8_t leftBytes[sizeof(uint32_t) * 12] = {0};
         uint8_t rightBytes[sizeof(uint32_t) * 12] = {0};
         uint8_t initialLeftBytes[sizeof(uint32_t) * 12] = {0};
         uint8_t sentinelBytes[sizeof(uint32_t) * 12] = {0};
         for (NSUInteger index = 0; index < 12; ++index) {
-            memcpy(leftBytes + index * profile.elementSize,
-                   &leftValuesBySize[sizeIndex][index], profile.elementSize);
-            memcpy(rightBytes + index * profile.elementSize,
-                   &rightValuesBySize[sizeIndex][index], profile.elementSize);
-            initialLeftBytes[index * profile.elementSize] = (uint8_t)(index + 1);
-            memset(sentinelBytes + index * profile.elementSize, 0xa5, profile.elementSize);
+            if (profile.elementBits == 4) {
+                const NSUInteger byteIndex = index / 2;
+                const uint8_t shift = (uint8_t)((index & 1u) * 4u);
+                leftBytes[byteIndex] |= (uint8_t)((leftValuesBySize[0][index] & 0xfu) << shift);
+                rightBytes[byteIndex] |= (uint8_t)((rightValuesBySize[0][index] & 0xfu) << shift);
+                initialLeftBytes[byteIndex] |= (uint8_t)(((index + 1u) & 0xfu) << shift);
+            } else {
+                memcpy(leftBytes + index * profile.elementSize,
+                       &leftValuesBySize[sizeIndex][index], profile.elementSize);
+                memcpy(rightBytes + index * profile.elementSize,
+                       &rightValuesBySize[sizeIndex][index], profile.elementSize);
+                initialLeftBytes[index * profile.elementSize] = (uint8_t)(index + 1);
+            }
+        }
+        for (NSUInteger index = 0; index < byteCount; ++index) {
+            sentinelBytes[index] = 0xa5;
         }
 
         NSError *adapterError = nil;
@@ -10163,7 +10187,8 @@ static int test_metal4_cpu_integer_multiply_profiles(
         [nativeEncoder setBuffer:nativeLeft offset:0 atIndex:0];
         [nativeEncoder setBuffer:nativeRight offset:0 atIndex:1];
         [nativeEncoder setBuffer:nativeOutput offset:0 atIndex:2];
-        [nativeEncoder dispatchThreads:MTLSizeMake(12, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [nativeEncoder dispatchThreads:MTLSizeMake(profile.elementBits == 4 ? 6 : 12, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         [nativeEncoder endEncoding];
         [nativeCommandBuffer commit];
         [nativeCommandBuffer waitUntilCompleted];
