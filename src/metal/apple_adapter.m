@@ -1040,6 +1040,7 @@ API_AVAILABLE(macos(13.0), ios(16.0))
 @public
     ZPUIOCommandQueue *_owner;
     NSMutableArray *_operations;
+    NSMutableArray *_operationIsIO;
     NSMutableArray *_statusTargets;
     NSMutableArray *_completedHandlers;
     MTLIOStatus _status;
@@ -1047,10 +1048,16 @@ API_AVAILABLE(macos(13.0), ios(16.0))
     NSString *_label;
     BOOL _committed;
     BOOL _cancelRequested;
+    BOOL _queueSlotAdmitted;
 }
 - (instancetype)initWithOwner:(ZPUIOCommandQueue *)owner;
 - (void)addOperation:(ZPUIOOperationBlock)operation;
+- (void)addIOOperation:(ZPUIOOperationBlock)operation;
 - (void)addFailure:(NSString *)message;
+- (BOOL)beginExecution;
+- (BOOL)beginIOCommand;
+- (void)finishIOCommand;
+- (void)finishExecution;
 @end
 
 API_AVAILABLE(macos(13.0), ios(16.0))
@@ -1063,8 +1070,18 @@ API_AVAILABLE(macos(13.0), ios(16.0))
     MTLIOCommandQueueType _type;
     NSUInteger _maxCommandsInFlight;
     id<MTLIOScratchBufferAllocator> _scratchBufferAllocator;
+    NSHashTable *_inFlightCommandBuffers;
+    NSHashTable *_executingCommandBuffers;
+    NSHashTable *_barrierDependencies;
+    NSUInteger _inFlightCommands;
+    NSCondition *_executionCondition;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLIOCommandQueueDescriptor *)descriptor;
+- (BOOL)admitCommandBuffer:(ZPUIOCommandBuffer *)commandBuffer;
+- (BOOL)beginCommandBufferExecution:(ZPUIOCommandBuffer *)commandBuffer;
+- (BOOL)beginIOCommand;
+- (void)finishIOCommand;
+- (void)commandBufferDidComplete:(ZPUIOCommandBuffer *)commandBuffer;
 @end
 #pragma clang diagnostic pop
 
@@ -9405,6 +9422,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     if ((self = [super init])) {
         _owner = owner;
         _operations = [NSMutableArray array];
+        _operationIsIO = [NSMutableArray array];
         _statusTargets = [NSMutableArray array];
         _completedHandlers = [NSMutableArray array];
         _status = MTLIOStatusPending;
@@ -9412,13 +9430,39 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
     return self;
 }
 - (void)addOperation:(ZPUIOOperationBlock)operation {
-    if (!_committed && !_cancelRequested && operation != nil) [_operations addObject:[operation copy]];
+    if (!_committed && !_cancelRequested && operation != nil) {
+        [_operations addObject:[operation copy]];
+        [_operationIsIO addObject:@NO];
+    }
+}
+- (void)addIOOperation:(ZPUIOOperationBlock)operation {
+    if (!_committed && !_cancelRequested && operation != nil) {
+        [_operations addObject:[operation copy]];
+        [_operationIsIO addObject:@YES];
+    }
 }
 - (void)addFailure:(NSString *)message {
     [self addOperation:^BOOL(NSError **error) {
         zpu_set_error(error, message);
         return NO;
     }];
+}
+- (BOOL)beginExecution {
+    if (_owner == nil) return NO;
+    return [_owner beginCommandBufferExecution:self];
+}
+- (BOOL)beginIOCommand {
+    if (_owner == nil) return NO;
+    return [_owner beginIOCommand];
+}
+- (void)finishIOCommand { [_owner finishIOCommand]; }
+- (void)finishExecution {
+    if (!_queueSlotAdmitted) return;
+    _queueSlotAdmitted = NO;
+    [_owner commandBufferDidComplete:self];
+}
+- (void)dealloc {
+    [self finishExecution];
 }
 - (void)notifyCompleted {
     NSArray *handlers = [_completedHandlers copy];
@@ -9441,7 +9485,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
         return;
     }
     NSData *data = handle->_data;
-    [self addOperation:^BOOL(NSError **error) {
+    [self addIOOperation:^BOOL(NSError **error) {
         if (!zpu_io_data_range(data, sourceHandleOffset, size)) {
             zpu_set_error(error, @"ZPU CPU Metal I/O byte source range is outside the file");
             return NO;
@@ -9460,7 +9504,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
         return;
     }
     NSData *data = handle->_data;
-    [self addOperation:^BOOL(NSError **error) {
+    [self addIOOperation:^BOOL(NSError **error) {
         if (!zpu_io_data_range(data, sourceHandleOffset, size) ||
             zpu_metal_buffer_write(destination->_zpuBuffer, offset,
                                    (const uint8_t *)data.bytes + sourceHandleOffset, size) != ZPU_METAL_OK) {
@@ -9479,7 +9523,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
         return;
     }
     NSData *data = handle->_data;
-    [self addOperation:^BOOL(NSError **error) {
+    [self addIOOperation:^BOOL(NSError **error) {
         return zpu_io_texture_load(destination, slice, level, size, sourceBytesPerRow,
                                    sourceBytesPerImage, destinationOrigin, data, sourceHandleOffset, error);
     }];
@@ -9501,9 +9545,26 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
         [self notifyCompleted];
         return;
     }
-    for (ZPUIOOperationBlock operation in [_operations copy]) {
+    if (![self beginExecution]) {
+        _status = MTLIOStatusCancelled;
+        [self finishExecution];
+        [self notifyCompleted];
+        return;
+    }
+    NSArray *operations = [_operations copy];
+    for (NSUInteger operationIndex = 0; operationIndex < operations.count; ++operationIndex) {
+        ZPUIOOperationBlock operation = operations[operationIndex];
+        const BOOL countsAsIO = [_operationIsIO[operationIndex] boolValue];
+        if (countsAsIO && ![self beginIOCommand]) {
+            _error = [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_COMMAND
+                                    userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal I/O command admission failed"}];
+            _status = MTLIOStatusError;
+            break;
+        }
         NSError *operationError = nil;
-        if (!operation(&operationError)) {
+        const BOOL operationSucceeded = operation(&operationError);
+        if (countsAsIO) [self finishIOCommand];
+        if (!operationSucceeded) {
             _error = operationError != nil ? operationError : [NSError errorWithDomain:@"ZPUMetal"
                 code:ZPU_METAL_INVALID_COMMAND userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal I/O operation failed"}];
             _status = MTLIOStatusError;
@@ -9522,6 +9583,7 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
                 userInfo:@{NSLocalizedDescriptionKey: @"ZPU CPU Metal I/O status write failed"}];
         }
     }
+    [self finishExecution];
     [self notifyCompleted];
 }
 - (void)waitUntilCompleted { [self commit]; }
@@ -9579,12 +9641,79 @@ static BOOL zpu_io_texture_load(ZPUTexture *texture, NSUInteger slice, NSUIntege
         _type = descriptor.type;
         _maxCommandsInFlight = descriptor.maxCommandsInFlight;
         _scratchBufferAllocator = descriptor.scratchBufferAllocator;
+        /* A zero command-buffer limit is treated as implementation-selected.
+         * The CPU executor has no hidden storage-device queue, so the safe
+         * equivalent is an unbounded admission count. Vended buffers consume
+         * a slot until they complete or are released without a commit. */
+        if (_maxCommandBufferCount == 0) _maxCommandBufferCount = NSUIntegerMax;
+        _inFlightCommandBuffers = [NSHashTable weakObjectsHashTable];
+        _executingCommandBuffers = [NSHashTable weakObjectsHashTable];
+        _barrierDependencies = [NSHashTable weakObjectsHashTable];
+        _executionCondition = [NSCondition new];
     }
     return self;
 }
-- (void)enqueueBarrier {}
+- (BOOL)beginCommandBufferExecution:(ZPUIOCommandBuffer *)commandBuffer {
+    if (commandBuffer == nil) return NO;
+    [_executionCondition lock];
+    /* Serial I/O queues have an implicit barrier between executing command
+     * buffers. The vended-buffer limit is tracked separately so recording a
+     * later buffer before committing an earlier one remains legal. */
+    while (_barrierDependencies.count != 0 ||
+           (_type == MTLIOCommandQueueTypeSerial && _executingCommandBuffers.count != 0)) {
+        [_executionCondition wait];
+    }
+    [_executingCommandBuffers addObject:commandBuffer];
+    [_executionCondition unlock];
+    return YES;
+}
+- (BOOL)admitCommandBuffer:(ZPUIOCommandBuffer *)commandBuffer {
+    if (commandBuffer == nil) return NO;
+    [_executionCondition lock];
+    while (_inFlightCommandBuffers.count >= _maxCommandBufferCount) {
+        [_executionCondition wait];
+    }
+    [_inFlightCommandBuffers addObject:commandBuffer];
+    [_executionCondition unlock];
+    return YES;
+}
+- (BOOL)beginIOCommand {
+    [_executionCondition lock];
+    while (_maxCommandsInFlight != 0 && _inFlightCommands >= _maxCommandsInFlight) {
+        [_executionCondition wait];
+    }
+    if (_maxCommandsInFlight != 0) _inFlightCommands += 1;
+    [_executionCondition unlock];
+    return YES;
+}
+- (void)finishIOCommand {
+    if (_maxCommandsInFlight == 0) return;
+    [_executionCondition lock];
+    if (_inFlightCommands != 0) _inFlightCommands -= 1;
+    [_executionCondition broadcast];
+    [_executionCondition unlock];
+}
+- (void)commandBufferDidComplete:(ZPUIOCommandBuffer *)commandBuffer {
+    if (commandBuffer == nil) return;
+    [_executionCondition lock];
+    [_executingCommandBuffers removeObject:commandBuffer];
+    [_barrierDependencies removeObject:commandBuffer];
+    [_inFlightCommandBuffers removeObject:commandBuffer];
+    [_executionCondition broadcast];
+    [_executionCondition unlock];
+}
+- (void)enqueueBarrier {
+    [_executionCondition lock];
+    for (ZPUIOCommandBuffer *commandBuffer in [_executingCommandBuffers allObjects]) {
+        [_barrierDependencies addObject:commandBuffer];
+    }
+    [_executionCondition unlock];
+}
 - (id<MTLIOCommandBuffer>)commandBuffer {
-    return (id<MTLIOCommandBuffer>)[[ZPUIOCommandBuffer alloc] initWithOwner:self];
+    ZPUIOCommandBuffer *result = [[ZPUIOCommandBuffer alloc] initWithOwner:self];
+    if (result == nil || ![self admitCommandBuffer:result]) return nil;
+    result->_queueSlotAdmitted = YES;
+    return (id<MTLIOCommandBuffer>)result;
 }
 - (id<MTLIOCommandBuffer>)commandBufferWithUnretainedReferences { return [self commandBuffer]; }
 - (NSString *)label { return _label; }

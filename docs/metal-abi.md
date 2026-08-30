@@ -547,7 +547,11 @@ triangle path:
 - CPU Metal I/O handles decode Apple `MTLIOCompressionContext` pack files for
   zlib, LZFSE, LZ4, LZMA, and LZBitmap through the system CPU compression API;
   load-bytes, buffer, and texture operations consume the decoded ZPU-owned
-  bytes, with native Metal used only as the test oracle
+  bytes, with native Metal used only as the test oracle. CPU I/O queues also
+  honor `maxCommandBufferCount` at buffer vending, serial implicit barriers,
+  and `maxCommandsInFlight` for storage-load commands; event signaling and
+  waiting remain ordered CPU synchronization metadata, matching the native
+  queue behavior exercised by the oracle
 - CPU resource-state encoders preserve Metal encoder boundaries and fence
   ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
   CPU memory; legacy sparse texture map, batch, indirect, and move operations

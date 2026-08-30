@@ -2195,6 +2195,110 @@ static int test_cpu_io_against_native(id<MTLDevice> native_device, id<MTLDevice>
         [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
         return 67;
     }
+
+    /* maxCommandBufferCount limits command buffers in flight at vending time.
+     * A concurrent queue with one slot must block vending its second buffer
+     * until the first command buffer's event wait completes. This is a
+     * scheduling contract rather than a pixel operation, so compare the CPU
+     * admission behavior with the native Metal oracle as well. */
+    MTLIOCommandQueueDescriptor *native_limited_descriptor = [MTLIOCommandQueueDescriptor new];
+    native_limited_descriptor.maxCommandBufferCount = 1;
+    native_limited_descriptor.type = MTLIOCommandQueueTypeConcurrent;
+    MTLIOCommandQueueDescriptor *adapter_limited_descriptor = [MTLIOCommandQueueDescriptor new];
+    adapter_limited_descriptor.maxCommandBufferCount = 1;
+    adapter_limited_descriptor.type = MTLIOCommandQueueTypeConcurrent;
+    NSError *limited_queue_error = nil;
+    id<MTLIOCommandQueue> native_limited_io_queue =
+        [native_device newIOCommandQueueWithDescriptor:native_limited_descriptor error:&limited_queue_error];
+    id<MTLIOCommandQueue> adapter_limited_io_queue =
+        [adapter_device newIOCommandQueueWithDescriptor:adapter_limited_descriptor error:&limited_queue_error];
+    id<MTLSharedEvent> native_limited_event = [native_device newSharedEvent];
+    id<MTLSharedEvent> adapter_limited_event = [adapter_device newSharedEvent];
+    id<MTLIOCommandBuffer> native_limited_wait = [native_limited_io_queue commandBuffer];
+    id<MTLIOCommandBuffer> adapter_limited_wait = [adapter_limited_io_queue commandBuffer];
+    if (native_limited_io_queue == nil || adapter_limited_io_queue == nil ||
+        native_limited_event == nil || adapter_limited_event == nil ||
+        native_limited_wait == nil || adapter_limited_wait == nil) {
+        fail_with_error("native/CPU limited Metal I/O queue creation failed", limited_queue_error);
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 68;
+    }
+    [native_limited_wait waitForEvent:native_limited_event value:1];
+    [adapter_limited_wait waitForEvent:adapter_limited_event value:1];
+    dispatch_semaphore_t native_limited_first_started = dispatch_semaphore_create(0);
+    dispatch_semaphore_t adapter_limited_first_started = dispatch_semaphore_create(0);
+    dispatch_semaphore_t native_limited_second_created = dispatch_semaphore_create(0);
+    dispatch_semaphore_t adapter_limited_second_created = dispatch_semaphore_create(0);
+    __block id<MTLIOCommandBuffer> native_limited_signal = nil;
+    __block id<MTLIOCommandBuffer> adapter_limited_signal = nil;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        dispatch_semaphore_signal(native_limited_first_started);
+        [native_limited_wait commit];
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        dispatch_semaphore_signal(adapter_limited_first_started);
+        [adapter_limited_wait commit];
+    });
+    if (dispatch_semaphore_wait(native_limited_first_started,
+                                 dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+        dispatch_semaphore_wait(adapter_limited_first_started,
+                                 dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+        fprintf(stderr, "metal-pixel: limited Metal I/O queue fixture did not start\n");
+        native_limited_event.signaledValue = 1;
+        adapter_limited_event.signaledValue = 1;
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 69;
+    }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        native_limited_signal = [native_limited_io_queue commandBuffer];
+        dispatch_semaphore_signal(native_limited_second_created);
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        adapter_limited_signal = [adapter_limited_io_queue commandBuffer];
+        dispatch_semaphore_signal(adapter_limited_second_created);
+    });
+    const BOOL native_limited_second_early =
+        dispatch_semaphore_wait(native_limited_second_created,
+                                dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) == 0;
+    const BOOL adapter_limited_second_early =
+        dispatch_semaphore_wait(adapter_limited_second_created,
+                                dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) == 0;
+    if (native_limited_second_early || adapter_limited_second_early) {
+        fprintf(stderr, "metal-pixel: native/CPU Metal I/O command-buffer limit did not hold\n");
+        native_limited_event.signaledValue = 1;
+        adapter_limited_event.signaledValue = 1;
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 70;
+    }
+    native_limited_event.signaledValue = 1;
+    adapter_limited_event.signaledValue = 1;
+    [native_limited_wait waitUntilCompleted];
+    [adapter_limited_wait waitUntilCompleted];
+    if (dispatch_semaphore_wait(native_limited_second_created,
+                                dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+        dispatch_semaphore_wait(adapter_limited_second_created,
+                                dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0 ||
+        native_limited_signal == nil || adapter_limited_signal == nil) {
+        fprintf(stderr, "metal-pixel: native/CPU Metal I/O command-buffer limit did not release\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 71;
+    }
+    [native_limited_signal signalEvent:native_limited_event value:2];
+    [adapter_limited_signal signalEvent:adapter_limited_event value:2];
+    [native_limited_signal commit];
+    [adapter_limited_signal commit];
+    [native_limited_signal waitUntilCompleted];
+    [adapter_limited_signal waitUntilCompleted];
+    if (native_limited_second_early || adapter_limited_second_early ||
+        native_limited_wait.status != MTLIOStatusComplete ||
+        native_limited_signal.status != MTLIOStatusComplete ||
+        adapter_limited_wait.status != MTLIOStatusComplete ||
+        adapter_limited_signal.status != MTLIOStatusComplete) {
+        fprintf(stderr, "metal-pixel: native/CPU Metal I/O command-buffer admission mismatch\n");
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        return 72;
+    }
+
     uint8_t compressed_source[128];
     memset(compressed_source, 0x5a, sizeof(compressed_source));
     uint8_t patterned_source[128];
