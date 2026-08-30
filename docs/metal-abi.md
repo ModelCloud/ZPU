@@ -315,7 +315,9 @@ triangle path:
   addition with Metal-compatible 8-bit wraparound through that same ZPU-owned
   storage path; the registered `zpu_cpu_ml_add_f16` profile performs deferred
   elementwise Float16 tensor addition through the same ZPU-owned storage path,
-  while arbitrary ML graphs
+  while the registered `zpu_cpu_ml_add_bf16` profile performs deferred
+  elementwise BFloat16 tensor addition through explicit CPU widening and
+  round-to-nearest-even packing on the same ZPU-owned storage path. Arbitrary ML graphs
   and arbitrary-MSL compiler requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
@@ -348,8 +350,8 @@ triangle path:
   native GPU binaries
 - the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_add_u8`,
   `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_add_i32`, `zpu_cpu_ml_add_u32`,
-  `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`, and
-  `zpu_cpu_ml_add_f16` Metal 4
+  `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`,
+  `zpu_cpu_ml_add_f16`, and `zpu_cpu_ml_add_bf16` Metal 4
   machine-learning profiles preserve CPU fence update/wait ordering and
   interleave tensor copies and arithmetic with other commands at their encoded
   position in the deferred ZPU command buffer; arbitrary ML graphs remain
