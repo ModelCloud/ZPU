@@ -1309,6 +1309,8 @@ fn project(vertex: abi.Vertex, viewport: PreciseViewport) ?ProjectedVertex {
 }
 
 fn interpolateLineColor(a: ProjectedVertex, b: ProjectedVertex, t: f32) [4]f32 {
+    if (a.color[0] == b.color[0] and a.color[1] == b.color[1] and
+        a.color[2] == b.color[2] and a.color[3] == b.color[3]) return a.color;
     const weight_a = 1 - t;
     const weight_b = t;
     const denominator = a.inverse_w * weight_a + b.inverse_w * weight_b;
