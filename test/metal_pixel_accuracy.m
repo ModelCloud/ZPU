@@ -11910,6 +11910,80 @@ int main(void) {
                 return 160;
             }
 
+            /* Row-major transform buffers were added after the original
+             * column-major coverage. Keep this comparison behind the SDK
+             * availability guard because the selector is newer than the
+             * baseline iOS deployment target. */
+            BOOL adapter_row_major_transform_exact = YES;
+            if (@available(macOS 15.0, iOS 18.0, *)) {
+                const float row_major_instance_matrix[] = {
+                    1.0f, 0.0f, 0.0f, instance_translation_x,
+                    0.0f, 1.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f, 1.0f, 0.0f,
+                };
+                id<MTLBuffer> adapter_row_major_transform =
+                    [adapter_device newBufferWithBytes:row_major_instance_matrix
+                                                 length:sizeof(row_major_instance_matrix)
+                                                options:MTLResourceStorageModeShared];
+                MTLPrimitiveAccelerationStructureDescriptor *row_major_descriptor =
+                    [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+                MTLAccelerationStructureTriangleGeometryDescriptor *row_major_geometry =
+                    [transform_geometry copy];
+                row_major_geometry.transformationMatrixBuffer = adapter_row_major_transform;
+                row_major_geometry.transformationMatrixBufferOffset = 0;
+                row_major_geometry.transformationMatrixLayout = MTLMatrixLayoutRowMajor;
+                row_major_descriptor.geometryDescriptors = @[row_major_geometry];
+                MTLAccelerationStructureSizes row_major_sizes =
+                    [adapter_device accelerationStructureSizesWithDescriptor:row_major_descriptor];
+                id<MTLAccelerationStructure> row_major_acceleration_structure =
+                    [adapter_device newAccelerationStructureWithSize:row_major_sizes.accelerationStructureSize];
+                id<MTLBuffer> row_major_scratch =
+                    [adapter_device newBufferWithLength:row_major_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                               row_major_sizes.buildScratchBufferSize
+                                                options:MTLResourceStorageModeShared];
+                id<MTLCommandBuffer> row_major_build_command_buffer = [adapter_queue commandBuffer];
+                id<MTLAccelerationStructureCommandEncoder> row_major_build_encoder =
+                    [row_major_build_command_buffer accelerationStructureCommandEncoder];
+                [row_major_build_encoder buildAccelerationStructure:row_major_acceleration_structure
+                                                           descriptor:row_major_descriptor
+                                                        scratchBuffer:row_major_scratch
+                                                  scratchBufferOffset:0];
+                [row_major_build_encoder endEncoding];
+                [row_major_build_command_buffer commit];
+                [row_major_build_command_buffer waitUntilCompleted];
+                id<MTLTexture> row_major_texture =
+                    [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+                id<MTLCommandBuffer> row_major_command_buffer = [adapter_queue commandBuffer];
+                id<MTLComputeCommandEncoder> row_major_encoder =
+                    [row_major_command_buffer computeCommandEncoder];
+                [row_major_encoder setComputePipelineState:adapter_ray_pipeline];
+                [row_major_encoder setAccelerationStructure:row_major_acceleration_structure
+                                               atBufferIndex:0];
+                [row_major_encoder setTexture:row_major_texture atIndex:0];
+                [row_major_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+                [row_major_encoder endEncoding];
+                [row_major_command_buffer commit];
+                [row_major_command_buffer waitUntilCompleted];
+                uint8_t row_major_pixels[ray_byte_count];
+                [row_major_texture getBytes:row_major_pixels bytesPerRow:ray_width * 4
+                                     fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height)
+                                    mipmapLevel:0];
+                adapter_row_major_transform_exact =
+                    adapter_row_major_transform != nil && row_major_geometry != nil &&
+                    row_major_acceleration_structure != nil && row_major_scratch != nil &&
+                    row_major_build_command_buffer != nil && row_major_build_encoder != nil &&
+                    row_major_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                    row_major_texture != nil && row_major_command_buffer != nil &&
+                    row_major_encoder != nil &&
+                    row_major_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                    memcmp(native_instance_ray_pixels, row_major_pixels, ray_byte_count) == 0;
+            }
+            if (!adapter_row_major_transform_exact) {
+                fail_with_error("CPU row-major primitive transform pixel oracle failed", adapter_ray_error);
+                return 161;
+            }
+
             const float refit_ray_vertices[] = {
                 instance_ray_vertices[0], instance_ray_vertices[1], instance_ray_vertices[2],
                 instance_ray_vertices[3], instance_ray_vertices[4], instance_ray_vertices[5],
