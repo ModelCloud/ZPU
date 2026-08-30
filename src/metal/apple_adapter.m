@@ -67,6 +67,7 @@ static NSString *const zpu_cpu_ml_mul_f16_function_name = @"zpu_cpu_ml_mul_f16";
 static NSString *const zpu_cpu_ml_matmul_f32_function_name = @"zpu_cpu_ml_matmul_f32";
 static NSString *const zpu_cpu_ml_matmul_f16_function_name = @"zpu_cpu_ml_matmul_f16";
 static NSString *const zpu_cpu_ml_mul_bf16_function_name = @"zpu_cpu_ml_mul_bf16";
+static NSString *const zpu_cpu_ml_matmul_bf16_function_name = @"zpu_cpu_ml_matmul_bf16";
 static NSString *const zpu_cpu_add_f32_function_name = @"zpu_cpu_add_f32";
 static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
 /* Metadata-only profile used to exercise CPU nested argument-buffer
@@ -78,6 +79,9 @@ static NSString *const zpu_cpu_argument_buffer_function_name = @"zpu_cpu_argumen
 static NSString *const zpu_cpu_argument_buffer_array_function_name = @"zpu_cpu_argument_buffer_array";
 static NSString *const zpu_cpu_tensor_argument_buffer_function_name = @"zpu_cpu_tensor_argument_buffer";
 static NSString *const zpu_cpu_tensor_argument_buffer_array_function_name = @"zpu_cpu_tensor_argument_buffer_array";
+
+static float zpu_bfloat16_to_float(uint16_t value);
+static uint16_t zpu_float_to_bfloat16(float value);
 
 static BOOL zpu_cpu_ml_add_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_add_u8_function_name] ||
@@ -100,7 +104,8 @@ static BOOL zpu_cpu_ml_function_name_supported(NSString *name) {
         [name isEqualToString:zpu_cpu_ml_mul_f16_function_name] ||
         [name isEqualToString:zpu_cpu_ml_mul_bf16_function_name] ||
         [name isEqualToString:zpu_cpu_ml_matmul_f32_function_name] ||
-        [name isEqualToString:zpu_cpu_ml_matmul_f16_function_name];
+        [name isEqualToString:zpu_cpu_ml_matmul_f16_function_name] ||
+        [name isEqualToString:zpu_cpu_ml_matmul_bf16_function_name];
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -1207,8 +1212,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 /* Metal 4 exposes machine-learning encoding as a separate command-encoder
  * family. The registered identity, UInt8-add, Float32-add, Int32-add,
  * UInt32-add, UInt16-add, Int16-add, Int8-add, Float16-add, BFloat16-add,
- * Int4-add, UInt4-add, and Float16-multiply
- * tensor profiles are CPU-owned and deferred;
+ * Int4-add, UInt4-add, Float16-multiply, and Float16/BFloat16-matmul tensor
+ * profiles are CPU-owned and deferred;
  * arbitrary ML graphs
  * still fail closed. Returning an object here is important: selector
  * discovery and encoder lifetime must not depend on Apple's native Metal
@@ -5519,6 +5524,56 @@ static BOOL zpu_tensor_matmul_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *
                                       resultPacked.bytes, YES);
 }
 
+static BOOL zpu_tensor_matmul_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
+    if (left == nil || right == nil || destination == nil || left->_owner == nil ||
+        left->_owner != right->_owner || left->_owner != destination->_owner ||
+        left->_dataType != MTLTensorDataTypeBFloat16 || right->_dataType != MTLTensorDataTypeBFloat16 ||
+        destination->_dataType != MTLTensorDataTypeBFloat16 || left->_elementSize != sizeof(uint16_t) ||
+        right->_elementSize != sizeof(uint16_t) || destination->_elementSize != sizeof(uint16_t) ||
+        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil ||
+        left->_dimensions.rank != 2 || right->_dimensions.rank != 2 || destination->_dimensions.rank != 2) return NO;
+    NSUInteger leftDimensions[2];
+    NSUInteger rightDimensions[2];
+    NSUInteger destinationDimensions[2];
+    if (!zpu_tensor_read_extents(left->_dimensions, 2, leftDimensions, NO) ||
+        !zpu_tensor_read_extents(right->_dimensions, 2, rightDimensions, NO) ||
+        !zpu_tensor_read_extents(destination->_dimensions, 2, destinationDimensions, NO) ||
+        leftDimensions[1] != rightDimensions[0] || destinationDimensions[0] != leftDimensions[0] ||
+        destinationDimensions[1] != rightDimensions[1]) return NO;
+    const NSUInteger rows = leftDimensions[0];
+    const NSUInteger reduction = leftDimensions[1];
+    const NSUInteger columns = rightDimensions[1];
+    if (rows > SIZE_MAX / reduction || rows * reduction > SIZE_MAX / sizeof(uint16_t) ||
+        reduction > SIZE_MAX / columns || reduction * columns > SIZE_MAX / sizeof(uint16_t) ||
+        rows > SIZE_MAX / columns || rows * columns > SIZE_MAX / sizeof(uint16_t)) return NO;
+    const NSUInteger leftCount = rows * reduction;
+    const NSUInteger rightCount = reduction * columns;
+    const NSUInteger destinationCount = rows * columns;
+    NSUInteger zeroValues[2] = {0, 0};
+    MTLTensorExtents *zero = zpu_tensor_make_extents(2, zeroValues);
+    NSMutableData *leftPacked = [NSMutableData dataWithLength:leftCount * sizeof(uint16_t)];
+    NSMutableData *rightPacked = [NSMutableData dataWithLength:rightCount * sizeof(uint16_t)];
+    NSMutableData *resultPacked = [NSMutableData dataWithLength:destinationCount * sizeof(uint16_t)];
+    if (zero == nil || leftPacked == nil || rightPacked == nil || resultPacked == nil ||
+        !zpu_tensor_transfer_bytes(left, zero, left->_dimensions, nil, leftPacked.mutableBytes, NO) ||
+        !zpu_tensor_transfer_bytes(right, zero, right->_dimensions, nil, rightPacked.mutableBytes, NO)) return NO;
+    const uint16_t *leftValues = (const uint16_t *)leftPacked.bytes;
+    const uint16_t *rightValues = (const uint16_t *)rightPacked.bytes;
+    uint16_t *resultValues = (uint16_t *)resultPacked.mutableBytes;
+    for (NSUInteger row = 0; row < rows; ++row) {
+        for (NSUInteger column = 0; column < columns; ++column) {
+            float sum = 0.0f;
+            for (NSUInteger index = 0; index < reduction; ++index) {
+                sum += zpu_bfloat16_to_float(leftValues[row * reduction + index]) *
+                    zpu_bfloat16_to_float(rightValues[index * columns + column]);
+            }
+            resultValues[row * columns + column] = zpu_float_to_bfloat16(sum);
+        }
+    }
+    return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
+                                      resultPacked.bytes, YES);
+}
+
 static BOOL zpu_tensor_add_i32(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
     if (left == nil || right == nil || destination == nil || left->_owner == nil ||
         left->_owner != right->_owner || left->_owner != destination->_owner ||
@@ -8478,6 +8533,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_ml_mul_bf16_function_name,
         zpu_cpu_ml_matmul_f32_function_name,
         zpu_cpu_ml_matmul_f16_function_name,
+        zpu_cpu_ml_matmul_bf16_function_name,
     ] containsObject:name];
 }
 
@@ -10127,7 +10183,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -10951,6 +11007,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_ml_mul_bf16_function_name,
             zpu_cpu_ml_matmul_f32_function_name,
             zpu_cpu_ml_matmul_f16_function_name,
+            zpu_cpu_ml_matmul_bf16_function_name,
             zpu_cpu_argument_buffer_function_name,
             zpu_cpu_argument_buffer_array_function_name,
             zpu_cpu_tensor_argument_buffer_function_name,
@@ -11425,6 +11482,7 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     if ([functionName isEqualToString:zpu_cpu_ml_mul_bf16_function_name]) return MTLTensorDataTypeBFloat16;
     if ([functionName isEqualToString:zpu_cpu_ml_matmul_f32_function_name]) return MTLTensorDataTypeFloat32;
     if ([functionName isEqualToString:zpu_cpu_ml_matmul_f16_function_name]) return MTLTensorDataTypeFloat16;
+    if ([functionName isEqualToString:zpu_cpu_ml_matmul_bf16_function_name]) return MTLTensorDataTypeBFloat16;
     /* The identity profile is intentionally polymorphic and accepts every
      * tensor storage format supported by the CPU tensor layer. None is the
      * only reflection value that does not falsely claim one format. */
@@ -11443,9 +11501,10 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     const BOOL multiplicationBF16 = [functionName isEqualToString:zpu_cpu_ml_mul_bf16_function_name];
     const BOOL matmulF32 = [functionName isEqualToString:zpu_cpu_ml_matmul_f32_function_name];
     const BOOL matmulF16 = [functionName isEqualToString:zpu_cpu_ml_matmul_f16_function_name];
+    const BOOL matmulBF16 = [functionName isEqualToString:zpu_cpu_ml_matmul_bf16_function_name];
     if (owner == nil || descriptor == nil || (!identity && !addition && !multiplication &&
                                               !multiplicationF16 && !multiplicationBF16 &&
-                                              !matmulF32 && !matmulF16)) {
+                                              !matmulF32 && !matmulF16 && !matmulBF16)) {
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered tensor CPU profiles");
         return nil;
     }
@@ -11455,7 +11514,7 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
         [descriptor inputDimensionsAtBufferIndex:2],
     };
     const NSUInteger inputCount = (addition || multiplication || multiplicationF16 || multiplicationBF16 ||
-                                   matmulF32 || matmulF16) ? 3 : 2;
+                                   matmulF32 || matmulF16 || matmulBF16) ? 3 : 2;
     for (NSUInteger index = 0; index < inputCount; ++index) {
         if (inputDimensions[index] == nil) {
             continue;
@@ -13575,10 +13634,11 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     const BOOL multiplyBF16 = [functionName isEqualToString:zpu_cpu_ml_mul_bf16_function_name];
     const BOOL matmulF32 = [functionName isEqualToString:zpu_cpu_ml_matmul_f32_function_name];
     const BOOL matmulF16 = [functionName isEqualToString:zpu_cpu_ml_matmul_f16_function_name];
+    const BOOL matmulBF16 = [functionName isEqualToString:zpu_cpu_ml_matmul_bf16_function_name];
     const BOOL addition = addU8 || addF32 || addI32 || addU32 || addU16 || addI16 || addI8 ||
         addF16 || addBF16 || addI4 || addU4;
     const BOOL elementwise = addition || multiplyF32 || multiplyF16 || multiplyBF16;
-    const BOOL binary = elementwise || matmulF32 || matmulF16;
+    const BOOL binary = elementwise || matmulF32 || matmulF16 || matmulBF16;
     const NSUInteger inputCount = binary ? 3 : 2;
     if (_ended || _owner == nil || _owner->_failed || _owner->_legacyBuffer == nil ||
         ![pipeline isKindOfClass:[ZPUMTL4MachineLearningPipeline class]] ||
@@ -13608,6 +13668,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         (multiplyBF16 && source->_dataType != MTLTensorDataTypeBFloat16) ||
         (matmulF32 && source->_dataType != MTLTensorDataTypeFloat32) ||
         (matmulF16 && source->_dataType != MTLTensorDataTypeFloat16) ||
+        (matmulBF16 && source->_dataType != MTLTensorDataTypeBFloat16) ||
         (addU8 && source->_dataType != MTLTensorDataTypeUInt8) ||
         (addF32 && source->_dataType != MTLTensorDataTypeFloat32) ||
         (addI32 && source->_dataType != MTLTensorDataTypeInt32) ||
@@ -13620,7 +13681,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         (addI4 && source->_dataType != MTLTensorDataTypeInt4) ||
         (addU4 && source->_dataType != MTLTensorDataTypeUInt4) ||
         source->_dimensions == nil || destination->_dimensions == nil ||
-        (!(matmulF32 || matmulF16) && source->_dimensions.rank != destination->_dimensions.rank) ||
+        (!(matmulF32 || matmulF16 || matmulBF16) && source->_dimensions.rank != destination->_dimensions.rank) ||
         !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[0], source->_dimensions) ||
         !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[inputCount - 1], destination->_dimensions) ||
         (elementwise && (right->_dimensions == nil ||
@@ -13628,7 +13689,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
                    right->_dimensions.rank != source->_dimensions.rank ||
                    !zpu_mtl4_ml_dimensions_equal(source->_dimensions, right->_dimensions) ||
                    !zpu_mtl4_ml_dimensions_equal(source->_dimensions, destination->_dimensions))) ||
-        ((matmulF32 || matmulF16) && (right->_dimensions == nil ||
+        ((matmulF32 || matmulF16 || matmulBF16) && (right->_dimensions == nil ||
                    !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[1], right->_dimensions) ||
                    !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[2], destination->_dimensions) ||
                    !zpu_mtl4_ml_matmul_dimensions_valid(source, right, destination)))) {
@@ -13642,6 +13703,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         if (multiplyBF16) return zpu_tensor_mul_bf16(source, right, destination);
         if (matmulF32) return zpu_tensor_matmul_f32(source, right, destination);
         if (matmulF16) return zpu_tensor_matmul_f16(source, right, destination);
+        if (matmulBF16) return zpu_tensor_matmul_bf16(source, right, destination);
         return addU8 ? zpu_tensor_add_u8(source, right, destination) :
             addF32 ? zpu_tensor_add_f32(source, right, destination) :
             addI32 ? zpu_tensor_add_i32(source, right, destination) :

@@ -354,9 +354,10 @@ triangle path:
   deferred packed low/high-nibble addition with modulo-16 results; the
   registered `zpu_cpu_ml_mul_f32` and `zpu_cpu_ml_mul_f16` profiles perform
   deferred elementwise Float32 and Float16 multiplication, and the registered
-  `zpu_cpu_ml_matmul_f32` and `zpu_cpu_ml_matmul_f16` profiles perform deferred
-  rank-2 Float32 and Float16 matrix multiplication through the same
-  ZPU-owned storage path. Arbitrary ML graphs and arbitrary-MSL compiler
+  `zpu_cpu_ml_matmul_f32`, `zpu_cpu_ml_matmul_f16`, and
+  `zpu_cpu_ml_matmul_bf16` profiles perform deferred rank-2 Float32, Float16,
+  and BFloat16 matrix multiplication through the same ZPU-owned storage path.
+  Arbitrary ML graphs and arbitrary-MSL compiler
   requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
@@ -392,8 +393,8 @@ triangle path:
   `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`,
   `zpu_cpu_ml_add_f16`, `zpu_cpu_ml_add_bf16`, `zpu_cpu_ml_add_i4`,
   `zpu_cpu_ml_add_u4`, `zpu_cpu_ml_mul_f32`, `zpu_cpu_ml_mul_f16`,
-  `zpu_cpu_ml_mul_bf16`,
-  `zpu_cpu_ml_matmul_f32`, and `zpu_cpu_ml_matmul_f16` Metal 4
+  `zpu_cpu_ml_mul_bf16`, `zpu_cpu_ml_matmul_f32`,
+  `zpu_cpu_ml_matmul_f16`, and `zpu_cpu_ml_matmul_bf16` Metal 4
   machine-learning profiles preserve CPU fence update/wait ordering and
   interleave tensor copies and arithmetic with other commands at their encoded
   position in the deferred ZPU command buffer; arbitrary ML graphs remain
