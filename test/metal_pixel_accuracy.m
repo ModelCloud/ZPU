@@ -28304,6 +28304,63 @@ int main(void) {
             return 63;
         }
 
+        /* Exercise the MTL4 viewport-array entry point with the same large
+         * double-valued coordinates used by the legacy precise oracle. The
+         * adapter accepts one viewport because its CPU raster ABI has one
+         * attachment-global grid, but it must preserve both axes through the
+         * array wrapper instead of narrowing them to the portable float ABI. */
+        id<MTLTexture> adapter_metal4_precise_viewport_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTL4RenderPassDescriptor *adapter_metal4_precise_viewport_pass = [MTL4RenderPassDescriptor new];
+        adapter_metal4_precise_viewport_pass.colorAttachments[0].texture =
+            adapter_metal4_precise_viewport_texture;
+        adapter_metal4_precise_viewport_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_metal4_precise_viewport_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_metal4_precise_viewport_pass.colorAttachments[0].clearColor =
+            MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        MTL4ArgumentTableDescriptor *adapter_metal4_precise_viewport_table_descriptor =
+            [MTL4ArgumentTableDescriptor new];
+        adapter_metal4_precise_viewport_table_descriptor.maxBufferBindCount = 1;
+        id<MTL4ArgumentTable> adapter_metal4_precise_viewport_table =
+            [adapter_device newArgumentTableWithDescriptor:adapter_metal4_precise_viewport_table_descriptor
+                                                       error:&metal4_error];
+        [adapter_metal4_precise_viewport_table setAddress:adapter_precise_viewport_vertex_buffer.gpuAddress
+                                                   atIndex:0];
+        id<MTL4CommandBuffer> adapter_metal4_precise_viewport_command_buffer =
+            [adapter_device newCommandBuffer];
+        [adapter_metal4_precise_viewport_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> adapter_metal4_precise_viewport_encoder =
+            [adapter_metal4_precise_viewport_command_buffer
+                renderCommandEncoderWithDescriptor:adapter_metal4_precise_viewport_pass];
+        [adapter_metal4_precise_viewport_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_metal4_precise_viewport_encoder setColorAttachmentMap:identity_color_map];
+        [adapter_metal4_precise_viewport_encoder setViewports:&precise_viewport count:1];
+        [adapter_metal4_precise_viewport_encoder setScissorRect:full_attachment_scissor];
+        [adapter_metal4_precise_viewport_encoder
+            setArgumentTable:adapter_metal4_precise_viewport_table
+                    atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [adapter_metal4_precise_viewport_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                                     vertexStart:0 vertexCount:3];
+        [adapter_metal4_precise_viewport_encoder endEncoding];
+        [adapter_metal4_precise_viewport_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_metal4_precise_viewport_command_buffers[] = {
+            adapter_metal4_precise_viewport_command_buffer};
+        [metal4_queue commit:adapter_metal4_precise_viewport_command_buffers count:1];
+        uint8_t adapter_metal4_precise_viewport_pixels[byte_count];
+        [adapter_metal4_precise_viewport_texture getBytes:adapter_metal4_precise_viewport_pixels
+                                              bytesPerRow:(NSUInteger)width * 4
+                                               fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                              mipmapLevel:0];
+        if (adapter_metal4_precise_viewport_texture == nil ||
+            adapter_metal4_precise_viewport_table == nil ||
+            adapter_metal4_precise_viewport_command_buffer == nil ||
+            adapter_metal4_precise_viewport_encoder == nil ||
+            memcmp(native_precise_viewport_pixels, adapter_metal4_precise_viewport_pixels,
+                   sizeof(native_precise_viewport_pixels)) != 0) {
+            fail_with_error("Metal 4 CPU precise viewport-array render failed", metal4_error);
+            return 64;
+        }
+
         /* The render encoder must also clear the CPU-owned state when a
          * caller explicitly unbinds a table for its stages. The second draw
          * has no vertex address and therefore must fail instead of replaying
