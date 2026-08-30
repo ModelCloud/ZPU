@@ -206,6 +206,39 @@ int main(void) {
     zpu_metal_command_buffer_destroy(compute_buffer);
     zpu_metal_texture_destroy(compute_texture);
 
+    const float add_left_values[] = {1.25f, -2.5f, 3.0f, 8.0f};
+    const float add_right_values[] = {2.5f, 0.5f, -1.0f, -3.0f};
+    const float add_expected[] = {3.75f, -2.0f, 2.0f, 5.0f};
+    float add_initial[] = {0.0f, 0.0f, 0.0f, 0.0f};
+    zpu_metal_buffer *add_left = zpu_metal_device_new_buffer(
+        device, sizeof(add_left_values), add_left_values);
+    zpu_metal_buffer *add_right = zpu_metal_device_new_buffer(
+        device, sizeof(add_right_values), add_right_values);
+    zpu_metal_buffer *add_output = zpu_metal_device_new_buffer(
+        device, sizeof(add_initial), add_initial);
+    zpu_metal_command_buffer *add_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_compute_encoder *add_encoder =
+        zpu_metal_command_buffer_compute_encoder(add_commands);
+    if (add_left == NULL || add_right == NULL || add_output == NULL ||
+        add_commands == NULL || add_encoder == NULL ||
+        zpu_metal_compute_encoder_set_kernel(add_encoder, ZPU_METAL_COMPUTE_ADD_F32) != 0 ||
+        zpu_metal_compute_encoder_set_buffer(add_encoder, add_left, 0, 0) != 0 ||
+        zpu_metal_compute_encoder_set_buffer(add_encoder, add_right, 0, 1) != 0 ||
+        zpu_metal_compute_encoder_set_buffer(add_encoder, add_output, 0, 2) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            add_encoder, (zpu_metal_size){4, 1, 1}, (zpu_metal_size){2, 1, 1}) != 0 ||
+        zpu_metal_compute_encoder_end_encoding(add_encoder) != 0 ||
+        memcmp(zpu_metal_buffer_contents(add_output), add_initial, sizeof(add_initial)) != 0 ||
+        zpu_metal_command_buffer_commit(add_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(add_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED ||
+        memcmp(zpu_metal_buffer_contents(add_output), add_expected, sizeof(add_expected)) != 0) return 45;
+    zpu_metal_compute_encoder_destroy(add_encoder);
+    zpu_metal_command_buffer_destroy(add_commands);
+    zpu_metal_buffer_destroy(add_left);
+    zpu_metal_buffer_destroy(add_right);
+    zpu_metal_buffer_destroy(add_output);
+
     uint8_t ray_payload[512] = {0};
     const zpu_metal_cpu_acceleration_structure_header ray_header = {
         ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
