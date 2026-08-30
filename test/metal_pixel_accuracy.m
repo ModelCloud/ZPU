@@ -28005,8 +28005,8 @@ int main(void) {
          * while still owning every resource and raster operation in ZPU. */
         const zpu_metal_vertex precise_viewport_vertices[] = {
             {{0.99999f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-            {{1.0f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-            {{0.99999f, -1.0f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{0.99999f, -0.9995f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{0.9995f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
         };
         const MTLViewport precise_viewport = {
             -8192.00001, -8192.00001, 8199.50001, 8199.50001, 0.0, 1.0};
@@ -28073,6 +28073,13 @@ int main(void) {
                                        bytesPerRow:(NSUInteger)width * 4
                                         fromRegion:MTLRegionMake2D(0, 0, width, height)
                                        mipmapLevel:0];
+        BOOL precise_viewport_covered = NO;
+        for (size_t index = 0; index < byte_count; index += 4) {
+            if (native_precise_viewport_pixels[index] != 0) {
+                precise_viewport_covered = YES;
+                break;
+            }
+        }
         if (native_precise_viewport_texture == nil || native_precise_viewport_vertex_buffer == nil ||
             native_precise_viewport_command_buffer == nil || native_precise_viewport_encoder == nil ||
             native_precise_viewport_command_buffer.status != MTLCommandBufferStatusCompleted ||
@@ -28083,6 +28090,10 @@ int main(void) {
                    sizeof(native_precise_viewport_pixels)) != 0) {
             fprintf(stderr, "metal-pixel: precise MTLViewport coordinate mismatch\n");
             return 55;
+        }
+        if (!precise_viewport_covered) {
+            fprintf(stderr, "metal-pixel: precise MTLViewport oracle covered no pixels\n");
+            return 56;
         }
         /* Visibility results are produced by the CPU rasterizer from the
          * same covered-fragment/depth/stencil accounting used for color.
