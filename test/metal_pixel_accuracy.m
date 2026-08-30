@@ -107,6 +107,9 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_mul_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 10) return; output[gid] = left[gid] * right[gid]; }\n"
+    "struct ZPUCPUArgumentBuffer { device float *data [[id(0)]]; "
+    "texture2d<float> tex [[id(1)]]; sampler samp [[id(2)]]; float4 color [[id(3)]]; };\n"
+    "kernel void zpu_cpu_argument_buffer(constant ZPUCPUArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "kernel void zpu_cpu_trace_triangles_rgba8(device const float *vertices [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -15110,6 +15113,7 @@ int main(void) {
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
+            "kernel void zpu_cpu_argument_buffer() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_cpu_vertex() {}\n"
@@ -15672,13 +15676,14 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 35 ||
+            adapter_library.functionNames.count != 36 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
@@ -26008,6 +26013,71 @@ int main(void) {
         } else {
             fprintf(stderr, "metal-pixel: CPU argument array fixture allocation failed\n");
             return 53;
+        }
+
+        /* A registered CPU profile may describe a fixed argument-buffer
+         * layout even though its implementation is still entirely CPU/ZPU.
+         * Use native Metal only as the byte-layout oracle for that metadata
+         * path; no native command encoder or resource is used by the adapter. */
+        id<MTLFunction> native_nested_profile =
+            [library newFunctionWithName:@"zpu_cpu_argument_buffer"];
+        id<MTLFunction> adapter_nested_profile =
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"];
+        id<MTLArgumentEncoder> native_nested_profile_encoder =
+            [native_nested_profile newArgumentEncoderWithBufferIndex:0];
+        id<MTLArgumentEncoder> adapter_nested_profile_encoder =
+            [adapter_nested_profile newArgumentEncoderWithBufferIndex:0];
+        id<MTLBuffer> native_nested_profile_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_nested_profile_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        if (native_nested_profile_encoder != nil && adapter_nested_profile_encoder != nil &&
+            native_nested_profile_buffer != nil && adapter_nested_profile_buffer != nil) {
+            [native_nested_profile_encoder setArgumentBuffer:native_nested_profile_buffer offset:0];
+            [adapter_nested_profile_encoder setArgumentBuffer:adapter_nested_profile_buffer offset:0];
+            void *native_nested_profile_color =
+                [native_nested_profile_encoder constantDataAtIndex:3];
+            void *adapter_nested_profile_color =
+                [adapter_nested_profile_encoder constantDataAtIndex:3];
+            const NSUInteger native_nested_profile_color_offset =
+                native_nested_profile_color == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_nested_profile_color -
+                             (uint8_t *)native_nested_profile_buffer.contents);
+            const NSUInteger adapter_nested_profile_color_offset =
+                adapter_nested_profile_color == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_nested_profile_color -
+                             (uint8_t *)adapter_nested_profile_buffer.contents);
+            [adapter_nested_profile_encoder setBuffer:adapter_copy_buffer offset:8 atIndex:0];
+            [adapter_nested_profile_encoder setTexture:adapter_compute_icb_texture atIndex:1];
+            [adapter_nested_profile_encoder setSamplerState:adapter_sampler atIndex:2];
+            uint64_t adapter_nested_profile_buffer_address = 0;
+            uint64_t adapter_nested_profile_texture_id = 0;
+            uint64_t adapter_nested_profile_sampler_id = 0;
+            memcpy(&adapter_nested_profile_buffer_address,
+                   adapter_nested_profile_buffer.contents, sizeof(adapter_nested_profile_buffer_address));
+            memcpy(&adapter_nested_profile_texture_id,
+                   (uint8_t *)adapter_nested_profile_buffer.contents + 8,
+                   sizeof(adapter_nested_profile_texture_id));
+            memcpy(&adapter_nested_profile_sampler_id,
+                   (uint8_t *)adapter_nested_profile_buffer.contents + 16,
+                   sizeof(adapter_nested_profile_sampler_id));
+            if ([native_nested_profile_encoder encodedLength] !=
+                    [adapter_nested_profile_encoder encodedLength] ||
+                [native_nested_profile_encoder alignment] !=
+                    [adapter_nested_profile_encoder alignment] ||
+                [native_nested_profile_encoder encodedLength] != 48 ||
+                [native_nested_profile_encoder alignment] != 16 ||
+                native_nested_profile_color_offset != adapter_nested_profile_color_offset ||
+                native_nested_profile_color_offset != 32 ||
+                adapter_nested_profile_buffer_address != adapter_copy_buffer.gpuAddress + 8 ||
+                adapter_nested_profile_texture_id != adapter_compute_icb_texture.gpuResourceID._impl ||
+                adapter_nested_profile_sampler_id != adapter_sampler.gpuResourceID._impl) {
+                fprintf(stderr, "metal-pixel: CPU nested argument encoder layout mismatch\n");
+                return 260;
+            }
+        } else {
+            fprintf(stderr, "metal-pixel: CPU nested argument encoder fixture allocation failed\n");
+            return 260;
         }
 
         /* A count-based NSArray-style range must not wrap its final binding

@@ -64,6 +64,9 @@ static NSString *const zpu_cpu_ml_add_i4_function_name = @"zpu_cpu_ml_add_i4";
 static NSString *const zpu_cpu_ml_add_u4_function_name = @"zpu_cpu_ml_add_u4";
 static NSString *const zpu_cpu_add_f32_function_name = @"zpu_cpu_add_f32";
 static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
+/* Metadata-only profile used to exercise CPU nested argument-buffer
+ * encoding. It is intentionally not an executable arbitrary-MSL kernel. */
+static NSString *const zpu_cpu_argument_buffer_function_name = @"zpu_cpu_argument_buffer";
 
 static BOOL zpu_cpu_ml_add_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_add_u8_function_name] ||
@@ -10328,12 +10331,28 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (NSDictionary *)functionConstantsDictionary API_AVAILABLE(macos(10.12), ios(10.0)) { return @{}; }
 - (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return _optionsOverride; }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(10.13), ios(11.0)) {
-    (void)bufferIndex;
-    /* The registered CPU profiles expose ordinary buffer/texture/sampler
-     * arguments, not an MSL argument-buffer parameter. Metal returns nil for
-     * this selector in that case; an empty encoder would incorrectly make a
-     * non-argument-buffer resource look encodable. */
-    return nil;
+    if (bufferIndex != 0 || ![_implementationName isEqualToString:zpu_cpu_argument_buffer_function_name]) {
+        /* The other registered CPU profiles expose ordinary
+         * buffer/texture/sampler arguments, not an MSL argument-buffer
+         * parameter. Metal returns nil for this selector in that case; an
+         * empty encoder would incorrectly make a non-argument-buffer
+         * resource look encodable. */
+        return nil;
+    }
+    MTLArgumentDescriptor *data = [MTLArgumentDescriptor argumentDescriptor];
+    data.dataType = MTLDataTypePointer;
+    data.index = 0;
+    MTLArgumentDescriptor *texture = [MTLArgumentDescriptor argumentDescriptor];
+    texture.dataType = MTLDataTypeTexture;
+    texture.index = 1;
+    MTLArgumentDescriptor *sampler = [MTLArgumentDescriptor argumentDescriptor];
+    sampler.dataType = MTLDataTypeSampler;
+    sampler.index = 2;
+    MTLArgumentDescriptor *color = [MTLArgumentDescriptor argumentDescriptor];
+    color.dataType = MTLDataTypeFloat4;
+    color.index = 3;
+    return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc]
+        initWithOwner:_owner arguments:@[data, texture, sampler, color]];
 }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -10468,6 +10487,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_ml_add_bf16_function_name,
             zpu_cpu_ml_add_i4_function_name,
             zpu_cpu_ml_add_u4_function_name,
+            zpu_cpu_argument_buffer_function_name,
         ]) {
             if (zpu_source_contains_identifier(source, name)) [names addObject:name];
         }
