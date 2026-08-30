@@ -17237,7 +17237,7 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, state->_meshMaxTotalThreadsPerObjectThreadgroup) ||
         threadsPerObjectThreadgroup.width != 1 || threadsPerObjectThreadgroup.height != 1 || threadsPerObjectThreadgroup.depth != 1 ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, state->_meshMaxTotalThreadsPerMeshThreadgroup) ||
-        threadgroupsPerGrid.width == 0 || threadgroupsPerGrid.height == 0 || threadgroupsPerGrid.depth != 1 ||
+        threadgroupsPerGrid.width == 0 || threadgroupsPerGrid.height == 0 || threadgroupsPerGrid.depth == 0 ||
         (state->_meshRequiredThreadsPerObjectThreadgroup.width != 0 &&
          (threadsPerObjectThreadgroup.width != state->_meshRequiredThreadsPerObjectThreadgroup.width ||
           threadsPerObjectThreadgroup.height != state->_meshRequiredThreadsPerObjectThreadgroup.height ||
@@ -17285,7 +17285,7 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerObjectThreadgroup, state->_meshMaxTotalThreadsPerObjectThreadgroup) ||
         threadsPerObjectThreadgroup.width != 1 || threadsPerObjectThreadgroup.height != 1 || threadsPerObjectThreadgroup.depth != 1 ||
         !zpu_metal_size_fits_cpu_threadgroup(threadsPerMeshThreadgroup, state->_meshMaxTotalThreadsPerMeshThreadgroup) ||
-        threadsPerGrid.width == 0 || threadsPerGrid.height == 0 || threadsPerGrid.depth != 1 ||
+        threadsPerGrid.width == 0 || threadsPerGrid.height == 0 || threadsPerGrid.depth == 0 ||
         (state->_meshRequiredThreadsPerObjectThreadgroup.width != 0 &&
          (threadsPerObjectThreadgroup.width != state->_meshRequiredThreadsPerObjectThreadgroup.width ||
           threadsPerObjectThreadgroup.height != state->_meshRequiredThreadsPerObjectThreadgroup.height ||

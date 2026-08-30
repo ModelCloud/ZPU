@@ -572,7 +572,9 @@ int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *e
  * through an opted-in color attachment map. The registered mesh profile
  * accepts the same contiguous RGBA8/BGRA8 attachment signature and routes its
  * logical outputs through an opted-in map. Factor-one triangle patches honor
- * baseInstance, while layered mesh draws remain rejected. Layered multisample
+ * baseInstance, while the registered mesh-gradient profile maps mesh-grid Z to
+ * layered slices and preserves attachment-global top-left X/Y; arbitrary mesh
+ * shader execution remains rejected. Layered multisample
  * color attachments use the explicit per-layer sample-plane entry point below.
  * Direct and indirect primitive/indexed draws honor
  * baseInstance and select the corresponding slices. */

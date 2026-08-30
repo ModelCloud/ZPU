@@ -1954,31 +1954,43 @@ pub const CommandBuffer = struct {
                 }
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != resolved_mesh.target) return self.fail(error.InvalidResource);
-                sparseSyncTexture(target_handle);
-                defer sparseFlushTexture(target_handle);
                 validateColorAttachmentOutputs(active_color_attachments, resolved_mesh.color_attachment_map, 1) catch |err| return self.fail(err);
-                const output_texture = active_color_attachments[@as(usize, resolved_mesh.color_attachment_map[0])] orelse return self.fail(error.InvalidResource);
+                const output_index = @as(usize, resolved_mesh.color_attachment_map[0]);
+                const output_texture = if (active_array_target_count > 1)
+                    active_array_color_attachments[output_index][0] orelse return self.fail(error.InvalidResource)
+                else
+                    active_color_attachments[output_index] orelse return self.fail(error.InvalidResource);
+                if (active_array_target_count > 1) {
+                    for (active_array_color_attachments[output_index][0..active_array_target_count]) |output| {
+                        sparseSyncTexture(output orelse return self.fail(error.InvalidResource));
+                    }
+                } else {
+                    sparseSyncTexture(output_texture);
+                }
+                defer {
+                    if (active_array_target_count > 1) {
+                        for (active_array_color_attachments[output_index][0..active_array_target_count]) |output| {
+                            sparseFlushOptionalTexture(output);
+                        }
+                    } else {
+                        sparseFlushTexture(output_texture);
+                    }
+                }
                 const mesh_threads = resolved_mesh.threads_per_mesh_threadgroup;
                 const object_threads = resolved_mesh.threads_per_object_threadgroup;
                 const mesh_thread_count = @as(u64, mesh_threads.width) * @as(u64, mesh_threads.height) * @as(u64, mesh_threads.depth);
                 const object_thread_count = @as(u64, object_threads.width) * @as(u64, object_threads.height) * @as(u64, object_threads.depth);
+                const layer_count = if (active_array_target_count > 1) active_array_target_count else 1;
                 if (resolved_mesh.kernel != 1 or
                     (output_texture.format != .rgba8_unorm and output_texture.format != .bgra8_unorm) or
                     resolved_mesh.threads_per_grid.width == 0 or resolved_mesh.threads_per_grid.height == 0 or
-                    resolved_mesh.threads_per_grid.depth != 1 or
+                    resolved_mesh.threads_per_grid.depth != layer_count or
                     object_threads.width != 1 or object_threads.height != 1 or object_threads.depth != 1 or
                     mesh_threads.width == 0 or mesh_threads.height == 0 or mesh_threads.depth != 1 or
                     mesh_thread_count > 1024 or object_thread_count != 1) return self.fail(error.InvalidArgument);
-                var target = output_texture.asTarget();
-                const width = @min(@as(usize, target.width), @as(usize, resolved_mesh.threads_per_grid.width));
-                const height = @min(@as(usize, target.height), @as(usize, resolved_mesh.threads_per_grid.height));
                 // Metal scissor coordinates are attachment-global and
                 // top-left-origin; the complete options snapshot prevents
                 // later encoder mutations from rebasing this command.
-                const x0 = @min(@as(usize, resolved_mesh.options.scissor.x), width);
-                const y0 = @min(@as(usize, resolved_mesh.options.scissor.y), height);
-                const x1 = @min(x0 +| @as(usize, resolved_mesh.options.scissor.width), width);
-                const y1 = @min(y0 +| @as(usize, resolved_mesh.options.scissor.height), height);
                 var mesh_options = resolved_mesh.options;
                 // The bounded profile has one logical output. Its selected
                 // physical attachment is already the target passed here;
@@ -1987,14 +1999,35 @@ pub const CommandBuffer = struct {
                 mesh_options.write_extra_targets = false;
                 mesh_options.color_attachment_map[0] = 0;
                 var stats: raster3d.Stats = .{};
-                for (y0..y1) |y| {
-                    for (x0..x1) |x| {
-                        stats = addRasterStats(stats, raster3d.writePoint(&target, active_depth, active_stencil, x, y, 0.5, .{
-                            (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
-                            (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
-                            0.25,
-                            1.0,
-                        }, mesh_options));
+                for (0..layer_count) |layer| {
+                    const layer_texture = if (active_array_target_count > 1)
+                        active_array_color_attachments[output_index][layer] orelse return self.fail(error.InvalidResource)
+                    else
+                        output_texture;
+                    var target = layer_texture.asTarget();
+                    const depth_values = if (active_array_target_count > 1)
+                        active_depth_array_values[layer]
+                    else
+                        active_depth;
+                    const stencil_values = if (active_array_target_count > 1)
+                        active_stencil_array_values[layer]
+                    else
+                        active_stencil;
+                    const width = @min(@as(usize, target.width), @as(usize, resolved_mesh.threads_per_grid.width));
+                    const height = @min(@as(usize, target.height), @as(usize, resolved_mesh.threads_per_grid.height));
+                    const x0 = @min(@as(usize, resolved_mesh.options.scissor.x), width);
+                    const y0 = @min(@as(usize, resolved_mesh.options.scissor.y), height);
+                    const x1 = @min(x0 +| @as(usize, resolved_mesh.options.scissor.width), width);
+                    const y1 = @min(y0 +| @as(usize, resolved_mesh.options.scissor.height), height);
+                    for (y0..y1) |y| {
+                        for (x0..x1) |x| {
+                            stats = addRasterStats(stats, raster3d.writePoint(&target, depth_values, stencil_values, x, y, 0.5, .{
+                                (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+                                (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+                                0.25,
+                                1.0,
+                            }, mesh_options));
+                        }
                     }
                 }
                 if (resolved_mesh.visibility_mode != .disabled) {
@@ -3937,23 +3970,26 @@ pub const RenderEncoder = struct {
         threads_per_mesh_threadgroup: abi.Size,
     ) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
+        const array_target_count = self.renderTargetArrayCount();
+        if (array_target_count == 0) return error.InvalidArgument;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
             else => return error.InvalidCommand,
         };
         if (kernel != 1 or
             (target.format != .rgba8_unorm and target.format != .bgra8_unorm) or
-            threadgroups_per_grid.width == 0 or threadgroups_per_grid.height == 0 or threadgroups_per_grid.depth != 1 or
+            threadgroups_per_grid.width == 0 or threadgroups_per_grid.height == 0 or
+            threadgroups_per_grid.depth != array_target_count or
             threads_per_object_threadgroup.width != 1 or threads_per_object_threadgroup.height != 1 or
             threads_per_object_threadgroup.depth != 1 or !validMeshThreadgroup(threads_per_mesh_threadgroup))
             return error.InvalidArgument;
         const grid_width = std.math.mul(u32, threadgroups_per_grid.width, threads_per_mesh_threadgroup.width) catch return error.InvalidArgument;
         const grid_height = std.math.mul(u32, threadgroups_per_grid.height, threads_per_mesh_threadgroup.height) catch return error.InvalidArgument;
+        const grid_depth = std.math.mul(u32, threadgroups_per_grid.depth, threads_per_mesh_threadgroup.depth) catch return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .mesh = .{
             .target = target,
             .kernel = kernel,
-            .threads_per_grid = .{ .width = grid_width, .height = grid_height, .depth = 1 },
+            .threads_per_grid = .{ .width = grid_width, .height = grid_height, .depth = grid_depth },
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
@@ -3973,15 +4009,21 @@ pub const RenderEncoder = struct {
         threads_per_mesh_threadgroup: abi.Size,
     ) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
-        if (threads_per_grid.width == 0 or threads_per_grid.height == 0 or threads_per_grid.depth != 1 or
+        const array_target_count = self.renderTargetArrayCount();
+        if (array_target_count == 0) return error.InvalidArgument;
+        if (threads_per_grid.width == 0 or threads_per_grid.height == 0 or
+            threads_per_grid.depth != array_target_count or
             threads_per_object_threadgroup.width != 1 or threads_per_object_threadgroup.height != 1 or
             threads_per_object_threadgroup.depth != 1 or !validMeshThreadgroup(threads_per_mesh_threadgroup))
             return error.InvalidArgument;
         const rounded_width = (threads_per_grid.width / threads_per_mesh_threadgroup.width) * threads_per_mesh_threadgroup.width;
         const rounded_height = (threads_per_grid.height / threads_per_mesh_threadgroup.height) * threads_per_mesh_threadgroup.height;
         if (rounded_width == 0 or rounded_height == 0) return;
-        return self.drawMeshThreadgroups(kernel, .{ .width = rounded_width / threads_per_mesh_threadgroup.width, .height = rounded_height / threads_per_mesh_threadgroup.height, .depth = 1 }, threads_per_object_threadgroup, threads_per_mesh_threadgroup);
+        return self.drawMeshThreadgroups(kernel, .{
+            .width = rounded_width / threads_per_mesh_threadgroup.width,
+            .height = rounded_height / threads_per_mesh_threadgroup.height,
+            .depth = threads_per_grid.depth,
+        }, threads_per_object_threadgroup, threads_per_mesh_threadgroup);
     }
 
     pub fn drawMeshThreadgroupsIndirect(
@@ -3993,7 +4035,6 @@ pub const RenderEncoder = struct {
         threads_per_mesh_threadgroup: abi.Size,
     ) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
             else => return error.InvalidCommand,
@@ -8360,6 +8401,59 @@ test "CPU mesh scissor keeps the Apple top-left grid origin" {
     }
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
     try std.testing.expectEqualSlices(u8, &expected, texture.bytes);
+}
+
+test "CPU layered mesh grid depth selects render-target slices" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    var layers: [3]*Texture = undefined;
+    for (&layers) |*layer| {
+        layer.* = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    }
+    defer for (layers) |layer| destroyTexture(layer);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, layers[0], .{
+        .color = .{
+            .load_action = .clear,
+            .store_action = .store,
+            .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 },
+        },
+    });
+    try encoder.setRenderTargetArray(&layers, layers.len);
+    // Mesh-grid Z selects the target slice in the bounded CPU profile. X/Y
+    // remain attachment-global and use Apple's top-left origin.
+    try encoder.setViewport(.{ .origin_x = 2, .origin_y = 1, .width = 3, .height = 2, .znear = 0, .zfar = 1 });
+    try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
+    try encoder.drawMeshThreads(
+        1,
+        .{ .width = 5, .height = 3, .depth = layers.len },
+        .{ .width = 1, .height = 1, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+    );
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+
+    var expected = [_]u8{0} ** (5 * 3 * 4);
+    for (0..3) |y| {
+        for (0..5) |x| {
+            const pixel = (y * 5 + x) * 4;
+            expected[pixel + 3] = 255;
+            if (x >= 1 and x < 4 and y >= 1 and y < 3) {
+                expected[pixel + 0] = @intCast(((x + 1) * 255 + 4) / 8);
+                expected[pixel + 1] = @intCast(((y + 1) * 255 + 4) / 8);
+                expected[pixel + 2] = 64;
+            }
+        }
+    }
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    for (layers) |layer| {
+        try std.testing.expectEqualSlices(u8, &expected, layer.bytes);
+    }
 }
 
 test "CPU mesh dispatch applies depth and stencil tests" {

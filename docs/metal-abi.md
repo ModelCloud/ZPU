@@ -98,7 +98,9 @@ triangle path:
   operations. The registered tile profile broadcasts its deterministic
   upper-left-grid output to every layer, accepts a contiguous RGBA8/BGRA8
   attachment signature, and routes its logical output through an opted-in
-  logical-to-physical map; layered mesh draws remain explicitly rejected, while
+  logical-to-physical map; the registered mesh-gradient profile maps mesh-grid
+  Z one-to-one to layered slices while preserving attachment-global top-left
+  X/Y; arbitrary mesh shader execution remains explicitly rejected, while
   factor-one triangle patches select layers
   by `baseInstance`.
 - CPU-owned 2D multisample and 2D multisample-array textures with
@@ -197,7 +199,9 @@ triangle path:
   broadcasts to each layer, and both the tile and registered mesh profiles
   support contiguous RGBA8/BGRA8 attachments with an opted-in
   logical-to-physical map. Factor-one triangle patches select layers by
-  `baseInstance`, while layered mesh draws remain explicitly rejected; layered
+  `baseInstance`; the registered mesh-gradient profile maps mesh-grid Z to
+  layered slices while preserving attachment-global top-left X/Y, while
+  arbitrary mesh shader execution remains explicitly rejected; layered
   multisample color passes use independent per-layer sample planes and resolves
 - buffer-backed 2D and texture-buffer views that alias ZPU storage with checked
   offsets/row strides and preserve the backing resource lifetime
@@ -294,6 +298,7 @@ triangle path:
   registered `zpu_cpu_mesh_gradient_rgba8` plus
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
   CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,
+  maps mesh-grid Z to the selected layered render-target slice,
   clips it with the recorded scissor rectangle, applies fixed profile depth
   0.5 through ZPU depth/stencil/color-write state, preserves the first logical
   color attachment's blend factors, operations, and write mask, and supports
