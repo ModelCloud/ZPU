@@ -5716,10 +5716,10 @@ int main(void) {
          * the asymmetric viewport/scissor below keeps the test sensitive to
          * the upper-left pixel-grid origin on both Apple platforms. */
         const zpu_metal_vertex primitive_vertices[] = {
-            {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
-            {{ 0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
-            {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
-            {{-0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.50f, 0.75f, 1.0f}},
+            {{-0.75f, -0.75f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 0.75f, -0.75f, 0.5f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+            {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            {{-0.75f,  0.75f, 0.5f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
         };
         const MTLPrimitiveType primitive_types[] = {
             MTLPrimitiveTypePoint, MTLPrimitiveTypeLine, MTLPrimitiveTypeLineStrip,

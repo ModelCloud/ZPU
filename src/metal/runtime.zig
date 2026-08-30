@@ -6254,7 +6254,7 @@ fn resolveMultisampleTargets(sample_targets: [4]?*Texture, sample_count: usize, 
             }
             const divisor: f32 = @floatFromInt(sample_count);
             for (0..4) |channel| color[channel] /= divisor;
-            destination.storeColor(x, y, color);
+            destination.storeResolvedColor(x, y, color);
         }
     }
 }

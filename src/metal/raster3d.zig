@@ -168,6 +168,8 @@ pub const TargetFormat = enum {
     rgb9e5_float,
 };
 
+const UnormRounding = enum { nearest_even, nearest_up };
+
 pub const Target = struct {
     pixels: []u8,
     width: u32,
@@ -679,18 +681,18 @@ pub const Target = struct {
     }
 
     fn writeColor(self: *Target, x: usize, y: usize, color: [4]f32, write_mask: u8) void {
-        self.writeColorWithSrgbEncoding(x, y, color, write_mask, .fixed_point);
+        self.writeColorWithSrgbEncoding(x, y, color, write_mask, .fixed_point, .nearest_even);
     }
 
-    fn writeColorWithSrgbEncoding(self: *Target, x: usize, y: usize, color: [4]f32, write_mask: u8, srgb_encoding: SrgbEncoding) void {
+    fn writeColorWithSrgbEncoding(self: *Target, x: usize, y: usize, color: [4]f32, write_mask: u8, srgb_encoding: SrgbEncoding, unorm_rounding: UnormRounding) void {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         switch (self.format) {
             .a8_unorm => {
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) row_bytes[offset] = colorByte(color[3]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) row_bytes[offset] = colorByteWithRounding(color[3], unorm_rounding);
             },
             .r8_unorm, .r8_unorm_srgb => {
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .r8_unorm_srgb) srgbByteForEncoding(color[0], srgb_encoding) else colorByte(color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .r8_unorm_srgb) srgbByteForEncoding(color[0], srgb_encoding) else colorByteWithRounding(color[0], unorm_rounding);
             },
             .r8_snorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
@@ -717,8 +719,8 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF16(row_bytes, offset, color[0]);
             },
             .rg8_unorm, .rg8_unorm_srgb => {
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .rg8_unorm_srgb) srgbByteForEncoding(color[0], srgb_encoding) else colorByte(color[0]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = if (self.format == .rg8_unorm_srgb) srgbByteForEncoding(color[1], srgb_encoding) else colorByte(color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) row_bytes[offset] = if (self.format == .rg8_unorm_srgb) srgbByteForEncoding(color[0], srgb_encoding) else colorByteWithRounding(color[0], unorm_rounding);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) row_bytes[offset + 1] = if (self.format == .rg8_unorm_srgb) srgbByteForEncoding(color[1], srgb_encoding) else colorByteWithRounding(color[1], unorm_rounding);
             },
             .rg8_snorm => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeS8(row_bytes, offset, color[0]);
@@ -765,10 +767,10 @@ pub const Target = struct {
                 else
                     .bgra8_unorm;
                 var output = surface.Surface.read(row_bytes, offset, format);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = if (srgb) srgbByteForEncoding(color[0], srgb_encoding) else colorByte(color[0]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = if (srgb) srgbByteForEncoding(color[1], srgb_encoding) else colorByte(color[1]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = if (srgb) srgbByteForEncoding(color[2], srgb_encoding) else colorByte(color[2]);
-                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByte(color[3]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) output.r = if (srgb) srgbByteForEncoding(color[0], srgb_encoding) else colorByteWithRounding(color[0], unorm_rounding);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) output.g = if (srgb) srgbByteForEncoding(color[1], srgb_encoding) else colorByteWithRounding(color[1], unorm_rounding);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) output.b = if (srgb) srgbByteForEncoding(color[2], srgb_encoding) else colorByteWithRounding(color[2], unorm_rounding);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) output.a = colorByteWithRounding(color[3], unorm_rounding);
                 surface.Surface.write(row_bytes, offset, format, output);
             },
             .rgba8_uint => {
@@ -911,9 +913,16 @@ pub const Target = struct {
         self.writeColor(x, y, color, @intFromEnum(abi.ColorWriteMask.all));
     }
 
+    pub fn storeResolvedColor(self: *Target, x: usize, y: usize, color: [4]f32) void {
+        if (x >= self.width or y >= self.height) return;
+        // Metal's fixed-point MSAA resolve rounds a half-byte upward, while
+        // direct normalized fragment stores use nearest-even conversion.
+        self.writeColorWithSrgbEncoding(x, y, color, @intFromEnum(abi.ColorWriteMask.all), .fixed_point, .nearest_up);
+    }
+
     pub fn storeColorWithNativeSrgb(self: *Target, x: usize, y: usize, color: [4]f32) void {
         if (x >= self.width or y >= self.height) return;
-        self.writeColorWithSrgbEncoding(x, y, color, @intFromEnum(abi.ColorWriteMask.all), .native_float);
+        self.writeColorWithSrgbEncoding(x, y, color, @intFromEnum(abi.ColorWriteMask.all), .native_float, .nearest_even);
     }
 
     fn clearColor(self: *Target, x: usize, y: usize, color: [4]f32) void {
@@ -1306,7 +1315,19 @@ fn outsideTopLeft(value: f32, a: ProjectedVertex, b: ProjectedVertex, positive_a
 }
 
 fn colorByte(value: f32) u8 {
-    return @intFromFloat(std.math.clamp(value, 0, 1) * 255.0 + 0.5);
+    return colorByteWithRounding(value, .nearest_even);
+}
+
+fn colorByteWithRounding(value: f32, rounding: UnormRounding) u8 {
+    const scaled = std.math.clamp(value, 0, 1) * 255.0;
+    const lower: u16 = @intFromFloat(@floor(scaled));
+    const fraction = scaled - @as(f32, @floatFromInt(lower));
+    const near_half = @abs(fraction - 0.5) <= std.math.floatEps(f32) * 256.0;
+    const rounded: u16 = switch (rounding) {
+        .nearest_even => if (near_half) (if ((lower & 1) != 0) lower + 1 else lower) else if (fraction > 0.5) lower + 1 else lower,
+        .nearest_up => @intFromFloat(scaled + 0.5),
+    };
+    return @intCast(rounded);
 }
 
 fn compareStencil(compare: abi.CompareFunction, reference: u8, current: u8, mask: u8) bool {
@@ -2042,6 +2063,19 @@ test "CPU sRGB targets decode samples and encode stores" {
     var rg = try Target.init(&rg_pixels, 1, 1, 2, .rg8_unorm_srgb);
     rg.storeColor(0, 0, .{ 0.25, 0.5, 0, 1 });
     try std.testing.expectEqual([2]u8{ 137, 188 }, rg_pixels);
+}
+
+test "CPU normalized stores use Apple's nearest-even byte conversion" {
+    try std.testing.expectEqual(@as(u8, 64), colorByte(0.25));
+    try std.testing.expectEqual(@as(u8, 128), colorByte(0.5));
+    try std.testing.expectEqual(@as(u8, 212), colorByte(@as(f32, 5) / 6));
+    try std.testing.expectEqual(@as(u8, 42), colorByte(@as(f32, 1) / 6));
+    try std.testing.expectEqual(@as(u8, 213), colorByte((@as(f32, 5) / 6) + 0.0001));
+
+    var resolved_pixels = [_]u8{0} ** 4;
+    var resolved = try Target.init(&resolved_pixels, 1, 1, 4, .rgba8_unorm);
+    resolved.storeResolvedColor(0, 0, .{ @as(f32, 5) / 6, @as(f32, 1) / 6, 0.5, 1 });
+    try std.testing.expectEqual([4]u8{ 213, 43, 128, 255 }, resolved_pixels);
 }
 
 test "CPU sRGB stores use Apple fixed-point conversion boundaries" {
