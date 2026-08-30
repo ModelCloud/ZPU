@@ -188,6 +188,9 @@ triangle path:
   CPU vertex ABI. Its function object is a Metal-shaped profile only; vertex
   fetch, viewport mapping, rasterization, and interpolation remain entirely
   ZPU-owned and CPU-executed
+- the registered `zpu_cpu_fragment` profile selects the fixed interpolated
+  color output ABI. Its function object is likewise metadata for the CPU
+  raster path; it does not compile or dispatch MSL
 - bounded CPU anisotropic sampler footprints for normalized coordinates and
   linear min/mag filters, with the configured tap count capped for predictable
   CPU work; native Metal remains only the byte-accuracy oracle

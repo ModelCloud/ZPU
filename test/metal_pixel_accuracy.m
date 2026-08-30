@@ -42,6 +42,7 @@ static const char *const kShaderSource =
     "Vertex output; output.position = input.position; output.color = input.color; return output; }\n"
     "vertex void zpu_test_no_raster_vertex(uint vertex_id [[vertex_id]]) { (void)vertex_id; }\n"
     "fragment float4 zpu_test_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
+    "fragment float4 zpu_cpu_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
     "fragment float4 zpu_test_position_gradient(Vertex input [[stage_in]]) { "
     "return float4((input.position.x + 0.5) / 8.0, (input.position.y + 0.5) / 8.0, 0.25, 1.0); }\n"
     "fragment float4 zpu_cpu_position_gradient_fragment() { return float4(1.0); }\n"
@@ -9974,7 +9975,7 @@ int main(void) {
         id<MTLFunction> adapter_stage_in_vertex_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_stage_in_vertex");
         id<MTLFunction> adapter_fragment_function =
-            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_fragment");
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fragment");
         id<MTLFunction> adapter_layered_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_fragment");
         id<MTLFunction> adapter_mrt_fragment_function =
@@ -14500,6 +14501,7 @@ int main(void) {
             "vertex void zpu_cpu_vertex() {}\n"
             "vertex void zpu_test_stage_in_vertex() {}\n"
             "fragment float4 zpu_test_fragment() { return float4(1.0); }\n"
+            "fragment float4 zpu_cpu_fragment() { return float4(1.0); }\n"
             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
             "kernel void zpu_cpu_mesh_gradient_rgba8() {}\n"
             "fragment float4 zpu_cpu_mesh_gradient_fragment() { return float4(1.0); }\n"
@@ -14685,8 +14687,8 @@ int main(void) {
                 [adapter_library newFunctionWithDescriptor:adapter_render_vertex_descriptor
                                                        error:&adapter_render_vertex_error];
             MTLFunctionDescriptor *adapter_render_fragment_descriptor = [MTLFunctionDescriptor functionDescriptor];
-            adapter_render_fragment_descriptor.name = @"zpu_test_fragment";
-            adapter_render_fragment_descriptor.specializedName = @"zpu_test_fragment_alias";
+            adapter_render_fragment_descriptor.name = @"zpu_cpu_fragment";
+            adapter_render_fragment_descriptor.specializedName = @"zpu_cpu_fragment_alias";
             NSError *adapter_render_fragment_error = nil;
             id<MTLFunction> adapter_render_fragment_alias =
                 [adapter_library newFunctionWithDescriptor:adapter_render_fragment_descriptor
@@ -15056,7 +15058,8 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 33 ||
+            adapter_library.functionNames.count != 34 ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
@@ -16060,7 +16063,7 @@ int main(void) {
         adapter_mtl4_vertex_descriptor.name = @"zpu_cpu_vertex";
         adapter_mtl4_vertex_descriptor.library = adapter_mtl4_library;
         MTL4LibraryFunctionDescriptor *adapter_mtl4_fragment_descriptor = [MTL4LibraryFunctionDescriptor new];
-        adapter_mtl4_fragment_descriptor.name = @"zpu_test_fragment";
+        adapter_mtl4_fragment_descriptor.name = @"zpu_cpu_fragment";
         adapter_mtl4_fragment_descriptor.library = adapter_mtl4_library;
         adapter_mtl4_render_descriptor.vertexFunctionDescriptor = adapter_mtl4_vertex_descriptor;
         adapter_mtl4_render_descriptor.fragmentFunctionDescriptor = adapter_mtl4_fragment_descriptor;
@@ -16198,7 +16201,7 @@ int main(void) {
         id<MTLFunctionHandle> adapter_mtl4_function_handle =
             [adapter_mtl4_compiled_pipeline functionHandleWithFunction:adapter_mtl4_compiler_function];
         MTL4BinaryFunctionDescriptor *adapter_mtl4_render_binary_descriptor = [MTL4BinaryFunctionDescriptor new];
-        adapter_mtl4_render_binary_descriptor.name = @"zpu_test_fragment";
+        adapter_mtl4_render_binary_descriptor.name = @"zpu_cpu_fragment";
         adapter_mtl4_render_binary_descriptor.functionDescriptor = adapter_mtl4_fragment_descriptor;
         adapter_mtl4_render_binary_descriptor.options = MTL4BinaryFunctionOptionPipelineIndependent;
         id<MTL4BinaryFunction> adapter_mtl4_render_binary_function =
@@ -18502,8 +18505,8 @@ int main(void) {
             adapter_device_function_handle == nil ||
             adapter_device_function_handle.functionType != MTLFunctionTypeFragment ||
             adapter_mtl4_render_function_handle.functionType != MTLFunctionTypeFragment ||
-            ![adapter_mtl4_render_function_handle.name isEqualToString:@"zpu_test_fragment"] ||
-            ![adapter_mtl4_render_binary_handle.name isEqualToString:@"zpu_test_fragment"]) {
+            ![adapter_mtl4_render_function_handle.name isEqualToString:@"zpu_cpu_fragment"] ||
+            ![adapter_mtl4_render_binary_handle.name isEqualToString:@"zpu_cpu_fragment"]) {
             fprintf(stderr, "metal-pixel: CPU function table layer failed\n");
             return 102;
         }
