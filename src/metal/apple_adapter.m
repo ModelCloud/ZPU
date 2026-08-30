@@ -93,6 +93,7 @@ static const MTLBindingType zpu_mtl_binding_type_tensor = (MTLBindingType)37;
 @class ZPUResourceStateEncoder;
 @class ZPULibrary;
 @class ZPUDynamicLibrary;
+@class ZPUFunctionLogContainer;
 @class ZPUBinaryArchive;
 @class ZPUMTL4BinaryFunction;
 @class ZPUMTL4PipelineDataSetSerializer;
@@ -846,6 +847,16 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 @end
 #pragma clang diagnostic pop
 
+/* MTLCommandBuffer.logs is a collection, not a log-state object. Keep the
+ * collection CPU-owned and iterable even when no supported CPU operation has
+ * emitted a function validation log. */
+@interface ZPUFunctionLogContainer : NSObject <MTLLogContainer> {
+@public
+    NSArray *_entries;
+}
+- (instancetype)initWithEntries:(NSArray *)entries;
+@end
+
 @interface ZPUDevice : NSObject <MTLDevice> {
 @public
     zpu_metal_device *_zpuDevice;
@@ -1274,6 +1285,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _hasComputeWork;
     BOOL _retainedReferences;
     MTLCommandBufferErrorOption _errorOptions;
+    ZPUFunctionLogContainer *_logs;
 }
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer;
 - (void)retainResource:(id)resource;
@@ -5464,6 +5476,18 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
 @end
 #pragma clang diagnostic pop
 
+@implementation ZPUFunctionLogContainer
+- (instancetype)initWithEntries:(NSArray *)entries {
+    if ((self = [super init])) _entries = [entries copy] ?: @[];
+    return self;
+}
+- (NSUInteger)countByEnumeratingWithState:(NSFastEnumerationState *)state
+                                  objects:(id __unsafe_unretained[])buffer
+                                    count:(NSUInteger)len {
+    return [_entries countByEnumeratingWithState:state objects:buffer count:len];
+}
+@end
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability-new"
 
@@ -9442,6 +9466,7 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         _deferredOperations = [NSMutableArray array];
         _scheduledHandlers = [NSMutableArray array];
         _completedHandlers = [NSMutableArray array];
+        _logs = [[ZPUFunctionLogContainer alloc] initWithEntries:@[]];
         _retainedReferences = YES;
         _errorOptions = MTLCommandBufferErrorOptionNone;
     }
@@ -9474,7 +9499,7 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
 - (CFTimeInterval)kernelEndTime { return _hasComputeWork ? _kernelEndTime : 0.0; }
 - (CFTimeInterval)GPUStartTime { return _gpuStartTime; }
 - (CFTimeInterval)GPUEndTime { return _gpuEndTime; }
-- (id<MTLLogContainer>)logs { return nil; }
+- (id<MTLLogContainer>)logs { return (id<MTLLogContainer>)_logs; }
 - (MTLCommandBufferStatus)status {
     switch (zpu_metal_command_buffer_get_status(_zpuCommandBuffer)) {
         case ZPU_METAL_COMMAND_BUFFER_COMMITTED: return MTLCommandBufferStatusCommitted;

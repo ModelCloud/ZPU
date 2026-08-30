@@ -194,6 +194,16 @@ static int test_vertex_attribute_stride_against_native(
                     (long)native_command_buffer.status, (long)adapter_command_buffer.status);
             return dynamic_stride ? 142 : 143;
         }
+        id<MTLLogContainer> adapter_logs = adapter_command_buffer.logs;
+        NSUInteger adapter_log_count = 0;
+        for (id entry in adapter_logs) {
+            (void)entry;
+            adapter_log_count += 1;
+        }
+        if (adapter_logs == nil || adapter_log_count != 0) {
+            fprintf(stderr, "metal-pixel: CPU command-buffer log container is not iterable\n");
+            return 144;
+        }
     }
     MTLVertexDescriptor *unsupported_vertex_descriptor = [MTLVertexDescriptor vertexDescriptor];
     unsupported_vertex_descriptor.attributes[2].format = MTLVertexFormatFloat4;
