@@ -31955,6 +31955,173 @@ int main(void) {
             return 150;
         }
 
+        /* The component-selecting blit options are observable through a
+         * buffer even though combined depth/stencil getBytes readback is not
+         * a stable native raw-layout oracle. Keep the stencil row stride at
+         * the source texel width so the Apple path and the CPU path exercise
+         * the same packed-resource contract. */
+        const NSUInteger option_depth_byte_count = width * height * sizeof(float);
+        const NSUInteger option_stencil_row_stride = width * 8;
+        const NSUInteger option_stencil_byte_count = option_stencil_row_stride * height;
+        id<MTLBuffer> metal_depth_option_buffer =
+            [device newBufferWithLength:option_depth_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_depth_option_buffer =
+            [adapter_device newBufferWithLength:option_depth_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> metal_stencil_option_buffer =
+            [device newBufferWithLength:option_stencil_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_stencil_option_buffer =
+            [adapter_device newBufferWithLength:option_stencil_byte_count options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> metal_option_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> metal_option_blit = [metal_option_command_buffer blitCommandEncoder];
+        id<MTLCommandBuffer> adapter_option_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_option_blit = [adapter_option_command_buffer blitCommandEncoder];
+        if (metal_depth_option_buffer == nil || adapter_depth_option_buffer == nil ||
+            metal_stencil_option_buffer == nil || adapter_stencil_option_buffer == nil ||
+            metal_option_command_buffer == nil || metal_option_blit == nil ||
+            adapter_option_command_buffer == nil || adapter_option_blit == nil) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 option allocation failed\n");
+            return 151;
+        }
+        [metal_option_blit copyFromTexture:metal_depth_stencil_texture
+                                sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                  sourceSize:MTLSizeMake(width, height, 1) toBuffer:metal_depth_option_buffer
+                        destinationOffset:0 destinationBytesPerRow:width * sizeof(float)
+                      destinationBytesPerImage:0 options:MTLBlitOptionDepthFromDepthStencil];
+        [metal_option_blit copyFromTexture:metal_depth_stencil_texture
+                                sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                  sourceSize:MTLSizeMake(width, height, 1) toBuffer:metal_stencil_option_buffer
+                        destinationOffset:0 destinationBytesPerRow:option_stencil_row_stride
+                      destinationBytesPerImage:0 options:MTLBlitOptionStencilFromDepthStencil];
+        [metal_option_blit endEncoding];
+        [metal_option_command_buffer commit];
+        [metal_option_command_buffer waitUntilCompleted];
+        [adapter_option_blit copyFromTexture:adapter_depth_stencil_texture
+                                 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                   sourceSize:MTLSizeMake(width, height, 1) toBuffer:adapter_depth_option_buffer
+                         destinationOffset:0 destinationBytesPerRow:width * sizeof(float)
+                       destinationBytesPerImage:0 options:MTLBlitOptionDepthFromDepthStencil];
+        [adapter_option_blit copyFromTexture:adapter_depth_stencil_texture
+                                 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                                   sourceSize:MTLSizeMake(width, height, 1) toBuffer:adapter_stencil_option_buffer
+                         destinationOffset:0 destinationBytesPerRow:option_stencil_row_stride
+                       destinationBytesPerImage:0 options:MTLBlitOptionStencilFromDepthStencil];
+        [adapter_option_blit endEncoding];
+        [adapter_option_command_buffer commit];
+        [adapter_option_command_buffer waitUntilCompleted];
+        BOOL option_stencil_match = YES;
+        for (NSUInteger row = 0; row < height && option_stencil_match; ++row) {
+            option_stencil_match = memcmp((const uint8_t *)metal_stencil_option_buffer.contents + row * option_stencil_row_stride,
+                                          (const uint8_t *)adapter_stencil_option_buffer.contents + row * option_stencil_row_stride,
+                                          width) == 0;
+        }
+        if (metal_option_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_option_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_depth_option_buffer.contents, adapter_depth_option_buffer.contents,
+                   option_depth_byte_count) != 0 || !option_stencil_match) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 blit option mismatch\n");
+            fail_with_error("native depth/stencil option error", metal_option_command_buffer.error);
+            fail_with_error("adapter depth/stencil option error", adapter_option_command_buffer.error);
+            return 152;
+        }
+
+        /* Exercise the inverse option direction as well. The source buffer
+         * is deliberately padded to the combined texel width for the
+         * stencil component; only the selected component is written back to
+         * the ZPU-owned combined texture, then read through the same native
+         * oracle path. */
+        for (NSUInteger index = 0; index < width * height; ++index) {
+            const float value = 0.125f + (float)(index % 11) / 16.0f;
+            memcpy((uint8_t *)metal_depth_option_buffer.contents + index * sizeof(float), &value, sizeof(value));
+            memcpy((uint8_t *)adapter_depth_option_buffer.contents + index * sizeof(float), &value, sizeof(value));
+        }
+        memset(metal_stencil_option_buffer.contents, 0, option_stencil_byte_count);
+        memset(adapter_stencil_option_buffer.contents, 0, option_stencil_byte_count);
+        for (NSUInteger row = 0; row < height; ++row) {
+            for (NSUInteger column = 0; column < width; ++column) {
+                const uint8_t value = (uint8_t)(row * width + column + 17);
+                ((uint8_t *)metal_stencil_option_buffer.contents)[row * option_stencil_row_stride + column] = value;
+                ((uint8_t *)adapter_stencil_option_buffer.contents)[row * option_stencil_row_stride + column] = value;
+            }
+        }
+        id<MTLTexture> metal_upload_texture = [device newTextureWithDescriptor:metal_depth_stencil_texture_descriptor];
+        id<MTLTexture> adapter_upload_texture = [adapter_device newTextureWithDescriptor:adapter_depth_stencil_texture_descriptor];
+        id<MTLBuffer> metal_upload_depth_readback =
+            [device newBufferWithLength:option_depth_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_upload_depth_readback =
+            [adapter_device newBufferWithLength:option_depth_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> metal_upload_stencil_readback =
+            [device newBufferWithLength:option_stencil_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_upload_stencil_readback =
+            [adapter_device newBufferWithLength:option_stencil_byte_count options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> metal_upload_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> metal_upload_blit = [metal_upload_command_buffer blitCommandEncoder];
+        id<MTLCommandBuffer> adapter_upload_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_upload_blit = [adapter_upload_command_buffer blitCommandEncoder];
+        if (metal_upload_texture == nil || adapter_upload_texture == nil || metal_upload_depth_readback == nil ||
+            adapter_upload_depth_readback == nil || metal_upload_stencil_readback == nil ||
+            adapter_upload_stencil_readback == nil || metal_upload_command_buffer == nil || metal_upload_blit == nil ||
+            adapter_upload_command_buffer == nil || adapter_upload_blit == nil) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 inverse option allocation failed\n");
+            return 153;
+        }
+        [metal_upload_blit copyFromBuffer:metal_depth_option_buffer sourceOffset:0
+                        sourceBytesPerRow:width * sizeof(float) sourceBytesPerImage:0
+                               sourceSize:MTLSizeMake(width, height, 1) toTexture:metal_upload_texture
+                         destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)
+                                  options:MTLBlitOptionDepthFromDepthStencil];
+        [metal_upload_blit copyFromBuffer:metal_stencil_option_buffer sourceOffset:0
+                        sourceBytesPerRow:option_stencil_row_stride sourceBytesPerImage:0
+                               sourceSize:MTLSizeMake(width, height, 1) toTexture:metal_upload_texture
+                         destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)
+                                  options:MTLBlitOptionStencilFromDepthStencil];
+        [metal_upload_blit copyFromTexture:metal_upload_texture sourceSlice:0 sourceLevel:0
+                              sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                                   toBuffer:metal_upload_depth_readback destinationOffset:0
+                       destinationBytesPerRow:width * sizeof(float) destinationBytesPerImage:0
+                                  options:MTLBlitOptionDepthFromDepthStencil];
+        [metal_upload_blit copyFromTexture:metal_upload_texture sourceSlice:0 sourceLevel:0
+                              sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                                   toBuffer:metal_upload_stencil_readback destinationOffset:0
+                       destinationBytesPerRow:option_stencil_row_stride destinationBytesPerImage:0
+                                  options:MTLBlitOptionStencilFromDepthStencil];
+        [metal_upload_blit endEncoding];
+        [metal_upload_command_buffer commit];
+        [metal_upload_command_buffer waitUntilCompleted];
+        [adapter_upload_blit copyFromBuffer:adapter_depth_option_buffer sourceOffset:0
+                         sourceBytesPerRow:width * sizeof(float) sourceBytesPerImage:0
+                                sourceSize:MTLSizeMake(width, height, 1) toTexture:adapter_upload_texture
+                          destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)
+                                   options:MTLBlitOptionDepthFromDepthStencil];
+        [adapter_upload_blit copyFromBuffer:adapter_stencil_option_buffer sourceOffset:0
+                         sourceBytesPerRow:option_stencil_row_stride sourceBytesPerImage:0
+                                sourceSize:MTLSizeMake(width, height, 1) toTexture:adapter_upload_texture
+                          destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)
+                                   options:MTLBlitOptionStencilFromDepthStencil];
+        [adapter_upload_blit copyFromTexture:adapter_upload_texture sourceSlice:0 sourceLevel:0
+                               sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                                    toBuffer:adapter_upload_depth_readback destinationOffset:0
+                        destinationBytesPerRow:width * sizeof(float) destinationBytesPerImage:0
+                                   options:MTLBlitOptionDepthFromDepthStencil];
+        [adapter_upload_blit copyFromTexture:adapter_upload_texture sourceSlice:0 sourceLevel:0
+                               sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                                    toBuffer:adapter_upload_stencil_readback destinationOffset:0
+                        destinationBytesPerRow:option_stencil_row_stride destinationBytesPerImage:0
+                                   options:MTLBlitOptionStencilFromDepthStencil];
+        [adapter_upload_blit endEncoding];
+        [adapter_upload_command_buffer commit];
+        [adapter_upload_command_buffer waitUntilCompleted];
+        if (metal_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_upload_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(metal_upload_depth_readback.contents, adapter_upload_depth_readback.contents,
+                   option_depth_byte_count) != 0 ||
+            memcmp(metal_upload_stencil_readback.contents, adapter_upload_stencil_readback.contents,
+                   option_stencil_byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: Depth32Float_Stencil8 inverse blit option mismatch\n");
+            fail_with_error("native inverse depth/stencil option error", metal_upload_command_buffer.error);
+            fail_with_error("adapter inverse depth/stencil option error", adapter_upload_command_buffer.error);
+            return 154;
+        }
+
         /* Depth bounds are a fixed-function test on the interpolated depth
          * value. The current M4 Metal runtime traps when the SDK 26 native
          * selector is called, so the native oracle uses an equivalent

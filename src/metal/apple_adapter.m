@@ -13004,6 +13004,178 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     return operation != nil && [owner appendDeferredOperation:operation];
 }
 
+static BOOL zpu_depth_stencil_copy_component(MTLPixelFormat format, MTLBlitOption options,
+                                             NSUInteger *sourceBytesPerPixel, NSUInteger *componentOffset,
+                                             NSUInteger *componentBytes) {
+    if (sourceBytesPerPixel == NULL || componentOffset == NULL || componentBytes == NULL ||
+        (options & ~(MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil)) != 0 ||
+        (options != MTLBlitOptionDepthFromDepthStencil && options != MTLBlitOptionStencilFromDepthStencil)) return NO;
+    if (format == MTLPixelFormatDepth32Float_Stencil8) {
+        *sourceBytesPerPixel = 8;
+        *componentOffset = options == MTLBlitOptionDepthFromDepthStencil ? 0 : 4;
+        *componentBytes = options == MTLBlitOptionDepthFromDepthStencil ? 4 : 1;
+        return YES;
+    }
+    if (options == MTLBlitOptionStencilFromDepthStencil && format == MTLPixelFormatX32_Stencil8) {
+        *sourceBytesPerPixel = 8;
+        *componentOffset = 4;
+        *componentBytes = 1;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL zpu_defer_depth_stencil_copy(ZPUCommandBuffer *owner, ZPUTexture *source,
+                                         NSUInteger sourceSlice, NSUInteger sourceLevel,
+                                         MTLOrigin sourceOrigin, MTLSize sourceSize,
+                                         ZPUBuffer *destination, NSUInteger destinationOffset,
+                                         NSUInteger destinationBytesPerRow, NSUInteger destinationBytesPerImage,
+                                         MTLBlitOption options) {
+    if (owner == nil || source == nil || destination == nil ||
+        !zpu_texture_belongs_to_device([owner device], source) ||
+        !zpu_buffer_belongs_to_device([owner device], destination) || !zpu_region_fits(MTLRegionMake3D(
+            sourceOrigin.x, sourceOrigin.y, sourceOrigin.z, sourceSize.width, sourceSize.height, sourceSize.depth))) return NO;
+    NSUInteger sourceBytesPerPixel = 0;
+    NSUInteger componentOffset = 0;
+    NSUInteger componentBytes = 0;
+    if (!zpu_depth_stencil_copy_component(source->_pixelFormat, options, &sourceBytesPerPixel,
+                                          &componentOffset, &componentBytes) || sourceLevel >= source.mipmapLevelCount ||
+        sourceSize.width == 0 || sourceSize.height == 0 || sourceSize.depth == 0) return NO;
+    const BOOL is3D = zpu_texture_type_is_3d(source->_textureType);
+    if (is3D) {
+        const NSUInteger levelDepth = zpu_texture_depth_at_level(source, sourceLevel);
+        if (sourceSlice != 0 || levelDepth == 0 || sourceOrigin.z > levelDepth ||
+            sourceSize.depth > levelDepth - sourceOrigin.z) return NO;
+    } else if (sourceSize.depth != 1 || sourceSlice >= zpu_texture_transfer_slice_count(source)) return NO;
+    if (sourceSize.width > SIZE_MAX / componentBytes) return NO;
+    const NSUInteger rowBytes = sourceSize.width * componentBytes;
+    const NSUInteger rowStride = destinationBytesPerRow == 0 ? rowBytes : destinationBytesPerRow;
+    if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) return NO;
+    const NSUInteger minimumImageStride = rowStride * sourceSize.height;
+    const NSUInteger imageStride = destinationBytesPerImage == 0 ? minimumImageStride : destinationBytesPerImage;
+    if (is3D && sourceSize.depth > 1 && imageStride < minimumImageStride) return NO;
+    if (is3D && sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) return NO;
+    if (sourceSize.width > SIZE_MAX / sourceBytesPerPixel ||
+        (sourceSize.height != 0 && sourceSize.width * sourceBytesPerPixel > SIZE_MAX / sourceSize.height)) return NO;
+    const NSUInteger sourceRowBytes = sourceSize.width * sourceBytesPerPixel;
+    const NSUInteger sourceLength = sourceRowBytes * sourceSize.height;
+    ZPUTexture *retainedSource = source;
+    ZPUBuffer *retainedDestination = destination;
+    if (!zpu_defer_operation(owner, ^BOOL {
+        for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
+            zpu_metal_texture *sourceTexture = [retainedSource zpuTextureAtLevel:sourceLevel
+                                                                            slice:is3D ? sourceOrigin.z + plane : sourceSlice];
+            if (sourceTexture == NULL) return NO;
+            NSMutableData *sourceData = [NSMutableData dataWithLength:sourceLength];
+            if (sourceData == nil || zpu_metal_texture_get_bytes(sourceTexture, sourceData.mutableBytes,
+                    sourceData.length, sourceRowBytes, zpu_region(MTLRegionMake3D(
+                        sourceOrigin.x, sourceOrigin.y, 0, sourceSize.width, sourceSize.height, 1))) != ZPU_METAL_OK) return NO;
+            NSMutableData *componentRow = [NSMutableData dataWithLength:rowBytes];
+            if (componentRow == nil) return NO;
+            for (NSUInteger row = 0; row < sourceSize.height; ++row) {
+                const uint8_t *sourceRow = (const uint8_t *)sourceData.bytes + row * sourceRowBytes;
+                uint8_t *destinationRow = (uint8_t *)componentRow.mutableBytes;
+                for (NSUInteger column = 0; column < sourceSize.width; ++column) {
+                    memcpy(destinationRow + column * componentBytes,
+                           sourceRow + column * sourceBytesPerPixel + componentOffset, componentBytes);
+                }
+                if (destinationOffset > SIZE_MAX - plane * imageStride ||
+                    destinationOffset + plane * imageStride > SIZE_MAX - row * rowStride ||
+                    zpu_metal_buffer_write(retainedDestination->_zpuBuffer,
+                        destinationOffset + plane * imageStride + row * rowStride,
+                        componentRow.bytes, rowBytes) != ZPU_METAL_OK) return NO;
+            }
+        }
+        return YES;
+    })) return NO;
+    return YES;
+}
+
+static BOOL zpu_defer_depth_stencil_upload(ZPUCommandBuffer *owner, ZPUBuffer *source,
+                                           NSUInteger sourceOffset, NSUInteger sourceBytesPerRow,
+                                           NSUInteger sourceBytesPerImage, MTLSize sourceSize,
+                                           ZPUTexture *destination, NSUInteger destinationSlice,
+                                           NSUInteger destinationLevel, MTLOrigin destinationOrigin,
+                                           MTLBlitOption options) {
+    if (owner == nil || source == nil || destination == nil ||
+        !zpu_buffer_belongs_to_device([owner device], source) ||
+        !zpu_texture_belongs_to_device([owner device], destination) || !zpu_region_fits(MTLRegionMake3D(
+            destinationOrigin.x, destinationOrigin.y, destinationOrigin.z,
+            sourceSize.width, sourceSize.height, sourceSize.depth))) return NO;
+    NSUInteger destinationBytesPerPixel = 0;
+    NSUInteger componentOffset = 0;
+    NSUInteger componentBytes = 0;
+    if (!zpu_depth_stencil_copy_component(destination->_pixelFormat, options, &destinationBytesPerPixel,
+                                          &componentOffset, &componentBytes) || destinationLevel >= destination.mipmapLevelCount ||
+        sourceSize.width == 0 || sourceSize.height == 0 || sourceSize.depth == 0) return NO;
+    const BOOL is3D = zpu_texture_type_is_3d(destination->_textureType);
+    zpu_metal_texture *destinationTexture = NULL;
+    if (is3D) {
+        const NSUInteger levelDepth = zpu_texture_depth_at_level(destination, destinationLevel);
+        if (destinationSlice != 0 || levelDepth == 0 || destinationOrigin.z > levelDepth ||
+            sourceSize.depth > levelDepth - destinationOrigin.z) return NO;
+        destinationTexture = [destination zpuTextureAtLevel:destinationLevel slice:destinationOrigin.z];
+    } else {
+        if (destinationOrigin.z != 0 || sourceSize.depth != 1 ||
+            destinationSlice >= zpu_texture_transfer_slice_count(destination)) return NO;
+        destinationTexture = [destination zpuTextureAtLevel:destinationLevel slice:destinationSlice];
+    }
+    if (destinationTexture == NULL || destinationOrigin.x > zpu_metal_texture_width(destinationTexture) ||
+        destinationOrigin.y > zpu_metal_texture_height(destinationTexture) ||
+        sourceSize.width > zpu_metal_texture_width(destinationTexture) - destinationOrigin.x ||
+        sourceSize.height > zpu_metal_texture_height(destinationTexture) - destinationOrigin.y ||
+        sourceSize.width > SIZE_MAX / componentBytes) return NO;
+    const NSUInteger rowBytes = sourceSize.width * componentBytes;
+    const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
+    if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) return NO;
+    const NSUInteger minimumImageStride = rowStride * sourceSize.height;
+    const NSUInteger imageStride = sourceBytesPerImage == 0 ? minimumImageStride : sourceBytesPerImage;
+    if (is3D && sourceSize.depth > 1 && imageStride < minimumImageStride) return NO;
+    NSUInteger sourceLastPlane = 0;
+    if (is3D && sourceSize.depth > 1) {
+        if (imageStride > SIZE_MAX / (sourceSize.depth - 1)) return NO;
+        sourceLastPlane = (sourceSize.depth - 1) * imageStride;
+    }
+    if (sourceOffset > source.length) return NO;
+    if (sourceOffset > SIZE_MAX - sourceLastPlane || sourceOffset + sourceLastPlane > source.length) return NO;
+    if (source.length < rowBytes || sourceOffset + sourceLastPlane > source.length - rowBytes) return NO;
+    const NSUInteger sourceLastRow = (sourceSize.height - 1) * rowStride;
+    if (sourceOffset + sourceLastPlane > SIZE_MAX - sourceLastRow || sourceOffset + sourceLastPlane + sourceLastRow > source.length - rowBytes) return NO;
+    if (sourceSize.width > SIZE_MAX / destinationBytesPerPixel ||
+        (sourceSize.height != 0 && sourceSize.width * destinationBytesPerPixel > SIZE_MAX / sourceSize.height)) return NO;
+    const NSUInteger destinationRowBytes = sourceSize.width * destinationBytesPerPixel;
+    const NSUInteger destinationLength = destinationRowBytes * sourceSize.height;
+    ZPUBuffer *retainedSource = source;
+    ZPUTexture *retainedDestination = destination;
+    if (!zpu_defer_operation(owner, ^BOOL {
+        const uint8_t *sourceBytes = (const uint8_t *)zpu_metal_buffer_contents(retainedSource->_zpuBuffer);
+        if (sourceBytes == NULL) return NO;
+        for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
+            zpu_metal_texture *destinationAtLevel = [retainedDestination zpuTextureAtLevel:destinationLevel
+                                                                                       slice:is3D ? destinationOrigin.z + plane : destinationSlice];
+            if (destinationAtLevel == NULL) return NO;
+            NSMutableData *destinationData = [NSMutableData dataWithLength:destinationLength];
+            if (destinationData == nil || zpu_metal_texture_get_bytes(destinationAtLevel, destinationData.mutableBytes,
+                    destinationData.length, destinationRowBytes, zpu_region(MTLRegionMake3D(
+                        destinationOrigin.x, destinationOrigin.y, 0, sourceSize.width, sourceSize.height, 1))) != ZPU_METAL_OK) return NO;
+            for (NSUInteger row = 0; row < sourceSize.height; ++row) {
+                const uint8_t *sourceRow = sourceBytes + sourceOffset + plane * imageStride + row * rowStride;
+                uint8_t *destinationRow = (uint8_t *)destinationData.mutableBytes + row * destinationRowBytes;
+                for (NSUInteger column = 0; column < sourceSize.width; ++column) {
+                    memcpy(destinationRow + column * destinationBytesPerPixel + componentOffset,
+                           sourceRow + column * componentBytes, componentBytes);
+                }
+            }
+            if (zpu_metal_texture_replace_region(destinationAtLevel,
+                    zpu_region(MTLRegionMake3D(destinationOrigin.x, destinationOrigin.y, 0,
+                                                sourceSize.width, sourceSize.height, 1)),
+                    destinationData.bytes, destinationData.length, destinationRowBytes) != ZPU_METAL_OK) return NO;
+        }
+        return YES;
+    })) return NO;
+    return YES;
+}
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_tensor_encode_packed_copy_slice(
     ZPUTensor *source, MTLTensorExtents *sourceOrigin, MTLTensorExtents *sourceDimensions,
@@ -15236,6 +15408,21 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     _stages |= MTLStageBlit;
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options {
+    const MTLBlitOption componentOptions = MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil;
+    if ((options & componentOptions) != 0) {
+        ZPUTexture *source = (ZPUTexture *)sourceTexture;
+        ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
+        if (!_owner->_recording || !zpu_defer_depth_stencil_copy(_owner->_legacyBuffer, source, sourceSlice, sourceLevel,
+                                                                 sourceOrigin, sourceSize, destination, destinationOffset,
+                                                                 destinationBytesPerRow, destinationBytesPerImage, options)) {
+            [_owner markError];
+        } else {
+            [_owner->_legacyBuffer retainResource:source];
+            [_owner->_legacyBuffer retainResource:destination];
+            _stages |= MTLStageBlit;
+        }
+        return;
+    }
     if (options != MTLBlitOptionNone) { [_owner markError]; return; }
     [self copyFromTexture:sourceTexture sourceSlice:sourceSlice sourceLevel:sourceLevel sourceOrigin:sourceOrigin sourceSize:sourceSize toBuffer:destinationBuffer destinationOffset:destinationOffset destinationBytesPerRow:destinationBytesPerRow destinationBytesPerImage:destinationBytesPerImage];
 }
@@ -15310,6 +15497,22 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     _stages |= MTLStageBlit;
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options {
+    const MTLBlitOption componentOptions = MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil;
+    if ((options & componentOptions) != 0) {
+        ZPUBuffer *source = (ZPUBuffer *)sourceBuffer;
+        ZPUTexture *destination = (ZPUTexture *)destinationTexture;
+        if (!_owner->_recording || !zpu_defer_depth_stencil_upload(_owner->_legacyBuffer, source, sourceOffset,
+                                                                  sourceBytesPerRow, sourceBytesPerImage, sourceSize,
+                                                                  destination, destinationSlice, destinationLevel,
+                                                                  destinationOrigin, options)) {
+            [_owner markError];
+        } else {
+            [_owner->_legacyBuffer retainResource:source];
+            [_owner->_legacyBuffer retainResource:destination];
+            _stages |= MTLStageBlit;
+        }
+        return;
+    }
     if (options != MTLBlitOptionNone) { [_owner markError]; return; }
     [self copyFromBuffer:sourceBuffer sourceOffset:sourceOffset sourceBytesPerRow:sourceBytesPerRow sourceBytesPerImage:sourceBytesPerImage sourceSize:sourceSize toTexture:destinationTexture destinationSlice:destinationSlice destinationLevel:destinationLevel destinationOrigin:destinationOrigin];
 }
@@ -17255,7 +17458,20 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
     if (zpu_metal_blit_encoder_copy_buffer_to_texture(_zpuEncoder, source->_zpuBuffer, sourceOffset, sourceBytesPerRow, destinationTextureAtLevel, zpu_region(region)) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)copyFromBuffer:(id<MTLBuffer>)sourceBuffer sourceOffset:(NSUInteger)sourceOffset sourceBytesPerRow:(NSUInteger)sourceBytesPerRow sourceBytesPerImage:(NSUInteger)sourceBytesPerImage sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin options:(MTLBlitOption)options API_AVAILABLE(macos(10.11), ios(9.0)) {
-    (void)options;
+    ZPUBuffer *source = (ZPUBuffer *)sourceBuffer;
+    ZPUTexture *destination = (ZPUTexture *)destinationTexture;
+    const MTLBlitOption componentOptions = MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil;
+    if ((options & componentOptions) != 0) {
+        if (!zpu_defer_depth_stencil_upload(_owner, source, sourceOffset, sourceBytesPerRow,
+                                            sourceBytesPerImage, sourceSize, destination, destinationSlice,
+                                            destinationLevel, destinationOrigin, options)) {
+            [_owner markError];
+        } else {
+            [_owner retainResource:source];
+            [_owner retainResource:destination];
+        }
+        return;
+    }
     [self copyFromBuffer:sourceBuffer sourceOffset:sourceOffset sourceBytesPerRow:sourceBytesPerRow sourceBytesPerImage:sourceBytesPerImage sourceSize:sourceSize toTexture:destinationTexture destinationSlice:destinationSlice destinationLevel:destinationLevel destinationOrigin:destinationOrigin];
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage {
@@ -17296,7 +17512,20 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
     if (zpu_metal_blit_encoder_copy_texture_to_buffer(_zpuEncoder, sourceTextureAtLevel, zpu_region(region), destination->_zpuBuffer, destinationOffset, destinationBytesPerRow) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage options:(MTLBlitOption)options API_AVAILABLE(macos(10.11), ios(9.0)) {
-    (void)options;
+    ZPUTexture *source = (ZPUTexture *)sourceTexture;
+    ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
+    const MTLBlitOption componentOptions = MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil;
+    if ((options & componentOptions) != 0) {
+        if (!zpu_defer_depth_stencil_copy(_owner, source, sourceSlice, sourceLevel, sourceOrigin, sourceSize,
+                                          destination, destinationOffset, destinationBytesPerRow,
+                                          destinationBytesPerImage, options)) {
+            [_owner markError];
+        } else {
+            [_owner retainResource:source];
+            [_owner retainResource:destination];
+        }
+        return;
+    }
     [self copyFromTexture:sourceTexture sourceSlice:sourceSlice sourceLevel:sourceLevel sourceOrigin:sourceOrigin sourceSize:sourceSize toBuffer:destinationBuffer destinationOffset:destinationOffset destinationBytesPerRow:destinationBytesPerRow destinationBytesPerImage:destinationBytesPerImage];
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toTexture:(id<MTLTexture>)destinationTexture destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel destinationOrigin:(MTLOrigin)destinationOrigin {
