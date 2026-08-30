@@ -462,6 +462,10 @@ const TileCommand = struct {
     threads_per_tile: abi.Size,
     color_attachment_map: [8]u8,
     options: raster3d.DrawOptions,
+    visibility_buffer: ?*Buffer = null,
+    visibility_mode: abi.VisibilityResultMode = .disabled,
+    visibility_offset: usize = 0,
+    visibility_result_type: abi.VisibilityResultType = .reset,
 };
 
 const MeshCommand = struct {
@@ -472,6 +476,10 @@ const MeshCommand = struct {
     threads_per_mesh_threadgroup: abi.Size,
     color_attachment_map: [8]u8,
     options: raster3d.DrawOptions,
+    visibility_buffer: ?*Buffer = null,
+    visibility_mode: abi.VisibilityResultMode = .disabled,
+    visibility_offset: usize = 0,
+    visibility_result_type: abi.VisibilityResultType = .reset,
     indirect_buffer: ?*Buffer = null,
     indirect_buffer_offset: usize = 0,
 };
@@ -1525,6 +1533,8 @@ pub const CommandBuffer = struct {
             },
             .tile => |tile| {
                 if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
+                sparseSyncOptionalBuffer(tile.visibility_buffer);
+                defer sparseFlushOptionalBuffer(tile.visibility_buffer);
                 const target_handle = active_target orelse return self.fail(error.InvalidCommand);
                 if (!validTexture(target_handle) or target_handle != tile.target) return self.fail(error.InvalidResource);
                 validateColorAttachmentOutputs(active_color_attachments, tile.color_attachment_map, 1) catch |err| return self.fail(err);
@@ -1570,6 +1580,7 @@ pub const CommandBuffer = struct {
                 const y0 = @min(@as(usize, tile_options.scissor.y), @as(usize, target_handle.height));
                 const x1 = @min(x0 +| @as(usize, tile_options.scissor.width), @as(usize, target_handle.width));
                 const y1 = @min(y0 +| @as(usize, tile_options.scissor.height), @as(usize, target_handle.height));
+                var stats: raster3d.Stats = .{};
                 for (0..layer_count) |layer| {
                     const layer_texture = if (active_array_target_count > 1)
                         active_array_color_attachments[output_index][layer] orelse return self.fail(error.InvalidResource)
@@ -1594,22 +1605,43 @@ pub const CommandBuffer = struct {
                                         active_stencil_array_values[layer]
                                     else
                                         active_stencil;
-                                    _ = raster3d.writePoint(&target, depth_values, stencil_values, x, y, 0.5, .{
+                                    stats = addRasterStats(stats, raster3d.writePoint(&target, depth_values, stencil_values, x, y, 0.5, .{
                                         (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
                                         (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
                                         0.25,
                                         1.0,
-                                    }, tile_options);
+                                    }, tile_options));
                                 }
                             }
                         }
                     }
                 }
+                if (tile.visibility_mode != .disabled) {
+                    const visibility_buffer = tile.visibility_buffer orelse return self.fail(error.InvalidResource);
+                    if (!validBuffer(visibility_buffer) or visibility_buffer.device != self.queue.device or
+                        !rangeValid(visibility_buffer.bytes.len, tile.visibility_offset, @sizeOf(u64)))
+                        return self.fail(error.InvalidArgument);
+                    if (tile.visibility_result_type == .reset and
+                        !visibilitySlotSeen(reset_visibility_slots.items, visibility_buffer, tile.visibility_offset))
+                    {
+                        writeU64Little(visibility_buffer.bytes, tile.visibility_offset, 0);
+                        reset_visibility_slots.append(allocator, .{ .buffer = visibility_buffer, .offset = tile.visibility_offset }) catch return self.fail(error.OutOfMemory);
+                    }
+                    const previous = readU64Little(visibility_buffer.bytes, tile.visibility_offset);
+                    const result = switch (tile.visibility_mode) {
+                        .disabled => unreachable,
+                        .boolean => @max(previous, if (stats.fragments_covered != 0) @as(u64, 1) else 0),
+                        .counting => previous +| stats.fragments_covered,
+                    };
+                    writeU64Little(visibility_buffer.bytes, tile.visibility_offset, result);
+                }
             },
             .mesh => |mesh| {
                 if (active_sample_count > 1) return self.fail(error.UnsupportedOperation);
                 sparseSyncOptionalBuffer(mesh.indirect_buffer);
+                sparseSyncOptionalBuffer(mesh.visibility_buffer);
                 defer sparseFlushOptionalBuffer(mesh.indirect_buffer);
+                defer sparseFlushOptionalBuffer(mesh.visibility_buffer);
                 var resolved_mesh = mesh;
                 if (mesh.indirect_buffer) |indirect_buffer| {
                     if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
@@ -1661,15 +1693,35 @@ pub const CommandBuffer = struct {
                 // retaining depth/stencil/blend/write-mask state.
                 mesh_options.write_extra_targets = false;
                 mesh_options.color_attachment_map[0] = 0;
+                var stats: raster3d.Stats = .{};
                 for (y0..y1) |y| {
                     for (x0..x1) |x| {
-                        _ = raster3d.writePoint(&target, active_depth, active_stencil, x, y, 0.5, .{
+                        stats = addRasterStats(stats, raster3d.writePoint(&target, active_depth, active_stencil, x, y, 0.5, .{
                             (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
                             (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
                             0.25,
                             1.0,
-                        }, mesh_options);
+                        }, mesh_options));
                     }
+                }
+                if (resolved_mesh.visibility_mode != .disabled) {
+                    const visibility_buffer = resolved_mesh.visibility_buffer orelse return self.fail(error.InvalidResource);
+                    if (!validBuffer(visibility_buffer) or visibility_buffer.device != self.queue.device or
+                        !rangeValid(visibility_buffer.bytes.len, resolved_mesh.visibility_offset, @sizeOf(u64)))
+                        return self.fail(error.InvalidArgument);
+                    if (resolved_mesh.visibility_result_type == .reset and
+                        !visibilitySlotSeen(reset_visibility_slots.items, visibility_buffer, resolved_mesh.visibility_offset))
+                    {
+                        writeU64Little(visibility_buffer.bytes, resolved_mesh.visibility_offset, 0);
+                        reset_visibility_slots.append(allocator, .{ .buffer = visibility_buffer, .offset = resolved_mesh.visibility_offset }) catch return self.fail(error.OutOfMemory);
+                    }
+                    const previous = readU64Little(visibility_buffer.bytes, resolved_mesh.visibility_offset);
+                    const result = switch (resolved_mesh.visibility_mode) {
+                        .disabled => unreachable,
+                        .boolean => @max(previous, if (stats.fragments_covered != 0) @as(u64, 1) else 0),
+                        .counting => previous +| stats.fragments_covered,
+                    };
+                    writeU64Little(visibility_buffer.bytes, resolved_mesh.visibility_offset, result);
                 }
             },
             .patch => |patch| {
@@ -3389,6 +3441,10 @@ pub const RenderEncoder = struct {
             .threads_per_tile = threads_per_tile,
             .color_attachment_map = self.color_attachment_map,
             .options = self.options(),
+            .visibility_buffer = self.visibility_buffer,
+            .visibility_mode = self.visibility_mode,
+            .visibility_offset = self.visibility_offset,
+            .visibility_result_type = self.visibility_result_type,
         } });
     }
 
@@ -3426,6 +3482,10 @@ pub const RenderEncoder = struct {
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
             .options = self.options(),
+            .visibility_buffer = self.visibility_buffer,
+            .visibility_mode = self.visibility_mode,
+            .visibility_offset = self.visibility_offset,
+            .visibility_result_type = self.visibility_result_type,
         } });
     }
 
@@ -3478,6 +3538,10 @@ pub const RenderEncoder = struct {
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
             .options = self.options(),
+            .visibility_buffer = self.visibility_buffer,
+            .visibility_mode = self.visibility_mode,
+            .visibility_offset = self.visibility_offset,
+            .visibility_result_type = self.visibility_result_type,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
         } });
@@ -9388,6 +9452,37 @@ test "visibility results count CPU-covered fragments and accumulate" {
     destroyRenderEncoder(second_encoder);
     try second.commit();
     try std.testing.expectEqual(@as(u64, 32), readU64Little(visibility.bytes, 8));
+}
+
+test "tile and mesh visibility results count CPU-covered fragments" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 4, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const visibility = try createBuffer(device, 16, null);
+    defer destroyBuffer(visibility);
+    @memset(visibility.bytes, 0xa5);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    });
+    try encoder.setVisibilityResultBuffer(visibility);
+    try encoder.setVisibilityResultType(@intFromEnum(abi.VisibilityResultType.reset));
+    try encoder.setVisibilityResultMode(@intFromEnum(abi.VisibilityResultMode.counting), 0);
+    try encoder.dispatchThreadsPerTile(1, .{ .width = 2, .height = 2, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.setVisibilityResultMode(@intFromEnum(abi.VisibilityResultMode.boolean), 8);
+    try encoder.drawMeshThreadgroups(1, .{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqual(@as(u64, 16), readU64Little(visibility.bytes, 0));
+    try std.testing.expectEqual(@as(u64, 1), readU64Little(visibility.bytes, 8));
 }
 
 test "CPU sparse buffer mappings preserve deferred ordering, zeroing, and aliases" {

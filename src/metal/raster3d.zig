@@ -1541,8 +1541,8 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
 }
 
 /// Write one CPU-generated fragment through the same fixed-function path as
-/// ordinary rasterized primitives. The mesh profile uses this entry point
-/// when it needs depth, stencil, blending, or write-mask semantics;
+/// ordinary rasterized primitives. The bounded tile and mesh profiles use this
+/// entry point when they need depth, stencil, blending, or write-mask semantics;
 /// coordinates remain attachment-global and are never rebased.
 pub fn writePoint(target: *Target, depth: ?[]f32, stencil: ?[]u8, x: usize, y: usize, z: f32, color: [4]f32, options: DrawOptions) Stats {
     var job = Job{
