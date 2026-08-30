@@ -12137,7 +12137,6 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         }
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
-    BOOL hasTextureBinding = NO;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
         if (index > 1) {
             if (textureIDs[index] != 0) {
@@ -12146,17 +12145,16 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
             }
             continue;
         }
-        if (textureIDs[index] == 0) continue;
+        if (textureIDs[index] == 0) {
+            [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:index];
+            continue;
+        }
         id resource = zpu_resource_for_id(textureIDs[index]);
         if (![resource isKindOfClass:[ZPUTexture class]] || ((ZPUTexture *)resource)->_owner != _owner->_owner) {
             [_owner markError];
             return;
         }
         [_legacy setTexture:(id<MTLTexture>)resource atIndex:index];
-        hasTextureBinding = YES;
-    }
-    if (!hasTextureBinding && _argumentTable->_maxTextureBindCount != 0) {
-        [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:0];
     }
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
