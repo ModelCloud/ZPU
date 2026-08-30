@@ -10941,7 +10941,9 @@ pub export fn zpu_metal_render_encoder_set_multisample_depth_attachment_array_ta
     sample_count: usize,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setMultisampleDepthAttachmentArrayTargets(
-        sample_textures, array_count, sample_count,
+        sample_textures,
+        array_count,
+        sample_count,
     ) catch |err| return errorCode(err);
     return 0;
 }
@@ -10996,7 +10998,12 @@ pub export fn zpu_metal_render_encoder_set_multisample_stencil_attachment_array_
     clear_value: u8,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setMultisampleStencilAttachmentArrayTargets(
-        sample_textures, array_count, sample_count, load_action, store_action, clear_value,
+        sample_textures,
+        array_count,
+        sample_count,
+        load_action,
+        store_action,
+        clear_value,
     ) catch |err| return errorCode(err);
     return 0;
 }

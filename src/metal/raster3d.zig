@@ -990,8 +990,7 @@ pub const Target = struct {
                     (clearPackedU2(color[3]) << 30);
                 writePacked32(row_bytes, offset, bits);
             },
-            else => self.writeColorWithSrgbEncoding(
-                x, y, color, @intFromEnum(abi.ColorWriteMask.all), .fixed_point, .nearest_up),
+            else => self.writeColorWithSrgbEncoding(x, y, color, @intFromEnum(abi.ColorWriteMask.all), .fixed_point, .nearest_up),
         }
     }
 
