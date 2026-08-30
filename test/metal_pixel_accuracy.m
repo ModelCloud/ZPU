@@ -1266,6 +1266,192 @@ static int test_multisample_depth_stencil_against_native(
     return 0;
 }
 
+static int test_metal4_multisample_depth_stencil_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTL4Compiler> adapter_compiler, MTL4RenderPipelineDescriptor *adapter_base_pipeline_descriptor,
+    id<MTL4CommandAllocator> adapter_allocator, id<MTL4CommandQueue> adapter_queue) {
+    enum { width = 9, height = 7, byte_count = width * height * 4 };
+    const NSUInteger sample_counts[] = {2, 4};
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.75f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f, -1.0f, 0.75f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.75f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f, -1.0f, 0.75f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.75f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.75f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{-0.2f, -0.2f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{ 0.8f, -0.2f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{ 0.8f,  0.8f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{-0.2f, -0.2f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{ 0.8f,  0.8f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{-0.2f,  0.8f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+    };
+    for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
+        const NSUInteger sample_count = sample_counts[sample_index];
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+        native_pipeline_descriptor.rasterSampleCount = sample_count;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_pipeline_descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        native_pipeline_descriptor.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+        MTL4RenderPipelineDescriptor *adapter_pipeline_descriptor = [adapter_base_pipeline_descriptor copy];
+        adapter_pipeline_descriptor.rasterSampleCount = sample_count;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_compiler newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor
+                                                   compilerTaskOptions:nil error:&adapter_error];
+        MTLDepthStencilDescriptor *depth_stencil_descriptor = [MTLDepthStencilDescriptor new];
+        depth_stencil_descriptor.depthCompareFunction = MTLCompareFunctionLessEqual;
+        depth_stencil_descriptor.depthWriteEnabled = YES;
+        MTLStencilDescriptor *stencil_descriptor = [MTLStencilDescriptor new];
+        stencil_descriptor.stencilCompareFunction = MTLCompareFunctionAlways;
+        stencil_descriptor.stencilFailureOperation = MTLStencilOperationKeep;
+        stencil_descriptor.depthFailureOperation = MTLStencilOperationKeep;
+        stencil_descriptor.depthStencilPassOperation = MTLStencilOperationReplace;
+        stencil_descriptor.readMask = 0xff;
+        stencil_descriptor.writeMask = 0xff;
+        depth_stencil_descriptor.frontFaceStencil = stencil_descriptor;
+        depth_stencil_descriptor.backFaceStencil = stencil_descriptor;
+        id<MTLDepthStencilState> native_depth_stencil_state =
+            [native_device newDepthStencilStateWithDescriptor:depth_stencil_descriptor];
+        id<MTLDepthStencilState> adapter_depth_stencil_state =
+            [adapter_device newDepthStencilStateWithDescriptor:depth_stencil_descriptor];
+        MTLTextureDescriptor *color_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        color_descriptor.textureType = MTLTextureType2DMultisample;
+        color_descriptor.sampleCount = sample_count;
+        color_descriptor.storageMode = MTLStorageModePrivate;
+        color_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *resolve_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        resolve_descriptor.storageMode = MTLStorageModeShared;
+        resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *depth_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                                width:width height:height mipmapped:NO];
+        depth_descriptor.textureType = MTLTextureType2DMultisample;
+        depth_descriptor.sampleCount = sample_count;
+        depth_descriptor.storageMode = MTLStorageModePrivate;
+        depth_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_color = [native_device newTextureWithDescriptor:color_descriptor];
+        id<MTLTexture> native_resolve = [native_device newTextureWithDescriptor:resolve_descriptor];
+        id<MTLTexture> native_depth = [native_device newTextureWithDescriptor:depth_descriptor];
+        id<MTLTexture> adapter_color = [adapter_device newTextureWithDescriptor:color_descriptor];
+        id<MTLTexture> adapter_resolve = [adapter_device newTextureWithDescriptor:resolve_descriptor];
+        id<MTLTexture> adapter_depth = [adapter_device newTextureWithDescriptor:depth_descriptor];
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_depth_stencil_state == nil ||
+            adapter_depth_stencil_state == nil || native_color == nil || native_resolve == nil || native_depth == nil ||
+            adapter_color == nil || adapter_resolve == nil || adapter_depth == nil || native_buffer == nil ||
+            adapter_buffer == nil) {
+            fail_with_error("Metal 4 multisample allocation", adapter_error ?: native_error);
+            return 159;
+        }
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.colorAttachments[0].texture = native_color;
+        native_pass.colorAttachments[0].resolveTexture = native_resolve;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
+        native_pass.depthAttachment.texture = native_depth;
+        native_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        native_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        native_pass.depthAttachment.clearDepth = 1.0;
+        native_pass.stencilAttachment.texture = native_depth;
+        native_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        native_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        native_pass.stencilAttachment.clearStencil = 7;
+        const MTLSamplePosition sample_positions[4] = {
+            {0.125f, 0.125f}, {0.875f, 0.375f}, {0.375f, 0.875f}, {0.875f, 0.875f},
+        };
+        [native_pass setSamplePositions:sample_positions count:sample_count];
+        MTL4RenderPassDescriptor *adapter_pass = [MTL4RenderPassDescriptor new];
+        adapter_pass.colorAttachments[0].texture = adapter_color;
+        adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
+        adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        adapter_pass.colorAttachments[0].clearColor = native_pass.colorAttachments[0].clearColor;
+        adapter_pass.depthAttachment.texture = adapter_depth;
+        adapter_pass.depthAttachment.loadAction = MTLLoadActionClear;
+        adapter_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        adapter_pass.depthAttachment.clearDepth = 1.0;
+        adapter_pass.stencilAttachment.texture = adapter_depth;
+        adapter_pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        adapter_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        adapter_pass.stencilAttachment.clearStencil = 7;
+        [adapter_pass setSamplePositions:sample_positions count:sample_count];
+        id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTL4CommandBuffer> adapter_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_command_buffer beginCommandBufferWithAllocator:adapter_allocator];
+        id<MTL4RenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        MTL4ArgumentTableDescriptor *table_descriptor = [MTL4ArgumentTableDescriptor new];
+        table_descriptor.maxBufferBindCount = 1;
+        NSError *table_error = nil;
+        id<MTL4ArgumentTable> table =
+            [adapter_device newArgumentTableWithDescriptor:table_descriptor error:&table_error];
+        [table setAddress:adapter_buffer.gpuAddress atIndex:0];
+        if (native_encoder == nil || adapter_command_buffer == nil || adapter_encoder == nil || table == nil) {
+            fail_with_error("Metal 4 multisample encoder allocation", table_error ?: native_error);
+            return 160;
+        }
+        const MTLViewport viewport = {0.0, 0.0, width, height, 0.0, 1.0};
+        const MTLScissorRect scissor = {0, 0, width, height};
+        [native_encoder setViewport:viewport];
+        [native_encoder setScissorRect:scissor];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setDepthStencilState:native_depth_stencil_state];
+        [native_encoder setStencilReferenceValue:7];
+        [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [native_encoder endEncoding];
+        [adapter_encoder setViewport:viewport];
+        [adapter_encoder setScissorRect:scissor];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setDepthStencilState:adapter_depth_stencil_state];
+        [adapter_encoder setStencilReferenceValue:7];
+        [adapter_encoder setArgumentTable:table atStages:MTLRenderStageVertex];
+        [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_command_buffers[] = {adapter_command_buffer};
+        [adapter_queue commit:adapter_command_buffers count:1];
+        uint8_t native_pixels[byte_count] = {0};
+        uint8_t adapter_pixels[byte_count] = {0};
+        [native_resolve getBytes:native_pixels bytesPerRow:width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_resolve getBytes:adapter_pixels bytesPerRow:width * 4
+                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_pixels, adapter_pixels, sizeof(native_pixels)) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < sizeof(native_pixels) && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: Metal 4 %zux MSAA depth/stencil mismatch at byte %zu native=%u adapter=%u\n",
+                    sample_count, mismatch,
+                    mismatch < sizeof(native_pixels) ? native_pixels[mismatch] : 0,
+                    mismatch < sizeof(adapter_pixels) ? adapter_pixels[mismatch] : 0);
+            fail_with_error("native Metal 4 multisample error", native_command_buffer.error);
+            return 161;
+        }
+    }
+    return 0;
+}
+
 static int test_srgb_render_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -11758,6 +11944,10 @@ int main(void) {
             fail_with_error("Metal 4 CPU command submission failed", metal4_error);
             return 60;
         }
+        const int metal4_multisample_result = test_metal4_multisample_depth_stencil_against_native(
+            device, adapter_device, vertex_function, fragment_function, adapter_mtl4_compiler,
+            adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
+        if (metal4_multisample_result != 0) return metal4_multisample_result;
 
         /* Replacing an argument table must clear null entries. In particular,
          * a CPU encoder cannot retain a prior texture binding just because a
