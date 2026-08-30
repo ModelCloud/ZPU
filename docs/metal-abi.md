@@ -306,7 +306,9 @@ triangle path:
   buffers support finite column-major and row-major CPU transforms. Supported
   refits re-read those current matrix and geometry bytes. Legacy
   default/UserID and Metal 4 indirect instance descriptors flatten already-built
-  CPU triangle children with finite affine transforms, while motion instances,
+  CPU triangle children with finite affine transforms; legacy indirect
+  descriptors flatten resource-ID children while honoring their CPU-owned
+  instance-count buffer, while motion instances,
   curves, custom intersection functions, and arbitrary ray tracing remain
   fail-closed
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
