@@ -5802,6 +5802,74 @@ int main(void) {
             }
         }
 
+        /* Clipping happens in homogeneous clip space before the perspective
+         * divide. A projected-space-only implementation cannot safely handle
+         * an edge that crosses W=0, so keep this oracle sensitive to the
+         * clipper's W-aware intersection as well as Apple's top-left grid. */
+        const zpu_metal_vertex clip_volume_vertices[] = {
+            {{-0.65f, -0.70f, 0.50f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{ 0.65f, -0.70f, 0.50f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+            {{ 0.00f,  0.20f, -0.20f, -1.0f}, {0.0f, 0.0f, 0.25f, 1.0f}},
+        };
+        id<MTLBuffer> native_clip_volume_buffer =
+            [device newBufferWithBytes:clip_volume_vertices length:sizeof(clip_volume_vertices)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_clip_volume_buffer =
+            [adapter_device newBufferWithBytes:clip_volume_vertices length:sizeof(clip_volume_vertices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_clip_volume_texture = [device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_clip_volume_texture = [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *native_clip_volume_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_clip_volume_pass.colorAttachments[0].texture = native_clip_volume_texture;
+        native_clip_volume_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_clip_volume_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_clip_volume_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_clip_volume_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_clip_volume_encoder =
+            [native_clip_volume_command_buffer renderCommandEncoderWithDescriptor:native_clip_volume_pass];
+        [native_clip_volume_encoder setRenderPipelineState:pipeline];
+        [native_clip_volume_encoder setVertexBuffer:native_clip_volume_buffer offset:0 atIndex:0];
+        [native_clip_volume_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [native_clip_volume_encoder endEncoding];
+        MTLRenderPassDescriptor *adapter_clip_volume_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_clip_volume_pass.colorAttachments[0].texture = adapter_clip_volume_texture;
+        adapter_clip_volume_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_clip_volume_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_clip_volume_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_clip_volume_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_clip_volume_encoder =
+            [adapter_clip_volume_command_buffer renderCommandEncoderWithDescriptor:adapter_clip_volume_pass];
+        [adapter_clip_volume_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_clip_volume_encoder setVertexBuffer:adapter_clip_volume_buffer offset:0 atIndex:0];
+        [adapter_clip_volume_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [adapter_clip_volume_encoder endEncoding];
+        [native_clip_volume_command_buffer commit];
+        [native_clip_volume_command_buffer waitUntilCompleted];
+        [adapter_clip_volume_command_buffer commit];
+        [adapter_clip_volume_command_buffer waitUntilCompleted];
+        uint8_t native_clip_volume_pixels[byte_count];
+        uint8_t adapter_clip_volume_pixels[byte_count];
+        [native_clip_volume_texture getBytes:native_clip_volume_pixels bytesPerRow:(NSUInteger)width * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_clip_volume_texture getBytes:adapter_clip_volume_pixels bytesPerRow:(NSUInteger)width * 4
+                                     fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_clip_volume_buffer == nil || adapter_clip_volume_buffer == nil ||
+            native_clip_volume_texture == nil || adapter_clip_volume_texture == nil ||
+            native_clip_volume_encoder == nil || adapter_clip_volume_encoder == nil ||
+            native_clip_volume_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_clip_volume_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_clip_volume_pixels, adapter_clip_volume_pixels, byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_clip_volume_pixels[mismatch] == adapter_clip_volume_pixels[mismatch]) {
+                mismatch += 1;
+            }
+            fprintf(stderr, "metal-pixel: homogeneous clip mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                    mismatch,
+                    mismatch < byte_count ? native_clip_volume_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_clip_volume_pixels[mismatch] : 0);
+            return 154;
+        }
+
         /* Bound vertex resources are read when the draw executes. Mutating
          * native and ZPU-owned storage after encoding but before commit checks
          * the CPU adapter's deferred buffer-binding semantics. */

@@ -17,8 +17,8 @@ triangle path:
 - `clear` and clipped rectangle fill into RGBA8/BGRA8 surfaces, serialized on
   the submitting core
 - clip-space point, line, line-strip, triangle, and triangle-strip draws with
-  viewport, scissor, cull, winding, fill-mode, color interpolation, depth
-  bias/slope scale, and clip-vs-clamp depth behavior
+  homogeneous X/Y/W clipping, viewport, scissor, cull, winding, fill-mode,
+  color interpolation, depth bias/slope scale, and clip-vs-clamp depth behavior
 - two screen-band workers for a 3D draw: the submitting core plus one worker
 - owned A8/R8/R8Unorm_sRGB/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Unorm_sRGB/RG8Snorm/
   RG16Unorm/RG16Snorm/RG16Float/R32Uint/R32Sint/

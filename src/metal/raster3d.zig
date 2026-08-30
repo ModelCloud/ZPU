@@ -1126,6 +1126,115 @@ const Job = struct {
     bands: [2]Stats = .{ .{}, .{} },
 };
 
+const ClipPlane = enum { w, left, right, bottom, top, near, far };
+
+const xywClipPlanes = [_]ClipPlane{ .w, .left, .right, .bottom, .top };
+const depthClipPlanes = [_]ClipPlane{ .near, .far };
+const clip_w_epsilon: f32 = 0.000001;
+
+fn clipDistance(vertex: abi.Vertex, plane: ClipPlane) f32 {
+    const p = vertex.position;
+    return switch (plane) {
+        .w => p[3] - clip_w_epsilon,
+        .left => p[0] + p[3],
+        .right => p[3] - p[0],
+        .bottom => p[1] + p[3],
+        .top => p[3] - p[1],
+        .near => p[2],
+        .far => p[3] - p[2],
+    };
+}
+
+fn clipInside(distance: f32) bool {
+    return std.math.isFinite(distance) and distance >= 0;
+}
+
+fn interpolateClipVertex(a: abi.Vertex, b: abi.Vertex, t: f32) abi.Vertex {
+    var result = a;
+    for (0..4) |component| result.position[component] = a.position[component] +
+        (b.position[component] - a.position[component]) * t;
+    result.color.red = a.color.red + (b.color.red - a.color.red) * t;
+    result.color.green = a.color.green + (b.color.green - a.color.green) * t;
+    result.color.blue = a.color.blue + (b.color.blue - a.color.blue) * t;
+    result.color.alpha = a.color.alpha + (b.color.alpha - a.color.alpha) * t;
+    return result;
+}
+
+fn clipPlanes(depth_clip_mode: abi.DepthClipMode) []const ClipPlane {
+    if (depth_clip_mode == .clip) return &depthClipPlanes;
+    return &xywClipPlanes;
+}
+
+fn clipTriangle(vertices: [3]abi.Vertex, depth_clip_mode: abi.DepthClipMode, output: *[16]abi.Vertex) usize {
+    var current: [16]abi.Vertex = undefined;
+    var next: [16]abi.Vertex = undefined;
+    for (vertices, 0..) |vertex, index| current[index] = vertex;
+    var count: usize = vertices.len;
+    for (clipPlanes(depth_clip_mode)) |plane| {
+        if (count == 0) break;
+        var next_count: usize = 0;
+        var previous = current[count - 1];
+        var previous_distance = clipDistance(previous, plane);
+        var previous_inside = clipInside(previous_distance);
+        for (0..count) |index| {
+            const vertex = current[index];
+            const distance = clipDistance(vertex, plane);
+            const inside = clipInside(distance);
+            if (inside != previous_inside) {
+                const denominator = previous_distance - distance;
+                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.0000001) return 0;
+                if (next_count >= next.len) return 0;
+                const t = previous_distance / denominator;
+                if (!std.math.isFinite(t)) return 0;
+                next[next_count] = interpolateClipVertex(previous, vertex, t);
+                next_count += 1;
+            }
+            if (inside) {
+                if (next_count >= next.len) return 0;
+                next[next_count] = vertex;
+                next_count += 1;
+            }
+            previous = vertex;
+            previous_distance = distance;
+            previous_inside = inside;
+        }
+        current = next;
+        count = next_count;
+    }
+    for (0..count) |index| output[index] = current[index];
+    return count;
+}
+
+fn clipLine(a: abi.Vertex, b: abi.Vertex, depth_clip_mode: abi.DepthClipMode, output: *[2]abi.Vertex) bool {
+    var first: f32 = 0;
+    var last: f32 = 1;
+    for (clipPlanes(depth_clip_mode)) |plane| {
+        const first_distance = clipDistance(a, plane);
+        const last_distance = clipDistance(b, plane);
+        const first_inside = clipInside(first_distance);
+        const last_inside = clipInside(last_distance);
+        if (!first_inside and !last_inside) return false;
+        if (first_inside != last_inside) {
+            const denominator = first_distance - last_distance;
+            if (!std.math.isFinite(denominator) or @abs(denominator) < 0.0000001) return false;
+            const t = first_distance / denominator;
+            if (!std.math.isFinite(t)) return false;
+            if (!first_inside) first = @max(first, t) else last = @min(last, t);
+        }
+        if (first > last) return false;
+    }
+    output[0] = interpolateClipVertex(a, b, first);
+    output[1] = interpolateClipVertex(a, b, last);
+    return true;
+}
+
+fn insideClipVolume(vertex: abi.Vertex, depth_clip_mode: abi.DepthClipMode) bool {
+    for (clipPlanes(depth_clip_mode)) |plane| {
+        if (!clipInside(clipDistance(vertex, plane))) return false;
+    }
+    return true;
+}
+
 fn outputTarget(job: *const Job, physical_index: usize) ?*Target {
     if (physical_index == 0) return job.target;
     const extra_index = physical_index - 1;
@@ -1135,7 +1244,7 @@ fn outputTarget(job: *const Job, physical_index: usize) ?*Target {
 
 fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
     const p = vertex.position;
-    if (!std.math.isFinite(p[0]) or !std.math.isFinite(p[1]) or !std.math.isFinite(p[2]) or !std.math.isFinite(p[3]) or @abs(p[3]) < 0.000001) return null;
+    if (!std.math.isFinite(p[0]) or !std.math.isFinite(p[1]) or !std.math.isFinite(p[2]) or !std.math.isFinite(p[3]) or p[3] < clip_w_epsilon) return null;
     const inverse_w = 1.0 / p[3];
     const nx = p[0] * inverse_w;
     const ny = p[1] * inverse_w;
@@ -1614,42 +1723,66 @@ fn drawBand(job: *Job, band: usize) Stats {
     const y0 = height * band / 2;
     const y1 = height * (band + 1) / 2;
     switch (job.primitive) {
-        .point => for (job.vertices) |vertex| if (project(vertex, job.options.viewport)) |p| drawPoint(job, p, y0, y1, &stats),
+        .point => for (job.vertices) |vertex| if (insideClipVolume(vertex, job.options.depth_clip_mode)) {
+            if (project(vertex, job.options.viewport)) |p| drawPoint(job, p, y0, y1, &stats);
+        },
         .line => {
             var index: usize = 0;
             while (index + 1 < job.vertices.len) : (index += 2) {
-                const a = project(job.vertices[index], job.options.viewport) orelse continue;
-                const b = project(job.vertices[index + 1], job.options.viewport) orelse continue;
-                drawLine(job, a, b, y0, y1, &stats);
+                var clipped: [2]abi.Vertex = undefined;
+                if (clipLine(job.vertices[index], job.vertices[index + 1], job.options.depth_clip_mode, &clipped)) {
+                    const a = project(clipped[0], job.options.viewport) orelse continue;
+                    const b = project(clipped[1], job.options.viewport) orelse continue;
+                    drawLine(job, a, b, y0, y1, &stats);
+                }
             }
         },
         .line_strip => {
             if (job.vertices.len > 1) for (0..job.vertices.len - 1) |index| {
-                const a = project(job.vertices[index], job.options.viewport) orelse continue;
-                const b = project(job.vertices[index + 1], job.options.viewport) orelse continue;
-                drawLine(job, a, b, y0, y1, &stats);
+                var clipped: [2]abi.Vertex = undefined;
+                if (clipLine(job.vertices[index], job.vertices[index + 1], job.options.depth_clip_mode, &clipped)) {
+                    const a = project(clipped[0], job.options.viewport) orelse continue;
+                    const b = project(clipped[1], job.options.viewport) orelse continue;
+                    drawLine(job, a, b, y0, y1, &stats);
+                }
             };
         },
         .triangle => {
             var index: usize = 0;
             while (index + 2 < job.vertices.len) : (index += 3) {
-                const triangle = [3]ProjectedVertex{
-                    project(job.vertices[index], job.options.viewport) orelse continue,
-                    project(job.vertices[index + 1], job.options.viewport) orelse continue,
-                    project(job.vertices[index + 2], job.options.viewport) orelse continue,
-                };
-                drawTriangle(job, triangle, y0, y1, &stats);
+                const input = [3]abi.Vertex{ job.vertices[index], job.vertices[index + 1], job.vertices[index + 2] };
+                var clipped: [16]abi.Vertex = undefined;
+                const clipped_count = clipTriangle(input, job.options.depth_clip_mode, &clipped);
+                if (clipped_count >= 3) {
+                    for (1..clipped_count - 1) |fan_index| {
+                        const triangle = [3]ProjectedVertex{
+                            project(clipped[0], job.options.viewport) orelse continue,
+                            project(clipped[fan_index], job.options.viewport) orelse continue,
+                            project(clipped[fan_index + 1], job.options.viewport) orelse continue,
+                        };
+                        drawTriangle(job, triangle, y0, y1, &stats);
+                    }
+                }
             }
         },
         .triangle_strip => {
             if (job.vertices.len > 2) for (0..job.vertices.len - 2) |index| {
-                const a = project(job.vertices[index], job.options.viewport) orelse continue;
                 const odd = index % 2 != 0;
                 const b_index: usize = index + (if (odd) @as(usize, 2) else @as(usize, 1));
                 const c_index: usize = index + (if (odd) @as(usize, 1) else @as(usize, 2));
-                const b = project(job.vertices[b_index], job.options.viewport) orelse continue;
-                const c = project(job.vertices[c_index], job.options.viewport) orelse continue;
-                drawTriangle(job, .{ a, b, c }, y0, y1, &stats);
+                const input = [3]abi.Vertex{ job.vertices[index], job.vertices[b_index], job.vertices[c_index] };
+                var clipped: [16]abi.Vertex = undefined;
+                const clipped_count = clipTriangle(input, job.options.depth_clip_mode, &clipped);
+                if (clipped_count >= 3) {
+                    for (1..clipped_count - 1) |fan_index| {
+                        const triangle = [3]ProjectedVertex{
+                            project(clipped[0], job.options.viewport) orelse continue,
+                            project(clipped[fan_index], job.options.viewport) orelse continue,
+                            project(clipped[fan_index + 1], job.options.viewport) orelse continue,
+                        };
+                        drawTriangle(job, triangle, y0, y1, &stats);
+                    }
+                }
             };
         },
     }
@@ -2315,4 +2448,31 @@ test "CPU sampler uses bounded anisotropic major-axis taps" {
     try std.testing.expectEqual(@as(usize, 2), selection.anisotropic_taps);
     const sampled = sampleTextureWithSelection(&job, 0.5, 0.5, selection);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), sampled[0], 0.001);
+}
+
+test "CPU rasterizer clips primitives in Metal homogeneous space" {
+    const color = abi.Color{ .red = 1, .green = 0.5, .blue = 0.25, .alpha = 1 };
+    const visible = abi.Vertex{ .position = .{ 0, 0, 0.5, 1 }, .color = color };
+    const left_outside = abi.Vertex{ .position = .{ -2, 0, 0.5, 1 }, .color = color };
+    const upper_right = abi.Vertex{ .position = .{ 0.75, 0.75, 0.5, 1 }, .color = color };
+    var clipped_triangle: [16]abi.Vertex = undefined;
+    const triangle_count = clipTriangle(.{ left_outside, visible, upper_right }, .clip, &clipped_triangle);
+    try std.testing.expect(triangle_count >= 3);
+    for (0..triangle_count) |index| {
+        try std.testing.expect(insideClipVolume(clipped_triangle[index], .clip));
+    }
+
+    const depth_outside = abi.Vertex{ .position = .{ 0, 0, -0.5, 1 }, .color = color };
+    var depth_clipped_triangle: [16]abi.Vertex = undefined;
+    try std.testing.expectEqual(@as(usize, 0), clipTriangle(.{ depth_outside, depth_outside, depth_outside }, .clip, &depth_clipped_triangle));
+    try std.testing.expectEqual(@as(usize, 3), clipTriangle(.{ depth_outside, depth_outside, depth_outside }, .clamp, &depth_clipped_triangle));
+
+    var clipped_line: [2]abi.Vertex = undefined;
+    try std.testing.expect(clipLine(left_outside, visible, .clip, &clipped_line));
+    try std.testing.expect(insideClipVolume(clipped_line[0], .clip));
+    try std.testing.expect(insideClipVolume(clipped_line[1], .clip));
+
+    const behind_w = abi.Vertex{ .position = .{ 0, 0, 0.5, -1 }, .color = color };
+    try std.testing.expect(!insideClipVolume(behind_w, .clip));
+    try std.testing.expect(!clipLine(behind_w, behind_w, .clip, &clipped_line));
 }
