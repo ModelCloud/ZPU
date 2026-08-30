@@ -12,7 +12,7 @@
 /// This is intentionally not Apple's framework version.  The ZPU ABI is an
 /// opt-in compatibility surface and must never be confused with an
 /// implementation of the Objective-C Metal runtime.
-pub const abi_version: u32 = 35;
+pub const abi_version: u32 = 36;
 
 pub const Workload = enum(u8) {
     two_dimensional,

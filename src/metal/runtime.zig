@@ -501,6 +501,7 @@ const PatchCommand = struct {
     factor_buffer_offset: usize,
     factor_instance_stride: usize,
     factor_scale: f32,
+    max_tessellation_factor: usize,
     indirect_buffer: ?*Buffer,
     indirect_buffer_offset: usize,
     vertex_buffer: ?*Buffer,
@@ -517,6 +518,67 @@ const PatchCommand = struct {
     visibility_offset: usize,
     visibility_result_type: abi.VisibilityResultType,
 };
+
+// The registered patch profile deliberately has a bounded CPU tessellator.
+// Integer triangle factors up to 16 cover the portable profile while keeping
+// the generated mesh on the command-buffer stack. Arbitrary tessellation
+// shaders, fractional factors, and non-uniform edge/inside factors remain
+// fail-closed at command commit.
+const cpu_patch_max_tessellation_factor: usize = 16;
+const cpu_patch_max_mesh_vertices: usize = cpu_patch_max_tessellation_factor * cpu_patch_max_tessellation_factor * 3;
+
+fn interpolatePatchVertex(control: [3]abi.Vertex, weights: [3]usize, factor: usize) abi.Vertex {
+    const denominator: f32 = @floatFromInt(factor);
+    const weight0: f32 = @as(f32, @floatFromInt(weights[0])) / denominator;
+    const weight1: f32 = @as(f32, @floatFromInt(weights[1])) / denominator;
+    const weight2: f32 = @as(f32, @floatFromInt(weights[2])) / denominator;
+    var result: abi.Vertex = undefined;
+    for (0..4) |component| {
+        result.position[component] = control[0].position[component] * weight0 +
+            control[1].position[component] * weight1 + control[2].position[component] * weight2;
+    }
+    result.color.red = control[0].color.red * weight0 + control[1].color.red * weight1 + control[2].color.red * weight2;
+    result.color.green = control[0].color.green * weight0 + control[1].color.green * weight1 + control[2].color.green * weight2;
+    result.color.blue = control[0].color.blue * weight0 + control[1].color.blue * weight1 + control[2].color.blue * weight2;
+    result.color.alpha = control[0].color.alpha * weight0 + control[1].color.alpha * weight1 + control[2].color.alpha * weight2;
+    return result;
+}
+
+fn appendPatchGridVertex(
+    output: *[cpu_patch_max_mesh_vertices]abi.Vertex,
+    count: *usize,
+    control: [3]abi.Vertex,
+    weights: [3]usize,
+    factor: usize,
+) void {
+    output.*[count.*] = interpolatePatchVertex(control, weights, factor);
+    count.* += 1;
+}
+
+fn tessellateUniformPatch(
+    control: [3]abi.Vertex,
+    factor: usize,
+    output: *[cpu_patch_max_mesh_vertices]abi.Vertex,
+) usize {
+    var count: usize = 0;
+    for (0..factor) |i| {
+        for (0..factor - i) |j| {
+            const lower_left = [3]usize{ i, j, factor - i - j };
+            const lower_right = [3]usize{ i + 1, j, factor - i - j - 1 };
+            const upper_left = [3]usize{ i, j + 1, factor - i - j - 1 };
+            appendPatchGridVertex(output, &count, control, lower_left, factor);
+            appendPatchGridVertex(output, &count, control, lower_right, factor);
+            appendPatchGridVertex(output, &count, control, upper_left, factor);
+            if (i + j + 2 <= factor) {
+                const upper_right = [3]usize{ i + 1, j + 1, factor - i - j - 2 };
+                appendPatchGridVertex(output, &count, control, lower_right, factor);
+                appendPatchGridVertex(output, &count, control, upper_right, factor);
+                appendPatchGridVertex(output, &count, control, upper_left, factor);
+            }
+        }
+    }
+    return count;
+}
 
 const VisibilitySlot = struct {
     buffer: *Buffer,
@@ -2220,7 +2282,9 @@ pub const CommandBuffer = struct {
                 if (!validTexture(target_handle) or target_handle != resolved_patch.target or
                     resolved_patch.kernel != 1 or resolved_patch.control_point_count != 3 or
                     (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
-                    resolved_patch.factor_scale != 1.0)
+                    resolved_patch.factor_scale != 1.0 or
+                    resolved_patch.max_tessellation_factor == 0 or
+                    resolved_patch.max_tessellation_factor > cpu_patch_max_tessellation_factor)
                     return self.fail(error.InvalidArgument);
                 if (resolved_patch.instance_count == 0 or resolved_patch.patch_count == 0) continue;
 
@@ -2436,8 +2500,11 @@ pub const CommandBuffer = struct {
                             if (!std.math.isFinite(edge0) or !std.math.isFinite(edge1) or !std.math.isFinite(edge2) or
                                 !std.math.isFinite(inside)) return self.fail(error.InvalidArgument);
                             if (edge0 <= 0 or edge1 <= 0 or edge2 <= 0) continue;
-                            if (edge0 != 1.0 or edge1 != 1.0 or edge2 != 1.0 or inside != 1.0)
+                            if (edge0 != edge1 or edge0 != edge2 or edge0 != inside or
+                                @floor(edge0) != edge0 or edge0 < 1.0 or
+                                edge0 > @as(f32, @floatFromInt(resolved_patch.max_tessellation_factor)))
                                 return self.fail(error.UnsupportedOperation);
+                            const tessellation_factor: usize = @intFromFloat(edge0);
 
                             const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
                                 readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
@@ -2465,6 +2532,11 @@ pub const CommandBuffer = struct {
                                 if (source_index >= source_vertices.len) return self.fail(error.InvalidArgument);
                                 patch_vertices[control_point] = source_vertices[source_index];
                             }
+                            var tessellated_vertices: [cpu_patch_max_mesh_vertices]abi.Vertex = undefined;
+                            const draw_vertices: []const abi.Vertex = if (tessellation_factor == 1 or draw_options.fill_mode == .fill)
+                                &patch_vertices
+                            else
+                                tessellated_vertices[0..tessellateUniformPatch(patch_vertices, tessellation_factor, &tessellated_vertices)];
                             stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
                                 @constCast(&target),
                                 extra_targets[0..sample_extra_count],
@@ -2472,7 +2544,7 @@ pub const CommandBuffer = struct {
                                 &.{},
                                 depth_values,
                                 stencil_values,
-                                &patch_vertices,
+                                draw_vertices,
                                 .triangle,
                                 draw_options,
                             ));
@@ -2816,6 +2888,7 @@ pub const RenderEncoder = struct {
     tessellation_factor_buffer_offset: usize = 0,
     tessellation_factor_buffer_instance_stride: usize = @sizeOf(u16) * 4,
     tessellation_factor_scale: f32 = 1,
+    patch_max_tessellation_factor: usize = 1,
 
     pub fn deinit(self: *RenderEncoder) void {
         self.inline_vertices.deinit(allocator);
@@ -3848,6 +3921,12 @@ pub const RenderEncoder = struct {
         self.tessellation_factor_scale = scale;
     }
 
+    pub fn setPatchMaxTessellationFactor(self: *RenderEncoder, max_factor: usize) Error!void {
+        if (!self.open() or max_factor == 0 or max_factor > cpu_patch_max_tessellation_factor)
+            return error.InvalidArgument;
+        self.patch_max_tessellation_factor = max_factor;
+    }
+
     pub fn updateFence(self: *RenderEncoder, fence: *Fence) Error!void {
         if (!self.open() or !validFence(fence) or fence.device != self.command_buffer.queue.device) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .update_fence = fence });
@@ -4378,6 +4457,7 @@ pub const RenderEncoder = struct {
             .factor_buffer_offset = self.tessellation_factor_buffer_offset,
             .factor_instance_stride = self.tessellation_factor_buffer_instance_stride,
             .factor_scale = self.tessellation_factor_scale,
+            .max_tessellation_factor = self.patch_max_tessellation_factor,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
             .vertex_buffer = self.vertex_buffer,
@@ -8806,7 +8886,7 @@ test "CPU mesh dispatch applies depth and stencil tests" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, color.bytes[0..4]);
 }
 
-test "CPU triangle patches use factor-one tessellation and preserve raster pixels" {
+test "CPU triangle patches use factor-one lowering and preserve raster pixels" {
     const device = try createDevice();
     defer destroyDevice(device);
     const queue = try createQueue(device);
@@ -8849,6 +8929,56 @@ test "CPU triangle patches use factor-one tessellation and preserve raster pixel
     try std.testing.expectEqual(CommandStatus.completed, patch_commands.status);
     try std.testing.expectEqualSlices(u8, patch_texture.bytes, primitive_texture.bytes);
     try std.testing.expect(std.mem.indexOfScalar(u8, patch_texture.bytes, 255) != null);
+}
+
+test "CPU uniform integer triangle patches preserve raster pixels" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.86, -0.72, 0.5, 1 }, .color = .{ .red = 0.91, .green = 0.17, .blue = 0.63, .alpha = 0.81 } },
+        .{ .position = .{ 0.78, -0.43, 0.5, 1 }, .color = .{ .red = 0.23, .green = 0.87, .blue = 0.31, .alpha = 0.59 } },
+        .{ .position = .{ -0.21, 0.84, 0.5, 1 }, .color = .{ .red = 0.19, .green = 0.41, .blue = 0.97, .alpha = 0.73 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const cases = [_]struct { factor: usize, half: u16 }{
+        .{ .factor = 2, .half = 0x4000 },
+        .{ .factor = 4, .half = 0x4400 },
+    };
+    for (cases) |case| {
+        const patch_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+        defer destroyTexture(patch_texture);
+        const primitive_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+        defer destroyTexture(primitive_texture);
+        const factors = [_]u16{ case.half, case.half, case.half, case.half };
+        const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(factors)), @ptrCast(&factors));
+        defer destroyBuffer(factor_buffer);
+
+        var patch_commands = try createCommandBuffer(queue);
+        defer destroyCommandBuffer(patch_commands);
+        var patch_encoder = try beginRender(patch_commands, patch_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+        try patch_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+        try patch_encoder.setPatchMaxTessellationFactor(case.factor);
+        try patch_encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf(@TypeOf(factors)));
+        try patch_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+        try patch_encoder.endEncoding();
+        destroyRenderEncoder(patch_encoder);
+
+        var primitive_commands = try createCommandBuffer(queue);
+        defer destroyCommandBuffer(primitive_commands);
+        var primitive_encoder = try beginRender(primitive_commands, primitive_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+        try primitive_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+        try primitive_encoder.drawPrimitives(.triangle, 0, 3, 1);
+        try primitive_encoder.endEncoding();
+        destroyRenderEncoder(primitive_encoder);
+
+        try patch_commands.commit();
+        try primitive_commands.commit();
+        try std.testing.expectEqual(CommandStatus.completed, patch_commands.status);
+        try std.testing.expectEqualSlices(u8, patch_texture.bytes, primitive_texture.bytes);
+    }
 }
 
 test "CPU compute writes narrow unorm targets at their native stride" {
@@ -11380,6 +11510,14 @@ pub export fn zpu_metal_render_encoder_set_tessellation_factor_scale(
     scale: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setTessellationFactorScale(scale) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_patch_max_tessellation_factor(
+    encoder: ?*RenderEncoder,
+    max_factor: u32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setPatchMaxTessellationFactor(max_factor) catch |err| return errorCode(err);
     return 0;
 }
 

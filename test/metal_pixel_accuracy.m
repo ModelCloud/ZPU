@@ -5091,10 +5091,10 @@ static int test_layered_icb_base_instance_render_against_native(
     return 0;
 }
 
-/* Factor-one triangle patches are lowered to the same CPU raster primitive as
- * an ordinary triangle.  Use native Metal only for that ordinary layered
- * triangle oracle; the adapter side exercises the public tessellation
- * selectors and remains entirely ZPU-owned. */
+/* Uniform integer triangle patches are lowered to CPU/ZPU geometry. Filled
+ * patches use the equivalent ordinary layered triangle for pixel stability;
+ * native Metal is only the oracle, while the adapter side exercises the
+ * public tessellation selectors and remains entirely ZPU-owned. */
 static int test_layered_patch_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_layered_vertex_function, id<MTLFunction> native_fragment_function,
@@ -5106,9 +5106,9 @@ static int test_layered_patch_against_native(
         {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
     };
     const uint16_t factors[] = {
-        0x3c00, 0x3c00, 0x3c00, 0x3c00,
-        0x3c00, 0x3c00, 0x3c00, 0x3c00,
-        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x4000, 0x4000, 0x4000, 0x4000,
+        0x4000, 0x4000, 0x4000, 0x4000,
+        0x4000, 0x4000, 0x4000, 0x4000,
     };
     MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
     native_pipeline_descriptor.vertexFunction = native_layered_vertex_function;
@@ -5125,7 +5125,7 @@ static int test_layered_patch_against_native(
         MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
     adapter_pipeline_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
     adapter_pipeline_descriptor.tessellationFactorScaleEnabled = NO;
-    adapter_pipeline_descriptor.maxTessellationFactor = 1.0f;
+    adapter_pipeline_descriptor.maxTessellationFactor = 16.0f;
     adapter_pipeline_descriptor.supportIndirectCommandBuffers = YES;
     adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     NSError *native_error = nil;

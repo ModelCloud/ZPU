@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 35u
+#define ZPU_METAL_ABI_VERSION 36u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -431,8 +431,9 @@ enum {
 
 /* Triangle-patch kernels are explicit CPU/ZPU operations. They are not MSL
  * and do not invoke Apple's Metal tessellator. The bounded profile accepts
- * factor-1 triangle patches and therefore rasterizes each patch's three
- * control points as one ordinary top-left-origin triangle. */
+ * uniform integer factors 1 through 16; filled patches use the equivalent
+ * ordinary top-left-origin triangle while line-filled patches expose the
+ * generated CPU triangle grid. */
 typedef uint8_t zpu_metal_patch_kernel;
 enum {
     ZPU_METAL_PATCH_TRIANGLE_RGBA8 = 1,
@@ -571,7 +572,7 @@ int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *e
  * contiguous RGBA8/BGRA8 attachment signature, and routes its logical output
  * through an opted-in color attachment map. The registered mesh profile
  * accepts the same contiguous RGBA8/BGRA8 attachment signature and routes its
- * logical outputs through an opted-in map. Factor-one triangle patches honor
+ * logical outputs through an opted-in map. Uniform integer triangle patches honor
  * baseInstance, while the registered mesh-gradient profile maps mesh-grid Z to
  * layered slices and preserves attachment-global top-left X/Y; arbitrary mesh
  * shader execution remains rejected. Layered multisample
@@ -645,6 +646,9 @@ int zpu_metal_render_encoder_set_visibility_result_type(zpu_metal_render_encoder
 /* Passing NULL unbinds the factor buffer, matching Metal's nullable selector. */
 int zpu_metal_render_encoder_set_tessellation_factor_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t instance_stride);
 int zpu_metal_render_encoder_set_tessellation_factor_scale(zpu_metal_render_encoder *encoder, float scale);
+/* Sets the maximum factor enforced by the registered CPU triangle-patch
+ * profile. The adapter supplies the value from the pipeline descriptor. */
+int zpu_metal_render_encoder_set_patch_max_tessellation_factor(zpu_metal_render_encoder *encoder, uint32_t max_factor);
 int zpu_metal_render_encoder_update_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_wait_for_fence(zpu_metal_render_encoder *encoder, zpu_metal_fence *fence);
 int zpu_metal_render_encoder_draw_primitives(zpu_metal_render_encoder *encoder, zpu_metal_primitive_type primitive, size_t vertex_start, size_t vertex_count, size_t instance_count);
