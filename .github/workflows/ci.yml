@@ -97,8 +97,7 @@ jobs:
     needs: core
     # Keep the strict repository coverage gate visible without allowing the
     # pre-existing baseline debt to suppress normal build and integration
-    # results. Raise this to a required gate after the baseline is repaired.
-    continue-on-error: true
+    # results. The command below still fails on setup/compile errors.
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -110,7 +109,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends kcov libxcb1-dev
           dpkg-query -W -f='${Package}=${Version}\n' kcov libxcb1-dev
-      - run: tools/limited-cpus.sh zig build coverage
+      - name: Coverage baseline (informational until the baseline is repaired)
+        run: |
+          set +e
+          tools/limited-cpus.sh zig build coverage 2>&1 | tee coverage.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if (( status == 0 )); then
+            exit 0
+          fi
+          if grep -Eq 'CoverageBelow100Percent|MissingCoverageRecords' coverage.log; then
+            echo '::warning::Repository coverage baseline is below 100%; the strict report is retained above.'
+            exit 0
+          fi
+          exit "$status"
 
   integration:
     needs: build
