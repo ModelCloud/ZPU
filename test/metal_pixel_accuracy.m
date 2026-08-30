@@ -9968,7 +9968,7 @@ int main(void) {
             return 78;
         }
         id<MTLFunction> adapter_vertex_function =
-            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_vertex");
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_vertex");
         id<MTLFunction> adapter_layered_vertex_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_vertex");
         id<MTLFunction> adapter_stage_in_vertex_function =
@@ -14678,8 +14678,8 @@ int main(void) {
                 [library newFunctionWithDescriptor:native_render_fragment_descriptor
                                                error:&native_render_fragment_error];
             MTLFunctionDescriptor *adapter_render_vertex_descriptor = [MTLFunctionDescriptor functionDescriptor];
-            adapter_render_vertex_descriptor.name = @"zpu_test_vertex";
-            adapter_render_vertex_descriptor.specializedName = @"zpu_test_vertex_alias";
+            adapter_render_vertex_descriptor.name = @"zpu_cpu_vertex";
+            adapter_render_vertex_descriptor.specializedName = @"zpu_cpu_vertex_alias";
             NSError *adapter_render_vertex_error = nil;
             id<MTLFunction> adapter_render_vertex_alias =
                 [adapter_library newFunctionWithDescriptor:adapter_render_vertex_descriptor
@@ -16057,7 +16057,7 @@ int main(void) {
                                                                       error:&adapter_mtl4_compiler_error];
         MTL4RenderPipelineDescriptor *adapter_mtl4_render_descriptor = [MTL4RenderPipelineDescriptor new];
         MTL4LibraryFunctionDescriptor *adapter_mtl4_vertex_descriptor = [MTL4LibraryFunctionDescriptor new];
-        adapter_mtl4_vertex_descriptor.name = @"zpu_test_vertex";
+        adapter_mtl4_vertex_descriptor.name = @"zpu_cpu_vertex";
         adapter_mtl4_vertex_descriptor.library = adapter_mtl4_library;
         MTL4LibraryFunctionDescriptor *adapter_mtl4_fragment_descriptor = [MTL4LibraryFunctionDescriptor new];
         adapter_mtl4_fragment_descriptor.name = @"zpu_test_fragment";
