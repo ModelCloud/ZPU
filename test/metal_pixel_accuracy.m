@@ -115,6 +115,12 @@ static const char *const kShaderSource =
     "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= 3 || gid.y >= 2) return; "
     "float sum = 0.0; for (uint k = 0; k < 4; ++k) sum += left[gid.y * 4 + k] * right[k * 3 + gid.x]; "
     "output[gid.y * 3 + gid.x] = sum; }\n"
+    "kernel void zpu_cpu_ml_matmul_f16_oracle(device const half *left [[buffer(0)]], "
+    "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
+    "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= 3 || gid.y >= 2) return; "
+    "half sum = 0.0h; for (uint k = 0; k < 4; ++k) "
+    "sum = half(sum + half(left[gid.y * 4 + k] * right[k * 3 + gid.x])); "
+    "output[gid.y * 3 + gid.x] = sum; }\n"
     "struct ZPUCPUArgumentBuffer { device float *data [[id(0)]]; "
     "texture2d<float> tex [[id(1)]]; sampler samp [[id(2)]]; float4 color [[id(3)]]; };\n"
     "kernel void zpu_cpu_argument_buffer(constant ZPUCPUArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
@@ -15131,6 +15137,7 @@ int main(void) {
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_matmul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f16() {}\n"
+            "kernel void zpu_cpu_ml_matmul_f16() {}\n"
             "kernel void zpu_cpu_argument_buffer() {}\n"
             "kernel void zpu_cpu_argument_buffer_array() {}\n"
             "kernel void zpu_cpu_tensor_argument_buffer() {}\n"
@@ -15697,7 +15704,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 42 ||
+            adapter_library.functionNames.count != 43 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -15707,6 +15714,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f16"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f16"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tensor_argument_buffer"] == nil ||
@@ -22211,6 +22219,182 @@ int main(void) {
             fail_with_error("Metal 4 CPU ML Float32 matrix-multiply profile failed",
                             metal4_ml_matmul_f32_error ?: metal4_ml_matmul_f32_feedback_error ?: native_ml_matmul_f32_error);
             return 192;
+        }
+
+        /* Float16 matrix multiplication uses the same CPU-owned tensor path;
+         * native Metal supplies only the half-precision arithmetic oracle. */
+        NSError *metal4_ml_matmul_f16_error = nil;
+        MTL4LibraryFunctionDescriptor *metal4_ml_matmul_f16_function_descriptor =
+            [MTL4LibraryFunctionDescriptor new];
+        metal4_ml_matmul_f16_function_descriptor.library = metal4_ml_identity_library;
+        metal4_ml_matmul_f16_function_descriptor.name = @"zpu_cpu_ml_matmul_f16";
+        MTLTensorExtents *metal4_ml_matmul_f16_left_dimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){2, 4}];
+        MTLTensorExtents *metal4_ml_matmul_f16_right_dimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){4, 3}];
+        MTLTensorExtents *metal4_ml_matmul_f16_output_dimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){2, 3}];
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_matmul_f16_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_matmul_f16_descriptor.label = @"zpu-cpu-ml-matmul-f16";
+        metal4_ml_matmul_f16_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_matmul_f16_function_descriptor;
+        [metal4_ml_matmul_f16_descriptor setInputDimensions:metal4_ml_matmul_f16_left_dimensions atBufferIndex:0];
+        [metal4_ml_matmul_f16_descriptor setInputDimensions:metal4_ml_matmul_f16_right_dimensions atBufferIndex:1];
+        [metal4_ml_matmul_f16_descriptor setInputDimensions:metal4_ml_matmul_f16_output_dimensions atBufferIndex:2];
+        id<MTL4MachineLearningPipelineState> metal4_ml_matmul_f16_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_matmul_f16_descriptor error:&metal4_ml_matmul_f16_error];
+        MTLTensorDescriptor *metal4_ml_matmul_f16_left_descriptor =
+            [metal4_ml_identity_tensor_descriptor copy];
+        metal4_ml_matmul_f16_left_descriptor.dimensions = metal4_ml_matmul_f16_left_dimensions;
+        metal4_ml_matmul_f16_left_descriptor.dataType = MTLTensorDataTypeFloat16;
+        MTLTensorDescriptor *metal4_ml_matmul_f16_right_descriptor =
+            [metal4_ml_identity_tensor_descriptor copy];
+        metal4_ml_matmul_f16_right_descriptor.dimensions = metal4_ml_matmul_f16_right_dimensions;
+        metal4_ml_matmul_f16_right_descriptor.dataType = MTLTensorDataTypeFloat16;
+        MTLTensorDescriptor *metal4_ml_matmul_f16_output_descriptor =
+            [metal4_ml_identity_tensor_descriptor copy];
+        metal4_ml_matmul_f16_output_descriptor.dimensions = metal4_ml_matmul_f16_output_dimensions;
+        metal4_ml_matmul_f16_output_descriptor.dataType = MTLTensorDataTypeFloat16;
+        id<MTLTensor> metal4_ml_matmul_f16_left =
+            [adapter_device newTensorWithDescriptor:metal4_ml_matmul_f16_left_descriptor
+                                               error:&metal4_ml_matmul_f16_error];
+        id<MTLTensor> metal4_ml_matmul_f16_right =
+            [adapter_device newTensorWithDescriptor:metal4_ml_matmul_f16_right_descriptor
+                                               error:&metal4_ml_matmul_f16_error];
+        id<MTLTensor> metal4_ml_matmul_f16_output =
+            [adapter_device newTensorWithDescriptor:metal4_ml_matmul_f16_output_descriptor
+                                               error:&metal4_ml_matmul_f16_error];
+        const NSInteger metal4_ml_matmul_f16_zero_values[] = {0, 0};
+        MTLTensorExtents *metal4_ml_matmul_f16_zero =
+            [[MTLTensorExtents alloc] initWithRank:2 values:metal4_ml_matmul_f16_zero_values];
+        const NSInteger metal4_ml_matmul_f16_left_strides_values[] = {1, 2};
+        const NSInteger metal4_ml_matmul_f16_right_strides_values[] = {1, 4};
+        const NSInteger metal4_ml_matmul_f16_output_strides_values[] = {1, 2};
+        MTLTensorExtents *metal4_ml_matmul_f16_left_strides =
+            [[MTLTensorExtents alloc] initWithRank:2 values:metal4_ml_matmul_f16_left_strides_values];
+        MTLTensorExtents *metal4_ml_matmul_f16_right_strides =
+            [[MTLTensorExtents alloc] initWithRank:2 values:metal4_ml_matmul_f16_right_strides_values];
+        MTLTensorExtents *metal4_ml_matmul_f16_output_strides =
+            [[MTLTensorExtents alloc] initWithRank:2 values:metal4_ml_matmul_f16_output_strides_values];
+        const _Float16 metal4_ml_matmul_f16_left_initial[] = {
+            0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+        };
+        const _Float16 metal4_ml_matmul_f16_left_committed[] = {
+            1.0f, 2.0f, 3.0f, 4.0f, -1.0f, 0.0f, 2.0f, 5.0f,
+        };
+        const _Float16 metal4_ml_matmul_f16_right_values[] = {
+            2.0f, 0.0f, 1.0f, 1.0f, 3.0f, -1.0f,
+            0.0f, 2.0f, 4.0f, -2.0f, 1.0f, 2.0f,
+        };
+        const _Float16 metal4_ml_matmul_f16_sentinel[] = {
+            -99.0f, -99.0f, -99.0f, -99.0f, -99.0f, -99.0f,
+        };
+        _Float16 metal4_ml_matmul_f16_values[6] = {0};
+        [metal4_ml_matmul_f16_left replaceSliceOrigin:metal4_ml_matmul_f16_zero
+                                      sliceDimensions:metal4_ml_matmul_f16_left_dimensions
+                                            withBytes:metal4_ml_matmul_f16_left_initial
+                                              strides:metal4_ml_matmul_f16_left_strides];
+        [metal4_ml_matmul_f16_right replaceSliceOrigin:metal4_ml_matmul_f16_zero
+                                       sliceDimensions:metal4_ml_matmul_f16_right_dimensions
+                                             withBytes:metal4_ml_matmul_f16_right_values
+                                               strides:metal4_ml_matmul_f16_right_strides];
+        [metal4_ml_matmul_f16_output replaceSliceOrigin:metal4_ml_matmul_f16_zero
+                                         sliceDimensions:metal4_ml_matmul_f16_output_dimensions
+                                               withBytes:metal4_ml_matmul_f16_sentinel
+                                                 strides:metal4_ml_matmul_f16_output_strides];
+        MTL4ArgumentTableDescriptor *metal4_ml_matmul_f16_table_descriptor =
+            [MTL4ArgumentTableDescriptor new];
+        metal4_ml_matmul_f16_table_descriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> metal4_ml_matmul_f16_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_ml_matmul_f16_table_descriptor
+                                                       error:&metal4_ml_matmul_f16_error];
+        [metal4_ml_matmul_f16_table setResource:metal4_ml_matmul_f16_left.gpuResourceID atBufferIndex:0];
+        [metal4_ml_matmul_f16_table setResource:metal4_ml_matmul_f16_right.gpuResourceID atBufferIndex:1];
+        [metal4_ml_matmul_f16_table setResource:metal4_ml_matmul_f16_output.gpuResourceID atBufferIndex:2];
+        id<MTL4CommandBuffer> metal4_ml_matmul_f16_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_matmul_f16_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_matmul_f16_encoder =
+            [metal4_ml_matmul_f16_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_matmul_f16_encoder setPipelineState:metal4_ml_matmul_f16_pipeline];
+        [metal4_ml_matmul_f16_encoder setArgumentTable:metal4_ml_matmul_f16_table];
+        [metal4_ml_matmul_f16_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_matmul_f16_left replaceSliceOrigin:metal4_ml_matmul_f16_zero
+                                      sliceDimensions:metal4_ml_matmul_f16_left_dimensions
+                                            withBytes:metal4_ml_matmul_f16_left_committed
+                                              strides:metal4_ml_matmul_f16_left_strides];
+        [metal4_ml_matmul_f16_encoder endEncoding];
+        [metal4_ml_matmul_f16_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_matmul_f16_command_buffers[] = {
+            metal4_ml_matmul_f16_command_buffer,
+        };
+        MTL4CommitOptions *metal4_ml_matmul_f16_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_matmul_f16_feedback_error = nil;
+        [metal4_ml_matmul_f16_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_matmul_f16_feedback_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_matmul_f16_command_buffers
+                        count:1 options:metal4_ml_matmul_f16_options];
+
+        id<MTLFunction> native_ml_matmul_f16_function =
+            [library newFunctionWithName:@"zpu_cpu_ml_matmul_f16_oracle"];
+        NSError *native_ml_matmul_f16_error = nil;
+        id<MTLComputePipelineState> native_ml_matmul_f16_pipeline =
+            [device newComputePipelineStateWithFunction:native_ml_matmul_f16_function
+                                                   error:&native_ml_matmul_f16_error];
+        id<MTLBuffer> native_ml_matmul_f16_left =
+            [device newBufferWithBytes:metal4_ml_matmul_f16_left_committed
+                                 length:sizeof(metal4_ml_matmul_f16_left_committed)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_ml_matmul_f16_right =
+            [device newBufferWithBytes:metal4_ml_matmul_f16_right_values
+                                 length:sizeof(metal4_ml_matmul_f16_right_values)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_ml_matmul_f16_output =
+            [device newBufferWithLength:sizeof(metal4_ml_matmul_f16_values)
+                                options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> native_ml_matmul_f16_command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_ml_matmul_f16_encoder =
+            [native_ml_matmul_f16_command_buffer computeCommandEncoder];
+        [native_ml_matmul_f16_encoder setComputePipelineState:native_ml_matmul_f16_pipeline];
+        [native_ml_matmul_f16_encoder setBuffer:native_ml_matmul_f16_left offset:0 atIndex:0];
+        [native_ml_matmul_f16_encoder setBuffer:native_ml_matmul_f16_right offset:0 atIndex:1];
+        [native_ml_matmul_f16_encoder setBuffer:native_ml_matmul_f16_output offset:0 atIndex:2];
+        [native_ml_matmul_f16_encoder dispatchThreads:MTLSizeMake(3, 2, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [native_ml_matmul_f16_encoder endEncoding];
+        [native_ml_matmul_f16_command_buffer commit];
+        [native_ml_matmul_f16_command_buffer waitUntilCompleted];
+        [metal4_ml_matmul_f16_output getBytes:metal4_ml_matmul_f16_values
+                                      strides:metal4_ml_matmul_f16_output_strides
+                             fromSliceOrigin:metal4_ml_matmul_f16_zero
+                              sliceDimensions:metal4_ml_matmul_f16_output_dimensions];
+        const _Float16 *native_ml_matmul_f16_values =
+            (const _Float16 *)native_ml_matmul_f16_output.contents;
+        id<MTLTensorBinding> metal4_ml_matmul_f16_binding =
+            metal4_ml_matmul_f16_pipeline.reflection.bindings.count > 0 ?
+                (id<MTLTensorBinding>)metal4_ml_matmul_f16_pipeline.reflection.bindings[0] : nil;
+        if (metal4_ml_matmul_f16_pipeline == nil || metal4_ml_matmul_f16_error != nil ||
+            [metal4_ml_identity_library newFunctionWithName:@"zpu_cpu_ml_matmul_f16"] == nil ||
+            metal4_ml_matmul_f16_left == nil || metal4_ml_matmul_f16_right == nil ||
+            metal4_ml_matmul_f16_output == nil || metal4_ml_matmul_f16_table == nil ||
+            metal4_ml_matmul_f16_encoder == nil || metal4_ml_matmul_f16_command_buffer == nil ||
+            metal4_ml_matmul_f16_feedback_error != nil || native_ml_matmul_f16_function == nil ||
+            native_ml_matmul_f16_pipeline == nil || native_ml_matmul_f16_error != nil ||
+            native_ml_matmul_f16_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            metal4_ml_matmul_f16_pipeline.reflection.bindings.count != 3 ||
+            metal4_ml_matmul_f16_binding == nil ||
+            metal4_ml_matmul_f16_binding.tensorDataType != MTLTensorDataTypeFloat16 ||
+            metal4_ml_matmul_f16_binding.indexType != MTLDataTypeInt ||
+            metal4_ml_matmul_f16_binding.dimensions.rank != 2 ||
+            [metal4_ml_matmul_f16_binding.dimensions extentAtDimensionIndex:0] != 2 ||
+            [metal4_ml_matmul_f16_binding.dimensions extentAtDimensionIndex:1] != 4 ||
+            memcmp(native_ml_matmul_f16_values, metal4_ml_matmul_f16_values,
+                   sizeof(metal4_ml_matmul_f16_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML Float16 matrix-multiply profile failed",
+                            metal4_ml_matmul_f16_error ?: metal4_ml_matmul_f16_feedback_error ?: native_ml_matmul_f16_error);
+            return 193;
         }
 
         /* Int32 addition is also CPU-owned. Native Metal is used only to

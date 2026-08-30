@@ -354,8 +354,8 @@ triangle path:
   deferred packed low/high-nibble addition with modulo-16 results; the
   registered `zpu_cpu_ml_mul_f32` and `zpu_cpu_ml_mul_f16` profiles perform
   deferred elementwise Float32 and Float16 multiplication, and the registered
-  `zpu_cpu_ml_matmul_f32` profile performs deferred rank-2 Float32 matrix
-  multiplication through the same
+  `zpu_cpu_ml_matmul_f32` and `zpu_cpu_ml_matmul_f16` profiles perform deferred
+  rank-2 Float32 and Float16 matrix multiplication through the same
   ZPU-owned storage path. Arbitrary ML graphs and arbitrary-MSL compiler
   requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
