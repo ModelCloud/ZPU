@@ -13353,6 +13353,9 @@ int main(void) {
             adapter_legacy_tile_pass.colorAttachments[1].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
             adapter_legacy_tile_pass.tileWidth = 2;
             adapter_legacy_tile_pass.tileHeight = 2;
+            id<MTLBuffer> adapter_legacy_tile_visibility_buffer =
+                [adapter_device newBufferWithLength:sizeof(uint64_t) options:MTLResourceStorageModeShared];
+            adapter_legacy_tile_pass.visibilityResultBuffer = adapter_legacy_tile_visibility_buffer;
             id<MTLCommandBuffer> adapter_legacy_tile_command_buffer = [adapter_queue commandBuffer];
             id<MTLRenderCommandEncoder> adapter_legacy_tile_encoder =
                 [adapter_legacy_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_legacy_tile_pass];
@@ -13378,6 +13381,7 @@ int main(void) {
             [adapter_legacy_tile_encoder setTileTexture:adapter_legacy_tile_texture atIndex:0];
             [adapter_legacy_tile_encoder setTileSamplerState:adapter_sampler atIndex:0];
             [adapter_legacy_tile_encoder setScissorRect:(MTLScissorRect){1, 1, 3, 2}];
+            [adapter_legacy_tile_encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
             [adapter_legacy_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
             [adapter_legacy_tile_encoder endEncoding];
             [adapter_legacy_tile_command_buffer commit];
@@ -13422,9 +13426,17 @@ int main(void) {
                     adapter_legacy_tile_pipeline.requiredThreadsPerTileThreadgroup.height == 2 &&
                     adapter_legacy_tile_pipeline.requiredThreadsPerTileThreadgroup.depth == 1;
             }
+            uint64_t adapter_legacy_tile_visibility_count = 0;
+            if (adapter_legacy_tile_visibility_buffer != nil) {
+                memcpy(&adapter_legacy_tile_visibility_count,
+                       adapter_legacy_tile_visibility_buffer.contents,
+                       sizeof(adapter_legacy_tile_visibility_count));
+            }
             adapter_legacy_tile_exact = adapter_legacy_tile_function != nil &&
                 adapter_legacy_tile_pipeline != nil && adapter_legacy_tile_texture != nil &&
                 adapter_legacy_tile_aux_texture != nil && adapter_legacy_tile_aux_clear &&
+                adapter_legacy_tile_visibility_buffer != nil &&
+                adapter_legacy_tile_visibility_count == 6 &&
                 adapter_legacy_tile_command_buffer != nil && adapter_legacy_tile_encoder != nil &&
                 adapter_legacy_tile_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 adapter_legacy_tile_pipeline.maxTotalThreadsPerThreadgroup == 4 &&
