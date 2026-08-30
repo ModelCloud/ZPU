@@ -8652,6 +8652,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
     pipeline->_colorAttachmentCount = color_attachment_count;
+    /* Legacy tile descriptors also lack a pipeline mapping-state property;
+     * the macOS 26/iOS 26 encoder pass opt-in controls whether a non-identity
+     * map can actually be used. */
+    pipeline->_colorAttachmentMappingInherited = YES;
     return (id<MTLRenderPipelineState>)pipeline;
 }
 - (void)newRenderPipelineStateWithTileDescriptor:(MTLTileRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
