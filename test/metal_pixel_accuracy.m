@@ -18387,6 +18387,39 @@ int main(void) {
             return 155;
         }
 
+        MTLTensorDescriptor *metal4_ml_add_wrong_type_descriptor =
+            [metal4_ml_identity_tensor_descriptor copy];
+        metal4_ml_add_wrong_type_descriptor.dataType = MTLTensorDataTypeFloat32;
+        id<MTLTensor> metal4_ml_add_wrong_type =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_wrong_type_descriptor
+                                               error:&metal4_ml_add_error];
+        [metal4_ml_add_table setResource:metal4_ml_add_wrong_type.gpuResourceID atBufferIndex:1];
+        id<MTL4CommandBuffer> metal4_ml_add_wrong_type_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_add_wrong_type_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_add_wrong_type_encoder =
+            [metal4_ml_add_wrong_type_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_add_wrong_type_encoder setPipelineState:metal4_ml_add_pipeline];
+        [metal4_ml_add_wrong_type_encoder setArgumentTable:metal4_ml_add_table];
+        [metal4_ml_add_wrong_type_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_add_wrong_type_encoder endEncoding];
+        [metal4_ml_add_wrong_type_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_add_wrong_type_command_buffers[] = {
+            metal4_ml_add_wrong_type_command_buffer,
+        };
+        MTL4CommitOptions *metal4_ml_add_wrong_type_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_add_wrong_type_feedback_error = nil;
+        [metal4_ml_add_wrong_type_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_add_wrong_type_feedback_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_add_wrong_type_command_buffers
+                        count:1
+                       options:metal4_ml_add_wrong_type_options];
+        if (metal4_ml_add_wrong_type == nil || metal4_ml_add_wrong_type_encoder == nil ||
+            metal4_ml_add_wrong_type_command_buffer == nil || metal4_ml_add_wrong_type_feedback_error == nil) {
+            fail_with_error("Metal 4 CPU ML add accepted a non-UInt8 tensor", metal4_ml_add_error);
+            return 156;
+        }
+
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
          * role in this test suite is to define the page-size and mapping
