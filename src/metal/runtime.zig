@@ -6776,6 +6776,31 @@ test "CPU triangle trace uses the Metal top-left pixel grid" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[(4 * texture.stride + 3 * 4)..][0..4]);
 }
 
+test "CPU compute acceleration bindings can be explicitly unbound" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const acceleration_storage = try createBuffer(device, 64, null);
+    defer destroyBuffer(acceleration_storage);
+
+    const command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(7);
+    try encoder.setTexture(texture, 0);
+    try encoder.setAccelerationStructure(acceleration_storage, 0);
+    try encoder.setAccelerationStructure(null, 0);
+    try std.testing.expectError(
+        error.InvalidCommand,
+        encoder.dispatchThreads(.{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }),
+    );
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+}
+
 test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
     const device = try createDevice();
     defer destroyDevice(device);

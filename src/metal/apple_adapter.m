@@ -2591,6 +2591,29 @@ static void zpu_metal4_clear_render_argument_table_stage(ZPURenderEncoder *legac
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+static void zpu_metal4_clear_compute_argument_table(ZPUComputeEncoder *legacy,
+                                                      ZPUMTL4ArgumentTable *table) {
+    if (legacy == nil || table == nil) return;
+    for (NSUInteger index = 0; index < table->_maxBufferBindCount; ++index) {
+        if (index == 0) {
+            [(id<MTLComputeCommandEncoder>)legacy setBuffer:nil offset:0 atIndex:0];
+        }
+        [(id<MTLComputeCommandEncoder>)legacy setAccelerationStructure:nil atBufferIndex:index];
+        [(id<MTLComputeCommandEncoder>)legacy setVisibleFunctionTable:nil atBufferIndex:index];
+        [(id<MTLComputeCommandEncoder>)legacy setIntersectionFunctionTable:nil atBufferIndex:index];
+    }
+    /* The fixed CPU compute profiles expose texture slots zero and one. Any
+     * larger table remains metadata-only and cannot have installed a native
+     * binding in this CPU encoder. */
+    const NSUInteger textureCount = MIN(table->_maxTextureBindCount, (NSUInteger)2);
+    for (NSUInteger index = 0; index < textureCount; ++index) {
+        [(id<MTLComputeCommandEncoder>)legacy setTexture:nil atIndex:index];
+    }
+    /* Sampler setters are retained only for ownership metadata by the
+     * bounded CPU kernels, so there is no executable sampler state to clear. */
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_metal4_buffer_range(MTL4BufferRange range, ZPUDevice *owner,
                                      ZPUBuffer **buffer, NSUInteger *offset) {
     if (buffer == NULL || offset == NULL || range.bufferAddress == 0 ||
@@ -12062,20 +12085,17 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         return;
     }
     ZPUMTL4ArgumentTable *previous = _argumentTable;
-    if (argumentTable == nil && previous != nil) {
-        if (previous->_maxBufferBindCount != 0) {
-            [(id<MTLComputeCommandEncoder>)_legacy setBuffer:nil offset:0 atIndex:0];
-        }
-        if (previous->_maxTextureBindCount != 0) {
-            [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:0];
-            [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:1];
-        }
-    }
+    zpu_metal4_clear_compute_argument_table(_legacy, previous);
     _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
     if (_argumentTable == nil) return;
     if (_argumentTable->_invalid) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
-        if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) continue;
+        if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
+            [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
+            [(id<MTLComputeCommandEncoder>)_legacy setVisibleFunctionTable:nil atBufferIndex:index];
+            [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:nil atBufferIndex:index];
+            continue;
+        }
         id resource = nil;
         ZPUBuffer *buffer = nil;
         NSUInteger bufferOffset = 0;
@@ -12095,6 +12115,9 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
                 (id<MTLIntersectionFunctionTable>)resource atBufferIndex:index];
         } else if (index == 0) {
             const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
+            [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
+            [(id<MTLComputeCommandEncoder>)_legacy setVisibleFunctionTable:nil atBufferIndex:index];
+            [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:nil atBufferIndex:index];
             [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
             if (buffer != nil && strides[index] != 0 && strides[index] != NSUIntegerMax) {
                 [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset
