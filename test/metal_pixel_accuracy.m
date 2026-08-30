@@ -22578,6 +22578,64 @@ int main(void) {
                 fail_with_error("Metal 4 CPU tensor copy failed", metal4_error);
                 return 112;
             }
+
+            MTLTensorDescriptor *metal4_subbyte_tensor_descriptor = [metal4_tensor_descriptor copy];
+            metal4_subbyte_tensor_descriptor.dataType = MTLTensorDataTypeInt4;
+            metal4_subbyte_tensor_descriptor.strides =
+                [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 256}];
+            NSError *metal4_subbyte_error = nil;
+            id<MTLBuffer> metal4_subbyte_source_buffer =
+                [adapter_device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> metal4_subbyte_destination_buffer =
+                [adapter_device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+            id<MTLTensor> metal4_subbyte_source =
+                [metal4_subbyte_source_buffer newTensorWithDescriptor:metal4_subbyte_tensor_descriptor
+                                                                  offset:0 error:&metal4_subbyte_error];
+            id<MTLTensor> metal4_subbyte_destination =
+                [metal4_subbyte_destination_buffer newTensorWithDescriptor:metal4_subbyte_tensor_descriptor
+                                                                     offset:0 error:&metal4_subbyte_error];
+            const uint8_t metal4_subbyte_initial[] = {0xa1, 0xb2, 0xc3};
+            const uint8_t metal4_subbyte_committed[] = {0x4d, 0x5e, 0x6f};
+            const uint8_t metal4_subbyte_sentinel[] = {0xff, 0xee, 0xdd};
+            uint8_t metal4_subbyte_values[sizeof(metal4_subbyte_sentinel)] = {0};
+            [metal4_subbyte_source replaceSliceOrigin:metal4_tensor_zero
+                                       sliceDimensions:metal4_tensor_dimensions
+                                             withBytes:metal4_subbyte_initial
+                                               strides:metal4_tensor_packed_strides];
+            [metal4_subbyte_destination replaceSliceOrigin:metal4_tensor_zero
+                                          sliceDimensions:metal4_tensor_dimensions
+                                                withBytes:metal4_subbyte_sentinel
+                                                  strides:metal4_tensor_packed_strides];
+            id<MTL4CommandBuffer> metal4_subbyte_command_buffer = [adapter_device newCommandBuffer];
+            [metal4_subbyte_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+            id<MTL4ComputeCommandEncoder> metal4_subbyte_encoder =
+                [metal4_subbyte_command_buffer computeCommandEncoder];
+            [metal4_subbyte_encoder copyFromTensor:metal4_subbyte_source
+                                      sourceOrigin:metal4_tensor_zero
+                                  sourceDimensions:metal4_tensor_dimensions
+                                          toTensor:metal4_subbyte_destination
+                                 destinationOrigin:metal4_tensor_zero
+                              destinationDimensions:metal4_tensor_dimensions];
+            [metal4_subbyte_source replaceSliceOrigin:metal4_tensor_zero
+                                       sliceDimensions:metal4_tensor_dimensions
+                                             withBytes:metal4_subbyte_committed
+                                               strides:metal4_tensor_packed_strides];
+            [metal4_subbyte_encoder endEncoding];
+            [metal4_subbyte_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> metal4_subbyte_command_buffers[] = {metal4_subbyte_command_buffer};
+            [metal4_queue commit:metal4_subbyte_command_buffers count:1];
+            [metal4_subbyte_destination getBytes:metal4_subbyte_values
+                                         strides:metal4_tensor_packed_strides
+                                fromSliceOrigin:metal4_tensor_zero
+                                 sliceDimensions:metal4_tensor_dimensions];
+            if (metal4_subbyte_source == nil || metal4_subbyte_destination == nil ||
+                metal4_subbyte_command_buffer == nil || metal4_subbyte_encoder == nil ||
+                [metal4_subbyte_encoder stages] != MTLStageBlit || metal4_subbyte_error != nil ||
+                memcmp(metal4_subbyte_values, metal4_subbyte_committed,
+                       sizeof(metal4_subbyte_values)) != 0) {
+                fail_with_error("Metal 4 CPU packed tensor copy failed", metal4_subbyte_error);
+                return 117;
+            }
         }
 
         MTL4ArgumentTableDescriptor *metal4_three_d_compute_table_descriptor = [MTL4ArgumentTableDescriptor new];
