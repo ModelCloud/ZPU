@@ -128,6 +128,54 @@ static const char *const kShaderSource =
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
     "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, 0, 0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r8_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, 0u, 0u, 0u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r8_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, 0, 0, 0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rg8_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, 0u, 0u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rg8_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, 0, 0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba8_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, gid.x + gid.y + 1u, 255u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba8_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, int(gid.x + gid.y), 127), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r16_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, 0u, 0u, 0u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r16_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, 0, 0, 0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rg16_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, 0u, 0u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rg16_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, 0, 0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba16_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, gid.x + gid.y + 1u, 65535u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rgba16_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, int(gid.x + gid.y), 32767), gid); }\n"
     "kernel void zpu_cpu_add_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
@@ -16002,6 +16050,18 @@ int main(void) {
             "kernel void zpu_cpu_fill_gradient_r32_sint() {}\n"
             "kernel void zpu_cpu_fill_gradient_rg32_uint() {}\n"
             "kernel void zpu_cpu_fill_gradient_rg32_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_r8_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_r8_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rg8_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rg8_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba8_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba8_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_r16_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_r16_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rg16_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rg16_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba16_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rgba16_sint() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
@@ -16579,7 +16639,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 53 ||
+            adapter_library.functionNames.count != 65 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -16590,6 +16650,18 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r32_sint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg32_uint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg32_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r8_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r8_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg8_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg8_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r16_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r16_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg16_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg16_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba16_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba16_sint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
@@ -21242,14 +21314,14 @@ int main(void) {
             }
         }
 
-        const MTLPixelFormat compute_integer_formats[] = {
+        const MTLPixelFormat compute_rgba32_formats[] = {
             MTLPixelFormatRGBA32Uint, MTLPixelFormatRGBA32Sint,
         };
-        NSString *compute_integer_names[] = {
+        NSString *compute_rgba32_names[] = {
             @"zpu_cpu_fill_gradient_rgba32_uint", @"zpu_cpu_fill_gradient_rgba32_sint",
         };
-        for (NSUInteger format_index = 0; format_index < sizeof(compute_integer_formats) / sizeof(compute_integer_formats[0]); ++format_index) {
-            const MTLPixelFormat format = compute_integer_formats[format_index];
+        for (NSUInteger format_index = 0; format_index < sizeof(compute_rgba32_formats) / sizeof(compute_rgba32_formats[0]); ++format_index) {
+            const MTLPixelFormat format = compute_rgba32_formats[format_index];
             const NSUInteger bytes_per_pixel = 16;
             const NSUInteger compute_integer_byte_count = (NSUInteger)width * height * bytes_per_pixel;
             MTLTextureDescriptor *native_compute_integer_descriptor = [compute_texture_descriptor copy];
@@ -21257,11 +21329,11 @@ int main(void) {
             MTLTextureDescriptor *adapter_compute_integer_descriptor = [native_compute_integer_descriptor copy];
             id<MTLTexture> native_compute_integer_texture = [device newTextureWithDescriptor:native_compute_integer_descriptor];
             id<MTLTexture> adapter_compute_integer_texture = [adapter_device newTextureWithDescriptor:adapter_compute_integer_descriptor];
-            id<MTLFunction> native_compute_integer_function = [library newFunctionWithName:compute_integer_names[format_index]];
+            id<MTLFunction> native_compute_integer_function = [library newFunctionWithName:compute_rgba32_names[format_index]];
             id<MTLComputePipelineState> native_compute_integer_pipeline =
                 [device newComputePipelineStateWithFunction:native_compute_integer_function error:&error];
             id<MTLFunction> adapter_compute_integer_function =
-                ZPUMetalCreateCPUFunction(adapter_device, compute_integer_names[format_index]);
+                ZPUMetalCreateCPUFunction(adapter_device, compute_rgba32_names[format_index]);
             id<MTLComputePipelineState> adapter_compute_integer_pipeline =
                 [adapter_device newComputePipelineStateWithFunction:adapter_compute_integer_function error:&adapter_compute_error];
             id<MTLCommandBuffer> native_compute_integer_command_buffer = [queue commandBuffer];
@@ -21308,19 +21380,31 @@ int main(void) {
             MTLPixelFormat format;
             NSUInteger bytes_per_pixel;
             NSString *name;
-        } compute_wide_integer_formats[] = {
+        } compute_integer_formats[] = {
+            {MTLPixelFormatR8Uint, 1, @"zpu_cpu_fill_gradient_r8_uint"},
+            {MTLPixelFormatR8Sint, 1, @"zpu_cpu_fill_gradient_r8_sint"},
+            {MTLPixelFormatRG8Uint, 2, @"zpu_cpu_fill_gradient_rg8_uint"},
+            {MTLPixelFormatRG8Sint, 2, @"zpu_cpu_fill_gradient_rg8_sint"},
+            {MTLPixelFormatRGBA8Uint, 4, @"zpu_cpu_fill_gradient_rgba8_uint"},
+            {MTLPixelFormatRGBA8Sint, 4, @"zpu_cpu_fill_gradient_rgba8_sint"},
+            {MTLPixelFormatR16Uint, 2, @"zpu_cpu_fill_gradient_r16_uint"},
+            {MTLPixelFormatR16Sint, 2, @"zpu_cpu_fill_gradient_r16_sint"},
+            {MTLPixelFormatRG16Uint, 4, @"zpu_cpu_fill_gradient_rg16_uint"},
+            {MTLPixelFormatRG16Sint, 4, @"zpu_cpu_fill_gradient_rg16_sint"},
+            {MTLPixelFormatRGBA16Uint, 8, @"zpu_cpu_fill_gradient_rgba16_uint"},
+            {MTLPixelFormatRGBA16Sint, 8, @"zpu_cpu_fill_gradient_rgba16_sint"},
             {MTLPixelFormatR32Uint, 4, @"zpu_cpu_fill_gradient_r32_uint"},
             {MTLPixelFormatR32Sint, 4, @"zpu_cpu_fill_gradient_r32_sint"},
             {MTLPixelFormatRG32Uint, 8, @"zpu_cpu_fill_gradient_rg32_uint"},
             {MTLPixelFormatRG32Sint, 8, @"zpu_cpu_fill_gradient_rg32_sint"},
         };
         for (NSUInteger format_index = 0;
-             format_index < sizeof(compute_wide_integer_formats) / sizeof(compute_wide_integer_formats[0]);
+             format_index < sizeof(compute_integer_formats) / sizeof(compute_integer_formats[0]);
              ++format_index) {
-            const NSUInteger bytes_per_pixel = compute_wide_integer_formats[format_index].bytes_per_pixel;
-            const NSUInteger wide_integer_byte_count = (NSUInteger)width * height * bytes_per_pixel;
+            const NSUInteger bytes_per_pixel = compute_integer_formats[format_index].bytes_per_pixel;
+            const NSUInteger integer_byte_count = (NSUInteger)width * height * bytes_per_pixel;
             MTLTextureDescriptor *native_wide_integer_descriptor = [compute_texture_descriptor copy];
-            native_wide_integer_descriptor.pixelFormat = compute_wide_integer_formats[format_index].format;
+            native_wide_integer_descriptor.pixelFormat = compute_integer_formats[format_index].format;
             MTLTextureDescriptor *adapter_wide_integer_descriptor = [native_wide_integer_descriptor copy];
             id<MTLTexture> native_wide_integer_texture =
                 [device newTextureWithDescriptor:native_wide_integer_descriptor];
@@ -21329,12 +21413,12 @@ int main(void) {
             NSError *native_wide_integer_error = nil;
             NSError *adapter_wide_integer_error = nil;
             id<MTLFunction> native_wide_integer_function =
-                [library newFunctionWithName:compute_wide_integer_formats[format_index].name];
+                [library newFunctionWithName:compute_integer_formats[format_index].name];
             id<MTLComputePipelineState> native_wide_integer_pipeline =
                 [device newComputePipelineStateWithFunction:native_wide_integer_function
                                                        error:&native_wide_integer_error];
             id<MTLFunction> adapter_wide_integer_function =
-                ZPUMetalCreateCPUFunction(adapter_device, compute_wide_integer_formats[format_index].name);
+                ZPUMetalCreateCPUFunction(adapter_device, compute_integer_formats[format_index].name);
             id<MTLComputePipelineState> adapter_wide_integer_pipeline =
                 [adapter_device newComputePipelineStateWithFunction:adapter_wide_integer_function
                                                                error:&adapter_wide_integer_error];
@@ -21358,8 +21442,8 @@ int main(void) {
             [adapter_wide_integer_encoder endEncoding];
             [adapter_wide_integer_command_buffer commit];
             [adapter_wide_integer_command_buffer waitUntilCompleted];
-            uint8_t native_wide_integer_bytes[wide_integer_byte_count];
-            uint8_t adapter_wide_integer_bytes[wide_integer_byte_count];
+            uint8_t native_wide_integer_bytes[integer_byte_count];
+            uint8_t adapter_wide_integer_bytes[integer_byte_count];
             [native_wide_integer_texture getBytes:native_wide_integer_bytes
                                         bytesPerRow:(NSUInteger)width * bytes_per_pixel
                                          fromRegion:MTLRegionMake2D(0, 0, width, height)
@@ -21376,7 +21460,7 @@ int main(void) {
                 adapter_wide_integer_error != nil || adapter_wide_integer_texture == nil ||
                 adapter_wide_integer_command_buffer == nil || adapter_wide_integer_encoder == nil ||
                 adapter_wide_integer_command_buffer.status != MTLCommandBufferStatusCompleted ||
-                memcmp(native_wide_integer_bytes, adapter_wide_integer_bytes, wide_integer_byte_count) != 0) {
+                memcmp(native_wide_integer_bytes, adapter_wide_integer_bytes, integer_byte_count) != 0) {
                 fail_with_error("wide integer compute adapter execution failed", adapter_wide_integer_error);
                 return 49 + (int)format_index;
             }
@@ -21969,7 +22053,7 @@ int main(void) {
          * 3x2 threadgroup make both the upper-left row origin and the
          * out-of-range threadgroup tail observable. */
         for (NSUInteger format_index = 0; format_index < 2; ++format_index) {
-            const MTLPixelFormat format = compute_integer_formats[format_index];
+            const MTLPixelFormat format = compute_rgba32_formats[format_index];
             const NSUInteger integer_byte_count = (NSUInteger)width * height * 16;
             MTLTextureDescriptor *native_integer_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
@@ -21982,7 +22066,7 @@ int main(void) {
             NSError *native_integer_error = nil;
             NSError *adapter_integer_error = nil;
             id<MTLFunction> native_integer_function =
-                [library newFunctionWithName:compute_integer_names[format_index]];
+                [library newFunctionWithName:compute_rgba32_names[format_index]];
             id<MTLComputePipelineState> native_integer_pipeline =
                 [device newComputePipelineStateWithFunction:native_integer_function error:&native_integer_error];
             id<MTLCommandBuffer> native_integer_command_buffer = [queue commandBuffer];
@@ -21999,7 +22083,7 @@ int main(void) {
             MTL4LibraryFunctionDescriptor *integer_function_descriptor =
                 [MTL4LibraryFunctionDescriptor new];
             integer_function_descriptor.library = adapter_mtl4_library;
-            integer_function_descriptor.name = compute_integer_names[format_index];
+            integer_function_descriptor.name = compute_rgba32_names[format_index];
             MTL4ComputePipelineDescriptor *integer_pipeline_descriptor =
                 [MTL4ComputePipelineDescriptor new];
             integer_pipeline_descriptor.computeFunctionDescriptor = integer_function_descriptor;

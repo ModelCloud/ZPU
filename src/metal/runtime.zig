@@ -4897,7 +4897,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6 and kernel != 7 and kernel != 8 and kernel != 9 and kernel != 10 and kernel != 11 and kernel != 12 and kernel != 13 and kernel != 14 and kernel != 15) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 27) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5673,6 +5673,90 @@ fn executeCompute(command: ComputeCommand) Error!void {
             var target = command.texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), 0, 0,
+            });
+        },
+        16 => {
+            if (command.texture.format != .r8_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), 0, 0, 0,
+            });
+        },
+        17 => {
+            if (command.texture.format != .r8_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), 0, 0, 0,
+            });
+        },
+        18 => {
+            if (command.texture.format != .rg8_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), @floatFromInt(y + 1), 0, 0,
+            });
+        },
+        19 => {
+            if (command.texture.format != .rg8_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), 0, 0,
+            });
+        },
+        20 => {
+            if (command.texture.format != .rgba8_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), @floatFromInt(y + 1), @floatFromInt(x + y + 1), 255,
+            });
+        },
+        21 => {
+            if (command.texture.format != .rgba8_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), @floatFromInt(x + y), 127,
+            });
+        },
+        22 => {
+            if (command.texture.format != .r16_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), 0, 0, 0,
+            });
+        },
+        23 => {
+            if (command.texture.format != .r16_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), 0, 0, 0,
+            });
+        },
+        24 => {
+            if (command.texture.format != .rg16_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), @floatFromInt(y + 1), 0, 0,
+            });
+        },
+        25 => {
+            if (command.texture.format != .rg16_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), 0, 0,
+            });
+        },
+        26 => {
+            if (command.texture.format != .rgba16_uint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), @floatFromInt(y + 1), @floatFromInt(x + y + 1), 65535,
+            });
+        },
+        27 => {
+            if (command.texture.format != .rgba16_sint) return error.UnsupportedFormat;
+            var target = command.texture.asTarget();
+            for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
+                @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), @floatFromInt(x + y), 32767,
             });
         },
         7 => return executeTraceTriangles(command),
@@ -9590,6 +9674,119 @@ test "CPU compute integer gradients preserve R32 and RG32 lanes" {
         try std.testing.expectEqual(@as(u32, @intCast(y + 1)), readU32Little(rg32_uint.bytes, rg32_offset + 4));
         try std.testing.expectEqual(@as(i32, @intCast(x + 1)), std.mem.readInt(i32, rg32_sint.bytes[rg32_offset..][0..4], .little));
         try std.testing.expectEqual(-@as(i32, @intCast(y + 1)), std.mem.readInt(i32, rg32_sint.bytes[rg32_offset + 4 ..][0..4], .little));
+    };
+}
+
+test "CPU compute integer gradients preserve R8/RG8/RGBA8 and 16-bit lanes" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const r8_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r8_uint));
+    defer destroyTexture(r8_uint);
+    const r8_sint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r8_sint));
+    defer destroyTexture(r8_sint);
+    const rg8_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rg8_uint));
+    defer destroyTexture(rg8_uint);
+    const rg8_sint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rg8_sint));
+    defer destroyTexture(rg8_sint);
+    const rgba8_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba8_uint));
+    defer destroyTexture(rgba8_uint);
+    const rgba8_sint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba8_sint));
+    defer destroyTexture(rgba8_sint);
+    const r16_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r16_uint));
+    defer destroyTexture(r16_uint);
+    const r16_sint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.r16_sint));
+    defer destroyTexture(r16_sint);
+    const rg16_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rg16_uint));
+    defer destroyTexture(rg16_uint);
+    const rg16_sint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rg16_sint));
+    defer destroyTexture(rg16_sint);
+    const rgba16_uint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba16_uint));
+    defer destroyTexture(rgba16_uint);
+    const rgba16_sint = try createTexture(device, 3, 2, @intFromEnum(abi.PixelFormat.rgba16_sint));
+    defer destroyTexture(rgba16_sint);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    const grid = abi.Size{ .width = 3, .height = 2, .depth = 1 };
+    const group = abi.Size{ .width = 2, .height = 2, .depth = 1 };
+    try encoder.setKernel(16);
+    try encoder.setTexture(r8_uint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(17);
+    try encoder.setTexture(r8_sint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(18);
+    try encoder.setTexture(rg8_uint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(19);
+    try encoder.setTexture(rg8_sint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(20);
+    try encoder.setTexture(rgba8_uint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(21);
+    try encoder.setTexture(rgba8_sint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(22);
+    try encoder.setTexture(r16_uint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(23);
+    try encoder.setTexture(r16_sint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(24);
+    try encoder.setTexture(rg16_uint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(25);
+    try encoder.setTexture(rg16_sint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(26);
+    try encoder.setTexture(rgba16_uint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.setKernel(27);
+    try encoder.setTexture(rgba16_sint, 0);
+    try encoder.dispatchThreads(grid, group);
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try command_buffer.commit();
+
+    for (0..2) |y| for (0..3) |x| {
+        const r8_offset = y * r8_uint.stride + x;
+        const rg8_offset = y * rg8_uint.stride + x * 2;
+        const rgba8_offset = y * rgba8_uint.stride + x * 4;
+        const r16_offset = y * r16_uint.stride + x * 2;
+        const rg16_offset = y * rg16_uint.stride + x * 4;
+        const rgba16_offset = y * rgba16_uint.stride + x * 8;
+        try std.testing.expectEqual(@as(u8, @intCast(x + 1)), r8_uint.bytes[r8_offset]);
+        try std.testing.expectEqual(@as(i8, @intCast(x + 1)), std.mem.readInt(i8, r8_sint.bytes[r8_offset..][0..1], .little));
+        try std.testing.expectEqual(@as(u8, @intCast(x + 1)), rg8_uint.bytes[rg8_offset]);
+        try std.testing.expectEqual(@as(u8, @intCast(y + 1)), rg8_uint.bytes[rg8_offset + 1]);
+        try std.testing.expectEqual(@as(i8, @intCast(x + 1)), std.mem.readInt(i8, rg8_sint.bytes[rg8_offset..][0..1], .little));
+        try std.testing.expectEqual(-@as(i8, @intCast(y + 1)), std.mem.readInt(i8, rg8_sint.bytes[rg8_offset + 1 ..][0..1], .little));
+        try std.testing.expectEqual(@as(u8, @intCast(x + 1)), rgba8_uint.bytes[rgba8_offset]);
+        try std.testing.expectEqual(@as(u8, @intCast(y + 1)), rgba8_uint.bytes[rgba8_offset + 1]);
+        try std.testing.expectEqual(@as(u8, @intCast(x + y + 1)), rgba8_uint.bytes[rgba8_offset + 2]);
+        try std.testing.expectEqual(@as(u8, 255), rgba8_uint.bytes[rgba8_offset + 3]);
+        try std.testing.expectEqual(@as(i8, @intCast(x + 1)), std.mem.readInt(i8, rgba8_sint.bytes[rgba8_offset..][0..1], .little));
+        try std.testing.expectEqual(-@as(i8, @intCast(y + 1)), std.mem.readInt(i8, rgba8_sint.bytes[rgba8_offset + 1 ..][0..1], .little));
+        try std.testing.expectEqual(@as(i8, @intCast(x + y)), std.mem.readInt(i8, rgba8_sint.bytes[rgba8_offset + 2 ..][0..1], .little));
+        try std.testing.expectEqual(@as(i8, 127), std.mem.readInt(i8, rgba8_sint.bytes[rgba8_offset + 3 ..][0..1], .little));
+        try std.testing.expectEqual(@as(u16, @intCast(x + 1)), readU16Little(r16_uint.bytes, r16_offset));
+        try std.testing.expectEqual(@as(i16, @intCast(x + 1)), std.mem.readInt(i16, r16_sint.bytes[r16_offset..][0..2], .little));
+        try std.testing.expectEqual(@as(u16, @intCast(x + 1)), readU16Little(rg16_uint.bytes, rg16_offset));
+        try std.testing.expectEqual(@as(u16, @intCast(y + 1)), readU16Little(rg16_uint.bytes, rg16_offset + 2));
+        try std.testing.expectEqual(@as(i16, @intCast(x + 1)), std.mem.readInt(i16, rg16_sint.bytes[rg16_offset..][0..2], .little));
+        try std.testing.expectEqual(-@as(i16, @intCast(y + 1)), std.mem.readInt(i16, rg16_sint.bytes[rg16_offset + 2 ..][0..2], .little));
+        try std.testing.expectEqual(@as(u16, @intCast(x + 1)), readU16Little(rgba16_uint.bytes, rgba16_offset));
+        try std.testing.expectEqual(@as(u16, @intCast(y + 1)), readU16Little(rgba16_uint.bytes, rgba16_offset + 2));
+        try std.testing.expectEqual(@as(u16, @intCast(x + y + 1)), readU16Little(rgba16_uint.bytes, rgba16_offset + 4));
+        try std.testing.expectEqual(@as(u16, 65535), readU16Little(rgba16_uint.bytes, rgba16_offset + 6));
+        try std.testing.expectEqual(@as(i16, @intCast(x + 1)), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset..][0..2], .little));
+        try std.testing.expectEqual(-@as(i16, @intCast(y + 1)), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset + 2 ..][0..2], .little));
+        try std.testing.expectEqual(@as(i16, @intCast(x + y)), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset + 4 ..][0..2], .little));
+        try std.testing.expectEqual(@as(i16, 32767), std.mem.readInt(i16, rgba16_sint.bytes[rgba16_offset + 6 ..][0..2], .little));
     };
 }
 
