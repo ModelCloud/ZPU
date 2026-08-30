@@ -1362,6 +1362,7 @@ static int test_cpu_indirect_trace_triangles_against_native(
         },
         {0},
     };
+    instance_data[1] = instance_data[0];
     id<MTLBuffer> instance_descriptor_buffer =
         [adapter_device newBufferWithBytes:instance_data length:sizeof(instance_data)
                                    options:MTLResourceStorageModeShared];
@@ -20098,6 +20099,7 @@ int main(void) {
                  * packed affine transform. */
                 MTLIndirectAccelerationStructureInstanceDescriptor metal4_indirect_data[2] = {0};
                 metal4_indirect_data[0] = metal4_instance_data;
+                metal4_indirect_data[1] = metal4_instance_data;
                 uint32_t metal4_indirect_count = 1;
                 id<MTLBuffer> adapter_metal4_indirect_instance_buffer =
                     [adapter_device newBufferWithBytes:metal4_indirect_data length:sizeof(metal4_indirect_data)

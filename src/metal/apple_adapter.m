@@ -16997,12 +16997,15 @@ static BOOL zpu_cpu_acceleration_metal4_indirect_instance_triangle_count(
             descriptor, owner, &instanceBuffer, &instanceOffset, &instanceRangeLength,
             &instanceStride, &instanceCount)) return NO;
     NSUInteger total = 0;
-    for (NSUInteger index = 0; index < instanceCount; ++index) {
+    for (NSUInteger index = 0; index < descriptor.maxInstanceCount; ++index) {
         MTLIndirectAccelerationStructureInstanceDescriptor instance;
         memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
                sizeof(instance));
         ZPUAccelerationStructure *child = zpu_cpu_acceleration_metal4_instance_child(&instance, owner);
-        if (child == nil) return NO;
+        if (child == nil) {
+            if (index < instanceCount) return NO;
+            continue;
+        }
         NSUInteger childCount = 0;
         NSUInteger childOffset = 0;
         if (child->_built && zpu_cpu_acceleration_payload_info(child, &childCount, &childOffset)) {
@@ -17229,12 +17232,15 @@ static BOOL zpu_cpu_acceleration_indirect_instance_triangle_count(
             &instanceBuffer, &instanceOffset, &instanceRangeLength, &instanceStride, &instanceCount)) return NO;
     ZPUDevice *owner = (ZPUDevice *)instanceBuffer->_owner;
     NSUInteger total = 0;
-    for (NSUInteger index = 0; index < instanceCount; ++index) {
+    for (NSUInteger index = 0; index < descriptor.maxInstanceCount; ++index) {
         MTLIndirectAccelerationStructureInstanceDescriptor instance;
         memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
                sizeof(instance));
         ZPUAccelerationStructure *child = zpu_cpu_acceleration_indirect_instance_child(&instance, owner);
-        if (child == nil) return NO;
+        if (child == nil) {
+            if (index < instanceCount) return NO;
+            continue;
+        }
         NSUInteger childCount = 0;
         NSUInteger childOffset = 0;
         if (child->_built && zpu_cpu_acceleration_payload_info(child, &childCount, &childOffset)) {
