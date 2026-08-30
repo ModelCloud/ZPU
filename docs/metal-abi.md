@@ -391,8 +391,8 @@ triangle path:
   `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_add_i32`, `zpu_cpu_ml_add_u32`,
   `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`,
   `zpu_cpu_ml_add_f16`, `zpu_cpu_ml_add_bf16`, `zpu_cpu_ml_add_i4`,
-  `zpu_cpu_ml_add_u4`, `zpu_cpu_ml_mul_f32`, `zpu_cpu_ml_mul_f16`, and
-  `zpu_cpu_ml_matmul_f32` Metal 4
+  `zpu_cpu_ml_add_u4`, `zpu_cpu_ml_mul_f32`, `zpu_cpu_ml_mul_f16`,
+  `zpu_cpu_ml_matmul_f32`, and `zpu_cpu_ml_matmul_f16` Metal 4
   machine-learning profiles preserve CPU fence update/wait ordering and
   interleave tensor copies and arithmetic with other commands at their encoded
   position in the deferred ZPU command buffer; arbitrary ML graphs remain
