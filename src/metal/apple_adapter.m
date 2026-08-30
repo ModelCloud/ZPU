@@ -1493,6 +1493,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
      * buffer-to-texture copy kernel, so unrelated slot updates must not erase
      * the profile's selected resource. */
     ZPUTexture *_boundTextures[2];
+    /* Registered CPU kernels have no arbitrary MSL resource ABI. Preserve
+     * valid non-executable texture/sampler slots as adapter-owned metadata so
+     * ordinary Metal binding calls remain last-write-wins without rebasing a
+     * slot onto the two executable texture bindings. */
+    NSMutableDictionary *_stageBindings;
     id _passDescriptor;
     BOOL _ended;
 }
@@ -1527,6 +1532,13 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 
 static NSUInteger zpu_compute_texture_index_for_kernel(zpu_metal_compute_kernel kernel);
 static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder);
+static BOOL zpu_compute_record_extra_texture(ZPUComputeEncoder *encoder,
+                                              id<MTLTexture> texture, NSUInteger index);
+static BOOL zpu_compute_record_sampler(ZPUComputeEncoder *encoder,
+                                        id<MTLSamplerState> sampler, NSUInteger index);
+static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
+                                                   float lodMinClamp, float lodMaxClamp,
+                                                   NSUInteger index);
 
 @interface ZPUArgumentEncoder : NSObject <MTLArgumentEncoder> {
 @public
@@ -3097,15 +3109,16 @@ static void zpu_metal4_clear_compute_argument_table(ZPUComputeEncoder *legacy,
         [(id<MTLComputeCommandEncoder>)legacy setVisibleFunctionTable:nil atBufferIndex:index];
         [(id<MTLComputeCommandEncoder>)legacy setIntersectionFunctionTable:nil atBufferIndex:index];
     }
-    /* The fixed CPU compute profiles expose texture slots zero and one. Any
-     * larger table remains metadata-only and cannot have installed a native
-     * binding in this CPU encoder. */
-    const NSUInteger textureCount = MIN(table->_maxTextureBindCount, (NSUInteger)2);
+    /* The fixed CPU compute profiles execute texture slots zero and one.
+     * Larger valid table slots are still retained as CPU metadata, so clear
+     * those slots too when replacing a table. */
+    const NSUInteger textureCount = table->_maxTextureBindCount;
     for (NSUInteger index = 0; index < textureCount; ++index) {
         [(id<MTLComputeCommandEncoder>)legacy setTexture:nil atIndex:index];
     }
-    /* Sampler setters are retained only for ownership metadata by the
-     * bounded CPU kernels, so there is no executable sampler state to clear. */
+    for (NSUInteger index = 0; index < MIN(table->_maxSamplerStateBindCount, (NSUInteger)16); ++index) {
+        [(id<MTLComputeCommandEncoder>)legacy setSamplerState:nil atIndex:index];
+    }
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -13851,13 +13864,6 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
-        if (index > 1) {
-            if (textureIDs[index] != 0) {
-                [_owner markError];
-                return;
-            }
-            continue;
-        }
         if (textureIDs[index] == 0) {
             [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:index];
             continue;
@@ -14827,6 +14833,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _kernel = 0;
         _boundTextures[0] = nil;
         _boundTextures[1] = nil;
+        _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
         _ended = NO;
     }
@@ -14917,12 +14924,12 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
-    if (zpu_metal_compute_encoder_set_texture(_zpuEncoder,
-            texture == nil ? NULL : zpuTexture->_zpuTexture, (uint32_t)index) != ZPU_METAL_OK) {
-        [_owner markError];
+    if (index > 1) {
+        (void)zpu_compute_record_extra_texture(self, texture, index);
         return;
     }
-    if (index > 1) {
+    if (zpu_metal_compute_encoder_set_texture(_zpuEncoder,
+            texture == nil ? NULL : zpuTexture->_zpuTexture, (uint32_t)index) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }
@@ -14938,13 +14945,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
-    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
-    if (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device])) {
-        [_owner markError];
-        return;
-    }
-    (void)index;
-    if (sampler != nil) [_owner retainResource:sampler];
+    (void)zpu_compute_record_sampler(self, sampler, index);
 }
 - (void)setSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers withRange:(NSRange)range {
     if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
@@ -14955,9 +14956,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index {
-    (void)lodMinClamp;
-    (void)lodMaxClamp;
     [self setSamplerState:sampler atIndex:index];
+    (void)zpu_compute_record_sampler_lod_clamps(self, lodMinClamp, lodMaxClamp, index);
 }
 - (void)setSamplerStates:(const id<MTLSamplerState> __nullable [__nonnull])samplers lodMinClamps:(const float [__nonnull])lodMinClamps lodMaxClamps:(const float [__nonnull])lodMaxClamps withRange:(NSRange)range {
     if (!zpu_u32_range_indices_fit(range)) { [_owner markError]; return; }
@@ -17495,6 +17495,52 @@ static BOOL zpu_render_record_direct_extra_sampler(ZPURenderEncoder *encoder,
     encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"sampler")] =
         sampler == nil ? (id)[NSNull null] : (id)sampler;
     if (sampler != nil) [encoder->_owner retainResource:sampler];
+    return YES;
+}
+
+static NSString *zpu_compute_stage_binding_key(NSUInteger index, NSString *kind) {
+    return [NSString stringWithFormat:@"compute.%lu.%@", (unsigned long)index, kind];
+}
+
+static BOOL zpu_compute_record_extra_texture(ZPUComputeEncoder *encoder,
+                                              id<MTLTexture> texture, NSUInteger index) {
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (index < 2 || index >= 128 ||
+        (texture != nil && !zpu_texture_belongs_to_device([encoder->_owner device], zpuTexture))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_compute_stage_binding_key(index, @"texture")] =
+        texture == nil ? (id)[NSNull null] : (id)texture;
+    if (texture != nil) [encoder->_owner retainResource:texture];
+    return YES;
+}
+
+static BOOL zpu_compute_record_sampler(ZPUComputeEncoder *encoder,
+                                        id<MTLSamplerState> sampler, NSUInteger index) {
+    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
+    if (index >= 16 ||
+        (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] ||
+                            zpuSampler->_owner != [encoder->_owner device]))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_compute_stage_binding_key(index, @"sampler")] =
+        sampler == nil ? (id)[NSNull null] : (id)sampler;
+    if (sampler != nil) [encoder->_owner retainResource:sampler];
+    return YES;
+}
+
+static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
+                                                   float lodMinClamp, float lodMaxClamp,
+                                                   NSUInteger index) {
+    if (!isfinite(lodMinClamp) || !isfinite(lodMaxClamp) || lodMinClamp < 0.0f ||
+        lodMaxClamp < lodMinClamp || index >= 16) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_compute_stage_binding_key(index, @"samplerLodClamps")] =
+        @[ @(lodMinClamp), @(lodMaxClamp) ];
     return YES;
 }
 

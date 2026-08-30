@@ -285,6 +285,11 @@ triangle path:
   provide the same three buffer bindings without changing CPU ownership, and
   `setBytes:length:atIndex:` snapshots are accepted in any of those profile
   slots with the same ZPU-owned lifetime semantics.
+  Direct compute texture slots 2 through 127 and sampler slots 0 through 15
+  are retained as ZPU-owned metadata for registered profiles that do not
+  execute those resources; the executable texture slots remain profile-owned
+  and are never rebased by an unrelated binding. Metal 4 compute argument
+  tables preserve and clear the same full texture/sampler slot ranges.
   The matching `zpu_cpu_mul_f32` profile performs deferred elementwise Float32
   multiplication through the same three ZPU-owned buffer slots and direct,
   indirect, and Metal 4 argument-table dispatch paths.

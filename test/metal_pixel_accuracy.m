@@ -15968,7 +15968,90 @@ int main(void) {
             return 187;
         }
 
-  /* The registered gradient profile writes a logical float4. The CPU
+        /* Compute texture and sampler slots beyond the registered CPU
+         * profile are still ordinary Metal state. The adapter keeps those
+         * slots as ZPU metadata while slot zero remains the executable
+         * gradient target. Native Metal is used only to prove that binding
+         * the same extra slots does not change the pixel result. */
+        id<MTLTexture> native_compute_extra_texture =
+            [device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLTexture> adapter_compute_extra_texture =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        MTLSamplerDescriptor *compute_extra_sampler_descriptor = [MTLSamplerDescriptor new];
+        id<MTLSamplerState> native_compute_extra_sampler =
+            [device newSamplerStateWithDescriptor:compute_extra_sampler_descriptor];
+        id<MTLSamplerState> adapter_compute_extra_sampler =
+            [adapter_device newSamplerStateWithDescriptor:compute_extra_sampler_descriptor];
+        id<MTLTexture> native_compute_extra_output =
+            [device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLTexture> adapter_compute_extra_output =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        id<MTLCommandBuffer> native_compute_extra_command_buffer = [queue commandBuffer];
+        id<MTLCommandBuffer> adapter_compute_extra_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_compute_extra_encoder =
+            [native_compute_extra_command_buffer computeCommandEncoder];
+        id<MTLComputeCommandEncoder> adapter_compute_extra_encoder =
+            [adapter_compute_extra_command_buffer computeCommandEncoder];
+        if (native_compute_extra_encoder != nil && native_compute_pipeline != nil &&
+            native_compute_extra_output != nil && native_compute_extra_texture != nil &&
+            native_compute_extra_sampler != nil) {
+            [native_compute_extra_encoder setComputePipelineState:native_compute_pipeline];
+            [native_compute_extra_encoder setTexture:native_compute_extra_output atIndex:0];
+            [native_compute_extra_encoder setTexture:native_compute_extra_texture atIndex:2];
+            [native_compute_extra_encoder setTexture:native_compute_extra_texture atIndex:127];
+            [native_compute_extra_encoder setSamplerState:native_compute_extra_sampler atIndex:1];
+            [native_compute_extra_encoder setSamplerState:native_compute_extra_sampler atIndex:15];
+            [native_compute_extra_encoder setSamplerState:native_compute_extra_sampler
+                                             lodMinClamp:0.0f lodMaxClamp:0.0f atIndex:2];
+            [native_compute_extra_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [native_compute_extra_encoder endEncoding];
+            [native_compute_extra_command_buffer commit];
+            [native_compute_extra_command_buffer waitUntilCompleted];
+        }
+        if (adapter_compute_extra_encoder != nil && adapter_compute_pipeline != nil &&
+            adapter_compute_extra_output != nil && adapter_compute_extra_texture != nil &&
+            adapter_compute_extra_sampler != nil) {
+            [adapter_compute_extra_encoder setComputePipelineState:adapter_compute_pipeline];
+            [adapter_compute_extra_encoder setTexture:adapter_compute_extra_output atIndex:0];
+            [adapter_compute_extra_encoder setTexture:adapter_compute_extra_texture atIndex:2];
+            [adapter_compute_extra_encoder setTexture:adapter_compute_extra_texture atIndex:127];
+            [adapter_compute_extra_encoder setSamplerState:adapter_compute_extra_sampler atIndex:1];
+            [adapter_compute_extra_encoder setSamplerState:adapter_compute_extra_sampler atIndex:15];
+            [adapter_compute_extra_encoder setSamplerState:adapter_compute_extra_sampler
+                                             lodMinClamp:0.0f lodMaxClamp:0.0f atIndex:2];
+            [adapter_compute_extra_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                       threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [adapter_compute_extra_encoder endEncoding];
+            [adapter_compute_extra_command_buffer commit];
+            [adapter_compute_extra_command_buffer waitUntilCompleted];
+        }
+        uint8_t native_compute_extra_pixels[byte_count] = {0};
+        uint8_t adapter_compute_extra_pixels[byte_count] = {0};
+        if (native_compute_extra_output != nil) {
+            [native_compute_extra_output getBytes:native_compute_extra_pixels
+                                       bytesPerRow:(NSUInteger)width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                       mipmapLevel:0];
+        }
+        if (adapter_compute_extra_output != nil) {
+            [adapter_compute_extra_output getBytes:adapter_compute_extra_pixels
+                                        bytesPerRow:(NSUInteger)width * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                        mipmapLevel:0];
+        }
+        const BOOL compute_extra_bindings_exact =
+            native_compute_extra_command_buffer != nil &&
+            native_compute_extra_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_compute_extra_command_buffer != nil &&
+            adapter_compute_extra_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_compute_extra_pixels, adapter_compute_extra_pixels, byte_count) == 0;
+        if (!compute_extra_bindings_exact) {
+            fail_with_error("CPU compute extra texture/sampler binding exactness failed", nil);
+            return 189;
+        }
+
+        /* The registered gradient profile writes a logical float4. The CPU
    * target encoder must preserve that result across representative color
    * formats it advertises, while native Metal remains the byte oracle. */
         const struct {
@@ -20179,6 +20262,58 @@ int main(void) {
                    sizeof(buffer_mul_left_values)) != 0) {
             fail_with_error("Metal 4 CPU buffer multiply argument-table dispatch failed", metal4_error);
             return 188;
+        }
+
+        /* Metal 4 compute tables expose the full texture/sampler slot ranges
+         * even when a registered CPU kernel only executes texture zero. The
+         * extra resources stay ZPU-owned metadata and table replacement clears
+         * them through the same CPU encoder state. */
+        MTL4ArgumentTableDescriptor *metal4_compute_extra_table_descriptor =
+            [MTL4ArgumentTableDescriptor new];
+        metal4_compute_extra_table_descriptor.maxTextureBindCount = 128;
+        metal4_compute_extra_table_descriptor.maxSamplerStateBindCount = 16;
+        id<MTL4ArgumentTable> metal4_compute_extra_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_compute_extra_table_descriptor
+                                                       error:&metal4_error];
+        id<MTL4CommandBuffer> metal4_compute_extra_command_buffer = [adapter_device newCommandBuffer];
+        id<MTL4ComputeCommandEncoder> metal4_compute_extra_encoder = nil;
+        __block NSError *metal4_compute_extra_error = nil;
+        id<MTLTexture> metal4_compute_extra_output =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        if (metal4_compute_extra_command_buffer != nil && metal4_allocator != nil) {
+            [metal4_compute_extra_table setTexture:metal4_compute_extra_output.gpuResourceID atIndex:0];
+            [metal4_compute_extra_table setTexture:adapter_compute_extra_texture.gpuResourceID atIndex:2];
+            [metal4_compute_extra_table setTexture:adapter_compute_extra_texture.gpuResourceID atIndex:127];
+            [metal4_compute_extra_table setSamplerState:adapter_compute_extra_sampler.gpuResourceID atIndex:1];
+            [metal4_compute_extra_table setSamplerState:adapter_compute_extra_sampler.gpuResourceID atIndex:15];
+            [metal4_compute_extra_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+            metal4_compute_extra_encoder = [metal4_compute_extra_command_buffer computeCommandEncoder];
+            [metal4_compute_extra_encoder setComputePipelineState:adapter_compute_pipeline];
+            [metal4_compute_extra_encoder setArgumentTable:metal4_compute_extra_table];
+            [metal4_compute_extra_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [metal4_compute_extra_encoder endEncoding];
+            [metal4_compute_extra_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> metal4_compute_extra_buffers[] = {metal4_compute_extra_command_buffer};
+            MTL4CommitOptions *metal4_compute_extra_options = ZPUMetalCreateCPUCommitOptions();
+            [metal4_compute_extra_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                metal4_compute_extra_error = feedback.error;
+            }];
+            [metal4_queue commit:metal4_compute_extra_buffers count:1 options:metal4_compute_extra_options];
+        }
+        uint8_t metal4_compute_extra_pixels[byte_count] = {0};
+        if (metal4_compute_extra_output != nil) {
+            [metal4_compute_extra_output getBytes:metal4_compute_extra_pixels
+                                       bytesPerRow:(NSUInteger)width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                       mipmapLevel:0];
+        }
+        if (metal4_compute_extra_table == nil || metal4_compute_extra_command_buffer == nil ||
+            metal4_compute_extra_encoder == nil || metal4_compute_extra_output == nil ||
+            metal4_compute_extra_error != nil ||
+            memcmp(native_compute_pixels, metal4_compute_extra_pixels, byte_count) != 0) {
+            fail_with_error("Metal 4 CPU compute extra binding exactness failed", metal4_error);
+            return 190;
         }
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const int metal4_position_result = test_metal4_position_fragment_grid_against_native(
