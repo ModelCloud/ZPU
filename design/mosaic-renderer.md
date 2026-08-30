@@ -53,7 +53,10 @@ Native Mosaic API ---------------------------┤
 
 The current branch implements Mosaic planning, prepared primitives, physical
 packet streams, and a scalar packet executor with differential coverage against
-`cpu_cube.zig`. It does not yet route real Vulkan draws through Mosaic.
+`cpu_cube.zig`. The Vulkan driver now has a narrow private bridge for eligible
+opaque `cpu_cube_v1` streams: it coalesces the complete bounded command run and
+routes it through the prepared scalar Mosaic executor. Full Vulkan draw
+lowering into hierarchy/physical cluster packets remains a later step.
 
 ## Current executable foundation
 
@@ -76,6 +79,8 @@ Implemented in this branch:
 - physical `LOCAL` / `MACRO` / `GLOBAL` packet streams;
 - prepared primitives that perform scalar triangle setup once;
 - scalar packet execution and differential testing against `cpu_cube`;
+- private Vulkan ABI bridge for eligible opaque streams using the prepared
+  scalar Mosaic executor;
 - primitive-SIMD versus pixel-SIMD path classification using a post-setup coverage estimate;
 - compact visibility/depth storage for the future opaque deferred-shading path;
 - caller-owned bounded scratch and capacity helpers;
@@ -83,7 +88,7 @@ Implemented in this branch:
 
 Not implemented yet:
 
-- Vulkan draw lowering into Mosaic cluster submissions;
+- full Vulkan draw lowering into Mosaic hierarchy/physical cluster submissions;
 - a stable public native Mosaic API;
 - instance/frustum/cone/LOD hierarchy generation;
 - actual primitive-SIMD triangle kernels;

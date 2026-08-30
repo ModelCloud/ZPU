@@ -17,6 +17,21 @@ const spirv_frontend = @import("spirv_frontend.zig");
 const render_ir = @import("render_ir.zig");
 const render_ir_exec = @import("render_ir_exec.zig");
 const core_command_inventory = @import("core_command_inventory.zig");
+
+/// Thread-local staging pointer for the private Mosaic ABI bridge. Keep the
+/// TLS object small: embedding the full 8,192-command array in TLS bloats the
+/// static TLS block and can make pthread_create fail on constrained hosts.
+/// The bounded array is allocated lazily per submitting thread, stays off the
+/// stack, and is reused by subsequent frames from that thread.
+threadlocal var mosaic_batch_storage: ?[]cpu_cube.DrawCommand = null;
+const mosaic_inline_batch_commands: usize = 256;
+
+fn mosaicBatchStorage() ?[]cpu_cube.DrawCommand {
+    if (mosaic_batch_storage == null) {
+        mosaic_batch_storage = std.heap.c_allocator.alloc(cpu_cube.DrawCommand, cpu_cube.max_batch_commands) catch return null;
+    }
+    return mosaic_batch_storage;
+}
 pub const Result = enum(i32) { success = 0, not_ready = 1, timeout = 2, event_set = 3, event_reset = 4, incomplete = 5, error_out_of_host_memory = -1, error_initialization_failed = -3, error_memory_map_failed = -5, error_layer_not_present = -6, error_extension_not_present = -7, error_feature_not_present = -8, error_incompatible_driver = -9, error_format_not_supported = -11, error_validation_failed = -1_000_011_001, error_out_of_pool_memory = -1_000_069_000, error_invalid_shader = -1_000_012_000, error_present_timing_queue_full = -1_000_208_000 };
 pub const Fn = ?*const fn () callconv(.c) void;
 pub const Alloc = opaque {};
@@ -9426,13 +9441,13 @@ fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
     };
 }
 
-/// Collapse adjacent legacy cpu_cube_v1 draw commands into one renderer
+/// Collapse adjacent eligible Vulkan draws into one private Mosaic
 /// submission. This is deliberately narrower than Vulkan's general command
 /// semantics: it only accepts the exact opaque, non-indexed, single-layer
-/// state that the batch API can represent. A state transition, unsupported
-/// execution ABI, blend, cull, indexed draw, instance, or layer falls back to
-/// executeValidatedCommand unchanged.
-fn executeValidatedCommandBatch(commands: []const Command, query_context: *QueryExecutionContext) ?usize {
+/// state that the prepared scalar Mosaic executor can represent. A state
+/// transition, unsupported execution ABI, blend, cull, indexed draw,
+/// instance, or layer falls back to executeValidatedCommand unchanged.
+fn executeMosaicCommandBatch(commands: []const Command, query_context: *QueryExecutionContext) ?usize {
     if (commands.len < 2) return null;
     const first = switch (commands[0]) {
         .cube_draw => |op| op,
@@ -9445,7 +9460,14 @@ fn executeValidatedCommandBatch(commands: []const Command, query_context: *Query
     const depth_image = first_depth orelse return null;
     if (color_image.width != depth_image.width or color_image.height != depth_image.height) return null;
 
-    var batch: [256]cpu_cube.DrawCommand = undefined;
+    // Keep the established short-batch path allocation-free.  The heap-backed
+    // 8,192-entry bridge is only needed once a stream is larger than the old
+    // ABI chunk; small ImGui/UI batches should not pay for its staging array.
+    var inline_batch: [mosaic_inline_batch_commands]cpu_cube.DrawCommand = undefined;
+    const batch = if (commands.len <= inline_batch.len)
+        inline_batch[0..]
+    else
+        (mosaicBatchStorage() orelse return null);
     var batch_len: usize = 0;
     var index: usize = 0;
     while (index < commands.len and batch_len < batch.len) : (index += 1) {
@@ -9469,9 +9491,9 @@ fn executeValidatedCommandBatch(commands: []const Command, query_context: *Query
     var bounds = emptyRect();
     const dirty_tiles = if (first.layer_count == 1 and @as(u64, color_image.width) * color_image.height >= 3840 * 2160) ensureDirtyTiles(color_image) else null;
     const pixels_written = if (dirty_tiles) |tiles|
-        cpu_cube.drawUncountedParallelBatchTrackedTiles(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds, tiles)
+        cpu_cube.drawUncountedParallelBatchMosaicTrackedTiles(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds, tiles)
     else
-        cpu_cube.drawUncountedParallelBatchTracked(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds);
+        cpu_cube.drawUncountedParallelBatchMosaic(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds);
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
     color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
     depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
@@ -9483,7 +9505,7 @@ fn executeValidatedCommandBatch(commands: []const Command, query_context: *Query
 fn executeValidatedCommands(commands: []const Command, query_context: *QueryExecutionContext) void {
     var index: usize = 0;
     while (index < commands.len) {
-        if (executeValidatedCommandBatch(commands[index..], query_context)) |consumed| {
+        if (executeMosaicCommandBatch(commands[index..], query_context)) |consumed| {
             index += consumed;
         } else {
             executeValidatedCommand(commands[index], query_context);
