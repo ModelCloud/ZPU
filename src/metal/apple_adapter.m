@@ -4634,6 +4634,31 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     return [viewSliceMipmapTextures copy];
 }
 
+static NSArray *zpu_make_sample_texture_views(ZPUTexture *source, MTLPixelFormat pixelFormat,
+                                              zpu_metal_texture **firstView, BOOL *success) {
+    if (source == nil || firstView == NULL || success == NULL || source.sampleCount <= 1) {
+        if (success != NULL) *success = NO;
+        return nil;
+    }
+    NSMutableArray *views = [NSMutableArray arrayWithCapacity:source.sampleCount - 1];
+    for (NSUInteger sample = 0; sample < source.sampleCount; ++sample) {
+        zpu_metal_texture *sourceTexture = [source zpuTextureAtLevel:0 slice:0 sample:sample];
+        zpu_metal_texture *view = sourceTexture == NULL ? NULL :
+            zpu_metal_texture_view(sourceTexture, zpu_pixel_format(pixelFormat));
+        if (view == NULL) {
+            for (id value in views) zpu_metal_texture_destroy((zpu_metal_texture *)[value pointerValue]);
+            *success = NO;
+            return nil;
+        }
+        if (sample == 0) {
+            *firstView = view;
+        } else {
+            [views addObject:[NSValue valueWithPointer:view]];
+        }
+    }
+    return [views copy];
+}
+
 @implementation ZPUTexture
 - (instancetype)initWithOwner:(id)owner texture:(zpu_metal_texture *)texture type:(MTLTextureType)type pixelFormat:(MTLPixelFormat)pixelFormat {
     return [self initWithOwner:owner texture:texture type:type pixelFormat:pixelFormat backing:nil];
@@ -5043,9 +5068,34 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     (void)zpu_metal_texture_replace_region(texture, zpu_region(region), source, NSUIntegerMax, bytesPerRow);
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat {
-    if (_sampleCount != 1) return nil;
     if (!zpu_texture_view_formats_compatible(_pixelFormat, pixelFormat) ||
         (_sparseMappings != nil && pixelFormat != _pixelFormat)) return nil;
+    if (_sampleCount != 1) {
+        if (_textureType != MTLTextureType2DMultisample) return nil;
+        ZPUTexture *view = [[ZPUTexture alloc] initWithOwner:_owner texture:_zpuTexture
+                                                        type:_textureType pixelFormat:pixelFormat backing:self];
+        if (pixelFormat == _pixelFormat) {
+            view->_sampleTextures = [_sampleTextures copy];
+        } else {
+            BOOL success = YES;
+            zpu_metal_texture *firstView = NULL;
+            NSArray *sampleViews = zpu_make_sample_texture_views(self, pixelFormat, &firstView, &success);
+            if (!success || firstView == NULL || sampleViews == nil) return nil;
+            view->_zpuTexture = firstView;
+            view->_mipmapTextures = @[[NSValue valueWithPointer:firstView]];
+            view->_sliceMipmapTextures = @[view->_mipmapTextures];
+            view->_sampleTextures = sampleViews;
+            view->_ownsZpuTextures = YES;
+        }
+        view->_sampleCount = _sampleCount;
+        view->_arrayLength = _arrayLength;
+        view->_depth = _depth;
+        view->_baseMipmapLevel = _baseMipmapLevel;
+        view->_baseSlice = _baseSlice;
+        view->_swizzle = [self swizzle];
+        zpu_sparse_inherit_texture_storage(view, self);
+        return (id<MTLTexture>)view;
+    }
     ZPUTexture *view = [[ZPUTexture alloc] initWithOwner:_owner texture:_zpuTexture
                                                     type:_textureType pixelFormat:pixelFormat backing:self];
     if (pixelFormat == _pixelFormat) {
@@ -5069,7 +5119,11 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat textureType:(MTLTextureType)textureType levels:(NSRange)levelRange slices:(NSRange)sliceRange {
-    if (_sampleCount != 1) return nil;
+    if (_sampleCount != 1) {
+        if (textureType != _textureType || levelRange.location != 0 || levelRange.length != 1 ||
+            sliceRange.location != 0 || sliceRange.length != 1) return nil;
+        return [self newTextureViewWithPixelFormat:pixelFormat];
+    }
     if (textureType != _textureType || sliceRange.location > _sliceMipmapTextures.count || sliceRange.length == 0 ||
         sliceRange.length > _sliceMipmapTextures.count - sliceRange.location ||
         levelRange.location > _mipmapTextures.count || levelRange.length == 0 ||

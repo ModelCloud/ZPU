@@ -952,6 +952,7 @@ static int test_multisample_resolve_against_native(
         native_resolve_descriptor.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> native_msaa = [native_device newTextureWithDescriptor:native_msaa_descriptor];
         id<MTLTexture> adapter_msaa = [adapter_device newTextureWithDescriptor:native_msaa_descriptor];
+        id<MTLTexture> adapter_msaa_view = [adapter_msaa newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
         id<MTLTexture> native_resolve = [native_device newTextureWithDescriptor:native_resolve_descriptor];
         id<MTLTexture> adapter_resolve = [adapter_device newTextureWithDescriptor:native_resolve_descriptor];
         id<MTLBuffer> native_buffer =
@@ -959,6 +960,7 @@ static int test_multisample_resolve_against_native(
         id<MTLBuffer> adapter_buffer =
             [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
         if (native_pipeline == nil || adapter_pipeline == nil || native_msaa == nil || adapter_msaa == nil ||
+            adapter_msaa_view == nil || adapter_msaa_view.sampleCount != sample_count ||
             native_resolve == nil || adapter_resolve == nil || native_buffer == nil || adapter_buffer == nil ||
             [adapter_device supportsTextureSampleCount:sample_count] == NO || adapter_msaa.sampleCount != sample_count) {
             fail_with_error("multisample resource/pipeline allocation", adapter_error ?: native_error);
@@ -972,7 +974,7 @@ static int test_multisample_resolve_against_native(
             MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve;
         native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
         MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
-        adapter_pass.colorAttachments[0].texture = adapter_msaa;
+        adapter_pass.colorAttachments[0].texture = adapter_msaa_view;
         adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
         id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
