@@ -343,6 +343,28 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
                 compute_encoder, blit_encoder, render_encoder, parallel_encoder);
         return 165;
     }
+    /* Apple rejects zero-sized texture descriptors before allocating any
+     * storage. Keep the CPU adapter equally strict, including the
+     * buffer-backed texture-view entry point. */
+    MTLTextureDescriptor *zero_width_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:0 height:1 mipmapped:NO];
+    MTLTextureDescriptor *zero_height_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:1 height:0 mipmapped:NO];
+    MTLTextureDescriptor *zero_buffer_width_descriptor = [zero_width_descriptor copy];
+    MTLTextureDescriptor *zero_buffer_height_descriptor = [zero_height_descriptor copy];
+    id<MTLTexture> zero_width_texture = [adapter_device newTextureWithDescriptor:zero_width_descriptor];
+    id<MTLTexture> zero_height_texture = [adapter_device newTextureWithDescriptor:zero_height_descriptor];
+    id<MTLTexture> zero_buffer_width_texture =
+        [adapter_buffer newTextureWithDescriptor:zero_buffer_width_descriptor offset:0 bytesPerRow:4];
+    id<MTLTexture> zero_buffer_height_texture =
+        [adapter_buffer newTextureWithDescriptor:zero_buffer_height_descriptor offset:0 bytesPerRow:4];
+    if (zero_width_texture != nil || zero_height_texture != nil ||
+        zero_buffer_width_texture != nil || zero_buffer_height_texture != nil) {
+        fprintf(stderr, "metal-pixel: CPU adapter accepted a zero-sized texture descriptor\n");
+        return 166;
+    }
     int result = 0;
 #define ZPU_AUDIT_OBJECT(object, protocol_type, name) \
     do { if (result == 0) result = test_adapter_object_protocol_selector_coverage( \
