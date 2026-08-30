@@ -7402,9 +7402,16 @@ int main(void) {
             adapter_kernel_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
             adapter_kernel_descriptor.options = MTLFunctionOptionCompileToBinary;
             NSError *adapter_kernel_descriptor_error = nil;
-            id<MTLFunction> adapter_invalid_descriptor_function =
+            id<MTLFunction> adapter_kernel_descriptor_function =
                 [adapter_library newFunctionWithDescriptor:adapter_kernel_descriptor
                                                        error:&adapter_kernel_descriptor_error];
+            MTLFunctionDescriptor *native_kernel_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_kernel_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+            native_kernel_descriptor.options = MTLFunctionOptionCompileToBinary;
+            NSError *native_kernel_descriptor_error = nil;
+            id<MTLFunction> native_kernel_descriptor_function =
+                [library newFunctionWithDescriptor:native_kernel_descriptor
+                                               error:&native_kernel_descriptor_error];
             adapter_function_descriptor_ok =
                 native_descriptor_function != nil && native_visible_descriptor_error == nil &&
                 native_descriptor_function.functionType == MTLFunctionTypeVisible &&
@@ -7415,7 +7422,12 @@ int main(void) {
                 [adapter_descriptor_function.name isEqualToString:@"zpu_test_visible_secondary_specialized"] &&
                 adapter_descriptor_function.label == nil &&
                 adapter_descriptor_function.options == MTLFunctionOptionCompileToBinary &&
-                adapter_invalid_descriptor_function == nil && adapter_kernel_descriptor_error != nil;
+                adapter_kernel_descriptor_function != nil && adapter_kernel_descriptor_error == nil &&
+                adapter_kernel_descriptor_function.functionType == MTLFunctionTypeKernel &&
+                adapter_kernel_descriptor_function.options == MTLFunctionOptionCompileToBinary &&
+                native_kernel_descriptor_function != nil && native_kernel_descriptor_error == nil &&
+                native_kernel_descriptor_function.functionType == MTLFunctionTypeKernel &&
+                native_kernel_descriptor_function.options == MTLFunctionOptionCompileToBinary;
         }
         if (@available(macOS 15.0, iOS 18.0, tvOS 18.0, *)) {
             const MTLFunctionOptions descriptor_options[] = {
@@ -7449,6 +7461,53 @@ int main(void) {
                     adapter_options_function.options == expected_options &&
                     adapter_options_function.functionType == MTLFunctionTypeVisible;
             }
+        }
+        if (@available(macOS 12.0, iOS 15.0, *)) {
+            MTLBinaryArchiveDescriptor *native_archive_descriptor = [MTLBinaryArchiveDescriptor new];
+            NSError *native_archive_error = nil;
+            id<MTLBinaryArchive> native_function_archive =
+                [device newBinaryArchiveWithDescriptor:native_archive_descriptor error:&native_archive_error];
+            MTLBinaryArchiveDescriptor *adapter_archive_descriptor = [MTLBinaryArchiveDescriptor new];
+            NSError *adapter_archive_error = nil;
+            id<MTLBinaryArchive> adapter_function_archive =
+                [adapter_device newBinaryArchiveWithDescriptor:adapter_archive_descriptor
+                                                           error:&adapter_archive_error];
+            MTLFunctionDescriptor *archive_function_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            archive_function_descriptor.name = @"zpu_test_visible_secondary";
+            archive_function_descriptor.options = MTLFunctionOptionCompileToBinary;
+            BOOL native_archive_add_ok =
+                native_function_archive != nil &&
+                [native_function_archive addFunctionWithDescriptor:archive_function_descriptor
+                                                             library:library error:&native_archive_error];
+            BOOL adapter_archive_add_ok =
+                adapter_function_archive != nil &&
+                [adapter_function_archive addFunctionWithDescriptor:archive_function_descriptor
+                                                              library:adapter_library error:&adapter_archive_error];
+            NSArray *native_archive_array = native_function_archive == nil ? @[] : @[native_function_archive];
+            NSArray *adapter_archive_array = adapter_function_archive == nil ? @[] : @[adapter_function_archive];
+            MTLFunctionDescriptor *native_archived_function_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_archived_function_descriptor.name = @"zpu_test_visible_secondary";
+            native_archived_function_descriptor.binaryArchives = native_archive_array;
+            NSError *native_archived_function_error = nil;
+            id<MTLFunction> native_archived_function =
+                [library newFunctionWithDescriptor:native_archived_function_descriptor
+                                               error:&native_archived_function_error];
+            MTLFunctionDescriptor *adapter_archived_function_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_archived_function_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_archived_function_descriptor.binaryArchives = adapter_archive_array;
+            NSError *adapter_archived_function_error = nil;
+            id<MTLFunction> adapter_archived_function =
+                [adapter_library newFunctionWithDescriptor:adapter_archived_function_descriptor
+                                                       error:&adapter_archived_function_error];
+            adapter_function_options_ok =
+                adapter_function_options_ok &&
+                native_archive_add_ok && native_archive_error == nil &&
+                adapter_archive_add_ok && adapter_archive_error == nil &&
+                native_archived_function != nil && native_archived_function_error == nil &&
+                native_archived_function.options == MTLFunctionOptionCompileToBinary &&
+                adapter_archived_function != nil && adapter_archived_function_error == nil &&
+                adapter_archived_function.options == MTLFunctionOptionCompileToBinary &&
+                adapter_archived_function.functionType == MTLFunctionTypeVisible;
         }
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTLFunctionDescriptor *native_independent_descriptor = [MTLFunctionDescriptor functionDescriptor];

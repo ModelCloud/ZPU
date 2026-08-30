@@ -8394,10 +8394,17 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         return nil;
     }
     if (@available(macOS 12.0, iOS 15.0, *)) {
-        if (descriptor.binaryArchives.count != 0) {
-            zpu_set_error(error, @"ZPU CPU Metal function descriptors do not search native binary archives");
-            return nil;
+        for (id<MTLBinaryArchive> archive in descriptor.binaryArchives ?: @[]) {
+            ZPUBinaryArchive *cpuArchive = (ZPUBinaryArchive *)archive;
+            if (![cpuArchive isKindOfClass:[ZPUBinaryArchive class]] || cpuArchive->_owner != self->_owner) {
+                zpu_set_error(error, @"ZPU CPU Metal function descriptors require ZPU-owned binary archives");
+                return nil;
+            }
         }
+    }
+    BOOL hasBinaryArchives = NO;
+    if (@available(macOS 12.0, iOS 15.0, *)) {
+        hasBinaryArchives = descriptor.binaryArchives.count != 0;
     }
     const MTLFunctionOptions options = descriptor.options;
     MTLFunctionOptions supportedOptions = MTLFunctionOptionCompileToBinary;
@@ -8413,14 +8420,16 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         return nil;
     }
     id<MTLFunction> registered = [self newFunctionWithName:descriptor.name];
-    if (registered == nil || (options != MTLFunctionOptionNone && registered.functionType != MTLFunctionTypeVisible)) {
-        zpu_set_error(error, @"ZPU CPU Metal function descriptor does not name a registered visible function");
+    if (registered == nil) {
+        zpu_set_error(error, @"ZPU CPU Metal function descriptor does not name a registered function");
         return nil;
     }
     MTLFunctionOptions normalizedOptions = options;
-    if (options != MTLFunctionOptionNone) normalizedOptions |= MTLFunctionOptionCompileToBinary;
+    if (options != MTLFunctionOptionNone || hasBinaryArchives) {
+        normalizedOptions |= MTLFunctionOptionCompileToBinary;
+    }
     ZPUCPUFunction *function = (ZPUCPUFunction *)registered;
-    if (options == MTLFunctionOptionNone) {
+    if (options == MTLFunctionOptionNone && !hasBinaryArchives && descriptor.specializedName.length == 0) {
         if (error != NULL) *error = nil;
         return registered;
     }
@@ -8642,7 +8651,8 @@ static void zpu_binary_archive_add_error(NSError **error, NSString *message) {
     }
     id<MTLFunction> function = [zpuLibrary newFunctionWithName:descriptor.name];
     NSString *name = zpu_binary_archive_function_name(_owner, function);
-    if (name == nil || function.functionType != MTLFunctionTypeKernel) {
+    if (name == nil || (function.functionType != MTLFunctionTypeKernel &&
+                        function.functionType != MTLFunctionTypeVisible)) {
         zpu_binary_archive_add_error(error, @"ZPU CPU Metal binary archives accept only registered CPU functions");
         return NO;
     }
