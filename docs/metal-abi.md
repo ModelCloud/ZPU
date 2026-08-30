@@ -184,6 +184,10 @@ triangle path:
   1/4, 1)`. Viewport origin and scissor affect coverage but never rebase the
   top-left pixel grid; the profile has no resource bindings and is checked
   byte-for-byte against the native position oracle
+- the registered `zpu_cpu_vertex` profile selects the fixed `zpu_metal_vertex`
+  CPU vertex ABI. Its function object is a Metal-shaped profile only; vertex
+  fetch, viewport mapping, rasterization, and interpolation remain entirely
+  ZPU-owned and CPU-executed
 - bounded CPU anisotropic sampler footprints for normalized coordinates and
   linear min/mag filters, with the configured tap count capped for predictable
   CPU work; native Metal remains only the byte-accuracy oracle

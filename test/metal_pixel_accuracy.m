@@ -21,6 +21,7 @@ static const char *const kShaderSource =
     "struct Vertex { float4 position [[position]]; float4 color; };\n"
     "vertex Vertex zpu_test_vertex(uint vertex_id [[vertex_id]], "
     "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
+    "vertex void zpu_cpu_vertex() {}\n"
     "struct LayeredVertex { float4 position [[position]]; float4 color; uint layer [[render_target_array_index]]; };\n"
     "vertex LayeredVertex zpu_cpu_layered_vertex(uint vertex_id [[vertex_id]], "
     "uint instance_id [[instance_id]], device const Vertex *vertices [[buffer(0)]]) { "
@@ -7744,7 +7745,7 @@ static int test_position_fragment_grid_against_native(
     enum { width = 7, height = 5, byte_count = width * height * 4 };
     id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_test_vertex"];
     id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_position_gradient"];
-    id<MTLFunction> adapter_vertex = [adapter_library newFunctionWithName:@"zpu_test_vertex"];
+    id<MTLFunction> adapter_vertex = [adapter_library newFunctionWithName:@"zpu_cpu_vertex"];
     id<MTLFunction> adapter_fragment =
         [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"];
     if (native_vertex == nil || native_fragment == nil || adapter_vertex == nil || adapter_fragment == nil) {
@@ -7875,9 +7876,13 @@ static int test_metal4_position_fragment_grid_against_native(
         [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
 
     MTL4RenderPipelineDescriptor *adapter_descriptor = [adapter_base_pipeline_descriptor copy];
+    MTL4LibraryFunctionDescriptor *adapter_vertex_descriptor =
+        [adapter_base_pipeline_descriptor.vertexFunctionDescriptor copy];
     MTL4LibraryFunctionDescriptor *adapter_fragment_descriptor =
         [adapter_base_pipeline_descriptor.fragmentFunctionDescriptor copy];
+    adapter_vertex_descriptor.name = @"zpu_cpu_vertex";
     adapter_fragment_descriptor.name = @"zpu_cpu_position_gradient_fragment";
+    adapter_descriptor.vertexFunctionDescriptor = adapter_vertex_descriptor;
     adapter_descriptor.fragmentFunctionDescriptor = adapter_fragment_descriptor;
     NSError *adapter_error = nil;
     id<MTLRenderPipelineState> adapter_pipeline =
@@ -14492,6 +14497,7 @@ int main(void) {
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
+            "vertex void zpu_cpu_vertex() {}\n"
             "vertex void zpu_test_stage_in_vertex() {}\n"
             "fragment float4 zpu_test_fragment() { return float4(1.0); }\n"
             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
@@ -15050,7 +15056,8 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 32 ||
+            adapter_library.functionNames.count != 33 ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||

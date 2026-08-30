@@ -86,6 +86,7 @@ static BOOL zpu_cpu_ml_function_name_supported(NSString *name) {
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName);
 static NSString *const zpu_cpu_trace_triangles_function_name = @"zpu_cpu_trace_triangles_rgba8";
+static NSString *const zpu_cpu_vertex_name = @"zpu_cpu_vertex";
 static NSString *const zpu_cpu_tile_gradient_function_name = @"zpu_cpu_tile_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_function_name = @"zpu_cpu_mesh_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_fragment_name = @"zpu_cpu_mesh_gradient_fragment";
@@ -7737,7 +7738,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
     }
-    if ([name isEqualToString:@"zpu_test_vertex"]) {
+    if ([name isEqualToString:@"zpu_test_vertex"] || [name isEqualToString:zpu_cpu_vertex_name]) {
         ZPUBinding *binding = zpu_reflection_binding(@"vertices", MTLBindingTypeBuffer,
                                                       MTLBindingAccessReadOnly, 0);
         [binding setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
@@ -7890,6 +7891,7 @@ static BOOL zpu_append_visible_binary_function_names(
 static BOOL zpu_cpu_function_name_supported(NSString *name) {
     return [@[
         @"zpu_test_vertex",
+        zpu_cpu_vertex_name,
         @"zpu_test_stage_in_vertex",
         @"zpu_test_no_raster_vertex",
         @"zpu_test_fragment",
@@ -9585,7 +9587,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -10324,6 +10326,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
         NSMutableArray *names = [NSMutableArray array];
         for (NSString *name in @[
             @"zpu_test_vertex",
+            zpu_cpu_vertex_name,
             @"zpu_test_stage_in_vertex",
             @"zpu_test_no_raster_vertex",
             @"zpu_test_fragment",
