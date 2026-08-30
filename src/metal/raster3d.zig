@@ -1321,6 +1321,16 @@ fn interpolateLineColor(a: ProjectedVertex, b: ProjectedVertex, t: f32) [4]f32 {
 }
 
 fn interpolateTriangleColor(vertices: [3]ProjectedVertex, w0: f32, w1: f32, w2: f32) [4]f32 {
+    var constant = true;
+    for (0..4) |channel| {
+        if (vertices[0].color[channel] != vertices[1].color[channel] or
+            vertices[0].color[channel] != vertices[2].color[channel])
+        {
+            constant = false;
+            break;
+        }
+    }
+    if (constant) return vertices[0].color;
     const denominator = vertices[0].inverse_w * w0 + vertices[1].inverse_w * w1 + vertices[2].inverse_w * w2;
     if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) return .{ 0, 0, 0, 1 };
     var color: [4]f32 = undefined;

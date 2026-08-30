@@ -2629,8 +2629,16 @@ static int test_multisample_resolve_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
     id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
-    enum { width = 9, height = 7, max_byte_count = width * height * 4 };
+    enum { width = 9, height = 7, max_byte_count = width * height * 16 };
     const NSUInteger sample_counts[] = {2, 4};
+    const struct {
+        MTLPixelFormat format;
+        NSUInteger bytes_per_pixel;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatRGBA8Unorm, 4, "RGBA8Unorm"},
+        {MTLPixelFormatRGBA32Float, 16, "RGBA32Float"},
+    };
     const zpu_metal_vertex vertices[] = {
         {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.91f, 0.23f, 0.71f, 0.81f}},
         {{ 1.0f,  0.714285714f, 0.5f, 1.0f}, {0.91f, 0.23f, 0.71f, 0.81f}},
@@ -2638,11 +2646,13 @@ static int test_multisample_resolve_against_native(
     };
     for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
         const NSUInteger sample_count = sample_counts[sample_index];
+        for (NSUInteger format_index = 0; format_index < sizeof(formats) / sizeof(formats[0]); ++format_index) {
+            const NSUInteger bytes_per_pixel = formats[format_index].bytes_per_pixel;
         MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
         native_pipeline_descriptor.vertexFunction = native_vertex_function;
         native_pipeline_descriptor.fragmentFunction = native_fragment_function;
         native_pipeline_descriptor.rasterSampleCount = sample_count;
-        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = formats[format_index].format;
         MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
         adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
         adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
@@ -2654,7 +2664,7 @@ static int test_multisample_resolve_against_native(
             [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
         MTLTextureDescriptor *native_msaa_descriptor = [MTLTextureDescriptor new];
         native_msaa_descriptor.textureType = MTLTextureType2DMultisample;
-        native_msaa_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_msaa_descriptor.pixelFormat = formats[format_index].format;
         native_msaa_descriptor.width = width;
         native_msaa_descriptor.height = height;
         native_msaa_descriptor.mipmapLevelCount = 1;
@@ -2662,13 +2672,13 @@ static int test_multisample_resolve_against_native(
         native_msaa_descriptor.storageMode = MTLStorageModePrivate;
         native_msaa_descriptor.usage = MTLTextureUsageRenderTarget;
         MTLTextureDescriptor *native_resolve_descriptor =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[format_index].format
                                                                 width:width height:height mipmapped:NO];
         native_resolve_descriptor.storageMode = MTLStorageModeShared;
         native_resolve_descriptor.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> native_msaa = [native_device newTextureWithDescriptor:native_msaa_descriptor];
         id<MTLTexture> adapter_msaa = [adapter_device newTextureWithDescriptor:native_msaa_descriptor];
-        id<MTLTexture> adapter_msaa_view = [adapter_msaa newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+        id<MTLTexture> adapter_msaa_view = [adapter_msaa newTextureViewWithPixelFormat:formats[format_index].format];
         id<MTLTexture> native_resolve = [native_device newTextureWithDescriptor:native_resolve_descriptor];
         id<MTLTexture> adapter_resolve = [adapter_device newTextureWithDescriptor:native_resolve_descriptor];
         id<MTLBuffer> native_buffer =
@@ -2700,7 +2710,8 @@ static int test_multisample_resolve_against_native(
         id<MTLRenderCommandEncoder> adapter_encoder =
             [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
         if (native_encoder == nil || adapter_encoder == nil) {
-            fprintf(stderr, "metal-pixel: %zux multisample encoder creation failed\n", sample_count);
+            fprintf(stderr, "metal-pixel: %s %zux multisample encoder creation failed\n",
+                    formats[format_index].name, sample_count);
             return 150;
         }
         /* Resolve actions are mutable encoder state in Metal. Exercise both
@@ -2724,21 +2735,34 @@ static int test_multisample_resolve_against_native(
         [adapter_command_buffer waitUntilCompleted];
         uint8_t native_pixels[max_byte_count] = {0};
         uint8_t adapter_pixels[max_byte_count] = {0};
-        [native_resolve getBytes:native_pixels bytesPerRow:width * 4
+        [native_resolve getBytes:native_pixels bytesPerRow:width * bytes_per_pixel
                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
-        [adapter_resolve getBytes:adapter_pixels bytesPerRow:width * 4
+        [adapter_resolve getBytes:adapter_pixels bytesPerRow:width * bytes_per_pixel
                          fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        const NSUInteger byte_count = width * height * bytes_per_pixel;
         if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            memcmp(native_pixels, adapter_pixels, sizeof(native_pixels)) != 0) {
+            memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
             size_t mismatch = 0;
-            while (mismatch < sizeof(native_pixels) && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
-            fprintf(stderr, "metal-pixel: %zux MSAA resolve mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
-                    sample_count, mismatch,
-                    mismatch < sizeof(native_pixels) ? native_pixels[mismatch] : 0,
-                    mismatch < sizeof(adapter_pixels) ? adapter_pixels[mismatch] : 0,
+            while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: %s %zux MSAA resolve mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                    formats[format_index].name, sample_count, mismatch,
+                    mismatch < byte_count ? native_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_pixels[mismatch] : 0,
                     (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+            if (formats[format_index].format == MTLPixelFormatRGBA32Float && mismatch < byte_count) {
+                const size_t pixel_offset = mismatch - (mismatch % 16);
+                for (size_t word = 0; word < 4; ++word) {
+                    uint32_t native_word = 0;
+                    uint32_t adapter_word = 0;
+                    memcpy(&native_word, native_pixels + pixel_offset + word * 4, sizeof(native_word));
+                    memcpy(&adapter_word, adapter_pixels + pixel_offset + word * 4, sizeof(adapter_word));
+                    fprintf(stderr, "metal-pixel: float pixel byte=%zu channel=%zu native=0x%08x adapter=0x%08x\n",
+                            pixel_offset, word, native_word, adapter_word);
+                }
+            }
             return 151;
+        }
         }
     }
     return 0;
