@@ -7379,6 +7379,7 @@ int main(void) {
                                   constantValues:[MTLFunctionConstantValues new]
                                              error:&adapter_library_error];
         BOOL adapter_function_descriptor_ok = YES;
+        BOOL adapter_function_options_ok = YES;
         BOOL adapter_specialized_link_ok = YES;
         if (@available(macOS 11.0, iOS 14.0, *)) {
             MTLFunctionDescriptor *native_visible_descriptor = [MTLFunctionDescriptor functionDescriptor];
@@ -7415,6 +7416,71 @@ int main(void) {
                 adapter_descriptor_function.label == nil &&
                 adapter_descriptor_function.options == MTLFunctionOptionCompileToBinary &&
                 adapter_invalid_descriptor_function == nil && adapter_kernel_descriptor_error != nil;
+        }
+        if (@available(macOS 15.0, iOS 18.0, tvOS 18.0, *)) {
+            const MTLFunctionOptions descriptor_options[] = {
+                MTLFunctionOptionStoreFunctionInMetalPipelinesScript,
+                MTLFunctionOptionFailOnBinaryArchiveMiss,
+                MTLFunctionOptionStoreFunctionInMetalPipelinesScript |
+                    MTLFunctionOptionFailOnBinaryArchiveMiss,
+            };
+            for (NSUInteger option_index = 0;
+                 option_index < sizeof(descriptor_options) / sizeof(descriptor_options[0]); ++option_index) {
+                MTLFunctionDescriptor *native_options_descriptor = [MTLFunctionDescriptor functionDescriptor];
+                native_options_descriptor.name = @"zpu_test_visible_secondary";
+                native_options_descriptor.options = descriptor_options[option_index];
+                NSError *native_options_error = nil;
+                id<MTLFunction> native_options_function =
+                    [library newFunctionWithDescriptor:native_options_descriptor error:&native_options_error];
+                MTLFunctionDescriptor *adapter_options_descriptor = [MTLFunctionDescriptor functionDescriptor];
+                adapter_options_descriptor.name = @"zpu_test_visible_secondary";
+                adapter_options_descriptor.options = descriptor_options[option_index];
+                NSError *adapter_options_error = nil;
+                id<MTLFunction> adapter_options_function =
+                    [adapter_library newFunctionWithDescriptor:adapter_options_descriptor
+                                                           error:&adapter_options_error];
+                const MTLFunctionOptions expected_options =
+                    descriptor_options[option_index] | MTLFunctionOptionCompileToBinary;
+                adapter_function_options_ok =
+                    adapter_function_options_ok &&
+                    native_options_function != nil && native_options_error == nil &&
+                    native_options_function.options == expected_options &&
+                    adapter_options_function != nil && adapter_options_error == nil &&
+                    adapter_options_function.options == expected_options &&
+                    adapter_options_function.functionType == MTLFunctionTypeVisible;
+            }
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionDescriptor *native_independent_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_independent_descriptor.name = @"zpu_test_visible_secondary";
+            native_independent_descriptor.options = MTLFunctionOptionPipelineIndependent;
+            NSError *native_independent_error = nil;
+            id<MTLFunction> native_independent_function =
+                [library newFunctionWithDescriptor:native_independent_descriptor
+                                               error:&native_independent_error];
+            MTLFunctionDescriptor *adapter_independent_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_independent_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_independent_descriptor.options = MTLFunctionOptionPipelineIndependent;
+            NSError *adapter_independent_error = nil;
+            id<MTLFunction> adapter_independent_function =
+                [adapter_library newFunctionWithDescriptor:adapter_independent_descriptor
+                                                       error:&adapter_independent_error];
+            id<MTLFunctionHandle> adapter_independent_handle_a =
+                [adapter_device functionHandleWithFunction:adapter_independent_function];
+            id<MTLFunctionHandle> adapter_independent_handle_b =
+                [adapter_device functionHandleWithFunction:adapter_independent_function];
+            adapter_function_options_ok =
+                adapter_function_options_ok &&
+                native_independent_function != nil && native_independent_error == nil &&
+                native_independent_function.options ==
+                    (MTLFunctionOptionCompileToBinary | MTLFunctionOptionPipelineIndependent) &&
+                adapter_independent_function != nil && adapter_independent_error == nil &&
+                adapter_independent_function.options ==
+                    (MTLFunctionOptionCompileToBinary | MTLFunctionOptionPipelineIndependent) &&
+                adapter_independent_handle_a != nil && adapter_independent_handle_b != nil &&
+                adapter_independent_handle_a.gpuResourceID._impl != 0 &&
+                adapter_independent_handle_a.gpuResourceID._impl ==
+                    adapter_independent_handle_b.gpuResourceID._impl;
         }
         if (@available(macOS 12.0, iOS 15.0, tvOS 16.0, *)) {
             MTLFunctionDescriptor *native_specialized_descriptor = [MTLFunctionDescriptor functionDescriptor];
@@ -7471,6 +7537,7 @@ int main(void) {
             !adapter_stage_input_attributes_ok ||
             !adapter_stitched_library_ok ||
             !adapter_function_descriptor_ok ||
+            !adapter_function_options_ok ||
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
