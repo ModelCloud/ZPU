@@ -439,7 +439,11 @@ triangle path:
   not alter slot-zero execution. Unsupported slot indices and foreign
   resources fail closed. Direct fragment buffer/inline-byte slots (1 through
   30) follow the same rule; fragment slot zero remains the only executable
-  uniform-buffer slot in the registered CPU profiles.
+  uniform-buffer slot in the registered CPU profiles. Direct vertex and
+  fragment texture slots (1 through 127) and sampler slots (1 through 15) are
+  likewise retained as metadata for profiles without those executable
+  bindings; the registered sample profile continues to require sampler slot
+  zero and rejects additional sampler slots.
 - direct and indexed indirect render draws read their ZPU argument buffers at
   commit time, including `vertexStart`, `instanceCount`, `indexStart`, and
   signed `baseVertex`; indexed `indexStart` is converted from elements to

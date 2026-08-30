@@ -17462,6 +17462,42 @@ static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
     return YES;
 }
 
+static BOOL zpu_render_record_direct_extra_texture(ZPURenderEncoder *encoder,
+                                                    MTLRenderStages stage,
+                                                    id<MTLTexture> texture, NSUInteger index) {
+    ZPUTexture *zpuTexture = (ZPUTexture *)texture;
+    if (index == 0 || index >= 128 ||
+        (texture != nil && !zpu_texture_belongs_to_device([encoder->_owner device], zpuTexture))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"texture")] =
+        texture == nil ? (id)[NSNull null] : (id)texture;
+    if (texture != nil) [encoder->_owner retainResource:texture];
+    return YES;
+}
+
+static BOOL zpu_render_record_direct_extra_sampler(ZPURenderEncoder *encoder,
+                                                    MTLRenderStages stage,
+                                                    id<MTLSamplerState> sampler, NSUInteger index) {
+    ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
+    /* The registered sample profile has a real sampler ABI at slot zero and
+     * deliberately rejects any other sampler slot. Other bounded CPU
+     * profiles have no executable sampler state, so their unused extra slots
+     * can be retained as metadata. */
+    if (index == 0 || index >= 16 ||
+        (encoder->_pipelineState != nil && encoder->_pipelineState->_sampleTexture) ||
+        (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] ||
+                            zpuSampler->_owner != [encoder->_owner device]))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    encoder->_stageBindings[zpu_render_stage_binding_key(stage, index, @"sampler")] =
+        sampler == nil ? (id)[NSNull null] : (id)sampler;
+    if (sampler != nil) [encoder->_owner retainResource:sampler];
+    return YES;
+}
+
 @implementation ZPURenderEncoder
 
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder {
@@ -17615,6 +17651,10 @@ static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
     [self setVertexBytes:bytes length:length atIndex:index];
 }
 - (void)setVertexTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_record_direct_extra_texture(self, MTLRenderStageVertex, texture, index);
+        return;
+    }
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (texture != nil && !zpu_texture_belongs_to_device([_owner device], zpuTexture)) { [_owner markError]; return; }
     if (texture != nil) { [_owner markError]; return; }
@@ -17627,6 +17667,10 @@ static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
     for (NSUInteger index = 0; index < range.length; ++index) [self setVertexTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setVertexSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_record_direct_extra_sampler(self, MTLRenderStageVertex, sampler, index);
+        return;
+    }
     ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
     if (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device])) { [_owner markError]; return; }
     if (sampler != nil) { [_owner markError]; return; }
@@ -17703,6 +17747,10 @@ static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
 }
 - (void)setFragmentTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_record_direct_extra_texture(self, MTLRenderStageFragment, texture, index);
+        return;
+    }
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (index > UINT32_MAX || (texture != nil && !zpu_texture_belongs_to_device([_owner device], zpuTexture))) { [_owner markError]; return; }
     if (zpu_metal_render_encoder_set_fragment_texture(
@@ -17741,6 +17789,10 @@ static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentTexture:textures[index] atIndex:range.location + index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_record_direct_extra_sampler(self, MTLRenderStageFragment, sampler, index);
+        return;
+    }
     ZPUSamplerState *zpuSampler = (ZPUSamplerState *)sampler;
     if (index > UINT32_MAX || (sampler != nil && index != 0) ||
         (sampler != nil && (![zpuSampler isKindOfClass:[ZPUSamplerState class]] || zpuSampler->_owner != [_owner device]))) {
@@ -17789,6 +17841,16 @@ static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
     for (NSUInteger index = 0; index < range.length; ++index) [self setFragmentSamplerState:samplers[index] atIndex:range.location + index];
 }
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index {
+    if (index != 0) {
+        if (!zpu_render_record_direct_extra_sampler(self, MTLRenderStageFragment, sampler, index)) return;
+        if (!isfinite(lodMinClamp) || !isfinite(lodMaxClamp) || lodMinClamp < 0.0f || lodMaxClamp < lodMinClamp) {
+            [_owner markError];
+            return;
+        }
+        _stageBindings[zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"samplerLodClamps")] =
+            @[ @(lodMinClamp), @(lodMaxClamp) ];
+        return;
+    }
     [self setFragmentSamplerState:sampler atIndex:index];
     if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_sampler_lod_clamps(
             _zpuEncoder, lodMinClamp, lodMaxClamp) != ZPU_METAL_OK) [_owner markError];

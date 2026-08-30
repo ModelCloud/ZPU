@@ -7898,6 +7898,18 @@ static int test_direct_extra_vertex_bindings_against_native(
     texture_descriptor.usage = MTLTextureUsageRenderTarget;
     id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
     id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    MTLTextureDescriptor *extra_texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
+                                                            width:1 height:1 mipmapped:NO];
+    extra_texture_descriptor.storageMode = MTLStorageModeShared;
+    extra_texture_descriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> native_extra_texture = [native_device newTextureWithDescriptor:extra_texture_descriptor];
+    id<MTLTexture> adapter_extra_texture = [adapter_device newTextureWithDescriptor:extra_texture_descriptor];
+    MTLSamplerDescriptor *extra_sampler_descriptor = [MTLSamplerDescriptor new];
+    id<MTLSamplerState> native_extra_sampler =
+        [native_device newSamplerStateWithDescriptor:extra_sampler_descriptor];
+    id<MTLSamplerState> adapter_extra_sampler =
+        [adapter_device newSamplerStateWithDescriptor:extra_sampler_descriptor];
 
     const zpu_metal_vertex vertices[] = {
         {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
@@ -7951,6 +7963,15 @@ static int test_direct_extra_vertex_bindings_against_native(
         [native_encoder setFragmentBufferOffset:16 atIndex:1];
         [native_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
         [native_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
+        [native_encoder setVertexTexture:native_extra_texture atIndex:1];
+        [native_encoder setVertexTexture:native_extra_texture atIndex:127];
+        [native_encoder setVertexSamplerState:native_extra_sampler atIndex:1];
+        [native_encoder setVertexSamplerState:native_extra_sampler atIndex:15];
+        [native_encoder setFragmentTexture:native_extra_texture atIndex:1];
+        [native_encoder setFragmentTexture:native_extra_texture atIndex:127];
+        [native_encoder setFragmentSamplerState:native_extra_sampler atIndex:1];
+        [native_encoder setFragmentSamplerState:native_extra_sampler atIndex:15];
+        [native_encoder setFragmentSamplerState:native_extra_sampler lodMinClamp:0.0f lodMaxClamp:4.0f atIndex:2];
         [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [native_encoder endEncoding];
     }
@@ -7965,6 +7986,15 @@ static int test_direct_extra_vertex_bindings_against_native(
         [adapter_encoder setFragmentBufferOffset:16 atIndex:1];
         [adapter_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
         [adapter_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
+        [adapter_encoder setVertexTexture:adapter_extra_texture atIndex:1];
+        [adapter_encoder setVertexTexture:adapter_extra_texture atIndex:127];
+        [adapter_encoder setVertexSamplerState:adapter_extra_sampler atIndex:1];
+        [adapter_encoder setVertexSamplerState:adapter_extra_sampler atIndex:15];
+        [adapter_encoder setFragmentTexture:adapter_extra_texture atIndex:1];
+        [adapter_encoder setFragmentTexture:adapter_extra_texture atIndex:127];
+        [adapter_encoder setFragmentSamplerState:adapter_extra_sampler atIndex:1];
+        [adapter_encoder setFragmentSamplerState:adapter_extra_sampler atIndex:15];
+        [adapter_encoder setFragmentSamplerState:adapter_extra_sampler lodMinClamp:0.0f lodMaxClamp:4.0f atIndex:2];
         [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [adapter_encoder endEncoding];
     }
@@ -7985,7 +8015,9 @@ static int test_direct_extra_vertex_bindings_against_native(
     }
     if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
         native_vertex_buffer == nil || adapter_vertex_buffer == nil || native_extra_buffer == nil ||
-        adapter_extra_buffer == nil || native_command_buffer == nil || adapter_command_buffer == nil ||
+        adapter_extra_buffer == nil || native_extra_texture == nil || adapter_extra_texture == nil ||
+        native_extra_sampler == nil || adapter_extra_sampler == nil || native_command_buffer == nil ||
+        adapter_command_buffer == nil ||
         native_encoder == nil || adapter_encoder == nil ||
         native_command_buffer.status != MTLCommandBufferStatusCompleted ||
         adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
