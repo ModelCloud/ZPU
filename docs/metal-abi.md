@@ -226,8 +226,9 @@ triangle path:
   3D dispatches expand z into plane commands while preserving the z coordinate
   in the CPU kernel; indirect array/3D dispatches resolve the deferred z
   extent at commit and skip slices outside that extent. The triangle trace
-  profile consumes a CPU-serialized legacy or Metal 4
-  `MTLPrimitiveAccelerationStructureDescriptor` containing Float3 triangle
+  profile consumes a CPU-serialized legacy
+  `MTLPrimitiveAccelerationStructureDescriptor` or Metal 4
+  `MTL4PrimitiveAccelerationStructureDescriptor` containing Float3 triangle
   geometry, including Metal 4 GPU-address ranges, casts one orthographic
   primary ray per output texel, and writes exact RGBA8 hit/miss values on
   Metal's top-left grid; indexed UInt16/UInt32 geometry and explicit vertex
