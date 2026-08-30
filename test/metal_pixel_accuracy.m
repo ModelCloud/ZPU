@@ -1124,13 +1124,16 @@ static int test_multisample_depth_stencil_against_native(
         {{ 0.8f,  0.8f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
         {{-0.2f,  0.8f, 0.25f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
     };
+    const NSUInteger sample_counts[] = {2, 4};
+    for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
+        const NSUInteger sample_count = sample_counts[sample_index];
     MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
     native_pipeline_descriptor.vertexFunction = native_vertex_function;
     native_pipeline_descriptor.fragmentFunction = native_fragment_function;
     native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     native_pipeline_descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
     native_pipeline_descriptor.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-    native_pipeline_descriptor.rasterSampleCount = 2;
+    native_pipeline_descriptor.rasterSampleCount = sample_count;
     MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
     adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
     adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
@@ -1160,7 +1163,7 @@ static int test_multisample_depth_stencil_against_native(
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                             width:width height:height mipmapped:NO];
     native_color_descriptor.textureType = MTLTextureType2DMultisample;
-    native_color_descriptor.sampleCount = 2;
+    native_color_descriptor.sampleCount = sample_count;
     native_color_descriptor.storageMode = MTLStorageModePrivate;
     native_color_descriptor.usage = MTLTextureUsageRenderTarget;
     MTLTextureDescriptor *native_resolve_descriptor =
@@ -1172,7 +1175,7 @@ static int test_multisample_depth_stencil_against_native(
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
                                                             width:width height:height mipmapped:NO];
     native_depth_descriptor.textureType = MTLTextureType2DMultisample;
-    native_depth_descriptor.sampleCount = 2;
+    native_depth_descriptor.sampleCount = sample_count;
     native_depth_descriptor.storageMode = MTLStorageModePrivate;
     native_depth_descriptor.usage = MTLTextureUsageRenderTarget;
     id<MTLTexture> native_color = [native_device newTextureWithDescriptor:native_color_descriptor];
@@ -1188,7 +1191,8 @@ static int test_multisample_depth_stencil_against_native(
     if (native_pipeline == nil || adapter_pipeline == nil || native_depth_stencil_state == nil ||
         adapter_depth_stencil_state == nil || native_color == nil || native_resolve == nil || native_depth == nil ||
         adapter_color == nil || adapter_resolve == nil || adapter_depth == nil || native_buffer == nil ||
-        adapter_buffer == nil || adapter_depth.sampleCount != 2 || adapter_depth.allocatedSize != width * height * 8 * 2) {
+        adapter_buffer == nil || adapter_depth.sampleCount != sample_count ||
+        adapter_depth.allocatedSize != width * height * 8 * sample_count) {
         fail_with_error("multisample depth/stencil allocation", adapter_error ?: native_error);
         return 156;
     }
@@ -1257,6 +1261,7 @@ static int test_multisample_depth_stencil_against_native(
         fail_with_error("native multisample depth/stencil error", native_command_buffer.error);
         fail_with_error("adapter multisample depth/stencil error", adapter_command_buffer.error);
         return 158;
+    }
     }
     return 0;
 }
