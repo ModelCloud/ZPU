@@ -122,6 +122,9 @@ static const char *const kShaderSource =
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
     "kernel void zpu_cpu_ml_add_i32_oracle(device const int *left [[buffer(0)]], "
     "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
+    "kernel void zpu_cpu_ml_add_u32_oracle(device const uint *left [[buffer(0)]], "
+    "device const uint *right [[buffer(1)]], device uint *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n";
 
 static void fail_with_error(const char *message, NSError *error) {
@@ -19957,6 +19960,155 @@ int main(void) {
             fail_with_error("Metal 4 CPU ML Int32 add profile failed",
                             metal4_ml_add_i32_error ?: metal4_ml_add_i32_feedback_error ?: native_ml_add_i32_error);
             return 164;
+        }
+
+        /* UInt32 addition stays entirely in ZPU storage as well. The native
+         * compute kernel below is only an arithmetic oracle; the adapter
+         * operation remains deferred until its CPU command buffer commits. */
+        NSError *metal4_ml_add_u32_error = nil;
+        MTL4LibraryFunctionDescriptor *metal4_ml_add_u32_function_descriptor =
+            [MTL4LibraryFunctionDescriptor new];
+        metal4_ml_add_u32_function_descriptor.library = metal4_ml_identity_library;
+        metal4_ml_add_u32_function_descriptor.name = @"zpu_cpu_ml_add_u32";
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_add_u32_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_add_u32_descriptor.label = @"zpu-cpu-ml-add-u32";
+        metal4_ml_add_u32_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_add_u32_function_descriptor;
+        [metal4_ml_add_u32_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:0];
+        [metal4_ml_add_u32_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:1];
+        [metal4_ml_add_u32_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:2];
+        id<MTL4MachineLearningPipelineState> metal4_ml_add_u32_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_add_u32_descriptor error:&metal4_ml_add_u32_error];
+        MTLTensorDescriptor *metal4_ml_add_u32_tensor_descriptor =
+            [metal4_ml_identity_tensor_descriptor copy];
+        metal4_ml_add_u32_tensor_descriptor.dataType = MTLTensorDataTypeUInt32;
+        id<MTLTensor> metal4_ml_add_u32_left =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_u32_tensor_descriptor
+                                               error:&metal4_ml_add_u32_error];
+        id<MTLTensor> metal4_ml_add_u32_right =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_u32_tensor_descriptor
+                                               error:&metal4_ml_add_u32_error];
+        id<MTLTensor> metal4_ml_add_u32_output =
+            [adapter_device newTensorWithDescriptor:metal4_ml_add_u32_tensor_descriptor
+                                               error:&metal4_ml_add_u32_error];
+        NSArray *metal4_ml_add_u32_resources = @[
+            (id)metal4_ml_add_u32_left,
+            (id)metal4_ml_add_u32_right,
+            (id)metal4_ml_add_u32_output,
+        ];
+        const uint32_t metal4_ml_add_u32_left_initial[] = {
+            1u, 2u, 3u, 4u, 5u, 6u,
+            7u, 8u, 9u, 10u, 11u, 12u,
+        };
+        const uint32_t metal4_ml_add_u32_left_committed[] = {
+            UINT32_MAX, 4000000000u, 3u, 4u, 500000000u, 600000000u,
+            700000000u, 800000000u, 900000000u, 1000000000u, 1100000000u, 1200000000u,
+        };
+        const uint32_t metal4_ml_add_u32_right_values[] = {
+            1u, 294967295u, UINT32_MAX, 8u, 500000000u, 600000000u,
+            700000000u, 800000000u, 900000000u, 1000000000u, 1100000000u, 1200000000u,
+        };
+        const uint32_t metal4_ml_add_u32_sentinel[] = {
+            0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        };
+        uint32_t metal4_ml_add_u32_values[12] = {0};
+        [metal4_ml_add_u32_left replaceSliceOrigin:metal4_ml_identity_zero
+                                      sliceDimensions:metal4_ml_identity_dimensions
+                                            withBytes:metal4_ml_add_u32_left_initial
+                                              strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_add_u32_right replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:metal4_ml_add_u32_right_values
+                                               strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_add_u32_output replaceSliceOrigin:metal4_ml_identity_zero
+                                        sliceDimensions:metal4_ml_identity_dimensions
+                                              withBytes:metal4_ml_add_u32_sentinel
+                                                strides:metal4_ml_identity_packed_strides];
+        MTL4ArgumentTableDescriptor *metal4_ml_add_u32_table_descriptor =
+            [MTL4ArgumentTableDescriptor new];
+        metal4_ml_add_u32_table_descriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> metal4_ml_add_u32_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_ml_add_u32_table_descriptor
+                                                       error:&metal4_ml_add_u32_error];
+        [metal4_ml_add_u32_table setResource:metal4_ml_add_u32_left.gpuResourceID atBufferIndex:0];
+        [metal4_ml_add_u32_table setResource:metal4_ml_add_u32_right.gpuResourceID atBufferIndex:1];
+        [metal4_ml_add_u32_table setResource:metal4_ml_add_u32_output.gpuResourceID atBufferIndex:2];
+        id<MTL4CommandBuffer> metal4_ml_add_u32_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_ml_add_u32_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_add_u32_encoder =
+            [metal4_ml_add_u32_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_add_u32_encoder setPipelineState:metal4_ml_add_u32_pipeline];
+        [metal4_ml_add_u32_encoder setArgumentTable:metal4_ml_add_u32_table];
+        [metal4_ml_add_u32_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_add_u32_left replaceSliceOrigin:metal4_ml_identity_zero
+                                      sliceDimensions:metal4_ml_identity_dimensions
+                                            withBytes:metal4_ml_add_u32_left_committed
+                                              strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_add_u32_encoder endEncoding];
+        [metal4_ml_add_u32_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_add_u32_command_buffers[] = {
+            metal4_ml_add_u32_command_buffer,
+        };
+        MTL4CommitOptions *metal4_ml_add_u32_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_add_u32_feedback_error = nil;
+        [metal4_ml_add_u32_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_add_u32_feedback_error = feedback.error;
+        }];
+
+        id<MTLFunction> native_ml_add_u32_function =
+            [library newFunctionWithName:@"zpu_cpu_ml_add_u32_oracle"];
+        NSError *native_ml_add_u32_error = nil;
+        id<MTLComputePipelineState> native_ml_add_u32_pipeline =
+            [device newComputePipelineStateWithFunction:native_ml_add_u32_function
+                                                   error:&native_ml_add_u32_error];
+        id<MTLBuffer> native_ml_add_u32_left =
+            [device newBufferWithBytes:metal4_ml_add_u32_left_committed
+                                 length:sizeof(metal4_ml_add_u32_left_committed)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_ml_add_u32_right =
+            [device newBufferWithBytes:metal4_ml_add_u32_right_values
+                                 length:sizeof(metal4_ml_add_u32_right_values)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_ml_add_u32_output =
+            [device newBufferWithLength:sizeof(metal4_ml_add_u32_values)
+                                options:MTLResourceStorageModeShared];
+        id<MTLCommandQueue> native_ml_add_u32_queue = [device newCommandQueue];
+        id<MTLCommandBuffer> native_ml_add_u32_command_buffer = [native_ml_add_u32_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_ml_add_u32_encoder =
+            [native_ml_add_u32_command_buffer computeCommandEncoder];
+        [native_ml_add_u32_encoder setComputePipelineState:native_ml_add_u32_pipeline];
+        [native_ml_add_u32_encoder setBuffer:native_ml_add_u32_left offset:0 atIndex:0];
+        [native_ml_add_u32_encoder setBuffer:native_ml_add_u32_right offset:0 atIndex:1];
+        [native_ml_add_u32_encoder setBuffer:native_ml_add_u32_output offset:0 atIndex:2];
+        [native_ml_add_u32_encoder dispatchThreads:MTLSizeMake(12, 1, 1)
+                              threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [native_ml_add_u32_encoder endEncoding];
+        [native_ml_add_u32_command_buffer commit];
+        [metal4_queue commit:metal4_ml_add_u32_command_buffers
+                        count:1
+                       options:metal4_ml_add_u32_options];
+        [native_ml_add_u32_command_buffer waitUntilCompleted];
+        [metal4_ml_add_u32_output getBytes:metal4_ml_add_u32_values
+                                  strides:metal4_ml_identity_packed_strides
+                         fromSliceOrigin:metal4_ml_identity_zero
+                         sliceDimensions:metal4_ml_identity_dimensions];
+        const uint32_t *native_ml_add_u32_values = (const uint32_t *)native_ml_add_u32_output.contents;
+        if (metal4_ml_add_u32_pipeline == nil || metal4_ml_add_u32_error != nil ||
+            metal4_ml_identity_library == nil ||
+            [metal4_ml_identity_library newFunctionWithName:@"zpu_cpu_ml_add_u32"] == nil ||
+            metal4_ml_add_u32_resources.count != 3 ||
+            metal4_ml_add_u32_table == nil || metal4_ml_add_u32_encoder == nil ||
+            metal4_ml_add_u32_command_buffer == nil || metal4_ml_add_u32_feedback_error != nil ||
+            native_ml_add_u32_function == nil || native_ml_add_u32_pipeline == nil ||
+            native_ml_add_u32_error != nil ||
+            native_ml_add_u32_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_ml_add_u32_values, metal4_ml_add_u32_values,
+                   sizeof(metal4_ml_add_u32_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML UInt32 add profile failed",
+                            metal4_ml_add_u32_error ?: metal4_ml_add_u32_feedback_error ?: native_ml_add_u32_error);
+            return 165;
         }
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
