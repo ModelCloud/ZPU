@@ -353,7 +353,8 @@ triangle path:
 - the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_add_u8`,
   `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_add_i32`, `zpu_cpu_ml_add_u32`,
   `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`,
-  `zpu_cpu_ml_add_f16`, and `zpu_cpu_ml_add_bf16` Metal 4
+  `zpu_cpu_ml_add_f16`, `zpu_cpu_ml_add_bf16`, `zpu_cpu_ml_add_i4`, and
+  `zpu_cpu_ml_add_u4` Metal 4
   machine-learning profiles preserve CPU fence update/wait ordering and
   interleave tensor copies and arithmetic with other commands at their encoded
   position in the deferred ZPU command buffer; arbitrary ML graphs remain
@@ -565,8 +566,11 @@ triangle path:
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice
   transfers, including packed low/high-nibble round trips for Int4 and UInt4
-  tensors; legacy and Metal 4 tensor copy commands defer packed sub-byte
-  transfers through the CPU/ZPU command stream. Acceleration-structure build/refit/copy/compaction commands use
+  tensors; buffer-backed tensor views enforce Apple's 64-byte ML row and
+  128-byte sub-byte outer-stride/offset rules, including exact higher-rank ML
+  stride continuation; direct tensors reject buffer-only stride descriptors;
+  legacy and Metal 4 tensor copy commands defer packed sub-byte transfers
+  through the CPU/ZPU command stream. Acceleration-structure build/refit/copy/compaction commands use
   the same CPU-owned storage path, and the bounded Float3 triangle trace
   profile executes from that storage. An explicit `ZPUMetalCreateCPUDrawable`
   factory wraps a ZPU texture in a CPU-owned `MTLDrawable`; ordinary command
