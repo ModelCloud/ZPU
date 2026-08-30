@@ -11599,6 +11599,7 @@ int main(void) {
                 -0.05f,  0.65f, 0.0f, 33.0f,
             };
             const uint16_t ray_indices[] = {0, 1, 2};
+            const uint32_t ray_uint32_indices[] = {0, 1, 2};
             id<MTLBuffer> native_ray_vertices =
                 [device newBufferWithBytes:ray_vertices length:sizeof(ray_vertices)
                                    options:MTLResourceStorageModeShared];
@@ -11607,6 +11608,9 @@ int main(void) {
                                             options:MTLResourceStorageModeShared];
             id<MTLBuffer> adapter_ray_indices =
                 [adapter_device newBufferWithBytes:ray_indices length:sizeof(ray_indices)
+                                            options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_ray_uint32_indices =
+                [adapter_device newBufferWithBytes:ray_uint32_indices length:sizeof(ray_uint32_indices)
                                             options:MTLResourceStorageModeShared];
             MTLPrimitiveAccelerationStructureDescriptor *ray_descriptor =
                 [MTLPrimitiveAccelerationStructureDescriptor descriptor];
@@ -11622,7 +11626,19 @@ int main(void) {
             if (@available(macOS 13.0, iOS 16.0, *)) {
                 ray_geometry.vertexFormat = MTLAttributeFormatFloat3;
             }
-            ray_descriptor.geometryDescriptors = @[ray_geometry];
+            MTLAccelerationStructureTriangleGeometryDescriptor *ray_uint32_geometry =
+                [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+            ray_uint32_geometry.vertexBuffer = adapter_ray_vertices;
+            ray_uint32_geometry.vertexBufferOffset = 0;
+            ray_uint32_geometry.vertexStride = 4 * sizeof(float);
+            ray_uint32_geometry.indexBuffer = adapter_ray_uint32_indices;
+            ray_uint32_geometry.indexBufferOffset = 0;
+            ray_uint32_geometry.indexType = MTLIndexTypeUInt32;
+            ray_uint32_geometry.triangleCount = 1;
+            if (@available(macOS 13.0, iOS 16.0, *)) {
+                ray_uint32_geometry.vertexFormat = MTLAttributeFormatFloat3;
+            }
+            ray_descriptor.geometryDescriptors = @[ray_geometry, ray_uint32_geometry];
             MTLAccelerationStructureSizes ray_sizes =
                 [adapter_device accelerationStructureSizesWithDescriptor:ray_descriptor];
             const NSUInteger ray_allocation_size = ray_sizes.accelerationStructureSize == 0 ?
@@ -11697,7 +11713,7 @@ int main(void) {
                                fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
             adapter_ray_trace_exact =
                 native_ray_vertices != nil && adapter_ray_vertices != nil && adapter_ray_indices != nil &&
-                ray_geometry != nil &&
+                adapter_ray_uint32_indices != nil && ray_geometry != nil && ray_uint32_geometry != nil &&
                 adapter_ray_acceleration_structure != nil && adapter_ray_scratch != nil &&
                 adapter_ray_build_command_buffer != nil && adapter_ray_build_encoder != nil &&
                 adapter_ray_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
