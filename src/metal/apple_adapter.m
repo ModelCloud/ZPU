@@ -11692,6 +11692,48 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     return operation != nil && [owner appendDeferredOperation:operation];
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_tensor_encode_packed_copy_slice(
+    ZPUTensor *source, MTLTensorExtents *sourceOrigin, MTLTensorExtents *sourceDimensions,
+    ZPUTensor *destination, MTLTensorExtents *destinationOrigin,
+    MTLTensorExtents *destinationDimensions, ZPUCommandBuffer *owner) {
+    if (source == nil || destination == nil || owner == nil || owner->_zpuCommandBuffer == NULL ||
+        source->_owner != destination->_owner || source->_owner == nil ||
+        source->_owner != owner->_owner->_owner ||
+        source->_dataType != destination->_dataType || source->_elementBits != 4 ||
+        destination->_elementBits != 4 || sourceDimensions == nil || sourceOrigin == nil ||
+        destinationOrigin == nil || destinationDimensions == nil ||
+        source->_dimensions == nil || destination->_dimensions == nil ||
+        sourceDimensions.rank != source->_dimensions.rank ||
+        destinationDimensions.rank != destination->_dimensions.rank ||
+        destinationDimensions.rank != sourceDimensions.rank) return NO;
+    NSUInteger sourceShape[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationShape[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(sourceDimensions, sourceDimensions.rank, sourceShape, YES) ||
+        !zpu_tensor_read_extents(destinationDimensions, destinationDimensions.rank, destinationShape, YES) ||
+        memcmp(sourceShape, destinationShape, sourceDimensions.rank * sizeof(NSUInteger)) != 0) return NO;
+    NSUInteger sourceCount = 0;
+    NSUInteger sourceOriginValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger sourceSliceDimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger sourceStrides[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_slice_parameters(source, sourceOrigin, sourceDimensions, nil,
+                                      sourceOriginValues, sourceSliceDimensions, sourceStrides, &sourceCount)) return NO;
+    NSUInteger destinationCount = 0;
+    NSUInteger destinationOriginValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationSliceDimensions[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationStrides[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_slice_parameters(destination, destinationOrigin, destinationDimensions, nil,
+                                      destinationOriginValues, destinationSliceDimensions, destinationStrides,
+                                      &destinationCount) || sourceCount != destinationCount) return NO;
+    if (sourceCount == 0) return YES;
+    return zpu_defer_operation(owner, ^BOOL {
+        NSMutableData *packed = [NSMutableData dataWithLength:sourceCount];
+        return packed != nil &&
+            zpu_tensor_transfer_bytes(source, sourceOrigin, sourceDimensions, nil, packed.mutableBytes, NO) &&
+            zpu_tensor_transfer_bytes(destination, destinationOrigin, destinationDimensions, nil, packed.bytes, YES);
+    });
+}
+
 @implementation ZPUCommandBuffer
 - (instancetype)initWithOwner:(ZPUCommandQueue *)owner commandBuffer:(zpu_metal_command_buffer *)commandBuffer {
     if ((self = [super init])) {
@@ -13812,10 +13854,16 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions {
     ZPUTensor *source = (ZPUTensor *)sourceTensor;
     ZPUTensor *destination = (ZPUTensor *)destinationTensor;
+    const BOOL packed = [source isKindOfClass:[ZPUTensor class]] && [destination isKindOfClass:[ZPUTensor class]] &&
+        (source->_elementBits < 8 || destination->_elementBits < 8);
+    const BOOL encoded = packed ?
+        zpu_tensor_encode_packed_copy_slice(source, sourceOrigin, sourceDimensions, destination,
+                                            destinationOrigin, destinationDimensions, _owner->_legacyBuffer) :
+        zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
+                                     destinationDimensions, _legacy->_zpuEncoder, YES);
     if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
         source->_owner != [_owner device] || destination->_owner != [_owner device] ||
-        !zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
-                                       destinationDimensions, _legacy->_zpuEncoder, YES)) {
+        !encoded) {
         [_owner markError];
         return;
     }
@@ -15854,10 +15902,16 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUTensor *source = (ZPUTensor *)sourceTensor;
     ZPUTensor *destination = (ZPUTensor *)destinationTensor;
+    const BOOL packed = [source isKindOfClass:[ZPUTensor class]] && [destination isKindOfClass:[ZPUTensor class]] &&
+        (source->_elementBits < 8 || destination->_elementBits < 8);
+    const BOOL encoded = packed ?
+        zpu_tensor_encode_packed_copy_slice(source, sourceOrigin, sourceDimensions, destination,
+                                            destinationOrigin, destinationDimensions, _owner) :
+        zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
+                                     destinationDimensions, _zpuEncoder, NO);
     if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
         source->_owner != [_owner device] || destination->_owner != [_owner device] ||
-        !zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
-                                       destinationDimensions, _zpuEncoder, NO)) {
+        !encoded) {
         [_owner markError];
         return;
     }

@@ -10207,6 +10207,106 @@ int main(void) {
                     fail_with_error("native UInt4 tensor transfer oracle mismatch", error);
                     return 114;
                 }
+
+                const uint8_t subbyte_copy_initial_values[] = {0xa1, 0xb2, 0xc3};
+                const uint8_t subbyte_copy_committed_values[] = {0x4d, 0x5e, 0x6f};
+                const uint8_t subbyte_copy_sentinel_values[] = {0xff, 0xee, 0xdd};
+                uint8_t subbyte_copy_adapter_values[sizeof(subbyte_copy_sentinel_values)] = {0};
+                MTLTensorDescriptor *subbyte_copy_descriptor = [subbyte_descriptor copy];
+                NSError *subbyte_copy_error = nil;
+                id<MTLTensor> subbyte_copy_source =
+                    [adapter_device newTensorWithDescriptor:subbyte_copy_descriptor error:&subbyte_copy_error];
+                id<MTLTensor> subbyte_copy_destination =
+                    [adapter_device newTensorWithDescriptor:subbyte_copy_descriptor error:&subbyte_copy_error];
+                [subbyte_copy_source replaceSliceOrigin:
+                                            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                       sliceDimensions:tensor_dimensions
+                                             withBytes:subbyte_copy_initial_values
+                                               strides:tensor_packed_strides];
+                [subbyte_copy_destination replaceSliceOrigin:
+                                                 [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                            sliceDimensions:tensor_dimensions
+                                                  withBytes:subbyte_copy_sentinel_values
+                                                    strides:tensor_packed_strides];
+                id<MTLCommandBuffer> subbyte_copy_command_buffer = [adapter_queue commandBuffer];
+                id<MTLBlitCommandEncoder> subbyte_copy_encoder =
+                    [subbyte_copy_command_buffer blitCommandEncoder];
+                [subbyte_copy_encoder copyFromTensor:subbyte_copy_source
+                                        sourceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                    sourceDimensions:tensor_dimensions
+                                           toTensor:subbyte_copy_destination
+                                  destinationOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                               destinationDimensions:tensor_dimensions];
+                [subbyte_copy_source replaceSliceOrigin:
+                                            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                       sliceDimensions:tensor_dimensions
+                                             withBytes:subbyte_copy_committed_values
+                                               strides:tensor_packed_strides];
+                [subbyte_copy_encoder endEncoding];
+                [subbyte_copy_command_buffer commit];
+                [subbyte_copy_command_buffer waitUntilCompleted];
+                [subbyte_copy_destination getBytes:subbyte_copy_adapter_values
+                                           strides:tensor_packed_strides
+                                  fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                   sliceDimensions:tensor_dimensions];
+                if (subbyte_copy_source == nil || subbyte_copy_destination == nil ||
+                    subbyte_copy_encoder == nil ||
+                    subbyte_copy_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                    memcmp(subbyte_copy_adapter_values, subbyte_copy_committed_values,
+                           sizeof(subbyte_copy_adapter_values)) != 0) {
+                    fail_with_error("CPU packed tensor copy failed", subbyte_copy_error);
+                    return 115;
+                }
+
+                BOOL native_subbyte_copy_available = NO;
+                BOOL native_subbyte_copy_oracle_ok = NO;
+                @try {
+                    id<MTLTensor> native_subbyte_copy_source =
+                        [device newTensorWithDescriptor:subbyte_copy_descriptor error:&error];
+                    id<MTLTensor> native_subbyte_copy_destination =
+                        [device newTensorWithDescriptor:subbyte_copy_descriptor error:&error];
+                    if (native_subbyte_copy_source != nil && native_subbyte_copy_destination != nil) {
+                        native_subbyte_copy_available = YES;
+                        [native_subbyte_copy_source replaceSliceOrigin:
+                                                    [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                               sliceDimensions:tensor_dimensions
+                                                     withBytes:subbyte_copy_committed_values
+                                                       strides:tensor_packed_strides];
+                        [native_subbyte_copy_destination replaceSliceOrigin:
+                                                         [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                                    sliceDimensions:tensor_dimensions
+                                                          withBytes:subbyte_copy_sentinel_values
+                                                            strides:tensor_packed_strides];
+                        id<MTLCommandBuffer> native_subbyte_copy_command_buffer = [queue commandBuffer];
+                        id<MTLBlitCommandEncoder> native_subbyte_copy_encoder =
+                            [native_subbyte_copy_command_buffer blitCommandEncoder];
+                        [native_subbyte_copy_encoder copyFromTensor:native_subbyte_copy_source
+                                                        sourceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                                    sourceDimensions:tensor_dimensions
+                                                           toTensor:native_subbyte_copy_destination
+                                                  destinationOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                               destinationDimensions:tensor_dimensions];
+                        [native_subbyte_copy_encoder endEncoding];
+                        [native_subbyte_copy_command_buffer commit];
+                        [native_subbyte_copy_command_buffer waitUntilCompleted];
+                        uint8_t native_subbyte_copy_values[sizeof(subbyte_copy_sentinel_values)] = {0};
+                        [native_subbyte_copy_destination getBytes:native_subbyte_copy_values
+                                                           strides:tensor_packed_strides
+                                                  fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                                   sliceDimensions:tensor_dimensions];
+                        native_subbyte_copy_oracle_ok =
+                            native_subbyte_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                            memcmp(native_subbyte_copy_values, subbyte_copy_adapter_values,
+                                   sizeof(native_subbyte_copy_values)) == 0;
+                    }
+                } @catch (NSException *exception) {
+                    (void)exception;
+                    native_subbyte_copy_oracle_ok = NO;
+                }
+                if (native_subbyte_copy_available && !native_subbyte_copy_oracle_ok) {
+                    fail_with_error("native packed tensor copy oracle mismatch", error);
+                    return 116;
+                }
             }
 
             BOOL native_tensor_oracle_ok = NO;
