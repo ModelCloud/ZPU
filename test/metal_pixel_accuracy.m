@@ -71,6 +71,121 @@ static void fail_with_error(const char *message, NSError *error) {
     }
 }
 
+static int test_texture_view_format_compatibility(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device)
+    API_AVAILABLE(macos(14.0), ios(17.0)) {
+    const struct {
+        MTLPixelFormat format;
+        NSUInteger bytes_per_pixel;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatA8Unorm, 1, "A8Unorm"},
+        {MTLPixelFormatR8Unorm, 1, "R8Unorm"},
+        {MTLPixelFormatR8Unorm_sRGB, 1, "R8Unorm_sRGB"},
+        {MTLPixelFormatR8Snorm, 1, "R8Snorm"},
+        {MTLPixelFormatR8Uint, 1, "R8Uint"},
+        {MTLPixelFormatR8Sint, 1, "R8Sint"},
+        {MTLPixelFormatRG8Unorm, 2, "RG8Unorm"},
+        {MTLPixelFormatRG8Unorm_sRGB, 2, "RG8Unorm_sRGB"},
+        {MTLPixelFormatRG8Snorm, 2, "RG8Snorm"},
+        {MTLPixelFormatRG8Uint, 2, "RG8Uint"},
+        {MTLPixelFormatRG8Sint, 2, "RG8Sint"},
+        {MTLPixelFormatR16Unorm, 2, "R16Unorm"},
+        {MTLPixelFormatR16Snorm, 2, "R16Snorm"},
+        {MTLPixelFormatR16Float, 2, "R16Float"},
+        {MTLPixelFormatR16Uint, 2, "R16Uint"},
+        {MTLPixelFormatR16Sint, 2, "R16Sint"},
+        {MTLPixelFormatRGBA8Unorm, 4, "RGBA8Unorm"},
+        {MTLPixelFormatRGBA8Unorm_sRGB, 4, "RGBA8Unorm_sRGB"},
+        {MTLPixelFormatBGRA8Unorm, 4, "BGRA8Unorm"},
+        {MTLPixelFormatBGRA8Unorm_sRGB, 4, "BGRA8Unorm_sRGB"},
+        {MTLPixelFormatRGBA8Snorm, 4, "RGBA8Snorm"},
+        {MTLPixelFormatRGBA8Uint, 4, "RGBA8Uint"},
+        {MTLPixelFormatRGBA8Sint, 4, "RGBA8Sint"},
+        {MTLPixelFormatRG16Unorm, 4, "RG16Unorm"},
+        {MTLPixelFormatRG16Snorm, 4, "RG16Snorm"},
+        {MTLPixelFormatRG16Float, 4, "RG16Float"},
+        {MTLPixelFormatRG16Uint, 4, "RG16Uint"},
+        {MTLPixelFormatRG16Sint, 4, "RG16Sint"},
+        {MTLPixelFormatR32Float, 4, "R32Float"},
+        {MTLPixelFormatR32Uint, 4, "R32Uint"},
+        {MTLPixelFormatR32Sint, 4, "R32Sint"},
+        {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm"},
+        {MTLPixelFormatRGB10A2Uint, 4, "RGB10A2Uint"},
+        {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm"},
+        {MTLPixelFormatRG11B10Float, 4, "RG11B10Float"},
+        {MTLPixelFormatRGB9E5Float, 4, "RGB9E5Float"},
+        {MTLPixelFormatRGBA16Unorm, 8, "RGBA16Unorm"},
+        {MTLPixelFormatRGBA16Snorm, 8, "RGBA16Snorm"},
+        {MTLPixelFormatRGBA16Float, 8, "RGBA16Float"},
+        {MTLPixelFormatRGBA16Uint, 8, "RGBA16Uint"},
+        {MTLPixelFormatRGBA16Sint, 8, "RGBA16Sint"},
+        {MTLPixelFormatRG32Float, 8, "RG32Float"},
+        {MTLPixelFormatRG32Uint, 8, "RG32Uint"},
+        {MTLPixelFormatRG32Sint, 8, "RG32Sint"},
+        {MTLPixelFormatRGBA32Float, 16, "RGBA32Float"},
+        {MTLPixelFormatRGBA32Uint, 16, "RGBA32Uint"},
+        {MTLPixelFormatRGBA32Sint, 16, "RGBA32Sint"},
+    };
+    BOOL mismatch = NO;
+    for (NSUInteger source_index = 0; source_index < sizeof(formats) / sizeof(formats[0]); ++source_index) {
+        MTLTextureDescriptor *native_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[source_index].format
+                                                                width:2 height:2 mipmapped:NO];
+        native_descriptor.storageMode = MTLStorageModeShared;
+        native_descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> native_source = [native_device newTextureWithDescriptor:native_descriptor];
+        id<MTLTexture> adapter_source = [adapter_device newTextureWithDescriptor:native_descriptor];
+        if (native_source == nil || adapter_source == nil) {
+            fprintf(stderr, "metal-pixel: texture view probe source allocation failed for %s\n",
+                    formats[source_index].name);
+            return 142;
+        }
+        for (NSUInteger view_index = 0; view_index < sizeof(formats) / sizeof(formats[0]); ++view_index) {
+            if (formats[source_index].bytes_per_pixel != formats[view_index].bytes_per_pixel) continue;
+            id<MTLTexture> native_view =
+                [native_source newTextureViewWithPixelFormat:formats[view_index].format];
+            id<MTLTexture> adapter_view =
+                [adapter_source newTextureViewWithPixelFormat:formats[view_index].format];
+            const BOOL native_accepts = native_view != nil;
+            const BOOL adapter_accepts = adapter_view != nil;
+            const BOOL expected_accepts = formats[source_index].bytes_per_pixel == formats[view_index].bytes_per_pixel;
+            if (native_accepts != expected_accepts || adapter_accepts != native_accepts) {
+                fprintf(stderr, "metal-pixel: texture view compatibility mismatch %s -> %s expected=%d native=%d adapter=%d\n",
+                        formats[source_index].name, formats[view_index].name, expected_accepts, native_accepts, adapter_accepts);
+                mismatch = YES;
+            }
+            if (!native_accepts) continue;
+            uint8_t source_bytes[4 * 16];
+            for (NSUInteger byte = 0; byte < formats[source_index].bytes_per_pixel * 4; ++byte) {
+                source_bytes[byte] = (uint8_t)(17 + byte * 13 + source_index + view_index);
+            }
+            [native_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0
+                                withBytes:source_bytes
+                             bytesPerRow:2 * formats[source_index].bytes_per_pixel];
+            [adapter_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0
+                                 withBytes:source_bytes
+                              bytesPerRow:2 * formats[source_index].bytes_per_pixel];
+            uint8_t native_view_bytes[4 * 16] = {0};
+            uint8_t adapter_view_bytes[4 * 16] = {0};
+            [native_view getBytes:native_view_bytes
+                      bytesPerRow:2 * formats[view_index].bytes_per_pixel
+                       fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+            [adapter_view getBytes:adapter_view_bytes
+                       bytesPerRow:2 * formats[view_index].bytes_per_pixel
+                        fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+            const NSUInteger byte_count = 4 * formats[source_index].bytes_per_pixel;
+            if (memcmp(native_view_bytes, source_bytes, byte_count) != 0 ||
+                memcmp(adapter_view_bytes, source_bytes, byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: texture view raw-byte alias mismatch %s -> %s\n",
+                        formats[source_index].name, formats[view_index].name);
+                mismatch = YES;
+            }
+        }
+    }
+    return mismatch ? 143 : 0;
+}
+
 static int test_vertex_attribute_stride_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -2566,6 +2681,10 @@ int main(void) {
         if (adapter_device.currentAllocatedSize != adapter_initial_allocated_size) {
             fprintf(stderr, "metal-pixel: direct CPU allocation accounting failed\n");
             return 19;
+        }
+        if (@available(macOS 14.0, iOS 17.0, *)) {
+            const int texture_view_probe = test_texture_view_format_compatibility(device, adapter_device);
+            if (texture_view_probe != 0) return texture_view_probe;
         }
 
         /* CPU-owned resources cannot be discarded to satisfy a purge request.

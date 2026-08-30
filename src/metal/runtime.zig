@@ -202,9 +202,13 @@ fn isStencilTextureFormat(format: TextureFormat) bool {
 
 fn textureFormatsViewCompatible(source: TextureFormat, view: TextureFormat) bool {
     if (source == view) return true;
-    const source_packed_32 = source == .rgba8_unorm or source == .bgra8_unorm or source == .r32_float;
-    const view_packed_32 = view == .rgba8_unorm or view == .bgra8_unorm or view == .r32_float;
-    return source_packed_32 and view_packed_32;
+    // Metal views reinterpret shared texel bytes. Apple accepts all color and
+    // integer formats with the same bytes-per-texel; depth/stencil formats
+    // remain conservative because their attachment interpretation is not a
+    // color/integer reinterpretation.
+    if (isDepthTextureFormat(source) or isStencilTextureFormat(source) or
+        isDepthTextureFormat(view) or isStencilTextureFormat(view)) return false;
+    return source.bytesPerPixel() == view.bytesPerPixel();
 }
 
 pub const Error = error{
@@ -6670,7 +6674,35 @@ test "compatible texture views reinterpret shared storage" {
     const replacement = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
     try textureReplaceRegion(view, .{ .origin = .{ .x = 1, .y = 0, .z = 0 }, .size = .{ .width = 1, .height = 1, .depth = 1 } }, &replacement, replacement.len, 4);
     try std.testing.expectEqualSlices(u8, &replacement, source.bytes[4..8]);
-    try std.testing.expectError(error.UnsupportedFormat, createTextureView(source, @intFromEnum(abi.PixelFormat.rgba16_float)));
+
+    const same_size_views = [_]struct { raw: u16, format: TextureFormat }{
+        .{ .raw = @intFromEnum(abi.PixelFormat.rgba8_unorm_srgb), .format = .rgba8_unorm_srgb },
+        .{ .raw = @intFromEnum(abi.PixelFormat.rgba8_snorm), .format = .rgba8_snorm },
+        .{ .raw = @intFromEnum(abi.PixelFormat.rgb10a2_unorm), .format = .rgb10a2_unorm },
+        .{ .raw = @intFromEnum(abi.PixelFormat.rg11b10_float), .format = .rg11b10_float },
+    };
+    for (same_size_views) |case| {
+        const compatible = try createTextureView(source, case.raw);
+        defer destroyTexture(compatible);
+        try std.testing.expectEqual(case.format, compatible.format);
+        try std.testing.expectEqual(@intFromPtr(source.bytes.ptr), @intFromPtr(compatible.bytes.ptr));
+    }
+    try std.testing.expectError(error.UnsupportedFormat, createTextureView(source, @intFromEnum(abi.PixelFormat.r16_float)));
+    try std.testing.expectError(error.UnsupportedFormat, createTextureView(source, @intFromEnum(abi.PixelFormat.depth32_float)));
+
+    const wide_source = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba16_unorm));
+    defer destroyTexture(wide_source);
+    const wide_views = [_]struct { raw: u16, format: TextureFormat }{
+        .{ .raw = @intFromEnum(abi.PixelFormat.rgba16_float), .format = .rgba16_float },
+        .{ .raw = @intFromEnum(abi.PixelFormat.rgba16_uint), .format = .rgba16_uint },
+        .{ .raw = @intFromEnum(abi.PixelFormat.rg32_float), .format = .rg32_float },
+    };
+    for (wide_views) |case| {
+        const compatible = try createTextureView(wide_source, case.raw);
+        defer destroyTexture(compatible);
+        try std.testing.expectEqual(case.format, compatible.format);
+        try std.testing.expectEqual(@intFromPtr(wide_source.bytes.ptr), @intFromPtr(compatible.bytes.ptr));
+    }
 }
 
 test "indexed render encoding produces the same pixels as direct vertices" {

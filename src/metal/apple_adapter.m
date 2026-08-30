@@ -4383,12 +4383,14 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 #pragma clang diagnostic pop
 
 static BOOL zpu_texture_view_formats_compatible(MTLPixelFormat source, MTLPixelFormat view) {
-    if (source == view) return YES;
-    const BOOL source_packed_32 = source == MTLPixelFormatRGBA8Unorm ||
-        source == MTLPixelFormatBGRA8Unorm || source == MTLPixelFormatR32Float;
-    const BOOL view_packed_32 = view == MTLPixelFormatRGBA8Unorm ||
-        view == MTLPixelFormatBGRA8Unorm || view == MTLPixelFormatR32Float;
-    return source_packed_32 && view_packed_32;
+    /* Apple texture views reinterpret the texel bytes, rather than converting
+     * them. On the tested macOS/iOS Metal implementations, every supported
+     * color or integer format with the same bytes-per-texel is view-compatible
+     * (including component-count and numeric-type changes). Keep depth/stencil
+     * views conservative because their attachment rules are format-specific. */
+    if (!zpu_color_texture_format_supported(source) && !zpu_integer_texture_format_supported(source)) return source == view;
+    if (!zpu_color_texture_format_supported(view) && !zpu_integer_texture_format_supported(view)) return source == view;
+    return zpu_texture_bytes_per_pixel(source) == zpu_texture_bytes_per_pixel(view);
 }
 
 static void zpu_destroy_texture_arrays(NSArray *sliceMipmapTextures) {
