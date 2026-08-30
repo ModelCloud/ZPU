@@ -19915,6 +19915,34 @@ int main(void) {
             fail_with_error("Metal 4 CPU buffer add argument-table dispatch failed", metal4_error);
             return 187;
         }
+        MTL4ArgumentTableDescriptor *metal4_buffer_mul_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        metal4_buffer_mul_table_descriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> metal4_buffer_mul_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_buffer_mul_table_descriptor error:&metal4_error];
+        [metal4_buffer_mul_table setAddress:adapter_buffer_mul_left.gpuAddress atIndex:0];
+        [metal4_buffer_mul_table setAddress:adapter_buffer_mul_right.gpuAddress atIndex:1];
+        id<MTLBuffer> metal4_buffer_mul_output =
+            [adapter_device newBufferWithLength:sizeof(buffer_mul_left_values) options:MTLResourceStorageModeShared];
+        id<MTL4CommandBuffer> metal4_buffer_mul_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_buffer_mul_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_buffer_mul_encoder =
+            [metal4_buffer_mul_command_buffer computeCommandEncoder];
+        [metal4_buffer_mul_table setAddress:metal4_buffer_mul_output.gpuAddress atIndex:2];
+        [metal4_buffer_mul_encoder setComputePipelineState:adapter_buffer_mul_pipeline];
+        [metal4_buffer_mul_encoder setArgumentTable:metal4_buffer_mul_table];
+        [metal4_buffer_mul_encoder dispatchThreads:MTLSizeMake(buffer_mul_count, 1, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+        [metal4_buffer_mul_encoder endEncoding];
+        [metal4_buffer_mul_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_buffer_mul_command_buffers[] = {metal4_buffer_mul_command_buffer};
+        [metal4_queue commit:metal4_buffer_mul_command_buffers count:1];
+        if (metal4_buffer_mul_table == nil || metal4_buffer_mul_output == nil ||
+            metal4_buffer_mul_command_buffer == nil || metal4_buffer_mul_encoder == nil ||
+            memcmp(native_buffer_mul_output.contents, metal4_buffer_mul_output.contents,
+                   sizeof(buffer_mul_left_values)) != 0) {
+            fail_with_error("Metal 4 CPU buffer multiply argument-table dispatch failed", metal4_error);
+            return 188;
+        }
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const int metal4_position_result = test_metal4_position_fragment_grid_against_native(
                 device, adapter_device, library, adapter_mtl4_compiler,
