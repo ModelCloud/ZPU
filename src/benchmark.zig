@@ -9,8 +9,8 @@ const dispatch = @import("simd/dispatch.zig");
 const pipeline = @import("render_pipeline.zig");
 const host_memory = @import("vulkan/host_memory.zig");
 
-pub const schema_version: u32 = 4;
-pub const workload_id = "zpu-2d-kernels-v4-240x240-seed-151521030";
+pub const schema_version: u32 = 5;
+pub const workload_id = "zpu-2d-app-scenes-v5-240x240-seed-151521030";
 pub const default_rate_tolerance_fraction = 0.20;
 pub const default_latency_tolerance_fraction = 1.50;
 // Per-run timings are intentionally noisy. Keep a catastrophic-route guard,
@@ -28,9 +28,9 @@ pub const PipelineMetric = struct { iterations: u64, key_construction_ns: u64, c
 pub const Fingerprint = struct { arch: []const u8, os: []const u8, cpu_model: []const u8, selected_cpus: []const u8, topology: []const u8, compiler: []const u8, build_mode: []const u8, max_threads: u8, limited_gate: []const u8 = "" };
 pub const Report = struct { schema_version: u32, workload_id: []const u8, source_commit: []const u8, utc: []const u8, fingerprint: Fingerprint, warmup_iterations: u32, sample_count: u32, rate_tolerance_fraction: f64 = default_rate_tolerance_fraction, latency_tolerance_fraction: f64 = default_latency_tolerance_fraction, pipeline: PipelineMetric, metrics: []const Metric };
 
-const Op = enum { clear, pixel_write, clipped_rectangle, vulkan_host_memory_fill, vulkan_host_memory_copy, source_over_blend, sprite_draw, frame };
-const raster_ops = [_]Op{ .clear, .pixel_write, .clipped_rectangle, .source_over_blend, .sprite_draw, .frame };
-const all_ops = [_]Op{ .clear, .pixel_write, .clipped_rectangle, .vulkan_host_memory_fill, .vulkan_host_memory_copy, .source_over_blend, .sprite_draw, .frame };
+const Op = enum { clear, pixel_write, clipped_rectangle, vulkan_host_memory_fill, vulkan_host_memory_copy, source_over_blend, sprite_draw, frame, desktop_windows, terminal_cells, game_scene, design_canvas };
+const raster_ops = [_]Op{ .clear, .pixel_write, .clipped_rectangle, .source_over_blend, .sprite_draw, .frame, .desktop_windows, .terminal_cells, .game_scene, .design_canvas };
+const all_ops = [_]Op{ .clear, .pixel_write, .clipped_rectangle, .vulkan_host_memory_fill, .vulkan_host_memory_copy, .source_over_blend, .sprite_draw, .frame, .desktop_windows, .terminal_cells, .game_scene, .design_canvas };
 const MetricKey = struct { op: Op, backend: []const u8 };
 
 pub fn percentileIndex(len: usize, numerator: usize, denominator: usize) !usize {
@@ -112,6 +112,10 @@ pub fn modeledBytes(name: []const u8) !u64 {
     if (std.mem.eql(u8, name, "source_over_blend")) return 57_600 * 8;
     if (std.mem.eql(u8, name, "sprite_draw")) return 128 * 8 * 8 * 8;
     if (std.mem.eql(u8, name, "frame")) return 57_600 * 4 + 64 * 16 * 16 * 8;
+    if (std.mem.eql(u8, name, "desktop_windows")) return 57_600 * 4 + 6 * (80 * 68 * 8 + 72 * 60 * 4 + 72 * 8 * 4 + 4 * 12 * 12 * 4);
+    if (std.mem.eql(u8, name, "terminal_cells")) return 57_600 * 4 + 900 * 8 * 8 * 8 + (2 * 8 + 24 * 8) * 8;
+    if (std.mem.eql(u8, name, "game_scene")) return 57_600 * 4 + 600 * 12 * 12 * 4 + 96 * 16 * 16 * 8 + 128 * 2 * 2 * 8;
+    if (std.mem.eql(u8, name, "design_canvas")) return 57_600 * 4 + 32 * 48 * 32 * 8 + 256 * 2 * 2 * 8 + 64 * 1 * 120 * 4;
     return error.UnknownOperation;
 }
 fn pixelCount(op: Op) f64 {
@@ -119,7 +123,21 @@ fn pixelCount(op: Op) f64 {
         .pixel_write => 512,
         .clipped_rectangle => 12_060,
         .sprite_draw => 8_192,
+        .desktop_windows => 57_600,
+        .terminal_cells => 57_600,
+        .game_scene => 57_600,
+        .design_canvas => 57_600,
         else => 57_600,
+    };
+}
+fn drawCount(op: Op) f64 {
+    return switch (op) {
+        .sprite_draw => 128,
+        .desktop_windows => 43,
+        .terminal_cells => 903,
+        .game_scene => 825,
+        .design_canvas => 353,
+        else => 0,
     };
 }
 fn sourceBytes(bytes: []u8) void {
@@ -148,6 +166,116 @@ fn blendRect(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: ?dispat
 fn drawSprite(surface: *s.Surface, rect: s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: ?dispatch.Backend) void {
     if (backend) |b| raster.drawSpriteWith(surface, rect, source, source_width, source_height, b) else raster.drawSprite(surface, rect, source, source_width, source_height);
 }
+fn drawSprites(surface: *s.Surface, source: []const u8, iteration: usize, backend: ?dispatch.Backend) void {
+    var destinations: [128]s.Rect = undefined;
+    for (0..128) |i| destinations[i] = .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 };
+    if (backend) |b| raster.drawSpritesWith(surface, &destinations, source, 8, 8, b) else raster.drawSprites(surface, &destinations, source, 8, 8);
+}
+fn drawSpritesOpaque(surface: *s.Surface, destinations: []const s.Rect, source: []const u8, source_width: u32, source_height: u32, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.drawSpritesOpaqueWith(surface, destinations, source, source_width, source_height, b) else raster.drawSpritesOpaque(surface, destinations, source, source_width, source_height);
+}
+fn fillRects(surface: *s.Surface, draws: []const raster.ColoredRect, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.fillRectsWith(surface, draws, b) else raster.fillRects(surface, draws);
+}
+fn blendRects(surface: *s.Surface, draws: []const raster.ColoredRect, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.blendRectsWith(surface, draws, b) else raster.blendRects(surface, draws);
+}
+fn blendOpaqueRect(surface: *s.Surface, rect: s.Rect, color: s.Color, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.blendOpaqueRectWith(surface, rect, color, b) else raster.blendOpaqueRect(surface, rect, color);
+}
+fn blendOpaqueRects(surface: *s.Surface, draws: []const raster.ColoredRect, backend: ?dispatch.Backend) void {
+    if (backend) |b| raster.blendOpaqueRectsWith(surface, draws, b) else raster.blendOpaqueRects(surface, draws);
+}
+fn terminalAtlas(src: []const u8, atlas: *[64 * 16 * 4]u8) void {
+    @memcpy(atlas, src[0 .. 64 * 16 * 4]);
+    // Terminal glyph caches are masks: channels carry the cached color while
+    // coverage is normally binary. A deterministic bitmap pattern gives the
+    // SIMD path realistic transparent/opaque runs without an empty workload.
+    for (0..16) |y| for (0..64) |x| {
+        const alpha: u8 = if (y < 8 and ((x / 8) * 7 + y * 3 + (x % 8) * 5) % 11 < 5) 255 else 0;
+        atlas[((y * 64 + x) * 4) + 3] = alpha;
+    };
+}
+
+fn desktopWindows(surface: *s.Surface, iteration: usize, backend: ?dispatch.Backend) void {
+    fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(18, 24, 34, 255), backend);
+    var shadows: [6]raster.ColoredRect = undefined;
+    var panels: [36]raster.ColoredRect = undefined;
+    for (0..6) |i| {
+        const x: i32 = @as(i32, @intCast((i * 37 + iteration * 3) % 184)) - 4;
+        const y: i32 = @as(i32, @intCast((i * 53 + iteration * 5) % 184)) - 4;
+        shadows[i] = .{ .rect = .{ .x = x - 4, .y = y + 4, .width = 80, .height = 68 }, .color = .rgba(0, 0, 0, 72) };
+        panels[i * 6] = .{ .rect = .{ .x = x, .y = y, .width = 72, .height = 60 }, .color = .rgba(@truncate(42 + i * 17), @truncate(52 + i * 11), @truncate(70 + i * 13), 255) };
+        panels[i * 6 + 1] = .{ .rect = .{ .x = x, .y = y, .width = 72, .height = 8 }, .color = .rgba(@truncate(28 + i * 19), @truncate(70 + i * 9), @truncate(125 + i * 7), 255) };
+        for (0..4) |control| {
+            const cx = x + 5 + @as(i32, @intCast(control * 16));
+            const cy = y + 18 + @as(i32, @intCast((control * 7 + i * 3) % 30));
+            panels[i * 6 + 2 + control] = .{ .rect = .{ .x = cx, .y = cy, .width = 12, .height = 12 }, .color = .rgba(@truncate(190 + control * 7), @truncate(195 + i * 5), 205, 255) };
+        }
+    }
+    // The frame starts with an opaque clear; source-over therefore preserves
+    // opaque destination alpha for the entire compositor pass.
+    blendOpaqueRects(surface, &shadows, backend);
+    fillRects(surface, &panels, backend);
+}
+
+fn terminalCells(surface: *s.Surface, src: []const u8, iteration: usize, backend: ?dispatch.Backend) void {
+    fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(12, 15, 20, 255), backend);
+    var atlas: [64 * 16 * 4]u8 = undefined;
+    terminalAtlas(src, &atlas);
+    var regions: [900]raster.SpriteRegion = undefined;
+    var count: usize = 0;
+    for (0..30) |row| for (0..30) |column| {
+        const glyph = (row * 13 + column * 7 + iteration) % 8;
+        regions[count] = .{ .destination = .{ .x = @intCast(column * 8), .y = @intCast(row * 8), .width = 8, .height = 8 }, .source = .{ .x = @intCast(glyph * 8), .y = 0, .width = 8, .height = 8 } };
+        count += 1;
+    };
+    if (backend) |b| raster.drawSpriteRegionsWith(surface, regions[0..count], &atlas, 64, 16, b) else raster.drawSpriteRegions(surface, regions[0..count], &atlas, 64, 16);
+    const overlays = [_]raster.ColoredRect{
+        .{ .rect = .{ .x = @intCast((iteration * 5) % 232), .y = 8, .width = 2, .height = 8 }, .color = .rgba(220, 220, 220, 220) },
+        .{ .rect = .{ .x = 16, .y = 16, .width = 24, .height = 8 }, .color = .rgba(68, 110, 180, 96) },
+    };
+    blendOpaqueRects(surface, &overlays, backend);
+}
+
+fn gameScene(surface: *s.Surface, src: []const u8, iteration: usize, backend: ?dispatch.Backend) void {
+    fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(20, 27, 42, 255), backend);
+    var tiles: [600]raster.ColoredRect = undefined;
+    for (0..20) |row| for (0..30) |column| {
+        const tile = (row * 17 + column * 11 + iteration) % 5;
+        tiles[row * 30 + column] = .{ .rect = .{ .x = @intCast(column * 8), .y = @intCast(row * 8), .width = 12, .height = 12 }, .color = .rgba(@truncate(24 + tile * 9), @truncate(52 + tile * 13), @truncate(74 + tile * 15), 255) };
+    };
+    fillRects(surface, &tiles, backend);
+    var destinations: [4][96]s.Rect = undefined;
+    var counts = [_]usize{0} ** 4;
+    for (0..96) |i| {
+        const kind = (i * 5 + iteration) % 4;
+        const index = counts[kind];
+        destinations[kind][index] = .{ .x = @as(i32, @intCast((i * 29 + iteration * 3) % 232)), .y = @as(i32, @intCast((i * 47 + iteration * 2) % 232)), .width = 16, .height = 16 };
+        counts[kind] = index + 1;
+    }
+    for (0..4) |kind| if (counts[kind] != 0) {
+        const source_offset = kind * 1024;
+        const source = src[source_offset .. source_offset + 1024];
+        drawSpritesOpaque(surface, destinations[kind][0..counts[kind]], source, 16, 16, backend);
+    };
+    var particles: [128]raster.ColoredRect = undefined;
+    for (0..128) |i| particles[i] = .{ .rect = .{ .x = @intCast((i * 31 + iteration) % 239), .y = @intCast((i * 19 + iteration * 2) % 239), .width = 2, .height = 2 }, .color = .rgba(@truncate(120 + i), @truncate(70 + i * 3), 30, 170) };
+    blendOpaqueRects(surface, &particles, backend);
+}
+
+fn designCanvas(surface: *s.Surface, iteration: usize, backend: ?dispatch.Backend) void {
+    fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(242, 244, 248, 255), backend);
+    var layers: [32]raster.ColoredRect = undefined;
+    for (0..32) |layer| layers[layer] = .{ .rect = .{ .x = @as(i32, @intCast((layer * 23 + iteration) % 208)) - 8, .y = @as(i32, @intCast((layer * 17 + iteration * 2) % 224)) - 8, .width = 48, .height = 32 }, .color = .rgba(@truncate(40 + layer * 5), @truncate(80 + layer * 3), @truncate(160 + layer * 2), 76) };
+    blendOpaqueRects(surface, &layers, backend);
+    var handles: [256]raster.ColoredRect = undefined;
+    for (0..256) |handle| handles[handle] = .{ .rect = .{ .x = @intCast((handle * 29 + iteration) % 239), .y = @intCast((handle * 43 + iteration * 3) % 239), .width = 2, .height = 2 }, .color = .rgba(@truncate(handle * 3), 80, 170, 255) };
+    fillRects(surface, &handles, backend);
+    var guides: [64]raster.ColoredRect = undefined;
+    for (0..64) |guide| guides[guide] = .{ .rect = .{ .x = @intCast((guide * 19 + iteration) % 239), .y = @intCast((guide * 7) % 120), .width = 1, .height = 120 }, .color = .rgba(80, 90, 110, 110) };
+    fillRects(surface, &guides, backend);
+}
 
 fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8, surface: *s.Surface, iteration: usize, copy: TransferCopyFn) void {
     switch (op) {
@@ -160,11 +288,15 @@ fn runOpWithCopy(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const u8,
         },
         .vulkan_host_memory_copy => copy(dst, src),
         .source_over_blend => blendRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(220, 31, 77, 128), backend),
-        .sprite_draw => for (0..128) |i| drawSprite(surface, .{ .x = @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, .y = @as(i32, @intCast((i * 43) % 248)) - 4, .width = 8, .height = 8 }, src[0..256], 8, 8, backend),
+        .sprite_draw => drawSprites(surface, src[0..256], iteration, backend),
         .frame => {
             fillRect(surface, .{ .x = 0, .y = 0, .width = width, .height = height }, .rgba(8, 12, 20, 255), backend);
-            for (0..64) |i| blendRect(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), backend);
+            for (0..64) |i| blendOpaqueRect(surface, .{ .x = @intCast((i * 17) % 224), .y = @intCast((i * 41) % 224), .width = 16, .height = 16 }, .rgba(@truncate(i * 5), 140, 60, 180), backend);
         },
+        .desktop_windows => desktopWindows(surface, iteration, backend),
+        .terminal_cells => terminalCells(surface, src, iteration, backend),
+        .game_scene => gameScene(surface, src, iteration, backend),
+        .design_canvas => designCanvas(surface, iteration, backend),
     }
 }
 
@@ -210,14 +342,80 @@ fn refClippedRect(bytes: []u8, x: i32, y: i32, w: u32, h: u32, color: s.Color, b
     refRect(bytes, x0, y0, x1 - x0, y1 - y0, color, blend);
 }
 fn refSprite(bytes: []u8, x: i32, y: i32, source: []const u8) void {
-    for (0..8) |sy| for (0..8) |sx| {
+    refSpriteSized(bytes, x, y, source, 8, 8);
+}
+fn refSpriteSized(bytes: []u8, x: i32, y: i32, source: []const u8, sprite_width: usize, sprite_height: usize) void {
+    for (0..sprite_height) |sy| for (0..sprite_width) |sx| {
         const dx = x + @as(i32, @intCast(sx));
         const dy = y + @as(i32, @intCast(sy));
         if (dx < 0 or dy < 0 or dx >= width or dy >= height) continue;
-        const si = (sy * 8 + sx) * 4;
+        const si = (sy * sprite_width + sx) * 4;
         refBlend(bytes, (@as(usize, @intCast(dy)) * width + @as(usize, @intCast(dx))) * 4, .rgba(source[si], source[si + 1], source[si + 2], source[si + 3]));
     };
 }
+fn refSpriteAtlas(bytes: []u8, x: i32, y: i32, source: []const u8, atlas_width: usize, source_x: usize, source_y: usize, sprite_width: usize, sprite_height: usize) void {
+    for (0..sprite_height) |sy| for (0..sprite_width) |sx| {
+        const dx = x + @as(i32, @intCast(sx));
+        const dy = y + @as(i32, @intCast(sy));
+        if (dx < 0 or dy < 0 or dx >= width or dy >= height) continue;
+        const si = ((source_y + sy) * atlas_width + source_x + sx) * 4;
+        refBlend(bytes, (@as(usize, @intCast(dy)) * width + @as(usize, @intCast(dx))) * 4, .rgba(source[si], source[si + 1], source[si + 2], source[si + 3]));
+    };
+}
+
+fn refDesktopWindows(bytes: []u8, iteration: usize) void {
+    refRect(bytes, 0, 0, width, height, .rgba(18, 24, 34, 255), false);
+    for (0..6) |i| {
+        const x: i32 = @as(i32, @intCast((i * 37 + iteration * 3) % 184)) - 4;
+        const y: i32 = @as(i32, @intCast((i * 53 + iteration * 5) % 184)) - 4;
+        refClippedRect(bytes, x - 4, y + 4, 80, 68, .rgba(0, 0, 0, 72), true);
+    }
+    for (0..6) |i| {
+        const x: i32 = @as(i32, @intCast((i * 37 + iteration * 3) % 184)) - 4;
+        const y: i32 = @as(i32, @intCast((i * 53 + iteration * 5) % 184)) - 4;
+        refClippedRect(bytes, x, y, 72, 60, .rgba(@truncate(42 + i * 17), @truncate(52 + i * 11), @truncate(70 + i * 13), 255), false);
+        refClippedRect(bytes, x, y, 72, 8, .rgba(@truncate(28 + i * 19), @truncate(70 + i * 9), @truncate(125 + i * 7), 255), false);
+        for (0..4) |control| {
+            const cx = x + 5 + @as(i32, @intCast(control * 16));
+            const cy = y + 18 + @as(i32, @intCast((control * 7 + i * 3) % 30));
+            refClippedRect(bytes, cx, cy, 12, 12, .rgba(@truncate(190 + control * 7), @truncate(195 + i * 5), 205, 255), false);
+        }
+    }
+}
+
+fn refTerminalCells(bytes: []u8, src: []const u8, iteration: usize) void {
+    refRect(bytes, 0, 0, width, height, .rgba(12, 15, 20, 255), false);
+    var atlas: [64 * 16 * 4]u8 = undefined;
+    terminalAtlas(src, &atlas);
+    for (0..30) |row| for (0..30) |column| {
+        const glyph = (row * 13 + column * 7 + iteration) % 8;
+        refSpriteAtlas(bytes, @intCast(column * 8), @intCast(row * 8), &atlas, 64, glyph * 8, 0, 8, 8);
+    };
+    refClippedRect(bytes, @intCast((iteration * 5) % 232), 8, 2, 8, .rgba(220, 220, 220, 220), true);
+    refClippedRect(bytes, 16, 16, 24, 8, .rgba(68, 110, 180, 96), true);
+}
+
+fn refGameScene(bytes: []u8, src: []const u8, iteration: usize) void {
+    refRect(bytes, 0, 0, width, height, .rgba(20, 27, 42, 255), false);
+    for (0..20) |row| for (0..30) |column| {
+        const tile = (row * 17 + column * 11 + iteration) % 5;
+        refClippedRect(bytes, @intCast(column * 8), @intCast(row * 8), 12, 12, .rgba(@truncate(24 + tile * 9), @truncate(52 + tile * 13), @truncate(74 + tile * 15), 255), false);
+    };
+    for (0..96) |i| {
+        const kind = (i * 5 + iteration) % 4;
+        const source_offset = kind * 1024;
+        refSpriteSized(bytes, @as(i32, @intCast((i * 29 + iteration * 3) % 232)), @as(i32, @intCast((i * 47 + iteration * 2) % 232)), src[source_offset .. source_offset + 1024], 16, 16);
+    }
+    for (0..128) |i| refClippedRect(bytes, @intCast((i * 31 + iteration) % 239), @intCast((i * 19 + iteration * 2) % 239), 2, 2, .rgba(@truncate(120 + i), @truncate(70 + i * 3), 30, 170), true);
+}
+
+fn refDesignCanvas(bytes: []u8, iteration: usize) void {
+    refRect(bytes, 0, 0, width, height, .rgba(242, 244, 248, 255), false);
+    for (0..32) |layer| refClippedRect(bytes, @as(i32, @intCast((layer * 23 + iteration) % 208)) - 8, @as(i32, @intCast((layer * 17 + iteration * 2) % 224)) - 8, 48, 32, .rgba(@truncate(40 + layer * 5), @truncate(80 + layer * 3), @truncate(160 + layer * 2), 76), true);
+    for (0..256) |handle| refClippedRect(bytes, @intCast((handle * 29 + iteration) % 239), @intCast((handle * 43 + iteration * 3) % 239), 2, 2, .rgba(@truncate(handle * 3), 80, 170, 255), false);
+    for (0..64) |guide| refClippedRect(bytes, @intCast((guide * 19 + iteration) % 239), @intCast((guide * 7) % 120), 1, 120, .rgba(80, 90, 110, 110), false);
+}
+
 fn referenceOp(op: Op, dst: []u8, src: []const u8, iteration: usize) void {
     switch (op) {
         .clear => refRect(dst, 0, 0, width, height, .rgba(11, 37, @truncate(iteration), 255), false),
@@ -234,6 +432,10 @@ fn referenceOp(op: Op, dst: []u8, src: []const u8, iteration: usize) void {
             refRect(dst, 0, 0, width, height, .rgba(8, 12, 20, 255), false);
             for (0..64) |i| refRect(dst, (i * 17) % 224, (i * 41) % 224, 16, 16, .rgba(@truncate(i * 5), 140, 60, 180), true);
         },
+        .desktop_windows => refDesktopWindows(dst, iteration),
+        .terminal_cells => refTerminalCells(dst, src, iteration),
+        .game_scene => refGameScene(dst, src, iteration),
+        .design_canvas => refDesignCanvas(dst, iteration),
     }
 }
 
@@ -246,8 +448,8 @@ fn validateOpOutput(op: Op, backend: ?dispatch.Backend, dst: []u8, src: []const 
     if (!std.mem.eql(u8, dst, &expected)) return error.OutputMismatch;
 }
 
-const oracle_checksums = [_]u64{ 0x89fcf336d86c4f25, 0x3d0737332ec9e1cc, 0x2cf726772c9ab549, 0x50dbc316a6090325, 0x4e61ac2d0cc0777b, 0xd5f99fe5b4e7eef8, 0xe73fc1dc4f99be0c, 0x2e480a89ab6181ef };
-const oracle_hex = [_][]const u8{ "89fcf336d86c4f25", "3d0737332ec9e1cc", "2cf726772c9ab549", "50dbc316a6090325", "4e61ac2d0cc0777b", "d5f99fe5b4e7eef8", "e73fc1dc4f99be0c", "2e480a89ab6181ef" };
+const oracle_checksums = [_]u64{ 0x89fcf336d86c4f25, 0x3d0737332ec9e1cc, 0x2cf726772c9ab549, 0x50dbc316a6090325, 0x4e61ac2d0cc0777b, 0xd5f99fe5b4e7eef8, 0xe73fc1dc4f99be0c, 0x2e480a89ab6181ef, 0x1a7c05700c2ce93b, 0x5d6a5af80b89eba8, 0x445b390c86d17660, 0x3ed1f3dec68d962c };
+const oracle_hex = [_][]const u8{ "89fcf336d86c4f25", "3d0737332ec9e1cc", "2cf726772c9ab549", "50dbc316a6090325", "4e61ac2d0cc0777b", "d5f99fe5b4e7eef8", "e73fc1dc4f99be0c", "2e480a89ab6181ef", "1a7c05700c2ce93b", "5d6a5af80b89eba8", "445b390c86d17660", "3ed1f3dec68d962c" };
 fn oracle(op: Op) u64 {
     return oracle_checksums[@intFromEnum(op)];
 }
@@ -282,7 +484,8 @@ fn validFingerprint(f: Fingerprint) bool {
 }
 fn applicable(op: Op, m: Metric) bool {
     const normal = op != .sprite_draw and op != .frame;
-    return (if (normal) m.mpix_s > 0 else m.mpix_s == 0) and m.bytes_s > 0 and m.effective_gib_s > 0 and (if (op == .sprite_draw) m.draws_s > 0 else m.draws_s == 0) and (if (op == .frame) m.fps > 0 else m.fps == 0);
+    const has_draws = drawCount(op) > 0;
+    return (if (normal) m.mpix_s > 0 else m.mpix_s == 0) and m.bytes_s > 0 and m.effective_gib_s > 0 and (if (has_draws) m.draws_s > 0 else m.draws_s == 0) and (if (op == .frame) m.fps > 0 else m.fps == 0);
 }
 
 pub fn validate(report: Report) !void {
@@ -372,10 +575,13 @@ pub fn benchmark(io: std.Io, metrics: []Metric, smoke: bool) !usize {
             if (!std.mem.eql(u8, &dst, &expected)) return error.OutputMismatch;
             try validateOpOutput(op, backend, &dst, &src, &surface, canonical_iteration, transferCopy);
             const output_checksum = checksum(&dst);
-            if (output_checksum != oracle(op)) return error.OutputMismatch;
+            if (output_checksum != oracle(op)) {
+                std.debug.print("runtime mismatch {s} {s}: {x} != {x}\n", .{ @tagName(op), backendName(backend), output_checksum, oracle(op) });
+                return error.OutputMismatch;
+            }
             const pixels = pixelCount(op);
             const bytes = @as(f64, @floatFromInt(try modeledBytes(@tagName(op))));
-            metrics[used] = .{ .name = @tagName(op), .backend = backendName(backend), .iterations = samples * inner, .checksum = output_checksum, .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprite_draw or op == .frame) 0 else pixels / seconds / 1e6, .bytes_s = bytes / seconds, .effective_gib_s = bytes / seconds / 1073741824.0, .draws_s = if (op == .sprite_draw) 128 / seconds else 0, .fps = if (op == .frame) 1 / seconds else 0, .frame = pct };
+            metrics[used] = .{ .name = @tagName(op), .backend = backendName(backend), .iterations = samples * inner, .checksum = output_checksum, .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprite_draw or op == .frame) 0 else pixels / seconds / 1e6, .bytes_s = bytes / seconds, .effective_gib_s = bytes / seconds / 1073741824.0, .draws_s = drawCount(op) / seconds, .fps = if (op == .frame) 1 / seconds else 0, .frame = pct };
             used += 1;
         }
     }
@@ -387,6 +593,51 @@ fn fingerprint() Fingerprint {
 }
 fn reportFor(metrics: []const Metric) Report {
     return .{ .schema_version = schema_version, .workload_id = workload_id, .source_commit = "unbound", .utc = "unbound", .fingerprint = fingerprint(), .warmup_iterations = 1, .sample_count = 3, .pipeline = .{ .iterations = 3, .key_construction_ns = 1, .cache_lookup_ns = 1, .cache_hits = 3, .cache_misses = 1, .cache_hit_rate = 0.75 }, .metrics = metrics };
+}
+
+fn markOrigin(seen: []bool, x: i32, y: i32) usize {
+    if (x < 0 or y < 0 or x >= width or y >= height) return 0;
+    const index = @as(usize, @intCast(y)) * width + @as(usize, @intCast(x));
+    if (seen[index]) return 0;
+    seen[index] = true;
+    return 1;
+}
+
+fn uniqueDrawOrigins(op: Op, iteration: usize) usize {
+    var seen = [_]bool{false} ** (width * height);
+    var unique: usize = 0;
+    switch (op) {
+        .pixel_write => for (0..512) |i| {
+            unique += markOrigin(&seen, @intCast((i * 37 + iteration) % width), @intCast((i * 73 + iteration) % height));
+        },
+        .clipped_rectangle => for (0..32) |i| {
+            unique += markOrigin(&seen, @as(i32, @intCast((i * 19) % 240)) - 10, @as(i32, @intCast((i * 31) % 240)) - 10);
+        },
+        .sprite_draw => for (0..128) |i| {
+            unique += markOrigin(&seen, @as(i32, @intCast((i * 29 + iteration) % 248)) - 4, @as(i32, @intCast((i * 43) % 248)) - 4);
+        },
+        .frame => for (0..64) |i| {
+            unique += markOrigin(&seen, @intCast((i * 17) % 224), @intCast((i * 41) % 224));
+        },
+        .desktop_windows => for (0..6) |i| {
+            const x: i32 = @as(i32, @intCast((i * 37 + canonical_iteration * 3) % 184)) - 4;
+            const y: i32 = @as(i32, @intCast((i * 53 + canonical_iteration * 5) % 184)) - 4;
+            unique += markOrigin(&seen, x, y);
+        },
+        .terminal_cells => {
+            for (0..30) |row| for (0..30) |column| {
+                unique += markOrigin(&seen, @intCast(column * 8), @intCast(row * 8));
+            };
+        },
+        .game_scene => {
+            for (0..96) |i| unique += markOrigin(&seen, @intCast((i * 29 + canonical_iteration * 3) % 232), @intCast((i * 47 + canonical_iteration * 2) % 232));
+        },
+        .design_canvas => {
+            for (0..256) |handle| unique += markOrigin(&seen, @intCast((handle * 29 + canonical_iteration) % 239), @intCast((handle * 43 + canonical_iteration * 3) % 239));
+        },
+        else => {},
+    }
+    return unique;
 }
 
 test "percentile index is overflow safe and nearest rank is exact" {
@@ -407,6 +658,10 @@ test "modeled byte traffic has exact hand computed cases" {
     try std.testing.expectEqual(@as(u64, 460800), try modeledBytes("source_over_blend"));
     try std.testing.expectEqual(@as(u64, 65536), try modeledBytes("sprite_draw"));
     try std.testing.expectEqual(@as(u64, 361472), try modeledBytes("frame"));
+    try std.testing.expectEqual(@as(u64, 622848), try modeledBytes("desktop_windows"));
+    try std.testing.expectEqual(@as(u64, 692864), try modeledBytes("terminal_cells"));
+    try std.testing.expectEqual(@as(u64, 776704), try modeledBytes("game_scene"));
+    try std.testing.expectEqual(@as(u64, 662528), try modeledBytes("design_canvas"));
     try std.testing.expectError(error.UnknownOperation, modeledBytes("triangle"));
 }
 test "independent reference renderer has fixed checksums" {
@@ -418,6 +673,18 @@ test "independent reference renderer has fixed checksums" {
         referenceOp(op, &dst, &src, canonical_iteration);
         try std.testing.expectEqual(oracle(op), checksum(&dst));
     }
+}
+test "2D draw workloads cover varied origins" {
+    // Pixel writes intentionally wrap after one full 240x240-period cycle;
+    // they still visit 240 distinct positions rather than hammering one pixel.
+    try std.testing.expectEqual(@as(usize, 240), uniqueDrawOrigins(.pixel_write, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 28), uniqueDrawOrigins(.clipped_rectangle, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 121), uniqueDrawOrigins(.sprite_draw, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 64), uniqueDrawOrigins(.frame, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 6), uniqueDrawOrigins(.desktop_windows, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 900), uniqueDrawOrigins(.terminal_cells, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 96), uniqueDrawOrigins(.game_scene, canonical_iteration));
+    try std.testing.expectEqual(@as(usize, 239), uniqueDrawOrigins(.design_canvas, canonical_iteration));
 }
 test "Vulkan host-memory copy is non-vacuous and no-op copy fails its oracle" {
     var src: [surface_bytes]u8 = undefined;
@@ -447,7 +714,7 @@ test "Vulkan host-memory copy validation rejects an executed no-op implementatio
     try std.testing.expectError(error.OutputMismatch, validateOpOutput(.vulkan_host_memory_copy, .scalar, &dst, &src, &surface, canonical_iteration, noOpCopy));
 }
 test "benchmark validates every available SIMD runtime and oracle" {
-    var metrics: [32]Metric = undefined;
+    var metrics: [64]Metric = undefined;
     const count = try benchmark(std.testing.io, &metrics, true);
     const r = reportFor(metrics[0..count]);
     try validate(r);
@@ -460,7 +727,7 @@ test "canonical metric ordering independently covers optional SIMD sets" {
 }
 
 test "full-run guard tolerates noisy timing but rejects catastrophic routes" {
-    var storage: [32]Metric = undefined;
+    var storage: [64]Metric = undefined;
     const r = try canonicalForTest(&storage);
     var index: usize = 0;
     while (index < r.metrics.len and !std.mem.eql(u8, r.metrics[index].backend, "runtime")) : (index += 1) {}
@@ -473,7 +740,7 @@ test "full-run guard tolerates noisy timing but rejects catastrophic routes" {
 }
 
 test "full validation rejects noncanonical sets fields and callers cannot bypass it" {
-    var storage: [32]Metric = undefined;
+    var storage: [64]Metric = undefined;
     const count = try benchmark(std.testing.io, &storage, true);
     var r = reportFor(storage[0..count]);
     try validate(r);
@@ -511,7 +778,7 @@ test "full validation rejects noncanonical sets fields and callers cannot bypass
 }
 
 fn metricForTest(op: Op, backend: []const u8) !Metric {
-    return .{ .name = @tagName(op), .backend = backend, .iterations = 3, .checksum = oracle(op), .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprite_draw or op == .frame) 0 else 100, .bytes_s = 107374182400, .effective_gib_s = 100, .draws_s = if (op == .sprite_draw) 100 else 0, .fps = if (op == .frame) 100 else 0, .frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 100, .max_ns = 100, .cv = 0 } };
+    return .{ .name = @tagName(op), .backend = backend, .iterations = 3, .checksum = oracle(op), .checksum_hex = oracleHex(op), .mpix_s = if (op == .sprite_draw or op == .frame) 0 else 100, .bytes_s = 107374182400, .effective_gib_s = 100, .draws_s = if (drawCount(op) > 0) 100 else 0, .fps = if (op == .frame) 100 else 0, .frame = .{ .p50_ns = 100, .p95_ns = 100, .p99_ns = 100, .max_ns = 100, .cv = 0 } };
 }
 
 fn canonicalForTest(storage: []Metric) !Report {
@@ -523,8 +790,8 @@ fn canonicalForTest(storage: []Metric) !Report {
 }
 
 test "baseline compares every applicable rate and every latency independently" {
-    var old_storage: [32]Metric = undefined;
-    var now_storage: [32]Metric = undefined;
+    var old_storage: [64]Metric = undefined;
+    var now_storage: [64]Metric = undefined;
     var baseline = try canonicalForTest(&old_storage);
     var current = try canonicalForTest(&now_storage);
     try compare(current, baseline);

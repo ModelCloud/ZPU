@@ -9,3 +9,14 @@ __pycache__/
 *.smolmachine
 smolvm-stage/
 .monitor_pr33*
+tools/zmouse
+tools/zkeyboard
+tools/libzinput.so
+zpu/libzinput.so
+dist/
+build/
+*.egg-info/
+.eggs/
+.tox/
+.pytest_cache/
+*.pyc

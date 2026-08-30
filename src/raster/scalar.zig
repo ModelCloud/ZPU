@@ -11,10 +11,23 @@ fn div255(v: u32) u32 {
     return (v + 127) / 255;
 }
 
+fn div255Fast(v: u32) u32 {
+    const shifted = v + 128;
+    return (shifted + (shifted >> 8)) >> 8;
+}
+
 pub fn blendPixel(dst: s.Color, src: s.Color) s.Color {
+    if (src.a == 0) return dst;
+    if (src.a == 255) return src;
     const sa: u32 = src.a;
     const da: u32 = dst.a;
     const inv = 255 - sa;
+    if (da == 255) return .rgba(
+        @intCast(div255Fast(@as(u32, src.r) * sa + @as(u32, dst.r) * inv)),
+        @intCast(div255Fast(@as(u32, src.g) * sa + @as(u32, dst.g) * inv)),
+        @intCast(div255Fast(@as(u32, src.b) * sa + @as(u32, dst.b) * inv)),
+        255,
+    );
     const out_a = sa + div255(da * inv);
     if (out_a == 0) return s.Color.rgba(0, 0, 0, 0);
     const blend = struct {
@@ -42,5 +55,23 @@ pub fn blendPixels(row: []u8, start_pixel: usize, source: []const u8, count: usi
         const destination_offset = (start_pixel + i) * 4;
         const color = s.Color.rgba(source[source_offset], source[source_offset + 1], source[source_offset + 2], source[source_offset + 3]);
         s.Surface.write(row, destination_offset, format, blendPixel(s.Surface.read(row, destination_offset, format), color));
+    }
+}
+
+/// Blend a source span whose coverage is known to be binary. This is common
+/// for glyph masks and lets transparent pixels skip the destination read while
+/// opaque pixels use a direct format-aware write.
+pub fn blendPixelsBinary(row: []u8, start_pixel: usize, source: []const u8, count: usize, format: s.Format) void {
+    for (0..count) |i| {
+        const source_offset = i * 4;
+        const alpha = source[source_offset + 3];
+        if (alpha == 0) continue;
+        const destination_offset = (start_pixel + i) * 4;
+        if (alpha == 255) {
+            s.Surface.write(row, destination_offset, format, .rgba(source[source_offset], source[source_offset + 1], source[source_offset + 2], 255));
+        } else {
+            const color = s.Color.rgba(source[source_offset], source[source_offset + 1], source[source_offset + 2], alpha);
+            s.Surface.write(row, destination_offset, format, blendPixel(s.Surface.read(row, destination_offset, format), color));
+        }
     }
 }

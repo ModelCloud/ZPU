@@ -1,0 +1,4 @@
+include README.md LICENSE pyproject.toml setup.py MANIFEST.in
+recursive-include zpu *.py
+recursive-include tools libzinput.c zinput.h
+global-exclude *.so

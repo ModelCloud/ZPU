@@ -1,0 +1,119 @@
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+#
+# Publish the `zpu` Python package to PyPI on releases or manual dispatch.
+
+name: Publish
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      upload_pypi:
+        description: 'Upload to PyPI'
+        type: boolean
+        required: false
+        default: false
+
+env:
+  CI: 1
+
+jobs:
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install build tools
+        run: |
+          pip install uv
+          uv pip install build "setuptools>=77.0.1,<83" twine packaging wheel --system
+
+      - name: Build sdist
+        run: python -m build --sdist
+
+      - name: Check sdist
+        run: twine check dist/*
+
+      - name: Test install
+        run: uv pip install dist/* --system
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: zpu-sdist
+          path: dist/*.tar.gz
+
+  build-wheels:
+    name: Build wheels on Linux
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.py }}
+          cache: 'pip'
+
+      - name: Install build tools
+        run: |
+          pip install uv
+          uv pip install build "setuptools>=77.0.1,<83" twine packaging wheel --system
+
+      - name: Build wheel
+        run: python -m build -w --no-isolation
+
+      - name: Check wheel
+        run: twine check dist/*.whl
+
+      - name: Test install
+        run: uv pip install dist/*.whl --system
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: zpu-wheel-${{ matrix.py }}
+          path: dist/*.whl
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    needs: [build-sdist, build-wheels]
+    if: github.event_name == 'release' || github.event.inputs.upload_pypi == 'true'
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install twine
+        run: pip install twine
+
+      - name: Publish source distribution to PyPI
+        env:
+          TWINE_USERNAME: "__token__"
+          TWINE_PASSWORD: ${{ secrets.PYPI_KEY }}
+        run: python -m twine upload dist/*.tar.gz

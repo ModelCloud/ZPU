@@ -318,7 +318,7 @@ int main(void) {
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_SRGB, &fp);
     CHECK_TRUE(fp.linearTilingFeatures == VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT && fp.optimalTilingFeatures == VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT && fp.bufferFeatures == 0);
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_B8G8R8A8_UNORM, &fp);
-    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT));
+    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
     CHECK_TRUE(fp.optimalTilingFeatures == fp.linearTilingFeatures && fp.bufferFeatures == 0);
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_D32_SFLOAT, &fp);
     CHECK_TRUE(fp.linearTilingFeatures == 0 && fp.optimalTilingFeatures == (VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT) && fp.bufferFeatures == 0);

@@ -13,11 +13,11 @@
 #       Artifact contains zero VEX-encoded instructions inside any project
 #       function.
 #   check --kernelized FILE...
-#       All three eight-lane kernel exports must be linked, genuinely
-#       vectorized (>0 VEX), and VEX-encoded instructions may appear ONLY
-#       inside them.
+#       All eight eight-lane kernel exports must be linked, genuinely
+#       vectorized (>0 VEX), and VEX-encoded instructions may appear only
+#       inside the kernel boundary (including its v3 tail helpers).
 #   check --kernels-linked FILE...
-#       All three eight-lane kernel exports must be linked and genuinely
+#       All eight eight-lane kernel exports must be linked and genuinely
 #       vectorized (>0 VEX inside them). No constraints are placed on other
 #       functions: this mode applies when the user explicitly opted the whole
 #       artifact into a higher CPU tier via -Dcpu, where portable-tier code
@@ -51,8 +51,13 @@ esac
 # Exact exported kernel symbols. Single source of truth is
 # src/simd/kernel_abi.zig, whose test asserts these names appear verbatim in
 # this script.
-KERNEL_EXPORTS=(zpu_v3_fill_span_8 zpu_v3_blend_span_8 zpu_v3_blend_pixels_8)
-kernel_symbol_re='^(zpu_v3_fill_span_8|zpu_v3_blend_span_8|zpu_v3_blend_pixels_8)$'
+KERNEL_EXPORTS=(zpu_v3_fill_span_8 zpu_v3_blend_span_8 zpu_v3_blend_pixels_8 zpu_v3_fill_rows_8 zpu_v3_blend_rows_8 zpu_v3_blend_pixels_rows_8 zpu_v3_fill_rects_8 zpu_v3_blend_sprite_batch_8)
+kernel_symbol_re='^(zpu_v3_fill_span_8|zpu_v3_blend_span_8|zpu_v3_blend_pixels_8|zpu_v3_fill_rows_8|zpu_v3_blend_rows_8|zpu_v3_blend_pixels_rows_8|zpu_v3_fill_rects_8|zpu_v3_blend_sprite_batch_8)$'
+# The v3 object reuses scalar tail helpers for spans shorter than one vector.
+# They are compiled in the v3 tier and may therefore contain the same VEX
+# encoding; keep them in the vectorized boundary without treating similarly
+# named functions in clean baseline artifacts as foreign.
+kernel_helper_re='^(raster[.]scalar[.]blendSpan|raster[.]scalar[.]blendPixels)$'
 
 # Fail closed: every required tool must exist before any analysis.
 missing_tools=()
@@ -143,7 +148,7 @@ count_vex() {
   cat "$workdir/syms.sorted" >"$workdir/stream.txt"
   printf '__ISA_GATE_DISASSEMBLY__\n' >>"$workdir/stream.txt"
   cat "$dis" >>"$workdir/stream.txt"
-  awk -v phase=1 -v foreign_re="$foreign_root_re" -v kernel_re="$kernel_symbol_re" '
+  awk -v phase=1 -v foreign_re="$foreign_root_re" -v kernel_re="$kernel_symbol_re" -v kernel_helper_re="$kernel_helper_re" '
     /^__ISA_GATE_DISASSEMBLY__$/ { phase = 2; next }
     phase == 1 {
       starts[++count] = $1
@@ -173,7 +178,7 @@ count_vex() {
       if (is_vex) {
         mnemonic = f[3]
         gsub(/^[ \t]+|[ \t]+$/, "", mnemonic)
-        if (mnemonic == "") is_vex = 0      # paranoia: never count without a decoded instruction
+        if (mnemonic == "" || mnemonic == "(bad)") is_vex = 0 # ignore undecodable bytes in jump tables/padding
       }
       if (!is_vex) next
       lo = 1; hi = count; best = 0
@@ -187,7 +192,7 @@ count_vex() {
         name = names[best]
         tail = name
         sub(/^.*\./, "", tail)
-        if (tail ~ kernel_re) kernel++
+        if (tail ~ kernel_re || name ~ kernel_helper_re) kernel++
         else if (name !~ foreign_re) outside++
         else foreign++
       }
@@ -298,7 +303,7 @@ check_file() {
         status=1
       fi
       if ((status == 0)); then
-        echo "isa-gate: $(basename "$file") kernels verified vectorized ($kernel VEX inside kernel exports only)"
+        echo "isa-gate: $(basename "$file") kernels verified vectorized ($kernel VEX inside kernel boundary only)"
       fi
       ;;
     linked)

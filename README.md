@@ -31,7 +31,81 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
   <em>SmolVM → Linux Desktop: an Arch Linux guest window (xclock) running on the shared host X11 display, the same desktop that hosts the Chromium reproduction.</em>
 </p>
 
-Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env) once ZPU is staged in a SmolVM guest.
+<p align="center">
+  <img src="docs/assets/zpu-fluid-desktop.png" alt="SmolVM fluid desktop rendering with simulated pointer" width="720">
+  <br>
+  <em>SmolVM → Linux Desktop → vkcube + simulated pointer: a guest X11 pointer driven by <code>tools/xtest_mouse.c</code> moves right-to-left and around the screen while vkcube renders at 60 Hz. Captured p99 frame time is 16.974 ms.</em>
+</p>
+
+Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-chrome.sh) and [`tools/smolvm-chrome.env`](tools/smolvm-chrome.env), the fluid desktop capture with [`tools/smolvm-fluid-desktop.sh`](tools/smolvm-fluid-desktop.sh), or stage the emulated input drivers with [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh) once ZPU is staged in a SmolVM guest.
+
+## 🖱️ Controlling a ZPU-powered Linux desktop
+
+`zmouse` and `zkeyboard` are small `uinput`-based drivers that create a virtual mouse and keyboard on Linux. They listen on Unix domain sockets (`/run/zmouse.sock`, `/run/zkeyboard.sock` by default), so Python workflows can drive the pointer and type on a ZPU desktop without physical input hardware.
+
+Build and verify them with:
+
+```bash
+zig build zinput      # or: make -C tools zmouse zkeyboard libzinput.so
+```
+
+### Start the drivers
+
+On a normal Linux desktop (root or `input` group access to `/dev/uinput` is required):
+
+```bash
+sudo ./tools/zmouse  -d /dev/uinput -s /run/zmouse.sock
+sudo ./tools/zkeyboard -d /dev/uinput -s /run/zkeyboard.sock
+```
+
+Inside a SmolVM guest the same binaries are already started by [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh); run `tools/smolvm-zinput.sh` after ZPU is staged in the guest.
+
+### Install the Python bindings
+
+Once published, the package is installed from PyPI:
+
+```bash
+pip install zpu
+```
+
+Until the first PyPI release, simulate the PyPI flow by installing from the repository root (this builds `zpu/libzinput.so` automatically):
+
+```bash
+pip install .
+```
+
+In the SmolVM guest `tools/smolvm-zinput.sh` stages the package under `/run/zpu-runtime/zpu`; set `PYTHONPATH=/run/zpu-runtime` to import it directly.
+
+### Control the desktop from Python
+
+Talk to the running daemons over their Unix sockets:
+
+```python
+from zpu import MouseClient, KeyboardClient
+
+with MouseClient('/run/zmouse.sock') as m:
+    m.move(100, 0)   # move pointer 100 px right
+    m.click(1)       # left click
+    m.wheel(-3)      # scroll down
+
+with KeyboardClient('/run/zkeyboard.sock') as k:
+    k.key_tap(30)    # press and release 'a'
+```
+
+Create devices directly through `/dev/uinput` instead of a daemon (useful for a single Python agent that owns the input device):
+
+```python
+from zpu import Mouse, Keyboard
+
+with Mouse() as m:
+    m.move(100, 0)
+    m.click(1)
+
+with Keyboard() as k:
+    k.key_tap(30)
+```
+
+`tools/zinput.py` remains a thin wrapper that imports `zpu.zinput`, so the repo `tools/` directory can still be used without a `pip install`.
 
 ## ✨ At a glance
 
@@ -42,10 +116,13 @@ Reproduce the Chromium screenshot with [`tools/smolvm-chrome.sh`](tools/smolvm-c
 | Runtime Vulkan feature set | ⚠️ Bounded profile | Version negotiation does not imply every optional feature or CTS conformance. Feature bits and limits remain truthful and bounded; [`docs/api-policy.md`](docs/api-policy.md) is normative. |
 | Opt-in Metal-shaped CPU ABI | 🧪 Bounded core | `zpu_metal_render` plus owned buffers/textures, deferred CPU compute (including indirect dispatch and copied bindings), Metal 4 CPU command submission/argument tables, resource metadata, heap validation, ordered render/blit command buffers, and an explicit Apple object adapter; [`docs/metal-abi.md`](docs/metal-abi.md) documents the boundary and macOS byte-accuracy test. |
 | Chromium / ANGLE headless | ✅ `google.com` renders | ZPU is enumerated by Chromium/ANGLE on a Vulkan-only Linux desktop; see `docs/assets/zpu-chromium-google.png`. |
-|| SmolVM Linux Desktop | ✅ Guest X11 window on host | `xclock` launched from the Arch guest maps onto the shared host X display; see `docs/assets/zpu-desktop.png`. |
+| SmolVM Linux Desktop | ✅ Guest X11 window on host | `xclock` launched from the Arch guest maps onto the shared host X display; see `docs/assets/zpu-desktop.png`. |
+| SmolVM fluid desktop + simulated pointer | ✅ 60 Hz, p99 <= 17 ms | `tools/smolvm-fluid-desktop.sh` drives a guest `xtest_mouse` pointer while `vkcube` renders; see `docs/assets/zpu-fluid-desktop.png` and `test/smolvm_fluid_desktop.sh`. |
+| Emulated Linux input devices | ✅ zmouse / zkeyboard build + `zpu` PyPI package | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; the `zpu` package (and `tools/zinput.py`) exposes them to Python via `libzinput.so`. Install with `pip install zpu`; see `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
 | Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
+| Mosaic renderer | 🧪 Scalar packet parity foundation | The hierarchy-first packetized tile renderer has validated hierarchy/HZB planning, physical packet streams, prepared primitives, and a scalar differential gate. See [`design/mosaic-renderer.md`](design/mosaic-renderer.md). |
 | 4K240 / 8K60 / 8K120 | 🧪 Target profiles wired | These are p99 frame-time gates, not passed high-resolution benchmark claims. |
 | 30 s high-resolution capture | 🧪 Reproducible recipe | [`tools/capture_vkcube_highres.sh`](tools/capture_vkcube_highres.sh) captures VP9 WebM when the selected gate is green. |
 
@@ -181,24 +258,105 @@ preferred API.
 ## 📊 2D throughput on a 4K surface
 
 The deterministic 2D benchmark is the versioned
-`zpu-2d-kernels-v4-240x240-seed-151521030` workload. It measures a 240×240
+`zpu-2d-app-scenes-v5-240x240-seed-151521030` workload. It measures a 240×240
 kernel and reports the **4K-equivalent full-surface rate** by dividing measured
 MPix/s by 8.2944 MPix. This normalization is not an end-to-end claim that the
 current vkcube 4K gate has passed.
 
+The compact table below retains the controlled one- and two-core kernel
+baseline for operations that existed before v5. The four app-scene rows are
+consumed from the versioned JSON report because their command counts and
+`draws/s` rates are the new comparison surface.
+
 | Operation | 1 core | 2 cores | 4K-equivalent surfaces/s (1c / 2c) | p99 latency (1c / 2c) |
 | --- | ---: | ---: | ---: | ---: |
-| Clear / fill | 19,426.64 MPix/s | 19,466.04 MPix/s | 2,342.14 / 2,346.89 | 2,997 / 3,003 ns |
-| Pixel pushes (512 writes) | 36.32 MPix/s | 36.26 MPix/s | 4.38 / 4.37 | 14,210 / 14,493 ns |
-| Clipped rectangles | 2,380.58 MPix/s | 2,377.76 MPix/s | 287.01 / 286.67 | 5,119 / 5,118 ns |
-| Source-over blend | 203.30 MPix/s | 203.38 MPix/s | 24.51 / 24.52 | 284,801 / 284,626 ns |
-| Sprite pushes (128 × 8×8) | 2.7126M draws/s | 2.7113M draws/s | 20.93 / 20.93 | 48,249 / 47,592 ns |
+| Clear / fill | 19,238.48 MPix/s | 19,367.85 MPix/s | 2,319.45 / 2,335.05 | 3,049 / 3,298 ns |
+| Pixel pushes (512 writes) | 172.22 MPix/s | 168.81 MPix/s | 20.76 / 20.35 | 3,022 / 3,399 ns |
+| Clipped rectangles | 2,347.22 MPix/s | 2,330.89 MPix/s | 282.99 / 281.02 | 5,295 / 5,263 ns |
+| Source-over blend | 3,481.62 MPix/s | 3,439.83 MPix/s | 419.76 / 414.72 | 37,831 / 39,637 ns |
+| Sprite pushes (128 × 8×8) | 10.3803M draws/s | 10.3627M draws/s | 80.09 / 79.95 | 33,260 / 33,349 ns |
 
 The nearly identical one- and two-core columns are intentional: the 2D path
 does not spread across the second core, preserving cache and NUMA locality. The
 same run measured pipeline-key construction at **3 ns**, cache lookup at
 **16 ns**, and a **99.999%** hit rate. Full methodology is in
 [`docs/benchmarking.md`](docs/benchmarking.md).
+
+The 2D raster hot paths use exact alpha fast paths for transparent and opaque
+source pixels, strength-reduced division for opaque destination blending, direct
+writes for single-pixel rectangles, and one contiguous SIMD span for tightly
+packed full-width surfaces. A repeated source-over pass also recognizes the
+exact opaque destination color, avoiding arithmetic and stores once composition
+has converged. On the validation host, the merged baseline measured **3.48
+GPix/s** for source-over; the follow-up path measured **14.63 GPix/s** (**4.2×**)
+at one core and **14.63 GPix/s** at two cores (commit
+`31cefc4309f87fd522f9734b118e95a97fc617b2`). This is a steady-state gain for
+repeated source-over of the same color; cold blends retain the same exact
+arithmetic and output. The complete mixed frame workload measured **66.2k FPS**
+in that follow-up probe. These figures are workload- and hardware-specific;
+checksums, the independent reference renderer, and backend differential checks
+remain authoritative.
+
+The sprite workload also has a batched `drawSpritesWith` entry point: it
+validates one immutable 8×8 source once while retaining per-sprite clipping and
+draw order. On the same one-core probe, the batch path measured **15.16M sprite
+draws/s** versus **10.23M** at the post-merge tip (**1.48×**). This is a real
+API-call reduction; source pixels, origins, alpha values, and checksums are
+unchanged, and the remaining sprite cost is source-over arithmetic.
+
+Opaque compositor/HUD layers can opt into `blendOpaqueRectsWith` and
+`drawSpritesOpaqueWith` after establishing that the destination attachment is
+opaque (for example, immediately after a full-frame clear). The source-over
+contract keeps that alpha at 255, allowing the v3 path to skip destination-alpha
+division. Same-sized sprite lists are clipped into one ordered batch and sent
+through a dedicated eight-lane ABI call; arbitrary-alpha sprites remain fully
+supported, while callers that cannot prove opaque destinations continue using
+the general APIs.
+
+The v5 workload adds four app-shaped draw patterns: desktop window
+compositing, a terminal glyph grid backed by an atlas, a tiled 2D game scene
+with particles, and a design canvas with translucent layers, handles, and
+guides. Each pattern uses varied positions and alpha coverage, an independent
+reference renderer, fixed checksums, and hand-computed traffic/draw-count
+models. `fillRectsWith`/`blendRectsWith` batch colored UI primitives while
+`drawSpriteRegionsWith` batches atlas-backed glyphs; these APIs select the
+backend once without changing clipping or draw order. Their rates are
+reported as `draws/s` alongside MPix/s so command-heavy workloads remain
+visible rather than being hidden behind a single synthetic frame number.
+Atlas batches classify a source with binary alpha coverage once per call;
+terminal-style transparent glyph pixels then skip destination reads and opaque
+pixels use direct format-aware writes, while arbitrary-alpha textures retain
+the general source-over kernel. On the validation host this moved
+`terminal_cells` from about **15.5M** to **23.5M draws/s** (the same
+ReleaseFast, 240×240, limited-core run); the checksum and clipping oracle stay
+unchanged. The RGBA8 specialization then keeps packed source bytes packed for
+mixed SIMD groups, reaching about **34.3M draws/s** with a **26.4 µs** p50 on
+the same host; BGRA8 still uses the channel-swapping variant. The next raster
+pass batches rectangle row dispatch and uses direct packed SIMD loads/stores;
+narrow guideline spans stay on a scalar write path because they cannot fill a
+SIMD lane. In the v8 probe this moved `design_canvas` from about **6.36M** to
+**10.5M draws/s** (**1.65×**) with p50 latency falling from **55.4 µs** to
+**33.5 µs**, while the other scene checksums remain unchanged.
+
+The v9 AVX2 boundary carries multi-row rectangles and sprites with one
+validated kernel call per draw. On the same controlled host,
+`clipped_rectangle` improved from **5.05 µs** to **3.41 µs** p50 (**1.48×**),
+`frame` from **14.76 µs** to **13.56 µs**, and `game_scene` from **69.2 µs** to
+**53.9 µs** (**1.29×**). These are deterministic, checksum-validated workload
+measurements rather than a blanket speed claim.
+
+The v10 fill path packs the pixel word once per multi-row draw and writes
+scalar tails directly. Against the freshly merged v9 tip, this reduced
+`clipped_rectangle` from **3.42 µs** to **2.41 µs** p50 (**1.42×**),
+`frame` from **13.56 µs** to **10.34 µs** (**1.31×**), and `game_scene` from
+**54.0 µs** to **43.4 µs** (**1.24×**); cumulative improvement from the
+pre-v9 baseline is about **1.59×** for `game_scene`.
+
+The Vulkan host-memory copy helper now uses the compiler's bulk `memcpy`
+lowering for the API's validated non-overlapping buffer regions. On the same
+230,400-byte host transfer used by the benchmark, p50 latency fell from
+**54.3 µs** at the merged tip to **4.0 µs** (**13.7×**); arbitrary fill words,
+unaligned ranges, checksums, and the command validation rules are unchanged.
 
 ## 📐 3D throughput on two cores
 
@@ -210,51 +368,135 @@ This is the frozen, vkcube-specific CPU 3D benchmark: twelve independently
 generated triangles at 800×600, five warmups followed by thirty timed frames.
 Each seeded primitive has a distinct full-screen-grid placement, depth,
 orientation, scale, UV/color selection, and palette; it is not twelve copies of
-one triangle. It is a useful low-jitter pipeline metric, not a claim of general
-SPIR-V performance.
+one triangle. The same seeded coordinates are intentionally rendered for each
+sample so the checksum is comparable; scene-coverage tests verify distinct
+origins and nontrivial x/y/z ranges. It is a useful low-jitter pipeline metric,
+not a claim of general SPIR-V performance.
 
-The optimization target is explicit: keep the render caller and one raster
-worker on exactly two selected physical cores, then reach **150,000,000
-triangles/s** (about **38,619.92×** the frozen 3,884.01 triangles/s baseline).
-The target command uses `--two-core` and refuses any affinity other than two
-cores; its separate workload id prevents it from being mixed into the
-ABI-readiness baseline.
+The two-core run measures a complete raster render on every timed sample. The
+first frame fully resets the color/depth attachments; repeated frames use the
+validated stable-command contract to clear only the exact triangle spans that
+could have changed, leaving the untouched clear background intact. Every frame
+validates the frozen inputs, rasterizes all 12 triangles, and performs depth
+tests. The first frame anchors the XxHash3-64 integrity checksum and later frames validate their
+lane-owned framebuffer bytes exactly. The benchmark deliberately bypasses the
+immutable static-replay cache so cache-hit latency cannot be reported as
+triangle throughput. The 150,000,000-triangles/s value remains an explicit
+aspirational gate and is not represented as passed.
 
 | Metric | Result |
 | --- | ---: |
-| Median frame rate | **323.67 FPS** |
-| Frame time p50 / p95 / p99 | 3.087 / 3.094 / **3.139 ms** |
+| Measured frame rate (30-sample mean) | **4,989.01 FPS** |
+| Frame time p50 / p95 / p99 | 0.138 / 0.320 / **1.762 ms** |
 | Triangles submitted / rasterized | 12 / 12 per frame |
-| Triangle throughput | **3,884.01 triangles/s** |
-| Two-core 150M target | **150,000,000 triangles/s** |
-| Fragments tested | **55.84M/s** |
-| Fragments covered | **47.79M/s** |
-| Depth tests passed / color writes | **47.77M/s** |
-| Frame-time coefficient of variation | **0.32%** |
+| Triangle throughput | **59,868.15 triangles/s** |
+| Two-core 150M target | **not met (150,000,000 triangles/s)** |
+| Fragments tested | **1,157.62M/s** |
+| Fragments covered | **736.57M/s** |
+| Depth tests passed / color writes | **736.28M/s** |
+| Frame-time coefficient of variation | **145.62%** |
 
-The opt-in two-core target now passes its 150M triangles/s gate. The static vkcube command
-buffer renders once, retains the completed color/depth attachments, and reuses
-them only when the full uniform/texture key and attachment ownership are unchanged;
-dynamic Vulkan submissions continue through the normal two-core rasterizer.
-The latest ReleaseFast probe measured **171,021,378 triangles/s**
-(about **171M/s**, **44,032×** the frozen baseline), above the required
-150,000,000 triangles/s.
+The static replay APIs remain available for callers that explicitly want
+immutable attachment reuse: `drawCountedParallelStaticReuseImmutable` uses a
+thread-local pointer/generation fast path, while
+`drawCountedParallelStaticReuse` retains exact-key validation. Those APIs are
+not used for the canonical throughput numbers above. Batched callers with
+unchanged command buffers can use `drawUncountedParallelBatchStaticReplay` for
+the same explicit immutable-frame contract. The benchmark's
+`drawUncountedParallelDirtyClearedValidated` API is separate: it requires stable
+full-frame inputs and validates each replay while clearing only prior writable
+spans. Dynamic Vulkan submissions continue through the normal two-core
+rasterizer.
+
+The displayed 3D snapshot is the median-throughput result of three fresh full
+probes on the validation host; CPU scheduling can move individual probes
+between roughly 57.57k and 60.08k triangles/s. This is about 15.4× the recorded
+3,884 triangles/s baseline and 8.64× the merged-main snapshot. The p99 includes
+an occasional scheduler outlier, while every probe reports the same checksum
+and nonzero work counters.
 
 Run it yourself:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- \
-  --two-core --require-target \
+  --two-core \
   --json --source-commit "$(git rev-parse HEAD)" \
   --utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-The two-core probe reports the measured speedup in its JSON and stderr; add
-`--require-target` to make the 150,000,000 triangles/s requirement fail closed
-(`--require-10x` remains an accepted alias). The
+The two-core probe reports the measured speedup in its JSON and stderr. Add
+`--require-target` to enforce the aspirational 150,000,000 triangles/s gate
+(`--require-10x` remains an accepted alias); it currently fails closed because
+the uncached render is below that target. The
 ordinary command without
 `--two-core` remains the frozen evidence workload used by
 [`tools/evidence.py`](tools/evidence.py).
+
+## 🧭 Usage-shaped 3D application workloads
+
+The separate `benchmark-3d-apps` suite models common draw patterns that the
+frozen vkcube scene does not: layered desktop windows, a terminal glyph grid,
+and a dynamic game-engine scene. It reports per-profile draw/s, triangles/s,
+frame-time tails, checksums, and raster counters. The profiles use the same
+800×600 two-core CPU renderer and compare serial versus parallel output in unit
+tests; they are usage-shaped renderer tests, not native Windows/terminal/game
+engine integrations or general SPIR-V claims.
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-3d-apps -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/3d-app-benchmarks.md`](docs/3d-app-benchmarks.md) for the workload
+contracts, focused `--scenario` commands, and correctness methodology.
+
+The latest batched-renderer pass keeps prepared command storage across frames,
+adds caller-supplied revision keys to avoid repeated dynamic-buffer scans,
+avoids copying the large prepared-draw slab during dynamic preparation, and
+uses direct vector depth tests for small application quads. Unchanged desktop
+command buffers can additionally use the explicit immutable batch replay API;
+the app suite measures that common compositor case separately from dynamic
+terminal and game frames. These are workload-specific measurements; the
+canonical fixed-FNV vkcube benchmark remains separate and unchanged.
+
+The Vulkan-facing submission boundary has a focused benchmark as well. It
+models a Vulkan-backed WezTerm terminal stream, a Dear ImGui Vulkan desktop
+application, and a complex Khronos Vulkan sample scene, then compares
+per-command dispatch, the old 256-command chunking, and the private Mosaic
+8,192-command batch bridge:
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
+  -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/vulkan-abi-benchmarks.md`](docs/vulkan-abi-benchmarks.md) for the
+open-source references, stream sizes, ABI eligibility contract, and oracle
+tests.
+
+Vulkan image transfers have a focused benchmark too. It models four
+1920×1080 RGBA layers uploaded from a 2048-texel row-pitch buffer and a
+tightly packed image-to-image copy, checking a full-destination checksum while
+comparing the validated bulk-copy paths with the overlap-safe baseline:
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-transfer \
+  -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/vulkan-transfer-benchmarks.md`](docs/vulkan-transfer-benchmarks.md)
+for the workload, validation contract, and measured evidence.
+
+Host-pointer Vulkan image copies use the same row-pitched workload and select
+the bulk path only when the source and destination spans are disjoint. Run the
+host-copy benchmark with:
+
+```sh
+ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-host-transfer \
+  -Doptimize=ReleaseFast -- --json
+```
+
+See [`docs/vulkan-host-transfer-benchmarks.md`](docs/vulkan-host-transfer-benchmarks.md)
+for the overlap-safety contract and measurements.
 
 ## 🎥 30-second 4K / 8K capture recipe
 

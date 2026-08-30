@@ -8,7 +8,7 @@
 #   1. A VEX instruction inside a plain project-named function is REJECTED
 #      by --kernelized (fail-closed leak detection).
 #   2. A VEX instruction inside the exact `zpu_v3_fill_span_8` export is
-#      ACCEPTED by --kernelized with all exports linked.
+#      ACCEPTED by --kernelized with all eight exports linked.
 #   3. Any VEX instruction is REJECTED by --no-kernel-symbols/--clean modes.
 #   4. A non-VEX object passes --clean.
 # Fails closed if the assembler or any required tool is unavailable.
@@ -81,6 +81,36 @@ zpu_v3_blend_span_8:
 zpu_v3_blend_pixels_8:
 	ret
 .size zpu_v3_blend_pixels_8, .-zpu_v3_blend_pixels_8
+.globl zpu_v3_fill_rows_8
+.type zpu_v3_fill_rows_8,@function
+zpu_v3_fill_rows_8:
+	vpbroadcastd %xmm1, %ymm0
+	ret
+.size zpu_v3_fill_rows_8, .-zpu_v3_fill_rows_8
+.globl zpu_v3_blend_rows_8
+.type zpu_v3_blend_rows_8,@function
+zpu_v3_blend_rows_8:
+	vpblendd $0, %ymm1, %ymm0, %ymm0
+	ret
+.size zpu_v3_blend_rows_8, .-zpu_v3_blend_rows_8
+.globl zpu_v3_blend_pixels_rows_8
+.type zpu_v3_blend_pixels_rows_8,@function
+zpu_v3_blend_pixels_rows_8:
+	vpblendd $0, %ymm1, %ymm0, %ymm0
+	ret
+.size zpu_v3_blend_pixels_rows_8, .-zpu_v3_blend_pixels_rows_8
+.globl zpu_v3_fill_rects_8
+.type zpu_v3_fill_rects_8,@function
+zpu_v3_fill_rects_8:
+	vpbroadcastd %xmm1, %ymm0
+	ret
+.size zpu_v3_fill_rects_8, .-zpu_v3_fill_rects_8
+.globl zpu_v3_blend_sprite_batch_8
+.type zpu_v3_blend_sprite_batch_8,@function
+zpu_v3_blend_sprite_batch_8:
+	vpbroadcastd %xmm1, %ymm0
+	ud2
+.size zpu_v3_blend_sprite_batch_8, .-zpu_v3_blend_sprite_batch_8
 EOF
 
 cat >"$work/plain.S" <<'EOF'
@@ -93,9 +123,20 @@ raster.project_plain:
 .size raster.project_plain, .-raster.project_plain
 EOF
 
+cat >"$work/jump_table.S" <<'EOF'
+.text
+.globl raster.project_jump_table
+.type raster.project_jump_table,@function
+raster.project_jump_table:
+	.byte 0xc4, 0x02, 0x2b, 0x01
+	ret
+.size raster.project_jump_table, .-raster.project_jump_table
+EOF
+
 as --64 -o "$work/leak.o" "$work/leak.S"
 as --64 -o "$work/kernel.o" "$work/kernel.S"
 as --64 -o "$work/plain.o" "$work/plain.S"
+as --64 -o "$work/jump_table.o" "$work/jump_table.S"
 
 # Negative control: an outside-kernel VEX leak must be rejected (fail closed).
 expect_fail "leaky project symbol rejected under --kernelized" check --kernelized "$work/leak.o"
@@ -123,6 +164,9 @@ expect_fail "missing sibling exports rejected under --kernelized" check --kernel
 
 expect_ok "plain non-VEX project object passes --clean" check --clean "$work/plain.o"
 expect_ok "plain non-VEX project object passes --no-kernel-symbols" check --no-kernel-symbols "$work/plain.o"
+# Bytes used by a jump table can begin with a VEX prefix but disassemble as
+# `(bad)`; they are data, not executable VEX, and must not trip the gate.
+expect_ok "undecodable jump-table bytes ignored under --clean" check --clean "$work/jump_table.o"
 
 # BL-2 fail-closed coverage: malformed and stripped inputs must exit nonzero
 # rather than announcing zero VEX.

@@ -51,11 +51,14 @@ one raster worker are pinned to that cache-local pair. Its target is
 150,000,000 triangles/s (about 38,619.92× the frozen 3,884.01 triangles/s
 baseline). A target run is enforced with `--require-target` (with
 `--require-10x` retained as an alias) and is not substituted for the schema-3
-readiness artifact above. The static target uses an exact uniform/texture-keyed
-completed-frame reuse; callers promise unchanged attachments between identical
-submissions. Dynamic Vulkan submissions remain on the normal raster path. The
-latest ReleaseFast probe measured 171,021,378 triangles/s (about 171M/s,
-44,032× baseline).
+readiness artifact above. Every timed sample performs a complete raster render:
+the first frame fully clears the attachments, while later stable-command frames
+clear only previously writable triangle spans and validate each lane's
+framebuffer bytes against the first frame. Validated transformed-triangle state
+may be reused, while the static replay cache is deliberately bypassed. The
+representative median-throughput snapshot measured 59,868.15 triangles/s
+(4,989.01 FPS, 1.762 ms p99), versus the aspirational target, which remains
+explicitly not reported as passed.
 
 Validation additionally requires the ZPU CPU device, one VP9 800×600 stream,
 19–21.5 seconds duration, positive frame count/rate, complete decode, motion,

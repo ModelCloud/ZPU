@@ -7,7 +7,7 @@
 # The kernel library is built optimized without Debug safety plumbing, so its
 # ABI-input violation paths use explicit @trap() calls. This script proves the
 # traps physically survived compilation in the emitted x86-64-v3 objects: each
-# of the three exported kernel functions must contain at least one `ud2`
+# of the eight exported kernel functions must contain at least one `ud2`
 # instruction inside its exact FUNC range.
 #
 # Usage: kernel_guard_regression.sh KERNEL_ARCHIVE
@@ -70,6 +70,11 @@ awk -v phase=1 '
     exports["zpu_v3_fill_span_8"] = 1
     exports["zpu_v3_blend_span_8"] = 1
     exports["zpu_v3_blend_pixels_8"] = 1
+    exports["zpu_v3_fill_rows_8"] = 1
+    exports["zpu_v3_blend_rows_8"] = 1
+    exports["zpu_v3_blend_pixels_rows_8"] = 1
+    exports["zpu_v3_fill_rects_8"] = 1
+    exports["zpu_v3_blend_sprite_batch_8"] = 1
     bad = 0
     for (e in exports) {
       if (!(e in seen_export)) {

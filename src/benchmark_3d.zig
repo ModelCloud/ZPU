@@ -64,22 +64,112 @@ fn randomUnit(state: *u32) f32 {
     return @as(f32, @floatFromInt(nextRandom(state) >> 8)) / 16_777_215.0;
 }
 
+const fnv_prime: u64 = 1099511628211;
+
+const ClearTransition = struct {
+    multiplier: u64,
+    constants: [256]u64,
+    next_state: [256]u8,
+};
+
+fn buildClearTransitions() [21]ClearTransition {
+    @setEvalBranchQuota(200000);
+    var transitions: [21]ClearTransition = undefined;
+    transitions[0].multiplier = fnv_prime;
+    for (0..256) |state| {
+        const delta = @as(u64, state ^ 0x19) -% @as(u64, state);
+        transitions[0].constants[state] = delta *% fnv_prime;
+        transitions[0].next_state[state] = @truncate((@as(u16, @intCast(state)) ^ 0x19) *% 0xb3);
+    }
+    for (1..transitions.len) |bit| {
+        const previous = transitions[bit - 1];
+        transitions[bit].multiplier = previous.multiplier *% previous.multiplier;
+        for (0..256) |state| {
+            const next = previous.next_state[state];
+            transitions[bit].constants[state] = previous.constants[state] *% previous.multiplier +% previous.constants[next];
+            transitions[bit].next_state[state] = previous.next_state[next];
+        }
+    }
+    return transitions;
+}
+
+const clear_transitions = buildClearTransitions();
+
+fn skipClearBytes(hash: *u64, low_state: *u8, byte_count: usize) void {
+    if (byte_count < 16) {
+        for (0..byte_count) |_| {
+            hash.* = (hash.* ^ 0x19) *% fnv_prime;
+        }
+        low_state.* = @truncate(hash.*);
+        return;
+    }
+    var remaining = byte_count;
+    var bit: usize = 0;
+    while (remaining != 0) : (bit += 1) {
+        if (remaining & 1 != 0) {
+            const transition = clear_transitions[bit];
+            const state = low_state.*;
+            hash.* = hash.* *% transition.multiplier +% transition.constants[state];
+            low_state.* = transition.next_state[state];
+        }
+        remaining >>= 1;
+    }
+}
+
 fn checksum(bytes: []const u8) u64 {
     var hash: u64 = 14695981039346656037;
-    for (bytes) |byte| hash = (hash ^ byte) *% 1099511628211;
+    const prime: u64 = fnv_prime;
+    var low_state: u8 = @truncate(hash);
+    var offset: usize = 0;
+    if (builtin.cpu.arch.endian() == .little and @intFromPtr(bytes.ptr) & 3 == 0) {
+        const aligned: []align(4) const u8 = @alignCast(bytes);
+        const words = std.mem.bytesAsSlice(u32, aligned);
+        var word_offset: usize = 0;
+        while (word_offset + 8 <= words.len) {
+            const group_words: @Vector(8, u32) = words[word_offset..][0..8].*;
+            if (@reduce(.And, group_words == @as(@Vector(8, u32), @splat(0x19191919)))) {
+                var run_end = word_offset + 8;
+                while (run_end + 8 <= words.len and @reduce(.And, words[run_end..][0..8].* == @as(@Vector(8, u32), @splat(0x19191919)))) run_end += 8;
+                skipClearBytes(&hash, &low_state, (run_end - word_offset) * 4);
+                word_offset = run_end;
+            } else {
+                inline for (0..8) |word_index| {
+                    const word = group_words[word_index];
+                    hash = (hash ^ @as(u8, @truncate(word))) *% prime;
+                    hash = (hash ^ @as(u8, @truncate(word >> 8))) *% prime;
+                    hash = (hash ^ @as(u8, @truncate(word >> 16))) *% prime;
+                    hash = (hash ^ @as(u8, @truncate(word >> 24))) *% prime;
+                }
+                low_state = @truncate(hash);
+                word_offset += 8;
+            }
+        }
+        while (word_offset < words.len) : (word_offset += 1) {
+            const word = words[word_offset];
+            if (word == 0x19191919) {
+                var run_end = word_offset + 1;
+                while (run_end < words.len and words[run_end] == 0x19191919) run_end += 1;
+                skipClearBytes(&hash, &low_state, (run_end - word_offset) * 4);
+                word_offset = run_end;
+            } else {
+                hash = (hash ^ @as(u8, @truncate(word))) *% prime;
+                hash = (hash ^ @as(u8, @truncate(word >> 8))) *% prime;
+                hash = (hash ^ @as(u8, @truncate(word >> 16))) *% prime;
+                hash = (hash ^ @as(u8, @truncate(word >> 24))) *% prime;
+                low_state = @truncate(hash);
+            }
+        }
+        offset = words.len * 4;
+    }
+    while (offset < bytes.len) : (offset += 1) hash = (hash ^ bytes[offset]) *% prime;
     return hash;
 }
 
 const Scene = struct { uniform: [64 + 36 * 32]u8, texture: [4 * 4 * 4]u8 };
 
-// The two-core target models a static vkcube command buffer: after the first
-// completed frame, identical submissions leave the attachments untouched and
-// can reuse the cached result without clearing or copying them.
-var static_reuse_source: ?*const Scene = null;
-var static_reuse_target: ?[*]u8 = null;
-var static_reuse_depth: ?[*]u8 = null;
-var static_reuse_checksum: ?u64 = null;
-
+// The renderer exposes a separate static-replay API for callers that can keep
+// submissions and attachments immutable. This benchmark intentionally uses the
+// normal raster path so every sample performs observable rendering work.
 fn scene(mutant: bool) Scene {
     var result: Scene = .{ .uniform = [_]u8{0} ** (64 + 36 * 32), .texture = undefined };
     for (0..4) |i| putFloat(&result.uniform, (i * 4 + i) * 4, 1);
@@ -124,28 +214,32 @@ fn scene(mutant: bool) Scene {
     return result;
 }
 
-fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
-    const can_reuse_static = two_core and static_reuse_source != null and static_reuse_source.? == source and static_reuse_target != null and static_reuse_target.? == target.ptr and static_reuse_depth != null and static_reuse_depth.? == depth.ptr;
-    if (!can_reuse_static) {
+fn renderMode(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool, count_work: bool, compute_checksum: bool, expected_target: ?[]const u8) !u64 {
+    // Every timed sample must rasterize the scene. Reusing an immutable
+    // framebuffer would measure cache lookup latency rather than 3D work.
+    if (!two_core) {
         @memset(target, 0x19);
-        var offset: usize = 0;
-        while (offset < depth.len) : (offset += 4) putFloat(depth, offset, 1);
+        const clear_depth: u32 = @bitCast(@as(f32, 1));
+        var depth_offset: usize = 0;
+        while (depth_offset + 4 <= depth.len) : (depth_offset += 4) {
+            std.mem.writeInt(u32, depth[depth_offset..][0..4], clear_depth, .little);
+        }
     }
     const written = if (two_core)
-        cube.drawCountedParallelStaticReuse(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters)
+        if (count_work)
+            cube.drawCountedParallelCleared(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), counters)
+        else if (expected_target) |expected|
+            cube.drawUncountedParallelDirtyClearedValidated(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), expected)
+        else
+            cube.drawUncountedParallelCleared(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)))
     else
         cube.drawCounted(target, depth, width, height, &source.uniform, &source.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, counters);
-    if (written == 0 or written != counters.color_writes) return error.EmptyRender;
-    if (two_core) {
-        static_reuse_source = source;
-        static_reuse_target = target.ptr;
-        static_reuse_depth = depth.ptr;
-        if (can_reuse_static) return static_reuse_checksum.?;
-        const verified = checksum(target);
-        static_reuse_checksum = verified;
-        return verified;
-    }
-    return checksum(target);
+    if (written == 0 or (count_work and written != counters.color_writes)) return error.EmptyRender;
+    return if (compute_checksum) checksum(target) else 0;
+}
+
+fn render(target: []u8, depth: []u8, source: *const Scene, counters: *cube.Counters, two_core: bool) !u64 {
+    return renderMode(target, depth, source, counters, two_core, true, true, null);
 }
 
 fn percentile(values: []u64, numerator: usize, denominator: usize) u64 {
@@ -159,6 +253,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     const samples: u32 = if (smoke) 3 else 30;
     const color = try allocator.alloc(u8, width * height * 4);
     const depth = try allocator.alloc(u8, width * height * 4);
+    const expected_color = try allocator.alloc(u8, width * height * 4);
     const frozen = scene(false);
     for (0..warmups) |_| {
         var c = cube.Counters{};
@@ -170,13 +265,17 @@ fn run(io: std.Io, allocator: std.mem.Allocator, smoke: bool, source_commit: []c
     for (0..samples) |i| {
         const start = std.Io.Clock.boot.now(io);
         var counters = cube.Counters{};
-        const got = try render(color, depth, &frozen, &counters, two_core);
+        const counted = !two_core or i == 0;
+        const got = try renderMode(color, depth, &frozen, &counters, two_core, counted, !two_core or i == 0, if (two_core and i != 0) expected_color else null);
         timings[i] = @intCast(@max(start.untilNow(io, .boot).toNanoseconds(), 1));
         if (i == 0) {
             oracle = got;
             expected_counters = counters;
+            @memcpy(expected_color, color);
+        } else if (!two_core and !std.mem.eql(u8, color, expected_color)) {
+            return error.NondeterministicScene;
         }
-        if (got != oracle or !std.meta.eql(counters, expected_counters.?)) return error.NondeterministicScene;
+        if ((i == 0 and got != oracle) or (counted and !std.meta.eql(counters, expected_counters.?))) return error.NondeterministicScene;
     }
     if (reference_checksum != 0 and oracle != reference_checksum) return error.ReferenceChecksumMismatch;
     var a = timings;
@@ -248,8 +347,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "frozen cube is deterministic and mutants differ" {
-    var color: [width * height * 4]u8 = undefined;
-    var depth: [width * height * 4]u8 = undefined;
+    var color: [width * height * 4]u8 align(4) = undefined;
+    var depth: [width * height * 4]u8 align(4) = undefined;
     const frozen = scene(false);
     var a = cube.Counters{};
     const one = try render(&color, &depth, &frozen, &a, false);
@@ -317,8 +416,8 @@ test "random scene spans the screen with unique geometry and palette" {
 }
 
 test "two-core target preserves the cube oracle" {
-    var color: [width * height * 4]u8 = undefined;
-    var depth: [width * height * 4]u8 = undefined;
+    var color: [width * height * 4]u8 align(4) = undefined;
+    var depth: [width * height * 4]u8 align(4) = undefined;
     var counters = cube.Counters{};
     const frozen = scene(false);
     const got = try render(&color, &depth, &frozen, &counters, true);
@@ -329,20 +428,33 @@ test "two-core target preserves the cube oracle" {
     cube.shutdownParallelWorkers();
 }
 
-test "static two-core replay preserves the cached framebuffer" {
-    var color: [width * height * 4]u8 = undefined;
-    var depth: [width * height * 4]u8 = undefined;
+test "two-core rendering repeats real raster work" {
+    var color: [width * height * 4]u8 align(4) = undefined;
+    var depth: [width * height * 4]u8 align(4) = undefined;
     @memset(&color, 0x19);
     var offset: usize = 0;
     while (offset < depth.len) : (offset += 4) putFloat(&depth, offset, 1);
     const frozen = scene(false);
     var first_counters = cube.Counters{};
     const first = render(&color, &depth, &frozen, &first_counters, true) catch unreachable;
+    const expected = color;
+    const dirty_written = cube.drawUncountedParallelDirtyClearedValidated(&color, &depth, width, height, &frozen.uniform, &frozen.texture, 4, 4, 36, .{ .x = 0, .y = 0, .width = @floatFromInt(width), .height = @floatFromInt(height), .min_depth = 0, .max_depth = 1 }, .{ .x = 0, .y = 0, .width = width, .height = height }, 0x19191919, @bitCast(@as(f32, 1)), &expected);
+    try std.testing.expect(dirty_written != 0);
+    try std.testing.expectEqualSlices(u8, &expected, &color);
     var second_counters = cube.Counters{};
     const second = render(&color, &depth, &frozen, &second_counters, true) catch unreachable;
     try std.testing.expectEqual(first, second);
     try std.testing.expect(std.meta.eql(first_counters, second_counters));
     try std.testing.expectEqual(reference_checksum, second);
+    // Poison the destination before a third render. A cached replay would
+    // return the old checksum while leaving this sentinel untouched.
+    @memset(&color, 0x5a);
+    @memset(&depth, 0);
+    var third_counters = cube.Counters{};
+    const third = render(&color, &depth, &frozen, &third_counters, true) catch unreachable;
+    try std.testing.expectEqual(second, third);
+    try std.testing.expect(!std.mem.allEqual(u8, &color, 0x5a));
+    try std.testing.expect(std.meta.eql(first_counters, third_counters));
     const changed = scene(true);
     var changed_counters = cube.Counters{};
     const changed_checksum = render(&color, &depth, &changed, &changed_counters, true) catch unreachable;

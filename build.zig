@@ -11,7 +11,8 @@ pub fn build(b: *std.Build) void {
     // `-Dv3-kernels=false` produces fully kernel-free baseline artifacts for
     // the ISA disassembly evidence gates.
     const v3_kernels_enabled = b.option(bool, "v3-kernels", "Link the separately compiled x86-64-v3 eight-lane kernel objects") orelse true;
-    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse true;
+    const core_only = b.option(bool, "core-only", "Run only dependency-free render foundation compiler/tests") orelse false;
+    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse !core_only;
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{});
     const cross_compiling = target.result.cpu.arch != b.graph.host.result.cpu.arch or
@@ -22,9 +23,16 @@ pub fn build(b: *std.Build) void {
 
     const v3_tier_applicable = target.result.cpu.arch == .x86_64;
     const v3_available = v3_kernels_enabled and v3_tier_applicable;
+    const host_test_xcb = enable_xcb and target.result.cpu.arch == b.graph.host.result.cpu.arch and target.result.os.tag == b.graph.host.result.os.tag;
 
     const build_config = b.addOptions();
     build_config.addOption(bool, "v3_kernels", v3_available);
+    build_config.addOption(bool, "surface_avx2", v3_available);
+    build_config.addOption(bool, "mosaic_primitive_avx2", false);
+    build_config.addOption(bool, "mosaic_pixel_avx2", false);
+    build_config.addOption(bool, "surface_avx512", false);
+    build_config.addOption(bool, "mosaic_primitive_avx512", false);
+    build_config.addOption(bool, "mosaic_pixel_avx512", false);
     const build_config_module = build_config.createModule();
 
     // Kernel-free twin configuration: identical sources and flags except the
@@ -33,8 +41,57 @@ pub fn build(b: *std.Build) void {
     // keeping the strongest evidence inside the normal test contract.
     const clean_config = b.addOptions();
     clean_config.addOption(bool, "v3_kernels", false);
+    clean_config.addOption(bool, "surface_avx2", false);
+    clean_config.addOption(bool, "mosaic_primitive_avx2", false);
+    clean_config.addOption(bool, "mosaic_pixel_avx2", false);
+    clean_config.addOption(bool, "surface_avx512", false);
+    clean_config.addOption(bool, "mosaic_primitive_avx512", false);
+    clean_config.addOption(bool, "mosaic_pixel_avx512", false);
     const clean_config_module = clean_config.createModule();
     const release_fast = .ReleaseFast;
+
+    // This path is intentionally small and dependency-free. CI runs it before
+    // installing kcov/X11/Vulkan packages so render-planning compiler failures
+    // cannot be hidden behind an integration setup failure.
+    if (core_only) {
+        const render_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/mosaic_backend.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_render_test = b.addRunArtifact(render_test);
+        const locality_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_locality.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        locality_test.root_module.link_libc = true;
+        const run_locality_test = b.addRunArtifact(locality_test);
+        const prepared_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/prepared_primitives.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_prepared_test = b.addRunArtifact(prepared_test);
+        const scalar_packet_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_scalar_packet_test = b.addRunArtifact(scalar_packet_test);
+        const scalar_packet_cpu_cube_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet_cpu_cube_test.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        scalar_packet_cpu_cube_test.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
+        scalar_packet_cpu_cube_test.root_module.link_libc = true;
+        const run_scalar_packet_cpu_cube_test = b.addRunArtifact(scalar_packet_cpu_cube_test);
+        // The default core-only build is a compile gate. Keep execution on the
+        // explicit `test` step so CI can enforce compilation before behavior.
+        b.getInstallStep().dependOn(&render_test.step);
+        b.getInstallStep().dependOn(&locality_test.step);
+        b.getInstallStep().dependOn(&prepared_test.step);
+        b.getInstallStep().dependOn(&scalar_packet_test.step);
+        b.getInstallStep().dependOn(&scalar_packet_cpu_cube_test.step);
+        const test_step = b.step("test", "Run dependency-free render foundation tests");
+        test_step.dependOn(&run_render_test.step);
+        test_step.dependOn(&run_locality_test.step);
+        test_step.dependOn(&run_prepared_test.step);
+        test_step.dependOn(&run_scalar_packet_test.step);
+        test_step.dependOn(&run_scalar_packet_cpu_cube_test.step);
+        return;
+    }
 
     const v3_kernels_main: ?*std.Build.Step.Compile =
         if (v3_available) addV3Kernels(b, target, "zpu-x86-64-v3-kernels") else null;
@@ -48,6 +105,8 @@ pub fn build(b: *std.Build) void {
     smolvm_guest_step.dependOn(&smolvm_guest_test.step);
     const smolvm_dry_run = b.addSystemCommand(&.{"test/smolvm_dry_run.sh"});
     smolvm_dry_run.step.dependOn(&require_limited.step);
+    const smolvm_fluid_desktop = b.addSystemCommand(&.{"test/smolvm_fluid_desktop.sh"});
+    smolvm_fluid_desktop.step.dependOn(&require_limited.step);
     const smolvm_untrusted_environment = [_][]const u8{
         "VK_DRIVER_FILES",              "VK_ICD_FILENAMES",                  "VK_ADD_DRIVER_FILES",             "VK_LAYER_PATH",               "VK_ADD_LAYER_PATH",
         "VK_IMPLICIT_LAYER_PATH",       "VK_ADD_IMPLICIT_LAYER_PATH",        "VK_INSTANCE_LAYERS",              "VK_LOADER_LAYERS_ENABLE",     "VK_LOADER_LAYERS_DISABLE",
@@ -63,9 +122,16 @@ pub fn build(b: *std.Build) void {
     for (smolvm_untrusted_environment) |name| {
         smolvm_guest_test.removeEnvironmentVariable(name);
         smolvm_dry_run.removeEnvironmentVariable(name);
+        smolvm_fluid_desktop.removeEnvironmentVariable(name);
     }
     const smolvm_dry_run_step = b.step("smolvm-dry-run", "Print the complete guest lifecycle without changing host or VM state");
     smolvm_dry_run_step.dependOn(&smolvm_dry_run.step);
+    const smolvm_fluid_desktop_step = b.step("smolvm-fluid-desktop", "Dry-run the SmolVM + fluid desktop + simulated pointer test");
+    smolvm_fluid_desktop_step.dependOn(&smolvm_fluid_desktop.step);
+    const zinput_test = b.addSystemCommand(&.{"test/zinput.sh"});
+    zinput_test.step.dependOn(&require_limited.step);
+    const zinput_step = b.step("zinput", "Build and verify zmouse/zkeyboard uinput drivers");
+    zinput_step.dependOn(&zinput_test.step);
     const validate_api_inventory = b.addSystemCommand(&.{ "python3", "tools/api_inventory.py" });
     validate_api_inventory.step.dependOn(&require_limited.step);
     const validate_command_matrix = b.addSystemCommand(&.{ "python3", "tools/vulkan_command_matrix.py" });
@@ -173,6 +239,53 @@ pub fn build(b: *std.Build) void {
     run_benchmark_3d.step.dependOn(&require_limited.step);
     const benchmark_3d_step = b.step("benchmark-3d", "Run the deterministic vkcube-specific CPU 3D benchmark");
     benchmark_3d_step.dependOn(&run_benchmark_3d.step);
+
+    const benchmark_3d_apps = b.addExecutable(.{
+        .name = "zpu-benchmark-3d-apps",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d_apps.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_3d_apps.root_module.link_libc = true;
+    b.installArtifact(benchmark_3d_apps);
+    const run_benchmark_3d_apps = b.addRunArtifact(benchmark_3d_apps);
+    if (b.args) |args| run_benchmark_3d_apps.addArgs(args);
+    run_benchmark_3d_apps.step.dependOn(&require_limited.step);
+    const benchmark_3d_apps_step = b.step("benchmark-3d-apps", "Run usage-shaped desktop, terminal, and game-engine CPU 3D benchmarks");
+    benchmark_3d_apps_step.dependOn(&run_benchmark_3d_apps.step);
+    const benchmark_vulkan_abi = b.addExecutable(.{
+        .name = "zpu-benchmark-vulkan-abi",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_abi.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_vulkan_abi.root_module.link_libc = true;
+    b.installArtifact(benchmark_vulkan_abi);
+    const run_benchmark_vulkan_abi = b.addRunArtifact(benchmark_vulkan_abi);
+    if (b.args) |args| run_benchmark_vulkan_abi.addArgs(args);
+    run_benchmark_vulkan_abi.step.dependOn(&require_limited.step);
+    const benchmark_vulkan_abi_step = b.step("benchmark-vulkan-abi", "Measure Vulkan cpu_cube_v1 per-draw versus batched submission for terminal, app, and complex-demo streams");
+    benchmark_vulkan_abi_step.dependOn(&run_benchmark_vulkan_abi.step);
+    const benchmark_vulkan_transfer = b.addExecutable(.{
+        .name = "zpu-benchmark-vulkan-transfer",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_vulkan_transfer.root_module.link_libc = true;
+    if (enable_xcb) benchmark_vulkan_transfer.root_module.linkSystemLibrary("xcb", .{});
+    b.installArtifact(benchmark_vulkan_transfer);
+    const run_benchmark_vulkan_transfer = b.addRunArtifact(benchmark_vulkan_transfer);
+    if (b.args) |args| run_benchmark_vulkan_transfer.addArgs(args);
+    run_benchmark_vulkan_transfer.step.dependOn(&require_limited.step);
+    const benchmark_vulkan_transfer_step = b.step("benchmark-vulkan-transfer", "Measure pitched Vulkan buffer/image transfers against the validated bulk-copy path");
+    benchmark_vulkan_transfer_step.dependOn(&run_benchmark_vulkan_transfer.step);
+    const benchmark_vulkan_host_transfer = b.addExecutable(.{
+        .name = "zpu-benchmark-vulkan-host-transfer",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_host_transfer.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_vulkan_host_transfer.root_module.link_libc = true;
+    if (enable_xcb) benchmark_vulkan_host_transfer.root_module.linkSystemLibrary("xcb", .{});
+    b.installArtifact(benchmark_vulkan_host_transfer);
+    const run_benchmark_vulkan_host_transfer = b.addRunArtifact(benchmark_vulkan_host_transfer);
+    if (b.args) |args| run_benchmark_vulkan_host_transfer.addArgs(args);
+    run_benchmark_vulkan_host_transfer.step.dependOn(&require_limited.step);
+    const benchmark_vulkan_host_transfer_step = b.step("benchmark-vulkan-host-transfer", "Measure Vulkan host image copies with disjoint bulk copies and overlap-safe fallback");
+    benchmark_vulkan_host_transfer_step.dependOn(&run_benchmark_vulkan_host_transfer.step);
 
     const run_target_800x600 = b.addSystemCommand(&.{ "python3", "test/vkcube_benchmark.py" });
     run_target_800x600.addArg(b.getInstallPath(.prefix, "share/vulkan/icd.d/zpu_icd.x86_64.json"));
@@ -380,6 +493,44 @@ pub fn build(b: *std.Build) void {
     const run_benchmark_3d_tests = b.addRunArtifact(benchmark_3d_tests);
     run_benchmark_3d_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_3d_tests.step);
+    const benchmark_3d_apps_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_3d_apps.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_3d_apps_tests.root_module.link_libc = true;
+    const run_benchmark_3d_apps_tests = b.addRunArtifact(benchmark_3d_apps_tests);
+    run_benchmark_3d_apps_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_3d_apps_tests.step);
+    const benchmark_vulkan_abi_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_abi.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_vulkan_abi_tests.root_module.link_libc = true;
+    const run_benchmark_vulkan_abi_tests = b.addRunArtifact(benchmark_vulkan_abi_tests);
+    run_benchmark_vulkan_abi_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_vulkan_abi_tests.step);
+    const benchmark_vulkan_transfer_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_vulkan_transfer_tests.root_module.link_libc = true;
+    if (host_test_xcb) benchmark_vulkan_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    const run_benchmark_vulkan_transfer_tests = b.addRunArtifact(benchmark_vulkan_transfer_tests);
+    run_benchmark_vulkan_transfer_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_vulkan_transfer_tests.step);
+    const benchmark_vulkan_host_transfer_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_host_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    benchmark_vulkan_host_transfer_tests.root_module.link_libc = true;
+    if (host_test_xcb) benchmark_vulkan_host_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    const run_benchmark_vulkan_host_transfer_tests = b.addRunArtifact(benchmark_vulkan_host_transfer_tests);
+    run_benchmark_vulkan_host_transfer_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_benchmark_vulkan_host_transfer_tests.step);
+    const scalar_packet_cpu_cube_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet_cpu_cube_test.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    scalar_packet_cpu_cube_tests.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
+    scalar_packet_cpu_cube_tests.root_module.link_libc = true;
+    const run_scalar_packet_cpu_cube_tests = b.addRunArtifact(scalar_packet_cpu_cube_tests);
+    run_scalar_packet_cpu_cube_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_scalar_packet_cpu_cube_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
@@ -405,6 +556,8 @@ pub fn build(b: *std.Build) void {
     const limited_cpus_topology_tests = b.addSystemCommand(&.{"test/limited_cpus_topology.sh"});
     limited_cpus_topology_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&limited_cpus_topology_tests.step);
+    test_step.dependOn(&smolvm_fluid_desktop.step);
+    test_step.dependOn(&zinput_test.step);
     test_step.dependOn(&test_api_inventory.step);
 
     const shader_module_client = b.addExecutable(.{

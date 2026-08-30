@@ -1,0 +1,43 @@
+# Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=77.0.1,<83", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zpu"
+version = "0.1.0"
+description = "Python bindings for the ZPU emulated Linux input drivers (zmouse/zkeyboard)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: C",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Hardware",
+]
+keywords = ["zpu", "uinput", "input", "mouse", "keyboard", "vulkan"]
+
+[project.urls]
+Homepage = "https://github.com/ModelCloud/ZPU"
+
+[project.scripts]
+zinput = "zpu.zinput:main"
+
+[tool.setuptools]
+packages = ["zpu"]
+
+[tool.setuptools.package-data]
+zpu = ["libzinput.so"]
