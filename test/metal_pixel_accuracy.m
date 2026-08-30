@@ -14350,6 +14350,67 @@ int main(void) {
             return 76;
         }
 
+        /* Scalar/one-element-array texture pairs are also legal whole-surface
+         * copies. The destination's single slice limits the copy while the
+         * source mip selection remains the same. */
+        MTLTextureDescriptor *scalar_convenience_descriptor =
+            [native_array_convenience_descriptor copy];
+        scalar_convenience_descriptor.textureType = MTLTextureType2D;
+        scalar_convenience_descriptor.arrayLength = 1;
+        id<MTLTexture> native_scalar_convenience_texture =
+            [device newTextureWithDescriptor:scalar_convenience_descriptor];
+        id<MTLTexture> adapter_scalar_convenience_texture =
+            [adapter_device newTextureWithDescriptor:scalar_convenience_descriptor];
+        id<MTLCommandBuffer> native_scalar_convenience_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> native_scalar_convenience_blit =
+            [native_scalar_convenience_command_buffer blitCommandEncoder];
+        [native_scalar_convenience_blit copyFromTexture:native_array_texture
+                                               toTexture:native_scalar_convenience_texture];
+        [native_scalar_convenience_blit endEncoding];
+        [native_scalar_convenience_command_buffer commit];
+        [native_scalar_convenience_command_buffer waitUntilCompleted];
+        id<MTLCommandBuffer> adapter_scalar_convenience_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_scalar_convenience_blit =
+            [adapter_scalar_convenience_command_buffer blitCommandEncoder];
+        [adapter_scalar_convenience_blit copyFromTexture:adapter_array_texture
+                                                toTexture:adapter_scalar_convenience_texture];
+        [adapter_scalar_convenience_blit endEncoding];
+        [adapter_scalar_convenience_command_buffer commit];
+        [adapter_scalar_convenience_command_buffer waitUntilCompleted];
+        uint8_t native_scalar_convenience_level_one[sizeof(array_level_one)];
+        uint8_t adapter_scalar_convenience_level_one[sizeof(array_level_one)];
+        uint8_t native_scalar_convenience_level_two[sizeof(array_level_two)];
+        uint8_t adapter_scalar_convenience_level_two[sizeof(array_level_two)];
+        [native_scalar_convenience_texture getBytes:native_scalar_convenience_level_one
+                                        bytesPerRow:2 * 4
+                                         fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                        mipmapLevel:0];
+        [adapter_scalar_convenience_texture getBytes:adapter_scalar_convenience_level_one
+                                         bytesPerRow:2 * 4
+                                          fromRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                         mipmapLevel:0];
+        [native_scalar_convenience_texture getBytes:native_scalar_convenience_level_two
+                                        bytesPerRow:4
+                                         fromRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                        mipmapLevel:1];
+        [adapter_scalar_convenience_texture getBytes:adapter_scalar_convenience_level_two
+                                         bytesPerRow:4
+                                          fromRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                         mipmapLevel:1];
+        if (native_scalar_convenience_texture == nil || adapter_scalar_convenience_texture == nil ||
+            native_scalar_convenience_blit == nil || adapter_scalar_convenience_blit == nil ||
+            native_scalar_convenience_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_scalar_convenience_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_scalar_convenience_level_one, array_level_one, sizeof(array_level_one)) != 0 ||
+            memcmp(adapter_scalar_convenience_level_one, native_scalar_convenience_level_one,
+                   sizeof(array_level_one)) != 0 ||
+            memcmp(native_scalar_convenience_level_two, array_level_two, sizeof(array_level_two)) != 0 ||
+            memcmp(adapter_scalar_convenience_level_two, native_scalar_convenience_level_two,
+                   sizeof(array_level_two)) != 0) {
+            fprintf(stderr, "metal-pixel: scalar/array convenience copy failed\n");
+            return 77;
+        }
+
         /* Cube storage is six ordinary CPU/ZPU-owned 2D faces. The native
          * texture is used only as the Metal slice, mipmap, copy, and view
          * oracle; no adapter operation below submits a native Metal command. */

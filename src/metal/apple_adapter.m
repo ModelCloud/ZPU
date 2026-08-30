@@ -2852,7 +2852,10 @@ static BOOL zpu_texture_copy_convenience_plan(ZPUTexture *source, ZPUTexture *de
                                               NSUInteger *sliceCount, NSUInteger *levelCount) {
     if (source == nil || destination == nil || sourceLevel == NULL || destinationLevel == NULL ||
         sliceCount == NULL || levelCount == NULL || source->_pixelFormat != destination->_pixelFormat ||
-        source.sampleCount != destination.sampleCount || source->_textureType != destination->_textureType ||
+        source.sampleCount != destination.sampleCount ||
+        !(source->_textureType == destination->_textureType ||
+          zpu_texture_view_types_compatible(source->_textureType, destination->_textureType,
+                                            NSMakeRange(0, 1))) ||
         source->_mipmapTextures.count == 0 || destination->_mipmapTextures.count == 0) return NO;
 
     zpu_metal_texture *sourceBase = [source zpuTextureAtLevel:0 slice:0];
