@@ -437,7 +437,9 @@ triangle path:
   additional direct vertex buffer/inline-byte slots (1 through 30) are
   accepted as ZPU-owned metadata with Metal last-write-wins semantics and do
   not alter slot-zero execution. Unsupported slot indices and foreign
-  resources fail closed.
+  resources fail closed. Direct fragment buffer/inline-byte slots (1 through
+  30) follow the same rule; fragment slot zero remains the only executable
+  uniform-buffer slot in the registered CPU profiles.
 - direct and indexed indirect render draws read their ZPU argument buffers at
   commit time, including `vertexStart`, `instanceCount`, `indexStart`, and
   signed `baseVertex`; indexed `indexStart` is converted from elements to

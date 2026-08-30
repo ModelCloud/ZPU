@@ -17417,6 +17417,51 @@ static BOOL zpu_render_vertex_record_extra_bytes(ZPURenderEncoder *encoder,
     return YES;
 }
 
+static BOOL zpu_render_fragment_extra_index_valid(ZPURenderEncoder *encoder, NSUInteger index) {
+    if (index == 0 || index >= 31) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL zpu_render_fragment_record_extra_buffer(ZPURenderEncoder *encoder,
+                                                     id<MTLBuffer> buffer, NSUInteger offset,
+                                                     NSUInteger index) {
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (!zpu_render_fragment_extra_index_valid(encoder, index) ||
+        (buffer != nil && (!zpu_buffer_belongs_to_device([encoder->_owner device], zpuBuffer) ||
+                           offset > buffer.length))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    NSString *bufferKey = zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"buffer");
+    NSString *offsetKey = zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"bufferOffset");
+    NSString *bytesKey = zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"bytes");
+    encoder->_stageBindings[bufferKey] = buffer == nil ? (id)[NSNull null] : (id)buffer;
+    encoder->_stageBindings[offsetKey] = @(buffer == nil ? 0 : offset);
+    [encoder->_stageBindings removeObjectForKey:bytesKey];
+    if (buffer != nil) [encoder->_owner retainResource:buffer];
+    return YES;
+}
+
+static BOOL zpu_render_fragment_record_extra_bytes(ZPURenderEncoder *encoder,
+                                                    const void *bytes, NSUInteger length,
+                                                    NSUInteger index) {
+    if (!zpu_render_fragment_extra_index_valid(encoder, index) ||
+        (bytes == NULL && length != 0)) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    NSString *bufferKey = zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"buffer");
+    NSString *offsetKey = zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"bufferOffset");
+    NSString *bytesKey = zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"bytes");
+    encoder->_stageBindings[bytesKey] = [NSData dataWithBytes:bytes length:length];
+    [encoder->_stageBindings removeObjectForKey:bufferKey];
+    [encoder->_stageBindings removeObjectForKey:offsetKey];
+    return YES;
+}
+
 @implementation ZPURenderEncoder
 
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder {
@@ -17613,6 +17658,10 @@ static BOOL zpu_render_vertex_record_extra_bytes(ZPURenderEncoder *encoder,
     }
 }
 - (void)setFragmentBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_fragment_record_extra_bytes(self, bytes, length, index);
+        return;
+    }
     if (index > UINT32_MAX || (bytes == NULL && length != 0)) { [_owner markError]; return; }
     if (zpu_metal_render_encoder_set_fragment_bytes(_zpuEncoder, bytes, length, (uint32_t)index) != ZPU_METAL_OK) {
         [_owner markError];
@@ -17621,6 +17670,10 @@ static BOOL zpu_render_vertex_record_extra_bytes(ZPURenderEncoder *encoder,
     if (length != 0) [_owner retainResource:[NSData dataWithBytes:bytes length:length]];
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_fragment_record_extra_buffer(self, buffer, offset, index);
+        return;
+    }
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
     if (buffer != nil && (!zpu_buffer_belongs_to_device([_owner device], zpuBuffer) || offset > zpuBuffer.length)) { [_owner markError]; return; }
     if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_buffer(
@@ -17631,6 +17684,16 @@ static BOOL zpu_render_vertex_record_extra_bytes(ZPURenderEncoder *encoder,
     if (zpuBuffer != nil) [_owner retainResource:zpuBuffer];
 }
 - (void)setFragmentBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (index != 0) {
+        if (!zpu_render_fragment_extra_index_valid(self, index)) return;
+        id buffer = _stageBindings[zpu_render_stage_binding_key(MTLRenderStageFragment, index, @"buffer")];
+        if (buffer == nil || buffer == (id)[NSNull null]) {
+            [_owner markError];
+            return;
+        }
+        (void)zpu_render_fragment_record_extra_buffer(self, (id<MTLBuffer>)buffer, offset, index);
+        return;
+    }
     if (index > UINT32_MAX || zpu_metal_render_encoder_set_fragment_buffer_offset(_zpuEncoder, offset, (uint32_t)index) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setFragmentBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range {

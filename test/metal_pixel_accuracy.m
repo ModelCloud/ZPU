@@ -7947,6 +7947,10 @@ static int test_direct_extra_vertex_bindings_against_native(
         [native_encoder setVertexBufferOffset:16 atIndex:1];
         [native_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
         [native_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
+        [native_encoder setFragmentBuffer:native_extra_buffer offset:16 atIndex:1];
+        [native_encoder setFragmentBufferOffset:16 atIndex:1];
+        [native_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
+        [native_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
         [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [native_encoder endEncoding];
     }
@@ -7957,6 +7961,10 @@ static int test_direct_extra_vertex_bindings_against_native(
         [adapter_encoder setVertexBufferOffset:16 atIndex:1];
         [adapter_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
         [adapter_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
+        [adapter_encoder setFragmentBuffer:adapter_extra_buffer offset:16 atIndex:1];
+        [adapter_encoder setFragmentBufferOffset:16 atIndex:1];
+        [adapter_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
+        [adapter_encoder setFragmentBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
         [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
         [adapter_encoder endEncoding];
     }
