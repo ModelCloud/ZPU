@@ -460,7 +460,8 @@ canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 The Vulkan-facing submission boundary has a focused benchmark as well. It
 models a Vulkan-backed WezTerm terminal stream, a Dear ImGui Vulkan desktop
 application, and a complex Khronos Vulkan sample scene, then compares
-per-command dispatch with conservative contiguous batching:
+per-command dispatch, the old 256-command chunking, and the private Mosaic
+8,192-command batch bridge:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \

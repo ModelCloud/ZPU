@@ -1703,7 +1703,10 @@ const parallel_8k_slice_count = 40;
 // Keep enough retained command/cache storage for realistic terminal frames.
 // Larger chunks amortize the existing Vulkan ABI submission and worker wakeup
 // costs without changing DrawCommand or the public batch entry points.
-const max_batch_commands = 8192;
+/// Maximum command stream consumed by one Mosaic ABI submission. Keep this
+/// public so the Vulkan command bridge and workload benchmarks share one
+/// bounded capacity instead of silently growing independent limits.
+pub const max_batch_commands: usize = 8192;
 // Small static UI batches are already fully prepared by the time the next
 // frame arrives. Avoid waking the raster worker for these short command lists;
 // the worker hand-off costs more than the bounded serial walk on two cores.
@@ -3586,6 +3589,20 @@ pub fn drawUncountedParallelBatch(target: []u8, depth: []u8, width: u32, height:
 /// to replay every command through the single-draw tracking API.
 pub fn drawUncountedParallelBatchTracked(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect) usize {
     return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, null);
+}
+
+/// Private Mosaic execution entry point used by the Vulkan ABI bridge. The
+/// prepared scalar batch executor is intentionally shared with the existing
+/// tracked entry point so the first runtime Mosaic milestone changes command
+/// planning/dispatch granularity without introducing a second raster oracle.
+pub fn drawUncountedParallelBatchMosaic(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect) usize {
+    return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, null);
+}
+
+/// Mosaic variant that preserves the large-surface dirty-tile contract used
+/// by the present path.
+pub fn drawUncountedParallelBatchMosaicTrackedTiles(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect, dirty_output: []u8) usize {
+    return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, dirty_output);
 }
 
 /// Tracked batch submission with the optional dirty-tile bitmap used by the

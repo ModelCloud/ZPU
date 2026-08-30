@@ -4,10 +4,10 @@
 const std = @import("std");
 const cube = @import("vulkan/cpu_cube.zig");
 
-// This benchmark measures the Vulkan command-to-cpu_cube submission boundary.
+// This benchmark measures the Vulkan command-to-Mosaic submission boundary.
 // The upstream projects below are workload references, not runtime
 // dependencies and not claims that this narrow renderer implements them.
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 pub const width: u32 = 800;
 pub const height: u32 = 600;
 pub const target_cpu_cores: u8 = 2;
@@ -17,9 +17,10 @@ const surface_bytes = @as(usize, width) * height * 4;
 const clear_color: u32 = 0x19191919;
 const clear_depth: u32 = @bitCast(@as(f32, 1));
 const max_samples = 8;
-const batch_limit = 8192;
+const legacy_batch_limit: usize = 256;
+const mosaic_batch_limit: usize = cube.max_batch_commands;
 
-const Mode = enum { per_draw, batched };
+const Mode = enum { per_draw, legacy_batched, mosaic_batched };
 const Target = enum { wezterm_terminal, imgui_vulkan_app, khronos_complex_demo };
 
 const TargetSpec = struct {
@@ -95,16 +96,19 @@ const Metric = struct {
     usage_shape: []const u8,
     draw_calls: u32,
     triangles_per_frame: u32,
-    batch_submissions: u32,
+    legacy_batch_submissions: u32,
+    mosaic_batch_submissions: u32,
     per_draw: Timing,
-    batched: Timing,
+    legacy_batched: Timing,
+    mosaic_batched: Timing,
     p50_speedup: f64,
+    mosaic_speedup_over_legacy: f64,
     first_checksum_hex: []const u8,
     final_checksum_hex: []const u8,
 };
 const Report = struct {
     schema_version: u32 = schema_version,
-    renderer_scope: []const u8 = "Vulkan cpu_cube_v1 ABI boundary; upstream projects are usage-shape references",
+    renderer_scope: []const u8 = "Vulkan cpu_cube_v1 ABI boundary with private Mosaic batching; upstream projects are usage-shape references",
     resolution: []const u8 = "800x600",
     cpu_cores: u8 = target_cpu_cores,
     warmup_iterations: u32,
@@ -324,12 +328,16 @@ fn render(workload: *const Workload, mode: Mode, color: []u8, depth: []u8) !Fram
         .per_draw => for (workload.commands) |command| {
             pixels_written += cube.drawUncountedParallel(color, depth, width, height, command.uniform, command.texture, command.texture_width, command.texture_height, command.vertex_count, command.viewport, command.scissor);
         },
-        .batched => {
+        .legacy_batched, .mosaic_batched => {
+            const limit: usize = if (mode == .legacy_batched) legacy_batch_limit else mosaic_batch_limit;
             var start: usize = 0;
             while (start < workload.commands.len) {
-                const end = @min(start + batch_limit, workload.commands.len);
+                const end = @min(start + limit, workload.commands.len);
                 var bounds = cube.Rect{ .x = 0, .y = 0, .width = 0, .height = 0 };
-                pixels_written += cube.drawUncountedParallelBatchTracked(color, depth, width, height, workload.commands[start..end], &bounds);
+                pixels_written += if (mode == .legacy_batched)
+                    cube.drawUncountedParallelBatchTracked(color, depth, width, height, workload.commands[start..end], &bounds)
+                else
+                    cube.drawUncountedParallelBatchMosaic(color, depth, width, height, workload.commands[start..end], &bounds);
                 start = end;
             }
         },
@@ -411,14 +419,17 @@ pub fn main(init: std.process.Init) !void {
     for (targets) |target| {
         if (only != null and only.? != target) continue;
         var per_draw_workload = try buildWorkload(allocator, target);
+        var legacy_batched_workload = try buildWorkload(allocator, target);
         var batched_workload = try buildWorkload(allocator, target);
         const target_spec = spec(target);
         const per_draw = try measure(allocator, init.io, &per_draw_workload, .per_draw, smoke);
-        const batched = try measure(allocator, init.io, &batched_workload, .batched, smoke);
+        const legacy_batched = try measure(allocator, init.io, &legacy_batched_workload, .legacy_batched, smoke);
+        const mosaic_batched = try measure(allocator, init.io, &batched_workload, .mosaic_batched, smoke);
         const per_checksum = try render(&per_draw_workload, .per_draw, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
-        const batch_checksum = try render(&batched_workload, .batched, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
-        if (per_checksum.checksum != batch_checksum.checksum) return error.BatchOracleMismatch;
-        const first_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{batch_checksum.checksum});
+        const legacy_checksum = try render(&legacy_batched_workload, .legacy_batched, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
+        const mosaic_checksum = try render(&batched_workload, .mosaic_batched, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
+        if (per_checksum.checksum != legacy_checksum.checksum or per_checksum.checksum != mosaic_checksum.checksum) return error.BatchOracleMismatch;
+        const first_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{mosaic_checksum.checksum});
         const per_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{per_checksum.checksum});
         metrics[metric_index] = .{
             .workload_id = target_spec.id,
@@ -426,14 +437,18 @@ pub fn main(init: std.process.Init) !void {
             .usage_shape = target_spec.shape,
             .draw_calls = @intCast(target_spec.draw_count),
             .triangles_per_frame = @intCast(target_spec.draw_count * target_spec.vertices_per_draw / 3),
-            .batch_submissions = @intCast((target_spec.draw_count + batch_limit - 1) / batch_limit),
+            .legacy_batch_submissions = @intCast((target_spec.draw_count + legacy_batch_limit - 1) / legacy_batch_limit),
+            .mosaic_batch_submissions = @intCast((target_spec.draw_count + mosaic_batch_limit - 1) / mosaic_batch_limit),
             .per_draw = per_draw,
-            .batched = batched,
-            .p50_speedup = @as(f64, @floatFromInt(per_draw.p50_ns)) / @as(f64, @floatFromInt(batched.p50_ns)),
+            .legacy_batched = legacy_batched,
+            .mosaic_batched = mosaic_batched,
+            .p50_speedup = @as(f64, @floatFromInt(per_draw.p50_ns)) / @as(f64, @floatFromInt(mosaic_batched.p50_ns)),
+            .mosaic_speedup_over_legacy = @as(f64, @floatFromInt(legacy_batched.p50_ns)) / @as(f64, @floatFromInt(mosaic_batched.p50_ns)),
             .first_checksum_hex = first_hex,
             .final_checksum_hex = per_hex,
         };
         per_draw_workload.deinit(allocator);
+        legacy_batched_workload.deinit(allocator);
         batched_workload.deinit(allocator);
         metric_index += 1;
     }
@@ -448,14 +463,16 @@ pub fn main(init: std.process.Init) !void {
         var stdout = std.Io.File.stdout().writer(init.io, &buffer);
         try stdout.interface.writeAll(out.written());
         try stdout.interface.flush();
-    } else for (metrics) |metric| std.debug.print("{s}: per-draw p50={d}us, batched p50={d}us, {d:.2}x, target {d:.1}x\n", .{ metric.workload_id, metric.per_draw.p50_ns / 1000, metric.batched.p50_ns / 1000, metric.p50_speedup, target_speedup });
+    } else for (metrics) |metric| std.debug.print("{s}: per-draw={d}us, legacy-256={d}us, Mosaic-8192={d}us, {d:.2}x vs legacy, target {d:.1}x\n", .{ metric.workload_id, metric.per_draw.p50_ns / 1000, metric.legacy_batched.p50_ns / 1000, metric.mosaic_batched.p50_ns / 1000, metric.mosaic_speedup_over_legacy, target_speedup });
 }
 
 test "Vulkan ABI targets freeze realistic stream shapes" {
     try std.testing.expectEqual(@as(usize, 4_801), spec(.wezterm_terminal).draw_count);
     try std.testing.expectEqual(@as(usize, 192), spec(.imgui_vulkan_app).draw_count);
     try std.testing.expectEqual(@as(usize, 128), spec(.khronos_complex_demo).draw_count);
-    try std.testing.expectEqual(@as(usize, 1), (spec(.wezterm_terminal).draw_count + batch_limit - 1) / batch_limit);
+    try std.testing.expectEqual(@as(usize, 19), (spec(.wezterm_terminal).draw_count + legacy_batch_limit - 1) / legacy_batch_limit);
+    try std.testing.expectEqual(@as(usize, 1), (spec(.wezterm_terminal).draw_count + mosaic_batch_limit - 1) / mosaic_batch_limit);
+    try std.testing.expect(mosaic_batch_limit == cube.max_batch_commands);
     try std.testing.expectEqual(@as(f64, 2.0), target_speedup);
 }
 
@@ -466,22 +483,33 @@ test "Vulkan ABI batch stream matches per-draw oracle" {
     for (targets) |target| {
         var per_draw_workload = try buildWorkload(allocator, target);
         defer per_draw_workload.deinit(allocator);
-        var batched_workload = try buildWorkload(allocator, target);
-        defer batched_workload.deinit(allocator);
+        var legacy_batched_workload = try buildWorkload(allocator, target);
+        defer legacy_batched_workload.deinit(allocator);
+        var mosaic_batched_workload = try buildWorkload(allocator, target);
+        defer mosaic_batched_workload.deinit(allocator);
         const per_color = try allocator.alloc(u8, surface_bytes);
         defer allocator.free(per_color);
         const per_depth = try allocator.alloc(u8, surface_bytes);
         defer allocator.free(per_depth);
-        const batch_color = try allocator.alloc(u8, surface_bytes);
-        defer allocator.free(batch_color);
-        const batch_depth = try allocator.alloc(u8, surface_bytes);
-        defer allocator.free(batch_depth);
+        const legacy_color = try allocator.alloc(u8, surface_bytes);
+        defer allocator.free(legacy_color);
+        const legacy_depth = try allocator.alloc(u8, surface_bytes);
+        defer allocator.free(legacy_depth);
+        const mosaic_color = try allocator.alloc(u8, surface_bytes);
+        defer allocator.free(mosaic_color);
+        const mosaic_depth = try allocator.alloc(u8, surface_bytes);
+        defer allocator.free(mosaic_depth);
         const per = try render(&per_draw_workload, .per_draw, per_color, per_depth);
-        const batch = try render(&batched_workload, .batched, batch_color, batch_depth);
-        try std.testing.expectEqual(per.checksum, batch.checksum);
-        try std.testing.expectEqualSlices(u8, per_color, batch_color);
-        try std.testing.expectEqualSlices(u8, per_depth, batch_depth);
+        const legacy = try render(&legacy_batched_workload, .legacy_batched, legacy_color, legacy_depth);
+        const mosaic = try render(&mosaic_batched_workload, .mosaic_batched, mosaic_color, mosaic_depth);
+        try std.testing.expectEqual(per.checksum, legacy.checksum);
+        try std.testing.expectEqual(per.checksum, mosaic.checksum);
+        try std.testing.expectEqualSlices(u8, per_color, legacy_color);
+        try std.testing.expectEqualSlices(u8, per_depth, legacy_depth);
+        try std.testing.expectEqualSlices(u8, per_color, mosaic_color);
+        try std.testing.expectEqualSlices(u8, per_depth, mosaic_depth);
         try std.testing.expect(per.pixels_written > 0);
-        try std.testing.expectEqual(per.pixels_written, batch.pixels_written);
+        try std.testing.expectEqual(per.pixels_written, legacy.pixels_written);
+        try std.testing.expectEqual(per.pixels_written, mosaic.pixels_written);
     }
 }

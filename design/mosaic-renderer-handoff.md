@@ -100,9 +100,11 @@ Native Mosaic path -----------------------------+
                                strict fallback for ineligible Vulkan work
 ```
 
-The current branch stops at prepared scalar packet execution with differential
+The current branch has a prepared scalar packet executor with differential
 coverage against `cpu_cube`. Compact physical packet streams are planned but
-not yet executable, and no Vulkan draw is routed through Mosaic yet.
+not yet the Vulkan execution representation. A narrow private Vulkan bridge
+now routes eligible opaque `cpu_cube_v1` draw runs through the prepared scalar
+Mosaic executor; general Vulkan draw lowering remains future work.
 
 ## Core design decisions and rationale
 
