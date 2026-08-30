@@ -772,6 +772,8 @@
     "MTLRenderCommandEncoder.sampleCountersInBuffer",
     "MTLBlitCommandEncoder.sampleCountersInBuffer",
     "MTLBlitCommandEncoder.resolveCounters",
+    "MTLBlitCommandEncoder.getTextureAccessCounters",
+    "MTLBlitCommandEncoder.resetTextureAccessCounters",
     "MTLRenderCommandEncoder.setBlendColor",
     "MTLSharedEvent.signaledValue",
     "MTLSharedEvent.notifyListener",
