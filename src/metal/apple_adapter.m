@@ -10008,7 +10008,11 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (MTLDeviceLocation)location { return MTLDeviceLocationBuiltIn; }
 - (NSUInteger)locationNumber { return 0; }
 #endif
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+- (BOOL)isDepth24Stencil8PixelFormatSupported { return YES; }
+#else
 - (BOOL)isDepth24Stencil8PixelFormatSupported { return NO; }
+#endif
 - (MTLReadWriteTextureTier)readWriteTextureSupport { return MTLReadWriteTextureTier1; }
 - (BOOL)areRasterOrderGroupsSupported { return NO; }
 /* The CPU sampler performs nearest and linear filtering directly on the
@@ -13005,23 +13009,47 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
 }
 
 static BOOL zpu_depth_stencil_copy_component(MTLPixelFormat format, MTLBlitOption options,
-                                             NSUInteger *sourceBytesPerPixel, NSUInteger *componentOffset,
-                                             NSUInteger *componentBytes) {
-    if (sourceBytesPerPixel == NULL || componentOffset == NULL || componentBytes == NULL ||
+                                             NSUInteger *sourceBytesPerPixel, NSUInteger *sourceComponentOffset,
+                                             NSUInteger *bufferComponentOffset, NSUInteger *componentBytes,
+                                             NSUInteger *bufferBytesPerPixel) {
+    if (sourceBytesPerPixel == NULL || sourceComponentOffset == NULL || bufferComponentOffset == NULL ||
+        componentBytes == NULL || bufferBytesPerPixel == NULL ||
         (options & ~(MTLBlitOptionDepthFromDepthStencil | MTLBlitOptionStencilFromDepthStencil)) != 0 ||
         (options != MTLBlitOptionDepthFromDepthStencil && options != MTLBlitOptionStencilFromDepthStencil)) return NO;
     if (format == MTLPixelFormatDepth32Float_Stencil8) {
         *sourceBytesPerPixel = 8;
-        *componentOffset = options == MTLBlitOptionDepthFromDepthStencil ? 0 : 4;
+        *sourceComponentOffset = options == MTLBlitOptionDepthFromDepthStencil ? 0 : 4;
+        *bufferComponentOffset = 0;
         *componentBytes = options == MTLBlitOptionDepthFromDepthStencil ? 4 : 1;
+        *bufferBytesPerPixel = *componentBytes;
         return YES;
     }
     if (options == MTLBlitOptionStencilFromDepthStencil && format == MTLPixelFormatX32_Stencil8) {
         *sourceBytesPerPixel = 8;
-        *componentOffset = 4;
+        *sourceComponentOffset = 4;
+        *bufferComponentOffset = 0;
         *componentBytes = 1;
+        *bufferBytesPerPixel = 1;
         return YES;
     }
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+    if (format == MTLPixelFormatDepth24Unorm_Stencil8) {
+        *sourceBytesPerPixel = 4;
+        *sourceComponentOffset = options == MTLBlitOptionDepthFromDepthStencil ? 0 : 3;
+        *bufferComponentOffset = options == MTLBlitOptionDepthFromDepthStencil ? 0 : 3;
+        *componentBytes = options == MTLBlitOptionDepthFromDepthStencil ? 3 : 1;
+        *bufferBytesPerPixel = 4;
+        return YES;
+    }
+    if (options == MTLBlitOptionStencilFromDepthStencil && format == MTLPixelFormatX24_Stencil8) {
+        *sourceBytesPerPixel = 4;
+        *sourceComponentOffset = 3;
+        *bufferComponentOffset = 3;
+        *componentBytes = 1;
+        *bufferBytesPerPixel = 4;
+        return YES;
+    }
+#endif
     return NO;
 }
 
@@ -13036,10 +13064,13 @@ static BOOL zpu_defer_depth_stencil_copy(ZPUCommandBuffer *owner, ZPUTexture *so
         !zpu_buffer_belongs_to_device([owner device], destination) || !zpu_region_fits(MTLRegionMake3D(
             sourceOrigin.x, sourceOrigin.y, sourceOrigin.z, sourceSize.width, sourceSize.height, sourceSize.depth))) return NO;
     NSUInteger sourceBytesPerPixel = 0;
-    NSUInteger componentOffset = 0;
+    NSUInteger sourceComponentOffset = 0;
+    NSUInteger bufferComponentOffset = 0;
     NSUInteger componentBytes = 0;
+    NSUInteger bufferBytesPerPixel = 0;
     if (!zpu_depth_stencil_copy_component(source->_pixelFormat, options, &sourceBytesPerPixel,
-                                          &componentOffset, &componentBytes) || sourceLevel >= source.mipmapLevelCount ||
+                                          &sourceComponentOffset, &bufferComponentOffset, &componentBytes,
+                                          &bufferBytesPerPixel) || sourceLevel >= source.mipmapLevelCount ||
         sourceSize.width == 0 || sourceSize.height == 0 || sourceSize.depth == 0) return NO;
     const BOOL is3D = zpu_texture_type_is_3d(source->_textureType);
     if (is3D) {
@@ -13047,8 +13078,8 @@ static BOOL zpu_defer_depth_stencil_copy(ZPUCommandBuffer *owner, ZPUTexture *so
         if (sourceSlice != 0 || levelDepth == 0 || sourceOrigin.z > levelDepth ||
             sourceSize.depth > levelDepth - sourceOrigin.z) return NO;
     } else if (sourceSize.depth != 1 || sourceSlice >= zpu_texture_transfer_slice_count(source)) return NO;
-    if (sourceSize.width > SIZE_MAX / componentBytes) return NO;
-    const NSUInteger rowBytes = sourceSize.width * componentBytes;
+    if (sourceSize.width > SIZE_MAX / bufferBytesPerPixel || destinationOffset % sourceBytesPerPixel != 0) return NO;
+    const NSUInteger rowBytes = sourceSize.width * bufferBytesPerPixel;
     const NSUInteger rowStride = destinationBytesPerRow == 0 ? rowBytes : destinationBytesPerRow;
     if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) return NO;
     const NSUInteger minimumImageStride = rowStride * sourceSize.height;
@@ -13075,9 +13106,10 @@ static BOOL zpu_defer_depth_stencil_copy(ZPUCommandBuffer *owner, ZPUTexture *so
             for (NSUInteger row = 0; row < sourceSize.height; ++row) {
                 const uint8_t *sourceRow = (const uint8_t *)sourceData.bytes + row * sourceRowBytes;
                 uint8_t *destinationRow = (uint8_t *)componentRow.mutableBytes;
+                memset(destinationRow, 0, rowBytes);
                 for (NSUInteger column = 0; column < sourceSize.width; ++column) {
-                    memcpy(destinationRow + column * componentBytes,
-                           sourceRow + column * sourceBytesPerPixel + componentOffset, componentBytes);
+                    memcpy(destinationRow + column * bufferBytesPerPixel + bufferComponentOffset,
+                           sourceRow + column * sourceBytesPerPixel + sourceComponentOffset, componentBytes);
                 }
                 if (destinationOffset > SIZE_MAX - plane * imageStride ||
                     destinationOffset + plane * imageStride > SIZE_MAX - row * rowStride ||
@@ -13103,10 +13135,13 @@ static BOOL zpu_defer_depth_stencil_upload(ZPUCommandBuffer *owner, ZPUBuffer *s
             destinationOrigin.x, destinationOrigin.y, destinationOrigin.z,
             sourceSize.width, sourceSize.height, sourceSize.depth))) return NO;
     NSUInteger destinationBytesPerPixel = 0;
-    NSUInteger componentOffset = 0;
+    NSUInteger sourceComponentOffset = 0;
+    NSUInteger destinationComponentOffset = 0;
     NSUInteger componentBytes = 0;
+    NSUInteger sourceBytesPerPixel = 0;
     if (!zpu_depth_stencil_copy_component(destination->_pixelFormat, options, &destinationBytesPerPixel,
-                                          &componentOffset, &componentBytes) || destinationLevel >= destination.mipmapLevelCount ||
+                                          &destinationComponentOffset, &sourceComponentOffset, &componentBytes,
+                                          &sourceBytesPerPixel) || destinationLevel >= destination.mipmapLevelCount ||
         sourceSize.width == 0 || sourceSize.height == 0 || sourceSize.depth == 0) return NO;
     const BOOL is3D = zpu_texture_type_is_3d(destination->_textureType);
     zpu_metal_texture *destinationTexture = NULL;
@@ -13124,8 +13159,8 @@ static BOOL zpu_defer_depth_stencil_upload(ZPUCommandBuffer *owner, ZPUBuffer *s
         destinationOrigin.y > zpu_metal_texture_height(destinationTexture) ||
         sourceSize.width > zpu_metal_texture_width(destinationTexture) - destinationOrigin.x ||
         sourceSize.height > zpu_metal_texture_height(destinationTexture) - destinationOrigin.y ||
-        sourceSize.width > SIZE_MAX / componentBytes) return NO;
-    const NSUInteger rowBytes = sourceSize.width * componentBytes;
+        sourceSize.width > SIZE_MAX / sourceBytesPerPixel || sourceOffset % destinationBytesPerPixel != 0) return NO;
+    const NSUInteger rowBytes = sourceSize.width * sourceBytesPerPixel;
     const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
     if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) return NO;
     const NSUInteger minimumImageStride = rowStride * sourceSize.height;
@@ -13162,8 +13197,8 @@ static BOOL zpu_defer_depth_stencil_upload(ZPUCommandBuffer *owner, ZPUBuffer *s
                 const uint8_t *sourceRow = sourceBytes + sourceOffset + plane * imageStride + row * rowStride;
                 uint8_t *destinationRow = (uint8_t *)destinationData.mutableBytes + row * destinationRowBytes;
                 for (NSUInteger column = 0; column < sourceSize.width; ++column) {
-                    memcpy(destinationRow + column * destinationBytesPerPixel + componentOffset,
-                           sourceRow + column * componentBytes, componentBytes);
+                    memcpy(destinationRow + column * destinationBytesPerPixel + destinationComponentOffset,
+                           sourceRow + column * sourceBytesPerPixel + sourceComponentOffset, componentBytes);
                 }
             }
             if (zpu_metal_texture_replace_region(destinationAtLevel,

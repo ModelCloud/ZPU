@@ -9668,6 +9668,165 @@ static int test_mtl4_layered_mesh_against_native(
     return 0;
 }
 
+/* The M4 native device does not expose the deprecated D24 formats, so their
+ * component blits cannot use the native byte oracle. Exercise the public
+ * adapter path against Apple's documented packed 32-bit transfer contract:
+ * D24 depth occupies bytes 0..2, D24/X24 stencil occupies byte 3, and the
+ * unselected bytes in a four-byte buffer texel are ignored. */
+static int test_adapter_packed_depth_stencil_blit_options(id<MTLDevice> adapter_device) {
+    enum { width = 3, height = 2, raw_byte_count = width * height * 4, row_stride = 16,
+           buffer_byte_count = row_stride * height };
+    const struct { MTLPixelFormat format; BOOL depth; } formats[] = {
+        {MTLPixelFormatDepth24Unorm_Stencil8, YES},
+        {MTLPixelFormatX24_Stencil8, NO},
+    };
+    id<MTLCommandQueue> queue = [adapter_device newCommandQueue];
+    if (queue == nil || !adapter_device.isDepth24Stencil8PixelFormatSupported) {
+        fprintf(stderr, "metal-pixel: packed D24 adapter capability missing\n");
+        return 232;
+    }
+    for (NSUInteger format_index = 0; format_index < sizeof(formats) / sizeof(formats[0]); ++format_index) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[format_index].format
+                                                                width:width height:height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        id<MTLTexture> source_texture = [adapter_device newTextureWithDescriptor:descriptor];
+        id<MTLTexture> destination_texture = [adapter_device newTextureWithDescriptor:descriptor];
+        id<MTLBuffer> depth_buffer =
+            [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> stencil_buffer =
+            [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> upload_depth_buffer =
+            [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
+        id<MTLBuffer> upload_stencil_buffer =
+            [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
+        if (source_texture == nil || destination_texture == nil || depth_buffer == nil || stencil_buffer == nil ||
+            upload_depth_buffer == nil || upload_stencil_buffer == nil) {
+            fprintf(stderr, "metal-pixel: packed D24 adapter allocation failed for format %lu\n",
+                    (unsigned long)formats[format_index].format);
+            return 233;
+        }
+        uint8_t raw[raw_byte_count];
+        for (NSUInteger index = 0; index < width * height; ++index) {
+            raw[index * 4 + 0] = (uint8_t)(0x11 + index * 3);
+            raw[index * 4 + 1] = (uint8_t)(0x22 + index * 5);
+            raw[index * 4 + 2] = (uint8_t)(0x33 + index * 7);
+            raw[index * 4 + 3] = (uint8_t)(0xa0 + index);
+        }
+        [source_texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0
+                              withBytes:raw bytesPerRow:width * 4];
+        memset(depth_buffer.contents, 0xa5, buffer_byte_count);
+        memset(stencil_buffer.contents, 0xa5, buffer_byte_count);
+        id<MTLCommandBuffer> copy_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> copy_blit = [copy_command_buffer blitCommandEncoder];
+        if (copy_command_buffer == nil || copy_blit == nil) {
+            fprintf(stderr, "metal-pixel: packed D24 adapter copy encoder failed\n");
+            return 234;
+        }
+        if (formats[format_index].depth) {
+            [copy_blit copyFromTexture:source_texture sourceSlice:0 sourceLevel:0
+                          sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                                toBuffer:depth_buffer destinationOffset:0 destinationBytesPerRow:row_stride
+                    destinationBytesPerImage:0 options:MTLBlitOptionDepthFromDepthStencil];
+        }
+        [copy_blit copyFromTexture:source_texture sourceSlice:0 sourceLevel:0
+                      sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1)
+                            toBuffer:stencil_buffer destinationOffset:0 destinationBytesPerRow:row_stride
+                destinationBytesPerImage:0 options:MTLBlitOptionStencilFromDepthStencil];
+        [copy_blit endEncoding];
+        [copy_command_buffer commit];
+        [copy_command_buffer waitUntilCompleted];
+        if (copy_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: packed D24 adapter copy failed for format %lu\n",
+                    (unsigned long)formats[format_index].format);
+            return 235;
+        }
+        for (NSUInteger row = 0; row < height; ++row) {
+            const uint8_t *depth_row = (const uint8_t *)depth_buffer.contents + row * row_stride;
+            const uint8_t *stencil_row = (const uint8_t *)stencil_buffer.contents + row * row_stride;
+            for (NSUInteger column = 0; column < width; ++column) {
+                const NSUInteger index = row * width + column;
+                if (formats[format_index].depth &&
+                    (memcmp(depth_row + column * 4, raw + index * 4, 3) != 0 || depth_row[column * 4 + 3] != 0)) {
+                    fprintf(stderr, "metal-pixel: packed D24 depth extraction mismatch for format %lu\n",
+                            (unsigned long)formats[format_index].format);
+                    return 236;
+                }
+                if (memcmp(stencil_row + column * 4, "\0\0\0", 3) != 0 ||
+                    stencil_row[column * 4 + 3] != raw[index * 4 + 3]) {
+                    fprintf(stderr, "metal-pixel: packed D24 stencil extraction mismatch for format %lu\n",
+                            (unsigned long)formats[format_index].format);
+                    return 237;
+                }
+            }
+            if ((formats[format_index].depth && depth_row[12] != 0xa5) || stencil_row[12] != 0xa5) {
+                fprintf(stderr, "metal-pixel: packed D24 row padding was modified for format %lu\n",
+                        (unsigned long)formats[format_index].format);
+                return 238;
+            }
+        }
+
+        memset(raw, 0x5a, sizeof(raw));
+        [destination_texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0
+                                  withBytes:raw bytesPerRow:width * 4];
+        memset(upload_depth_buffer.contents, 0xc1, buffer_byte_count);
+        memset(upload_stencil_buffer.contents, 0xc2, buffer_byte_count);
+        for (NSUInteger row = 0; row < height; ++row) {
+            uint8_t *depth_row = (uint8_t *)upload_depth_buffer.contents + row * row_stride;
+            uint8_t *stencil_row = (uint8_t *)upload_stencil_buffer.contents + row * row_stride;
+            for (NSUInteger column = 0; column < width; ++column) {
+                const NSUInteger index = row * width + column;
+                depth_row[column * 4 + 0] = (uint8_t)(0x41 + index);
+                depth_row[column * 4 + 1] = (uint8_t)(0x52 + index);
+                depth_row[column * 4 + 2] = (uint8_t)(0x63 + index);
+                depth_row[column * 4 + 3] = 0xf1;
+                stencil_row[column * 4 + 0] = 0xd1;
+                stencil_row[column * 4 + 1] = 0xd2;
+                stencil_row[column * 4 + 2] = 0xd3;
+                stencil_row[column * 4 + 3] = (uint8_t)(0x71 + index);
+            }
+        }
+        id<MTLCommandBuffer> upload_command_buffer = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> upload_blit = [upload_command_buffer blitCommandEncoder];
+        if (formats[format_index].depth) {
+            [upload_blit copyFromBuffer:upload_depth_buffer sourceOffset:0 sourceBytesPerRow:row_stride
+                       sourceBytesPerImage:0 sourceSize:MTLSizeMake(width, height, 1)
+                              toTexture:destination_texture destinationSlice:0 destinationLevel:0
+                       destinationOrigin:MTLOriginMake(0, 0, 0) options:MTLBlitOptionDepthFromDepthStencil];
+        }
+        [upload_blit copyFromBuffer:upload_stencil_buffer sourceOffset:0 sourceBytesPerRow:row_stride
+                   sourceBytesPerImage:0 sourceSize:MTLSizeMake(width, height, 1)
+                          toTexture:destination_texture destinationSlice:0 destinationLevel:0
+                   destinationOrigin:MTLOriginMake(0, 0, 0) options:MTLBlitOptionStencilFromDepthStencil];
+        [upload_blit endEncoding];
+        [upload_command_buffer commit];
+        [upload_command_buffer waitUntilCompleted];
+        uint8_t result[raw_byte_count];
+        [destination_texture getBytes:result bytesPerRow:width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        for (NSUInteger index = 0; index < width * height; ++index) {
+            const NSUInteger row = index / width;
+            const NSUInteger column = index % width;
+            const uint8_t *upload_depth = (const uint8_t *)upload_depth_buffer.contents + row * row_stride + column * 4;
+            const uint8_t *upload_stencil = (const uint8_t *)upload_stencil_buffer.contents + row * row_stride + column * 4;
+            if ((formats[format_index].depth && memcmp(result + index * 4, upload_depth, 3) != 0) ||
+                (!formats[format_index].depth && memcmp(result + index * 4, "ZZZ", 3) != 0) ||
+                result[index * 4 + 3] != upload_stencil[3]) {
+                fprintf(stderr, "metal-pixel: packed D24 component upload mismatch for format %lu\n",
+                        (unsigned long)formats[format_index].format);
+                return 239;
+            }
+        }
+        if (upload_command_buffer.status != MTLCommandBufferStatusCompleted) {
+            fprintf(stderr, "metal-pixel: packed D24 adapter upload failed for format %lu\n",
+                    (unsigned long)formats[format_index].format);
+            return 240;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -10949,6 +11108,10 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_sample_fragment");
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
+
+        const int adapter_packed_depth_stencil_blit_result =
+            test_adapter_packed_depth_stencil_blit_options(adapter_device);
+        if (adapter_packed_depth_stencil_blit_result != 0) return adapter_packed_depth_stencil_blit_result;
 
         const int default_sample_position_result = test_default_sample_positions_against_native(device, adapter_device);
         if (default_sample_position_result != 0) return default_sample_position_result;
@@ -32629,7 +32792,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/RGBA32Uint/RGBA32Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/Depth16Unorm raw/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/RGBA32Uint/RGBA32Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/Depth16Unorm raw/D24/X24 CPU component blits/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

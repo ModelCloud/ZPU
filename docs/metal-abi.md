@@ -43,7 +43,12 @@ triangle path:
   Depth32Float_Stencil8 are accepted by the CPU depth/stencil attachment path
   with explicit pack/unpack semantics, while X32_Stencil8 and X24_Stencil8
   remain stencil-only. Native combined-format availability and raw readback
-  are device-specific, so CPU tests are the packing oracle; render paths accept
+  are device-specific, so CPU tests are the packing oracle; the legacy and
+  Metal 4 adapter blit options also support combined depth/stencil resources.
+  D24/X24 component transfers use Apple's four-byte buffer texel layout
+  (depth in bytes 0..2, stencil in byte 3) and preserve the unselected
+  component; D24 support is CPU-adapter-only on devices whose native Metal
+  capability query reports it unavailable. Render paths accept
   A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
   R16Unorm/R16Snorm, RG8Unorm/RG8Unorm_sRGB/RG8Snorm,
   RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
