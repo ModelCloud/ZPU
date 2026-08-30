@@ -799,6 +799,115 @@ static zpu_metal_vertex zpu_line_vertex(float x, float y) {
     return (zpu_metal_vertex){{nx, ny, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}};
 }
 
+static int test_cpu_trace_triangles_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    id<MTLCommandQueue> native_queue, id<MTLCommandQueue> adapter_queue)
+    API_AVAILABLE(macos(11.0), ios(14.0)) {
+    enum { width = 9, height = 7, byte_count = width * height * 4 };
+    const float triangle_vertices[] = {
+        -0.80f, -0.65f, 0.0f,
+         0.80f, -0.65f, 0.0f,
+        -0.05f,  0.65f, 0.0f,
+    };
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLFunction> native_function =
+        [native_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
+    id<MTLFunction> adapter_function =
+        [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
+    id<MTLComputePipelineState> native_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+    id<MTLComputePipelineState> adapter_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLBuffer> native_vertex_buffer =
+        [native_device newBufferWithBytes:triangle_vertices length:sizeof(triangle_vertices)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_vertex_buffer =
+        [adapter_device newBufferWithBytes:triangle_vertices length:sizeof(triangle_vertices)
+                                   options:MTLResourceStorageModeShared];
+    MTLAccelerationStructureTriangleGeometryDescriptor *geometry =
+        [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+    geometry.vertexBuffer = adapter_vertex_buffer;
+    geometry.vertexBufferOffset = 0;
+    geometry.vertexStride = sizeof(float) * 3;
+    geometry.triangleCount = 1;
+    MTLPrimitiveAccelerationStructureDescriptor *acceleration_descriptor =
+        [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    acceleration_descriptor.geometryDescriptors = @[geometry];
+    MTLAccelerationStructureSizes sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:acceleration_descriptor];
+    id<MTLAccelerationStructure> acceleration_structure =
+        sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+    id<MTLBuffer> scratch_buffer = [adapter_device
+        newBufferWithLength:sizes.buildScratchBufferSize == 0 ? 1 : sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> build_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> build_encoder =
+        [build_command_buffer accelerationStructureCommandEncoder];
+    if (native_function == nil || adapter_function == nil || native_pipeline == nil ||
+        adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        native_vertex_buffer == nil || adapter_vertex_buffer == nil ||
+        acceleration_structure == nil || scratch_buffer == nil || build_command_buffer == nil ||
+        build_encoder == nil) {
+        fail_with_error("CPU trace acceleration resources failed", adapter_error ?: native_error);
+        return 157;
+    }
+    [build_encoder buildAccelerationStructure:acceleration_structure descriptor:acceleration_descriptor
+                                scratchBuffer:scratch_buffer scratchBufferOffset:0];
+    [build_encoder endEncoding];
+    [build_command_buffer commit];
+    [build_command_buffer waitUntilCompleted];
+
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+    [native_encoder setComputePipelineState:native_pipeline];
+    [native_encoder setBuffer:native_vertex_buffer offset:0 atIndex:0];
+    [native_encoder setTexture:native_texture atIndex:0];
+    [native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+              threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [native_encoder endEncoding];
+    [adapter_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_encoder setAccelerationStructure:acceleration_structure atBufferIndex:0];
+    [adapter_encoder setTexture:adapter_texture atIndex:0];
+    [adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    [native_texture getBytes:native_pixels bytesPerRow:(NSUInteger)width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_pixels bytesPerRow:(NSUInteger)width * 4
+                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    if (build_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: CPU trace/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("CPU trace command failed", adapter_error ?: native_error);
+        return 158;
+    }
+    return 0;
+}
+
 static int test_line_diamond_exit_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -14504,6 +14613,11 @@ int main(void) {
         id<MTLLibrary> adapter_default_library = [adapter_device newDefaultLibrary];
         id<MTLFunction> adapter_default_compute_function =
             [adapter_default_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"];
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            const int trace_oracle_result = test_cpu_trace_triangles_against_native(
+                device, adapter_device, library, adapter_library, queue, adapter_queue);
+            if (trace_oracle_result != 0) return trace_oracle_result;
+        }
         id<MTLArgumentEncoder> adapter_non_argument_buffer_encoder =
             [adapter_compute_function newArgumentEncoderWithBufferIndex:0];
         id<MTLTexture> adapter_compute_texture =
