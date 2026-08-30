@@ -1583,12 +1583,17 @@ const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeli
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, clear_attachments_deferred: struct { color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: [256]DescriptorSetObj = undefined, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: [256]Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
 const max_objects = 64;
 const max_child_objects = 64;
+// A primary command buffer may contain a long ordered draw stream.  Allocate
+// this storage lazily on first begin so command-buffer creation stays cheap,
+// while keeping the Mosaic batch bound and descriptor snapshot capacity in
+// lockstep.
+const max_command_buffer_commands: usize = cpu_cube.max_batch_commands;
 // A submitted command stream can retain one instance of every live buffer
 // and image, and each of those can point at a distinct allocation.  Keep the
 // pin lists fixed-size so the submission hot path remains allocation-free.
@@ -4032,6 +4037,7 @@ fn destroyDevice(device: ?Device, alloc: ?*const Alloc) callconv(.c) void {
         for (&command_buffer_objects, &command_buffer_state) |*cb, *child_state| if (child_state.* == .live and cb.impl.owner == d) {
             retireCommandBufferContentsLocked(cb);
             child_state.* = .tombstone;
+            maybeReleaseCommandBufferStorageLocked(cb);
             cb.loader_data = 0;
         };
         for (&command_pool_objects, &command_pool_state) |*pool, *child_state| if (child_state.* == .live and pool.owner == d) {
@@ -4216,6 +4222,32 @@ fn allocateBytes(size: usize) error{OutOfMemory}![]align(64) u8 {
     cpu_locality.prepareMemory(bytes);
     return bytes;
 }
+
+fn releaseCommandBufferStorageLocked(command_buffer: *CommandBufferObj) void {
+    if (command_buffer.impl.commands.len != 0) allocator.free(command_buffer.impl.commands);
+    if (command_buffer.impl.descriptor_snapshots.len != 0) allocator.free(command_buffer.impl.descriptor_snapshots);
+    command_buffer.impl.commands = &.{};
+    command_buffer.impl.descriptor_snapshots = &.{};
+}
+
+fn maybeReleaseCommandBufferStorageLocked(command_buffer: *CommandBufferObj) void {
+    const slot = commandBufferSlot(command_buffer);
+    if (command_buffer_active_users[slot].load(.acquire) != 0 or command_buffer_state[slot] != .tombstone) return;
+    releaseCommandBufferStorageLocked(command_buffer);
+}
+
+fn ensureCommandBufferStorage(command_buffer: *CommandBufferObj) bool {
+    if (command_buffer.impl.commands.len != 0) return true;
+    const commands = allocator.alloc(Command, max_command_buffer_commands) catch return false;
+    const descriptor_snapshots = allocator.alloc(DescriptorSetObj, max_command_buffer_commands) catch {
+        allocator.free(commands);
+        return false;
+    };
+    command_buffer.impl.commands = commands;
+    command_buffer.impl.descriptor_snapshots = descriptor_snapshots;
+    return true;
+}
+
 fn validOwner(device: Device, owner: Device) bool {
     return device == owner;
 }
@@ -4457,6 +4489,10 @@ fn retireCommandBufferContentsLocked(command_buffer: *CommandBufferObj) void {
     }
     deinitRecordedCommands(command_buffer);
     command_buffer_retire_pending[slot] = false;
+    // A command buffer can be retired by a destroy/free call while a submit
+    // still owns it.  Once that last owner releases, reclaim the separately
+    // allocated Mosaic recording arena as well as the recorded objects.
+    maybeReleaseCommandBufferStorageLocked(command_buffer);
 }
 fn pinCommandBufferLocked(command_buffer: *CommandBufferObj, owner: Device) bool {
     const slot = commandBufferSlot(command_buffer);
@@ -5767,6 +5803,7 @@ fn destroyCommandPool(device: ?Device, handle: usize, alloc: ?*const Alloc) call
     for (&command_buffer_objects, &command_buffer_state) |*cb, *state| if (state.* == .live and cb.impl.pool == pool) {
         retireCommandBufferContentsLocked(cb);
         state.* = .tombstone;
+        maybeReleaseCommandBufferStorageLocked(cb);
         cb.loader_data = 0;
     };
     stateForObject(CommandPoolObj, pool, &command_pool_objects, &command_pool_state).?.* = .tombstone;
@@ -5798,7 +5835,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
         const impl = &command_buffer_impls[index];
         command_buffer_active_users[index].store(0, .monotonic);
         command_buffer_retire_pending[index] = false;
-        impl.* = .{ .owner = d, .pool = pool, .level = @intCast(ci.level), .state = 0, .invalid = false, .begin_flags = 0, .count = 0, .owned_update_count = 0, .secondary_count = 0, .primary_ref_count = 0, .render_pass_continue = false, .render_contents = 0, .inherited_occlusion = false, .inherited_subpass = 0, .active_subpass = 0, .active_framebuffer = null, .active_render_pass = null, .active_query_pool = null, .active_query_index = 0, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_descriptor_bind_point = 0, .bound_descriptor_stage_flags = 0, .bound_layout = null, .bound_layout_handle = 0, .dynamic = .{}, .vertex_bindings = .{}, .index_buffer = null, .index_buffer_handle = 0, .index_offset = 0, .index_size = 0, .index_type = 0, .index_buffer_set = false, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .viewport_set = false, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .scissor_set = false, .line_width = 1, .line_width_set = false, .line_stipple_set = false, .blend_constants = .{ 0, 0, 0, 0 }, .blend_constants_set = false, .depth_bias = .{ 0, 0, 0 }, .depth_bias_set = false, .depth_bounds = .{ 0, 1 }, .depth_bounds_set = false, .stencil_compare_mask = .{ 0, 0 }, .stencil_compare_mask_set = 0, .stencil_write_mask = .{ 0, 0 }, .stencil_write_mask_set = 0, .stencil_reference = .{ 0, 0 }, .stencil_reference_set = 0, .push_constants = .{}, .commands = undefined, .owned_updates = undefined, .secondaries = undefined };
+        impl.* = .{ .owner = d, .pool = pool, .level = @intCast(ci.level), .state = 0, .invalid = false, .begin_flags = 0, .count = 0, .owned_update_count = 0, .secondary_count = 0, .primary_ref_count = 0, .render_pass_continue = false, .render_contents = 0, .inherited_occlusion = false, .inherited_subpass = 0, .active_subpass = 0, .active_framebuffer = null, .active_render_pass = null, .active_query_pool = null, .active_query_index = 0, .bound_pipeline = null, .bound_pipeline_handle = 0, .bound_descriptors = null, .bound_descriptor_bind_point = 0, .bound_descriptor_stage_flags = 0, .bound_layout = null, .bound_layout_handle = 0, .dynamic = .{}, .vertex_bindings = .{}, .index_buffer = null, .index_buffer_handle = 0, .index_offset = 0, .index_size = 0, .index_type = 0, .index_buffer_set = false, .viewport = .{ .x = 0, .y = 0, .width = 0, .height = 0, .min_depth = 0, .max_depth = 1 }, .viewport_set = false, .scissor = .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .scissor_set = false, .line_width = 1, .line_width_set = false, .line_stipple_set = false, .blend_constants = .{ 0, 0, 0, 0 }, .blend_constants_set = false, .depth_bias = .{ 0, 0, 0 }, .depth_bias_set = false, .depth_bounds = .{ 0, 1 }, .depth_bounds_set = false, .stencil_compare_mask = .{ 0, 0 }, .stencil_compare_mask_set = 0, .stencil_write_mask = .{ 0, 0 }, .stencil_write_mask_set = 0, .stencil_reference = .{ 0, 0 }, .stencil_reference_set = 0, .descriptor_snapshots = &.{}, .push_constants = .{}, .commands = &.{}, .owned_updates = undefined, .secondaries = undefined };
         cb.* = .{ .loader_data = MAGIC, .impl = impl };
         command_buffer_state[index] = .live;
         if (d.set_loader_data) |set| {
@@ -5843,6 +5880,7 @@ fn freeCommandBuffers(device: ?Device, pool_handle: usize, count: u32, buffers: 
         if (cb.impl.level == 1) invalidatePrimariesReferencing(cb);
         retireCommandBufferContentsLocked(cb);
         stateForObject(CommandBufferObj, cb, &command_buffer_objects, &command_buffer_state).?.* = .tombstone;
+        maybeReleaseCommandBufferStorageLocked(cb);
         cb.loader_data = 0;
     }
 }
@@ -6023,6 +6061,11 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
         }
     }
     if (c.impl.level == 1) invalidatePrimariesReferencing(c);
+    // Keep command recording allocation-free after begin while allowing a
+    // primary to retain the complete Mosaic-sized draw stream. The storage is
+    // lazy so applications that only create pools/buffers do not reserve a
+    // multi-megabyte command arena.
+    if (!ensureCommandBufferStorage(c)) return .error_out_of_host_memory;
     deinitRecordedCommands(c);
     c.impl.state = 1;
     c.impl.invalid = false;
@@ -9441,15 +9484,72 @@ fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
     };
 }
 
+/// A command stream is one primary command buffer's already validated command
+/// array. Keeping the stream boundary explicit lets Mosaic coalesce adjacent
+/// primary buffers without flattening or rewriting Vulkan commands.
+const MosaicCommandStream = struct { commands: []const Command };
+
+const MosaicCommandCursor = struct {
+    streams: []const MosaicCommandStream,
+    stream_index: usize = 0,
+    command_index: usize = 0,
+
+    fn normalize(self: *MosaicCommandCursor) void {
+        while (self.stream_index < self.streams.len) {
+            if (self.command_index < self.streams[self.stream_index].commands.len) return;
+            self.stream_index += 1;
+            self.command_index = 0;
+        }
+    }
+
+    fn current(self: *MosaicCommandCursor) ?*const Command {
+        self.normalize();
+        if (self.stream_index == self.streams.len) return null;
+        return &self.streams[self.stream_index].commands[self.command_index];
+    }
+
+    fn advance(self: *MosaicCommandCursor) void {
+        self.command_index += 1;
+        self.normalize();
+    }
+};
+
+fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawCommand, query_context: *QueryExecutionContext) usize {
+    const first_color = first.color_image orelse if (first.framebuffer) |fb| fb.color_image else null;
+    const first_depth = first.depth_image orelse if (first.framebuffer) |fb| fb.depth_image else null;
+    const color_image = first_color orelse return 0;
+    const depth_image = first_depth orelse return 0;
+    const color_bytes = imageLayerBytes(color_image, first.color_base_layer);
+    const depth_bytes = imageLayerBytes(depth_image, first.depth_base_layer);
+    const operation_start = frame_pacing.monotonicNs();
+    var bounds = emptyRect();
+    const dirty_tiles = if (first.layer_count == 1 and @as(u64, color_image.width) * color_image.height >= 3840 * 2160) ensureDirtyTiles(color_image) else null;
+    const pixels_written = if (dirty_tiles) |tiles|
+        cpu_cube.drawUncountedParallelBatchMosaicTrackedTiles(color_bytes, depth_bytes, color_image.width, color_image.height, batch, &bounds, tiles)
+    else
+        cpu_cube.drawUncountedParallelBatchMosaic(color_bytes, depth_bytes, color_image.width, color_image.height, batch, &bounds);
+    if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
+    color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
+    depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
+    color_image.complex_3d_content = true;
+    color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+    return batch.len;
+}
+
 /// Collapse adjacent eligible Vulkan draws into one private Mosaic
 /// submission. This is deliberately narrower than Vulkan's general command
 /// semantics: it only accepts the exact opaque, non-indexed, single-layer
 /// state that the prepared scalar Mosaic executor can represent. A state
 /// transition, unsupported execution ABI, blend, cull, indexed draw,
 /// instance, or layer falls back to executeValidatedCommand unchanged.
-fn executeMosaicCommandBatch(commands: []const Command, query_context: *QueryExecutionContext) ?usize {
-    if (commands.len < 2) return null;
-    const first = switch (commands[0]) {
+///
+/// The cursor may cross primary command-buffer boundaries, but never crosses
+/// a non-draw command or the end of the current queue submit. This preserves
+/// API order while removing redundant worker dispatches from applications
+/// that split a long ordered draw stream across primary buffers.
+fn executeMosaicCommandBatchStreams(cursor: *MosaicCommandCursor, query_context: *QueryExecutionContext) ?usize {
+    const first_raw = cursor.current() orelse return null;
+    const first = switch (first_raw.*) {
         .cube_draw => |op| op,
         else => return null,
     };
@@ -9460,18 +9560,16 @@ fn executeMosaicCommandBatch(commands: []const Command, query_context: *QueryExe
     const depth_image = first_depth orelse return null;
     if (color_image.width != depth_image.width or color_image.height != depth_image.height) return null;
 
-    // Keep the established short-batch path allocation-free.  The heap-backed
-    // 8,192-entry bridge is only needed once a stream is larger than the old
-    // ABI chunk; small ImGui/UI batches should not pay for its staging array.
+    // Keep the established short-batch path allocation-free. The heap-backed
+    // 8,192-entry bridge is only needed when a compatible run crosses the old
+    // inline capacity; small ImGui/UI batches never pay for that allocation.
     var inline_batch: [mosaic_inline_batch_commands]cpu_cube.DrawCommand = undefined;
-    const batch = if (commands.len <= inline_batch.len)
-        inline_batch[0..]
-    else
-        (mosaicBatchStorage() orelse return null);
+    var batch: []cpu_cube.DrawCommand = inline_batch[0..];
     var batch_len: usize = 0;
-    var index: usize = 0;
-    while (index < commands.len and batch_len < batch.len) : (index += 1) {
-        const op = switch (commands[index]) {
+    var candidate = cursor.*;
+    while (batch_len < cpu_cube.max_batch_commands) {
+        const raw = candidate.current() orelse break;
+        const op = switch (raw.*) {
             .cube_draw => |value| value,
             else => break,
         };
@@ -9480,38 +9578,41 @@ fn executeMosaicCommandBatch(commands: []const Command, query_context: *QueryExe
         const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
         if (color != color_image or depth != depth_image or op.color_base_layer != first.color_base_layer or
             op.depth_base_layer != first.depth_base_layer) break;
+        if (batch_len == batch.len) {
+            const storage = mosaicBatchStorage() orelse break;
+            @memcpy(storage[0..batch_len], batch[0..batch_len]);
+            batch = storage;
+        }
         batch[batch_len] = command;
         batch_len += 1;
+        candidate.advance();
     }
     if (batch_len < 2) return null;
-
-    const color_bytes = imageLayerBytes(color_image, first.color_base_layer);
-    const depth_bytes = imageLayerBytes(depth_image, first.depth_base_layer);
-    const operation_start = frame_pacing.monotonicNs();
-    var bounds = emptyRect();
-    const dirty_tiles = if (first.layer_count == 1 and @as(u64, color_image.width) * color_image.height >= 3840 * 2160) ensureDirtyTiles(color_image) else null;
-    const pixels_written = if (dirty_tiles) |tiles|
-        cpu_cube.drawUncountedParallelBatchMosaicTrackedTiles(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds, tiles)
-    else
-        cpu_cube.drawUncountedParallelBatchMosaic(color_bytes, depth_bytes, color_image.width, color_image.height, batch[0..batch_len], &bounds);
-    if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
-    color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
-    depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
-    color_image.complex_3d_content = true;
-    color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+    _ = executeMosaicPreparedBatch(first, batch[0..batch_len], query_context);
+    cursor.* = candidate;
     return batch_len;
 }
 
-fn executeValidatedCommands(commands: []const Command, query_context: *QueryExecutionContext) void {
-    var index: usize = 0;
-    while (index < commands.len) {
-        if (executeMosaicCommandBatch(commands[index..], query_context)) |consumed| {
-            index += consumed;
-        } else {
-            executeValidatedCommand(commands[index], query_context);
-            index += 1;
-        }
+fn executeMosaicCommandBatch(commands: []const Command, query_context: *QueryExecutionContext) ?usize {
+    const stream = MosaicCommandStream{ .commands = commands };
+    var streams = [_]MosaicCommandStream{stream};
+    var cursor = MosaicCommandCursor{ .streams = streams[0..] };
+    return executeMosaicCommandBatchStreams(&cursor, query_context);
+}
+
+fn executeValidatedCommandStreams(streams: []const MosaicCommandStream, query_context: *QueryExecutionContext) void {
+    var cursor = MosaicCommandCursor{ .streams = streams };
+    while (cursor.current()) |raw| {
+        if (executeMosaicCommandBatchStreams(&cursor, query_context) != null) continue;
+        const command = raw.*;
+        cursor.advance();
+        executeValidatedCommand(command, query_context);
     }
+}
+
+fn executeValidatedCommands(commands: []const Command, query_context: *QueryExecutionContext) void {
+    var stream = MosaicCommandStream{ .commands = commands };
+    executeValidatedCommandStreams((&stream)[0..1], query_context);
 }
 
 fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
@@ -15646,15 +15747,20 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 semaphore.signaled.store(false, .release);
             }
         };
-        if (submit.command_buffer_count != 0) for (submit.command_buffers.?[0..submit.command_buffer_count]) |cb| {
-            executeValidatedCommands(cb.impl.commands[0..cb.impl.count], &query_context);
-            for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| {
-                if (secondary.impl.begin_flags & 1 != 0) secondary.impl.state = 3;
+        if (submit.command_buffer_count != 0) {
+            const cbs = submit.command_buffers.?[0..submit.command_buffer_count];
+            var streams: [max_api_items]MosaicCommandStream = undefined;
+            for (cbs, 0..) |cb, index| streams[index] = .{ .commands = cb.impl.commands[0..cb.impl.count] };
+            executeValidatedCommandStreams(streams[0..submit.command_buffer_count], &query_context);
+            for (cbs) |cb| {
+                for (cb.impl.secondaries[0..cb.impl.secondary_count]) |secondary| {
+                    if (secondary.impl.begin_flags & 1 != 0) secondary.impl.state = 3;
+                }
+                if (cb.impl.begin_flags & 1 != 0) {
+                    cb.impl.state = 3;
+                }
             }
-            if (cb.impl.begin_flags & 1 != 0) {
-                cb.impl.state = 3;
-            }
-        };
+        }
         if (submit.signal_semaphore_count != 0) for (submit.signal_semaphores.?[0..submit.signal_semaphore_count], 0..) |handle, signal_index| {
             const semaphore: *SemaphoreObj = @ptrFromInt(handle);
             if (semaphore.timeline) semaphore.timeline_value.store(timeline_info.?.signal_semaphore_values.?[signal_index], .release) else semaphore.signaled.store(true, .release);
@@ -23036,7 +23142,7 @@ test "memory transfer objects execute against independently specified bytes" {
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
-    commands[0].impl.count = commands[0].impl.commands.len;
+    commands[0].impl.count = @intCast(commands[0].impl.commands.len);
     cmdFillBuffer(commands[0], buffer_a, 0, 4, 0);
     try std.testing.expect(commands[0].impl.invalid);
 
@@ -24710,7 +24816,7 @@ test "secondary command buffers inherit lifetime and execute in exact primary or
     try std.testing.expect(primary[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(primary[0], &primary_begin));
-    primary[0].impl.count = primary[0].impl.commands.len;
+    primary[0].impl.count = @intCast(primary[0].impl.commands.len);
     cmdExecuteCommands(primary[0], 1, &secondary);
     try std.testing.expect(primary[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(primary[0], 0));
@@ -27318,6 +27424,52 @@ test "explicit behavioral requirement matrix is complete" {
         const mask = @as(u64, 1) << field.value;
         try std.testing.expect(requirement_hits & mask != 0);
     }
+}
+
+test "Mosaic command buffers allocate bounded recording storage lazily" {
+    const ctx = try createTestDeviceContext();
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var command: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocate_info, &command));
+    // Mosaic's public recording bridge is lazy, but once recording starts it
+    // must admit a complete application-sized draw stream rather than the
+    // historical 256-command ceiling.
+    try std.testing.expectEqual(@as(usize, 0), command[0].impl.commands.len);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    try std.testing.expectEqual(max_command_buffer_commands, command[0].impl.commands.len);
+    try std.testing.expectEqual(max_command_buffer_commands, command[0].impl.descriptor_snapshots.len);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(max_command_buffer_commands, command[0].impl.commands.len);
+    freeCommandBuffers(ctx.device, pool, 1, &command);
+    destroyCommandPool(ctx.device, pool, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "Mosaic command cursor skips empty primary streams without reordering" {
+    var first_commands = [_]Command{.{ .next_subpass = {} }};
+    var second_commands = [_]Command{.{ .next_subpass = {} }};
+    const streams = [_]MosaicCommandStream{
+        .{ .commands = &.{} },
+        .{ .commands = first_commands[0..] },
+        .{ .commands = &.{} },
+        .{ .commands = second_commands[0..] },
+    };
+    var cursor = MosaicCommandCursor{ .streams = streams[0..] };
+    try std.testing.expect(cursor.current() != null);
+    try std.testing.expectEqual(@as(usize, 1), cursor.stream_index);
+    try std.testing.expectEqual(@as(usize, 0), cursor.command_index);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .next_subpass), std.meta.activeTag(cursor.current().?.*));
+    cursor.advance();
+    try std.testing.expectEqual(@as(usize, 3), cursor.stream_index);
+    try std.testing.expectEqual(@as(usize, 0), cursor.command_index);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .next_subpass), std.meta.activeTag(cursor.current().?.*));
+    cursor.advance();
+    try std.testing.expect(cursor.current() == null);
 }
 
 test "pinned Vulkan 1.4 core command inventory resolves through the ICD dispatch" {

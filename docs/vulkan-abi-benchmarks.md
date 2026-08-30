@@ -6,7 +6,9 @@
 `benchmark-vulkan-abi` measures the command-stream boundary used by the
 `cpu_cube_v1` Vulkan bridge. It compares one CPU-raster dispatch per recorded
 draw, the pre-Mosaic 256-command chunking, and the private Mosaic 8,192-command
-batch bridge. The target for this pass is a 2× p50 frame-time improvement.
+batch bridge. The current optimization target is command-stream fragmentation:
+long application streams should reach Mosaic as one ordered batch where Vulkan
+semantics allow it.
 
 The profiles are deterministic usage-shape references drawn from open-source
 projects:
@@ -47,14 +49,23 @@ comparison isolates draw submission and raster execution.
 The driver-side Mosaic bridge only accepts adjacent commands with the exact
 opaque `cpu_cube_v1` contract: single-layer, non-indexed, one instance,
 triangle-list geometry, no blend/cull/bias, full color writes, and compatible
-attachments. Any other command remains on the original per-command executor.
+attachments. It can join compatible runs across primary command-buffer streams
+within one queue submit, but never crosses a non-draw command or submit
+boundary. Any other command remains on the original executor.
 
 ## Mosaic runtime result
 
-The merged runtime bridge now stages eligible adjacent draws in thread-local
-storage and sends the complete bounded stream to the prepared scalar Mosaic
-executor. This fixes a mismatch where the benchmark modeled one 8,192-command
-batch while the real driver stopped at 256 commands.
+The merged runtime bridge now gives each begun command buffer a lazy bounded
+8,192-command recording arena and stages eligible adjacent draws in thread-local
+storage. The queue executor joins compatible primary streams before sending the
+complete bounded run to the prepared scalar Mosaic executor. This fixes two
+mismatches where the benchmark modeled one 8,192-command batch while the real
+driver stopped at 256 commands and dispatched each primary independently.
+
+The arena is released with command-buffer contents, including the deferred
+retirement path used when a command buffer is destroyed while a queue submit
+still pins it. Unsupported commands remain hard Mosaic barriers, so stream
+coalescing does not reorder observable Vulkan work.
 
 On the validation host, the smoke probe measured the 4,801-draw WezTerm-shaped
 stream at 31.3 ms p50 with 256-command chunking and 2.86 ms p50 through Mosaic
