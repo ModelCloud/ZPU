@@ -291,8 +291,10 @@ triangle path:
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
   CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,
   clips it with the recorded scissor rectangle, applies fixed profile depth
-  0.5 through ZPU depth/stencil/color-write state, and supports contiguous
-  RGBA8/BGRA8 logical attachments through the opted-in color map. Tile and mesh
+  0.5 through ZPU depth/stencil/color-write state, preserves the first logical
+  color attachment's blend factors, operations, and write mask, and supports
+  contiguous RGBA8/BGRA8 logical attachments through the opted-in color map.
+  Tile and mesh
   visibility results use those same ZPU fragment outcomes: boolean results report
   whether any pixel passed, while counting results accumulate passed pixels;
   the registered

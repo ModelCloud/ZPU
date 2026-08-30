@@ -31,6 +31,8 @@ static const char *const kShaderSource =
     "Vertex output; output.position = input.position; output.color = input.color; return output; }\n"
     "vertex void zpu_test_no_raster_vertex(uint vertex_id [[vertex_id]]) { (void)vertex_id; }\n"
     "fragment float4 zpu_test_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
+    "fragment float4 zpu_test_position_gradient(Vertex input [[stage_in]]) { "
+    "return float4((input.position.x + 0.5) / 8.0, (input.position.y + 0.5) / 8.0, 0.25, 1.0); }\n"
     "fragment uint zpu_cpu_r8_uint_fragment(Vertex input [[stage_in]]) { return uint(input.color.r * 255.0); }\n"
     "fragment int zpu_cpu_r8_sint_fragment(Vertex input [[stage_in]]) { return int(input.color.r * 127.0); }\n"
     "fragment uint zpu_cpu_r16_uint_fragment(Vertex input [[stage_in]]) { return uint(input.color.r * 65535.0); }\n"
@@ -5778,6 +5780,140 @@ static int test_metal4_layered_indirect_color_render_against_native(
                     indexed == 0 ? "primitive" : "indexed");
             return 200;
         }
+    }
+    return 0;
+}
+
+API_AVAILABLE(macos(13.0), ios(16.0))
+static int test_mesh_blend_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    id<MTLCommandQueue> adapter_queue) {
+    enum { width = 5, height = 3, byte_count = width * height * 4 };
+    id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_test_vertex"];
+    id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_position_gradient"];
+    id<MTLFunction> adapter_mesh = [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_rgba8"];
+    id<MTLFunction> adapter_fragment = [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_fragment"];
+    if (native_vertex == nil || native_fragment == nil || adapter_mesh == nil || adapter_fragment == nil) return 224;
+
+    MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+    native_descriptor.vertexFunction = native_vertex;
+    native_descriptor.fragmentFunction = native_fragment;
+    native_descriptor.rasterSampleCount = 1;
+    native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_descriptor.colorAttachments[0].blendingEnabled = YES;
+    native_descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceColor;
+    native_descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceColor;
+    native_descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    native_descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    native_descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+    native_descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    NSError *native_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+
+    MTLMeshRenderPipelineDescriptor *adapter_descriptor = [MTLMeshRenderPipelineDescriptor new];
+    adapter_descriptor.meshFunction = adapter_mesh;
+    adapter_descriptor.fragmentFunction = adapter_fragment;
+    adapter_descriptor.rasterSampleCount = 1;
+    adapter_descriptor.maxTotalThreadsPerMeshThreadgroup = 1;
+    adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    adapter_descriptor.colorAttachments[0].blendingEnabled = YES;
+    adapter_descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceColor;
+    adapter_descriptor.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceColor;
+    adapter_descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+    adapter_descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    adapter_descriptor.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorZero;
+    adapter_descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithMeshDescriptor:adapter_descriptor
+                                                          options:0 reflection:nil error:&adapter_error];
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    uint8_t initial[byte_count];
+    for (NSUInteger pixel = 0; pixel < byte_count; pixel += 4) {
+        initial[pixel + 0] = 51;
+        initial[pixel + 1] = 77;
+        initial[pixel + 2] = 102;
+        initial[pixel + 3] = 128;
+    }
+    if (native_texture != nil) {
+        [native_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                           mipmapLevel:0 withBytes:initial bytesPerRow:width * 4];
+    }
+    if (adapter_texture != nil) {
+        [adapter_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0 withBytes:initial bytesPerRow:width * 4];
+    }
+
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+    };
+    id<MTLBuffer> native_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    [native_encoder setRenderPipelineState:native_pipeline];
+    [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+    [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    [native_encoder endEncoding];
+    [native_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+
+    MTLRenderPassDescriptor *adapter_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    adapter_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLRenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    [adapter_encoder setRenderPipelineState:adapter_pipeline];
+    [adapter_encoder drawMeshThreads:MTLSizeMake(width, height, 1)
+           threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+             threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+    [adapter_encoder endEncoding];
+    [adapter_command_buffer commit];
+    [adapter_command_buffer waitUntilCompleted];
+
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    if (native_texture != nil) {
+        [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    }
+    if (adapter_texture != nil) {
+        [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    }
+    if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        native_buffer == nil || native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_command_buffer == nil || adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: mesh blend mismatch at byte %zu native=%u adapter=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("native mesh blend oracle failed", native_error);
+        fail_with_error("adapter mesh blend failed", adapter_error);
+        return 225;
     }
     return 0;
 }
@@ -13777,6 +13913,12 @@ int main(void) {
             fail_with_error("Metal 4 mapped CPU tile attachment pixel exactness failed",
                             adapter_mapped_tile_error ?: native_mapped_tile_error);
             return 112;
+        }
+
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            const int mesh_blend_result = test_mesh_blend_against_native(
+                device, adapter_device, library, adapter_default_library, adapter_queue);
+            if (mesh_blend_result != 0) return mesh_blend_result;
         }
 
         /* The registered mesh profile is also CPU/ZPU-owned. It represents

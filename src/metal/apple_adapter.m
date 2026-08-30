@@ -6960,6 +6960,14 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _rasterizationEnabled = NO;
         _rasterSampleCount = 1;
         _supportsIndirectCommandBuffers = NO;
+        _blendingEnabled = NO;
+        _sourceRGBBlendFactor = MTLBlendFactorOne;
+        _destinationRGBBlendFactor = MTLBlendFactorZero;
+        _rgbBlendOperation = MTLBlendOperationAdd;
+        _sourceAlphaBlendFactor = MTLBlendFactorOne;
+        _destinationAlphaBlendFactor = MTLBlendFactorZero;
+        _alphaBlendOperation = MTLBlendOperationAdd;
+        _writeMask = MTLColorWriteMaskAll;
         _fragmentFunctionName = nil;
         _reflection = (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
             initWithVertexArguments:@[] fragmentArguments:@[] vertexBindings:@[] fragmentBindings:@[]];
@@ -6997,6 +7005,14 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _rasterizationEnabled = YES;
         _rasterSampleCount = 1;
         _supportsIndirectCommandBuffers = NO;
+        _blendingEnabled = NO;
+        _sourceRGBBlendFactor = MTLBlendFactorOne;
+        _destinationRGBBlendFactor = MTLBlendFactorZero;
+        _rgbBlendOperation = MTLBlendOperationAdd;
+        _sourceAlphaBlendFactor = MTLBlendFactorOne;
+        _destinationAlphaBlendFactor = MTLBlendFactorZero;
+        _alphaBlendOperation = MTLBlendOperationAdd;
+        _writeMask = MTLColorWriteMaskAll;
         _fragmentFunctionName = [fragmentFunctionName copy];
         _reflection = (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
             initWithVertexArguments:@[] fragmentArguments:@[] vertexBindings:@[] fragmentBindings:@[]];
@@ -8687,7 +8703,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
     MTLRenderPipelineColorAttachmentDescriptor *attachment = descriptor.colorAttachments[0];
     if (attachment == nil || (attachment.pixelFormat != MTLPixelFormatRGBA8Unorm &&
-                              attachment.pixelFormat != MTLPixelFormatBGRA8Unorm)) {
+                              attachment.pixelFormat != MTLPixelFormatBGRA8Unorm) ||
+        (attachment.blendingEnabled && zpu_integer_render_format_supported(attachment.pixelFormat))) {
         zpu_set_error(error, @"ZPU CPU Metal mesh gradients require an RGBA8 or BGRA8 color attachment");
         return nil;
     }
@@ -8706,6 +8723,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         if (additional.pixelFormat != MTLPixelFormatRGBA8Unorm &&
             additional.pixelFormat != MTLPixelFormatBGRA8Unorm) {
             zpu_set_error(error, @"ZPU CPU Metal supports only RGBA8 or BGRA8 CPU mesh attachments");
+            return nil;
+        }
+        if (additional.blendingEnabled && zpu_integer_render_format_supported(additional.pixelFormat)) {
+            zpu_set_error(error, @"ZPU CPU Metal mesh gradients do not support blending on integer attachments");
             return nil;
         }
         color_attachment_count = index + 1;
@@ -8736,6 +8757,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
     pipeline->_colorAttachmentCount = color_attachment_count;
+    pipeline->_blendingEnabled = attachment.blendingEnabled;
+    pipeline->_sourceRGBBlendFactor = attachment.sourceRGBBlendFactor;
+    pipeline->_destinationRGBBlendFactor = attachment.destinationRGBBlendFactor;
+    pipeline->_rgbBlendOperation = attachment.rgbBlendOperation;
+    pipeline->_sourceAlphaBlendFactor = attachment.sourceAlphaBlendFactor;
+    pipeline->_destinationAlphaBlendFactor = attachment.destinationAlphaBlendFactor;
+    pipeline->_alphaBlendOperation = attachment.alphaBlendOperation;
+    pipeline->_writeMask = attachment.writeMask;
     /* Legacy mesh descriptors do not expose a pipeline mapping-state
      * property; the macOS 26/iOS 26 render-pass opt-in controls the map. */
     pipeline->_colorAttachmentMappingInherited = YES;
@@ -9939,7 +9968,8 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         ![mesh.name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
         ![fragment.name isEqualToString:zpu_cpu_mesh_gradient_fragment_name] || attachment == nil ||
         (attachment.pixelFormat != MTLPixelFormatRGBA8Unorm && attachment.pixelFormat != MTLPixelFormatBGRA8Unorm) ||
-        attachment.blendingState != MTL4BlendStateDisabled || attachment.writeMask != MTLColorWriteMaskAll ||
+        (attachment.blendingState != MTL4BlendStateDisabled &&
+         attachment.blendingState != MTL4BlendStateEnabled) ||
         !descriptor.isRasterizationEnabled) {
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered RGBA8 mesh gradient profile");
         return nil;
@@ -9961,9 +9991,9 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
             zpu_set_error(error, @"ZPU CPU Metal 4 supports only RGBA8 or BGRA8 CPU mesh attachments");
             return nil;
         }
-        if (additional.blendingState != MTL4BlendStateDisabled ||
-            additional.writeMask != MTLColorWriteMaskAll) {
-            zpu_set_error(error, @"ZPU CPU Metal 4 mesh attachments require disabled blending");
+        if (additional.blendingState != MTL4BlendStateDisabled &&
+            additional.blendingState != MTL4BlendStateEnabled) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 mesh attachments require a resolved blend state");
             return nil;
         }
         color_attachment_count = index + 1;
@@ -10001,6 +10031,14 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
     pipeline->_colorAttachmentCount = color_attachment_count;
+    pipeline->_blendingEnabled = attachment.blendingState == MTL4BlendStateEnabled;
+    pipeline->_sourceRGBBlendFactor = attachment.sourceRGBBlendFactor;
+    pipeline->_destinationRGBBlendFactor = attachment.destinationRGBBlendFactor;
+    pipeline->_rgbBlendOperation = attachment.rgbBlendOperation;
+    pipeline->_sourceAlphaBlendFactor = attachment.sourceAlphaBlendFactor;
+    pipeline->_destinationAlphaBlendFactor = attachment.destinationAlphaBlendFactor;
+    pipeline->_alphaBlendOperation = attachment.alphaBlendOperation;
+    pipeline->_writeMask = attachment.writeMask;
     pipeline->_colorAttachmentMappingInherited =
         descriptor.colorAttachmentMappingState == MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
     pipeline->_specializationDescriptor = [descriptor copy];
@@ -16586,7 +16624,16 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
                 _zpuEncoder, colorFormats, state->_colorAttachmentCount,
                 (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_raster_sample_count(_zpuEncoder, 1) != ZPU_METAL_OK ||
-            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, false) != ZPU_METAL_OK) {
+            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, false) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_blend_state(
+                _zpuEncoder, state->_blendingEnabled,
+                (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,
+                (zpu_metal_blend_factor)state->_destinationRGBBlendFactor,
+                (zpu_metal_blend_operation)state->_rgbBlendOperation,
+                (zpu_metal_blend_factor)state->_sourceAlphaBlendFactor,
+                (zpu_metal_blend_factor)state->_destinationAlphaBlendFactor,
+                (zpu_metal_blend_operation)state->_alphaBlendOperation,
+                (zpu_metal_color_write_mask)state->_writeMask) != ZPU_METAL_OK) {
             [_owner markError];
         }
         return;
