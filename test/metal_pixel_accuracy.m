@@ -128,6 +128,55 @@ static void fail_with_error(const char *message, NSError *error) {
     }
 }
 
+static void collect_protocol_selectors(Protocol *protocol, NSMutableSet<NSString *> *selectors,
+                                       NSMutableSet<NSValue *> *visited) {
+    if (protocol == NULL || selectors == nil || visited == nil) return;
+    NSValue *protocol_key = [NSValue valueWithPointer:(__bridge const void *)protocol];
+    if ([visited containsObject:protocol_key]) return;
+    [visited addObject:protocol_key];
+    for (int required_value = 0; required_value < 2; ++required_value) {
+        for (int instance_value = 0; instance_value < 2; ++instance_value) {
+            const BOOL required = required_value != 0;
+            const BOOL instance = instance_value != 0;
+            unsigned count = 0;
+            struct objc_method_description *descriptions =
+                protocol_copyMethodDescriptionList(protocol, required, instance, &count);
+            for (unsigned index = 0; index < count; ++index) {
+                if (descriptions[index].name != NULL) {
+                    [selectors addObject:NSStringFromSelector(descriptions[index].name)];
+                }
+            }
+            free(descriptions);
+        }
+    }
+    unsigned protocol_count = 0;
+    Protocol *__unsafe_unretained *children = protocol_copyProtocolList(protocol, &protocol_count);
+    for (unsigned index = 0; index < protocol_count; ++index) {
+        collect_protocol_selectors(children[index], selectors, visited);
+    }
+    free(children);
+}
+
+static int test_adapter_protocol_selector_coverage(id<MTLDevice> adapter_device) {
+    NSMutableSet<NSString *> *selectors = [NSMutableSet set];
+    NSMutableSet<NSValue *> *visited = [NSMutableSet set];
+    collect_protocol_selectors(@protocol(MTLDevice), selectors, visited);
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (NSString *selector_name in [selectors allObjects]) {
+        if (![adapter_device respondsToSelector:NSSelectorFromString(selector_name)]) {
+            [missing addObject:selector_name];
+        }
+    }
+    if (missing.count != 0) {
+        [missing sortUsingSelector:@selector(compare:)];
+        fprintf(stderr, "metal-pixel: CPU adapter missing %lu Metal protocol selectors:\n",
+                (unsigned long)missing.count);
+        for (NSString *selector_name in missing) fprintf(stderr, "  %s\n", selector_name.UTF8String);
+        return 164;
+    }
+    return 0;
+}
+
 /* The CPU adapter keeps Metal 4 tile/object/mesh bindings as deterministic
  * stage metadata. Inspect that private representation here so an argument
  * table replacement test can distinguish an explicit null from a stale
@@ -8734,6 +8783,8 @@ int main(void) {
             fprintf(stderr, "metal-pixel: CPU adapter device creation failed\n");
             return 18;
         }
+        const int adapter_protocol_selector_result = test_adapter_protocol_selector_coverage(adapter_device);
+        if (adapter_protocol_selector_result != 0) return adapter_protocol_selector_result;
         if (@available(macOS 14.0, iOS 17.0, *)) {
             MTLArchitecture *adapter_architecture = adapter_device.architecture;
             MTLArchitecture *adapter_architecture_copy = [adapter_architecture copy];

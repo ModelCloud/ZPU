@@ -681,6 +681,9 @@ inventory and macOS/iOS behavior tests pass.
 
 The SDK inventory on the current Xcode 26.6 host contains 96 headers, 253
 Metal-named types, 446 Objective-C selectors, and 11 C functions. Those counts
-are useful review gates; they are not implementation coverage. ZPU cannot
+are useful review gates; they are not implementation coverage. The Apple pixel
+suite additionally enumerates the current `MTLDevice` protocol hierarchy and
+requires the CPU adapter to expose every selector before running semantic
+tests. ZPU cannot
 replace Apple's system `MTLCreateSystemDefaultDevice` from an ordinary app, so
 the supported integration is explicit selection of this portable ABI.
