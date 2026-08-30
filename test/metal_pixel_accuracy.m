@@ -11842,6 +11842,74 @@ int main(void) {
                 return 157;
             }
 
+            id<MTLBuffer> adapter_ray_transform =
+                [adapter_device newBufferWithBytes:&instance_matrix length:sizeof(instance_matrix)
+                                            options:MTLResourceStorageModeShared];
+            MTLPrimitiveAccelerationStructureDescriptor *transform_descriptor =
+                [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+            MTLAccelerationStructureTriangleGeometryDescriptor *transform_geometry =
+                [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+            transform_geometry.vertexBuffer = adapter_ray_vertices;
+            transform_geometry.vertexBufferOffset = 0;
+            transform_geometry.vertexStride = 4 * sizeof(float);
+            transform_geometry.indexBuffer = adapter_ray_indices;
+            transform_geometry.indexBufferOffset = 0;
+            transform_geometry.indexType = MTLIndexTypeUInt16;
+            transform_geometry.triangleCount = 1;
+            if (@available(macOS 13.0, iOS 16.0, *)) {
+                transform_geometry.vertexFormat = MTLAttributeFormatFloat3;
+            }
+            if (@available(macOS 13.0, iOS 16.0, *)) {
+                transform_geometry.transformationMatrixBuffer = adapter_ray_transform;
+                transform_geometry.transformationMatrixBufferOffset = 0;
+            }
+            transform_descriptor.geometryDescriptors = @[transform_geometry];
+            MTLAccelerationStructureSizes transform_sizes =
+                [adapter_device accelerationStructureSizesWithDescriptor:transform_descriptor];
+            id<MTLAccelerationStructure> adapter_transform_acceleration_structure =
+                [adapter_device newAccelerationStructureWithSize:transform_sizes.accelerationStructureSize];
+            id<MTLBuffer> adapter_transform_scratch =
+                [adapter_device newBufferWithLength:transform_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                           transform_sizes.buildScratchBufferSize
+                                            options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> adapter_transform_build_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_transform_build_encoder =
+                [adapter_transform_build_command_buffer accelerationStructureCommandEncoder];
+            [adapter_transform_build_encoder buildAccelerationStructure:adapter_transform_acceleration_structure
+                                                               descriptor:transform_descriptor
+                                                            scratchBuffer:adapter_transform_scratch
+                                                      scratchBufferOffset:0];
+            [adapter_transform_build_encoder endEncoding];
+            [adapter_transform_build_command_buffer commit];
+            [adapter_transform_build_command_buffer waitUntilCompleted];
+            id<MTLTexture> adapter_transform_texture =
+                [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+            id<MTLCommandBuffer> adapter_transform_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_transform_encoder =
+                [adapter_transform_command_buffer computeCommandEncoder];
+            [adapter_transform_encoder setComputePipelineState:adapter_ray_pipeline];
+            [adapter_transform_encoder setAccelerationStructure:adapter_transform_acceleration_structure
+                                                   atBufferIndex:0];
+            [adapter_transform_encoder setTexture:adapter_transform_texture atIndex:0];
+            [adapter_transform_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+            [adapter_transform_encoder endEncoding];
+            [adapter_transform_command_buffer commit];
+            [adapter_transform_command_buffer waitUntilCompleted];
+            uint8_t adapter_transform_pixels[ray_byte_count];
+            [adapter_transform_texture getBytes:adapter_transform_pixels bytesPerRow:ray_width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+            if (adapter_ray_transform == nil || transform_descriptor == nil || transform_geometry == nil ||
+                adapter_transform_acceleration_structure == nil || adapter_transform_scratch == nil ||
+                adapter_transform_build_command_buffer == nil || adapter_transform_build_encoder == nil ||
+                adapter_transform_build_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_transform_texture == nil || adapter_transform_command_buffer == nil ||
+                adapter_transform_encoder == nil || adapter_transform_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_instance_ray_pixels, adapter_transform_pixels, ray_byte_count) != 0) {
+                fail_with_error("CPU primitive transform pixel oracle failed", adapter_ray_error);
+                return 160;
+            }
+
             const float refit_ray_vertices[] = {
                 instance_ray_vertices[0], instance_ray_vertices[1], instance_ray_vertices[2],
                 instance_ray_vertices[3], instance_ray_vertices[4], instance_ray_vertices[5],
@@ -11928,6 +11996,8 @@ int main(void) {
                 metal4_ray_geometry.indexBuffer = MTL4BufferRangeMake(adapter_ray_indices.gpuAddress, UINT64_MAX);
                 metal4_ray_geometry.indexType = MTLIndexTypeUInt16;
                 metal4_ray_geometry.triangleCount = 1;
+                metal4_ray_geometry.transformationMatrixBuffer =
+                    MTL4BufferRangeMake(adapter_ray_transform.gpuAddress, UINT64_MAX);
                 metal4_ray_descriptor.geometryDescriptors = @[metal4_ray_geometry];
                 MTLAccelerationStructureSizes metal4_ray_sizes =
                     [adapter_device accelerationStructureSizesWithDescriptor:metal4_ray_descriptor];
@@ -11982,7 +12052,7 @@ int main(void) {
                     metal4_ray_feedback_error == nil && adapter_metal4_ray_texture != nil &&
                     adapter_metal4_ray_command_buffer != nil && adapter_metal4_ray_encoder != nil &&
                     adapter_metal4_ray_command_buffer.status == MTLCommandBufferStatusCompleted &&
-                    memcmp(native_ray_pixels, adapter_metal4_ray_pixels, ray_byte_count) == 0;
+                    memcmp(native_instance_ray_pixels, adapter_metal4_ray_pixels, ray_byte_count) == 0;
                 if (!adapter_metal4_ray_trace_exact) {
                     fail_with_error("Metal 4 CPU triangle trace pixel oracle failed", metal4_ray_feedback_error);
                     return 156;

@@ -14616,6 +14616,32 @@ static BOOL zpu_cpu_acceleration_transform_position(const MTLPackedFloat4x3 *mat
     return isfinite(output[0]) && isfinite(output[1]) && isfinite(output[2]);
 }
 
+static BOOL zpu_cpu_acceleration_read_matrix(ZPUBuffer *buffer, NSUInteger offset, float matrix[12]) {
+    if (buffer == nil || !zpu_buffer_belongs_to_device((ZPUDevice *)buffer->_owner, buffer) || buffer.contents == NULL ||
+        offset > buffer.length || buffer.length - offset < 12 * sizeof(float)) return NO;
+    memcpy(matrix, (const uint8_t *)buffer.contents + offset, 12 * sizeof(float));
+    for (NSUInteger index = 0; index < 12; ++index) {
+        if (!isfinite(matrix[index])) return NO;
+    }
+    return YES;
+}
+
+static BOOL zpu_cpu_acceleration_transform_position_layout(const float matrix[12],
+                                                            NSInteger layout,
+                                                            const float input[3], float output[3]) {
+    if (matrix == NULL || input == NULL || output == NULL) return NO;
+    if (layout == 1) {
+        output[0] = matrix[0] * input[0] + matrix[1] * input[1] + matrix[2] * input[2] + matrix[3];
+        output[1] = matrix[4] * input[0] + matrix[5] * input[1] + matrix[6] * input[2] + matrix[7];
+        output[2] = matrix[8] * input[0] + matrix[9] * input[1] + matrix[10] * input[2] + matrix[11];
+    } else {
+        output[0] = matrix[0] * input[0] + matrix[3] * input[1] + matrix[6] * input[2] + matrix[9];
+        output[1] = matrix[1] * input[0] + matrix[4] * input[1] + matrix[7] * input[2] + matrix[10];
+        output[2] = matrix[2] * input[0] + matrix[5] * input[1] + matrix[8] * input[2] + matrix[11];
+    }
+    return isfinite(output[0]) && isfinite(output[1]) && isfinite(output[2]);
+}
+
 static BOOL zpu_cpu_acceleration_write_instance_payload(
     ZPUAccelerationStructure *target, MTLInstanceAccelerationStructureDescriptor *descriptor) {
     NSUInteger descriptorSize = 0;
@@ -14850,6 +14876,9 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
             (MTLAccelerationStructureTriangleGeometryDescriptor *)geometry;
         ZPUBuffer *vertexBuffer = (ZPUBuffer *)triangles.vertexBuffer;
         ZPUBuffer *indexBuffer = (ZPUBuffer *)triangles.indexBuffer;
+        float transformationMatrix[12] = {0};
+        BOOL hasTransformation = NO;
+        NSInteger transformationLayout = 0;
         if (!zpu_buffer_belongs_to_device(target->_owner, vertexBuffer) ||
             (indexBuffer != nil && !zpu_buffer_belongs_to_device(target->_owner, indexBuffer)) ||
             triangles.vertexBufferOffset % sizeof(float) != 0 ||
@@ -14861,7 +14890,17 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
         const NSUInteger vertexStride = triangles.vertexStride == 0 ? 12 : triangles.vertexStride;
         if (vertexStride < 12 || vertexStride % 4 != 0) return NO;
         if (@available(macOS 13.0, iOS 16.0, *)) {
-            if (triangles.transformationMatrixBuffer != nil) return NO;
+            ZPUBuffer *matrixBuffer = (ZPUBuffer *)triangles.transformationMatrixBuffer;
+            if (matrixBuffer != nil) {
+                if (!zpu_buffer_belongs_to_device(target->_owner, matrixBuffer) ||
+                    !zpu_cpu_acceleration_read_matrix(matrixBuffer,
+                                                       triangles.transformationMatrixBufferOffset,
+                                                       transformationMatrix)) return NO;
+                if (@available(macOS 15.0, iOS 18.0, *)) {
+                    transformationLayout = (NSInteger)triangles.transformationMatrixLayout;
+                }
+                hasTransformation = YES;
+            }
         }
         for (NSUInteger triangleIndex = 0; triangleIndex < triangles.triangleCount; ++triangleIndex) {
             zpu_metal_cpu_acceleration_triangle triangle;
@@ -14870,6 +14909,15 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
                                                      indexBuffer, triangles.indexBufferOffset,
                                                      indexBuffer == nil ? 0 : indexBuffer.length - triangles.indexBufferOffset,
                                                      triangles.indexType, triangleIndex)) return NO;
+            if (hasTransformation) {
+                for (NSUInteger vertex = 0; vertex < 3; ++vertex) {
+                    float transformed[3];
+                    if (!zpu_cpu_acceleration_transform_position_layout(
+                            transformationMatrix, transformationLayout,
+                            &triangle.positions[vertex * 3], transformed)) return NO;
+                    memcpy(&triangle.positions[vertex * 3], transformed, sizeof(transformed));
+                }
+            }
             memcpy((uint8_t *)target->_storage.contents + 256 + destinationIndex * sizeof(triangle),
                    &triangle, sizeof(triangle));
             destinationIndex += 1;
@@ -14906,6 +14954,9 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
             (MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry;
         ZPUBuffer *vertexBuffer = nil;
         NSUInteger vertexOffset = 0;
+        float transformationMatrix[12] = {0};
+        BOOL hasTransformation = NO;
+        const NSInteger transformationLayout = (NSInteger)triangles.transformationMatrixLayout;
         if (!zpu_metal4_buffer_range(triangles.vertexBuffer, target->_owner, &vertexBuffer, &vertexOffset) ||
             vertexOffset % sizeof(float) != 0) return NO;
         const NSUInteger vertexRangeLength = triangles.vertexBuffer.length == UINT64_MAX ?
@@ -14924,13 +14975,34 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         if (triangles.vertexFormat != MTLAttributeFormatFloat3 ||
             (indexBuffer != nil && triangles.indexType != MTLIndexTypeUInt16 && triangles.indexType != MTLIndexTypeUInt32)) return NO;
         const NSUInteger vertexStride = triangles.vertexStride == 0 ? 12 : triangles.vertexStride;
-        if (vertexStride < 12 || vertexStride % 4 != 0 || triangles.transformationMatrixBuffer.bufferAddress != 0) return NO;
+        if (vertexStride < 12 || vertexStride % 4 != 0) return NO;
+        if (triangles.transformationMatrixBuffer.bufferAddress != 0) {
+            ZPUBuffer *matrixBuffer = nil;
+            NSUInteger matrixOffset = 0;
+            if (!zpu_metal4_buffer_range(triangles.transformationMatrixBuffer, target->_owner,
+                                         &matrixBuffer, &matrixOffset) ||
+                (triangles.transformationMatrixBuffer.length != UINT64_MAX &&
+                    triangles.transformationMatrixBuffer.length < 12 * sizeof(float)) ||
+                !zpu_cpu_acceleration_read_matrix(matrixBuffer, matrixOffset, transformationMatrix)) return NO;
+            hasTransformation = YES;
+        } else if (triangles.transformationMatrixBuffer.length != 0) {
+            return NO;
+        }
         for (NSUInteger triangleIndex = 0; triangleIndex < triangles.triangleCount; ++triangleIndex) {
             zpu_metal_cpu_acceleration_triangle triangle;
             if (!zpu_cpu_acceleration_write_triangle(&triangle, vertexBuffer, vertexOffset,
                                                      vertexStride, vertexRangeLength,
                                                      indexBuffer, indexOffset, indexRangeLength,
                                                      triangles.indexType, triangleIndex)) return NO;
+            if (hasTransformation) {
+                for (NSUInteger vertex = 0; vertex < 3; ++vertex) {
+                    float transformed[3];
+                    if (!zpu_cpu_acceleration_transform_position_layout(
+                            transformationMatrix, transformationLayout,
+                            &triangle.positions[vertex * 3], transformed)) return NO;
+                    memcpy(&triangle.positions[vertex * 3], transformed, sizeof(transformed));
+                }
+            }
             memcpy((uint8_t *)target->_storage.contents + 256 + destinationIndex * sizeof(triangle),
                    &triangle, sizeof(triangle));
             destinationIndex += 1;

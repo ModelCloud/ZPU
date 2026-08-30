@@ -232,10 +232,13 @@ triangle path:
   geometry, including Metal 4 GPU-address ranges, casts one orthographic
   primary ray per output texel, and writes exact RGBA8 hit/miss values on
   Metal's top-left grid; indexed UInt16/UInt32 geometry and explicit vertex
-  strides are supported; legacy default/UserID and Metal 4 indirect instance
-  descriptors flatten already-built CPU triangle children with finite affine
-  transforms, while primitive transforms, motion instances, curves, custom
-  intersection functions, and arbitrary ray tracing remain fail-closed
+  strides are supported; legacy and Metal 4 primitive transformation matrix
+  buffers support finite column-major and row-major CPU transforms. Supported
+  refits re-read those current matrix and geometry bytes. Legacy
+  default/UserID and Metal 4 indirect instance descriptors flatten already-built
+  CPU triangle children with finite affine transforms, while motion instances,
+  curves, custom intersection functions, and arbitrary ray tracing remain
+  fail-closed
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
