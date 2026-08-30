@@ -2076,9 +2076,11 @@ test "Apple raster coordinates use an 8-bit fractional screen grid" {
 test "Metal precise viewport coordinates survive the raster-grid boundary" {
     const viewport = PreciseViewport{
         .origin_x = -8191.99995,
-        .origin_y = -8191.99995,
+        // Keep the two axes deliberately different: Apple selects the
+        // attachment-global top-left raster origin independently for X/Y.
+        .origin_y = -8192.24995,
         .width = 8199.50005,
-        .height = 8199.50005,
+        .height = 8199.00005,
         .znear = 0,
         .zfar = 1,
     };
@@ -2099,11 +2101,13 @@ test "Metal precise viewport coordinates survive the raster-grid boundary" {
 
     // The double-valued Apple viewport lands on a different 1/256th screen
     // coordinate than the historical float ABI would. This is the exact
-    // X/Y zero-point boundary that the Objective-C private bridge preserves.
+    // X/Y zero-point boundary that the Objective-C private bridge preserves;
+    // the asymmetric values ensure neither axis can accidentally borrow the
+    // other's origin or extent.
     try std.testing.expectEqual(@as(f32, 7.4609375), precise.x);
-    try std.testing.expectEqual(@as(f32, 7.4609375), precise.y);
+    try std.testing.expectEqual(@as(f32, 6.7109375), precise.y);
     try std.testing.expectEqual(@as(f32, 7.45703125), narrowed.x);
-    try std.testing.expectEqual(@as(f32, 7.45703125), narrowed.y);
+    try std.testing.expectEqual(@as(f32, 6.70703125), narrowed.y);
     try std.testing.expect(precise.x != narrowed.x);
     try std.testing.expect(precise.y != narrowed.y);
 }

@@ -28059,8 +28059,11 @@ int main(void) {
             {{0.99999f, -0.9995f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
             {{0.9995f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
         };
+        /* Keep the X and Y origin/extent pairs intentionally different. The
+         * Apple raster grid is attachment-global and top-left on both axes;
+         * using one shared pair here would allow an axis mix-up to pass. */
         const MTLViewport precise_viewport = {
-            -8191.99995, -8191.99995, 8199.50005, 8199.50005, 0.0, 1.0};
+            -8191.99995, -8192.24995, 8199.50005, 8199.00005, 0.0, 1.0};
         id<MTLBuffer> native_precise_viewport_vertex_buffer =
             [device newBufferWithBytes:precise_viewport_vertices
                                   length:sizeof(precise_viewport_vertices)
