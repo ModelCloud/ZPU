@@ -3026,7 +3026,10 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setSamplePositions(self: *RenderEncoder, positions: ?[*]const abi.SamplePosition, count: usize) Error!void {
-        if (!self.open() or count > 4 or (count != 0 and count != 1 and count != 2 and count != 4) or
+        // Apple's custom-position API accepts only the supported multisample
+        // counts. A single sample uses the fixed 0.5/0.5 center and cannot
+        // be configured through this selector on the native M4 path.
+        if (!self.open() or !validMetalSamplePositionCount(count) or
             (count != 0 and positions == null)) return error.InvalidArgument;
         const values = positions orelse undefined;
         var sample_positions: [4]abi.SamplePosition = .{
@@ -3037,8 +3040,7 @@ pub const RenderEncoder = struct {
         };
         if (count != 0) {
             for (values[0..count], 0..) |position, index| {
-                if (!std.math.isFinite(position.x) or !std.math.isFinite(position.y) or
-                    position.x < 0 or position.x > 1 or position.y < 0 or position.y > 1)
+                if (!validMetalSamplePosition(position.x) or !validMetalSamplePosition(position.y))
                     return error.InvalidArgument;
                 // Apple programmable sample positions use the top-left pixel
                 // grid with 1/16-pixel coordinates. Keep the public descriptor
@@ -8035,6 +8037,14 @@ fn quantizeMetalSamplePosition(value: f32) f32 {
     return @round(value * 16.0) / 16.0;
 }
 
+fn validMetalSamplePosition(value: f32) bool {
+    return std.math.isFinite(value) and value >= 0 and value < 1;
+}
+
+fn validMetalSamplePositionCount(count: usize) bool {
+    return count == 0 or count == 2 or count == 4;
+}
+
 fn validPass(pass: abi.RenderPassDescriptor) bool {
     return @intFromEnum(pass.color.load_action) <= @intFromEnum(abi.LoadAction.clear) and
         @intFromEnum(pass.color.store_action) <= @intFromEnum(abi.StoreAction.store) and
@@ -8048,6 +8058,20 @@ test "Apple programmable sample positions use a 1/16 top-left pixel grid" {
     try std.testing.expectEqual(@as(f32, 0.8125), quantizeMetalSamplePosition(0.79));
     try std.testing.expectEqual(@as(f32, 0.1875), quantizeMetalSamplePosition(0.21));
     try std.testing.expectEqual(@as(f32, 0.6875), quantizeMetalSamplePosition(0.69));
+}
+
+test "Apple custom sample positions use supported counts and a half-open pixel cell" {
+    try std.testing.expect(validMetalSamplePositionCount(0));
+    try std.testing.expect(validMetalSamplePositionCount(2));
+    try std.testing.expect(validMetalSamplePositionCount(4));
+    try std.testing.expect(!validMetalSamplePositionCount(1));
+    try std.testing.expect(!validMetalSamplePositionCount(3));
+    try std.testing.expect(!validMetalSamplePositionCount(5));
+    try std.testing.expect(!validMetalSamplePosition(std.math.nan(f32)));
+    try std.testing.expect(validMetalSamplePosition(0));
+    try std.testing.expect(validMetalSamplePosition(0.999));
+    try std.testing.expect(!validMetalSamplePosition(1));
+    try std.testing.expect(!validMetalSamplePosition(-0.001));
 }
 
 fn validPrimitive(primitive: abi.PrimitiveType) bool {

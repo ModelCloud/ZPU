@@ -257,7 +257,7 @@ enum {
 typedef struct zpu_metal_color { float red, green, blue, alpha; } zpu_metal_color;
 /* Sample coordinates are pixel-local and top-left, matching Metal's
  * MTLSamplePosition convention: (0, 0) is the upper-left pixel corner and
- * both coordinates are in [0, 1]. */
+ * both coordinates are in the half-open [0, 1) range. */
 typedef struct zpu_metal_sample_position { float x, y; } zpu_metal_sample_position;
 typedef struct zpu_metal_origin { uint32_t x, y, z; } zpu_metal_origin;
 typedef struct zpu_metal_size { uint32_t width, height, depth; } zpu_metal_size;
