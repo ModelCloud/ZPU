@@ -25616,13 +25616,15 @@ int main(void) {
         adapter_metal4_origin_table_descriptor.maxBufferBindCount = 2;
         adapter_metal4_origin_table_descriptor.maxTextureBindCount = 2;
         adapter_metal4_origin_table_descriptor.maxSamplerStateBindCount = 2;
+        adapter_metal4_origin_table_descriptor.supportAttributeStrides = YES;
         id<MTL4ArgumentTable> adapter_metal4_origin_table =
             [adapter_device newArgumentTableWithDescriptor:adapter_metal4_origin_table_descriptor error:&metal4_error];
         [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16 atIndex:0];
         /* Nonzero render-table slots are retained by the CPU adapter as
          * stage metadata. They must be accepted and later cleared without
          * being rebased onto the executable slot zero. */
-        [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16 atIndex:1];
+        [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16
+                                attributeStride:sizeof(zpu_metal_vertex) atIndex:1];
         [adapter_metal4_origin_table setTexture:adapter_compute_extra_texture.gpuResourceID atIndex:1];
         [adapter_metal4_origin_table setSamplerState:adapter_compute_extra_sampler.gpuResourceID atIndex:1];
         id<MTL4CommandBuffer> adapter_metal4_origin_command_buffer = [adapter_device newCommandBuffer];

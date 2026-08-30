@@ -425,6 +425,7 @@ API_AVAILABLE(macos(15.0), ios(18.0))
      * that the CPU profile executes arbitrary MSL resources. */
     NSMutableDictionary *_vertexBuffers;
     NSMutableDictionary *_vertexBufferOffsets;
+    NSMutableDictionary *_vertexBufferStrides;
     NSMutableDictionary *_fragmentBuffers;
     NSMutableDictionary *_fragmentBufferOffsets;
     BOOL _hasPatches;
@@ -13585,7 +13586,12 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
             }
             if ((stages & MTLRenderStageVertex) != 0) {
                 if (index < 31) {
-                    [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                    if (bufferStrides[index] != 0 && bufferStrides[index] != NSUIntegerMax) {
+                        [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset
+                                      attributeStride:(NSUInteger)bufferStrides[index] atIndex:index];
+                    } else {
+                        [(id)_legacy setVertexBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+                    }
                 }
             }
             if ((stages & MTLRenderStageFragment) != 0) {
@@ -17431,9 +17437,11 @@ static BOOL zpu_render_vertex_record_extra_buffer(ZPURenderEncoder *encoder,
     NSString *bufferKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"buffer");
     NSString *offsetKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferOffset");
     NSString *bytesKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bytes");
+    NSString *strideKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferStride");
     encoder->_stageBindings[bufferKey] = buffer == nil ? (id)[NSNull null] : (id)buffer;
     encoder->_stageBindings[offsetKey] = @(buffer == nil ? 0 : offset);
     [encoder->_stageBindings removeObjectForKey:bytesKey];
+    [encoder->_stageBindings removeObjectForKey:strideKey];
     if (buffer != nil) [encoder->_owner retainResource:buffer];
     return YES;
 }
@@ -17449,9 +17457,11 @@ static BOOL zpu_render_vertex_record_extra_bytes(ZPURenderEncoder *encoder,
     NSString *bufferKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"buffer");
     NSString *offsetKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferOffset");
     NSString *bytesKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bytes");
+    NSString *strideKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferStride");
     encoder->_stageBindings[bytesKey] = [NSData dataWithBytes:bytes length:length];
     [encoder->_stageBindings removeObjectForKey:bufferKey];
     [encoder->_stageBindings removeObjectForKey:offsetKey];
+    [encoder->_stageBindings removeObjectForKey:strideKey];
     return YES;
 }
 
@@ -17683,6 +17693,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
             return;
         }
         [self setVertexBuffer:buffer offset:offset atIndex:index];
+        _stageBindings[zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferStride")] = @(stride);
         return;
     }
     if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
@@ -17717,6 +17728,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
             return;
         }
         [self setVertexBufferOffset:offset atIndex:index];
+        _stageBindings[zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferStride")] = @(stride);
         return;
     }
     if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
@@ -17729,6 +17741,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
             return;
         }
         [self setVertexBytes:bytes length:length atIndex:index];
+        _stageBindings[zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferStride")] = @(stride);
         return;
     }
     if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
@@ -18987,11 +19000,15 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
             for (NSNumber *bindingIndex in renderCommand->_vertexBuffers) {
                 if (bindingIndex.unsignedIntegerValue >= _maxVertexBufferBindCount) return NO;
             }
+            for (NSNumber *bindingIndex in renderCommand->_vertexBufferStrides) {
+                if (bindingIndex.unsignedIntegerValue >= _maxVertexBufferBindCount) return NO;
+            }
             for (NSNumber *bindingIndex in renderCommand->_fragmentBuffers) {
                 if (bindingIndex.unsignedIntegerValue >= _maxFragmentBufferBindCount) return NO;
             }
             copy->_vertexBuffers = [renderCommand->_vertexBuffers mutableCopy];
             copy->_vertexBufferOffsets = [renderCommand->_vertexBufferOffsets mutableCopy];
+            copy->_vertexBufferStrides = [renderCommand->_vertexBufferStrides mutableCopy];
             copy->_fragmentBuffers = [renderCommand->_fragmentBuffers mutableCopy];
             copy->_fragmentBufferOffsets = [renderCommand->_fragmentBufferOffsets mutableCopy];
             copy->_hasPatches = renderCommand->_hasPatches;
@@ -19109,8 +19126,15 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
     for (NSNumber *bindingIndex in command->_vertexBuffers) {
         id buffer = command->_vertexBuffers[bindingIndex];
         const NSUInteger offset = [command->_vertexBufferOffsets[bindingIndex] unsignedIntegerValue];
-        [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
-                           offset:offset atIndex:bindingIndex.unsignedIntegerValue];
+        NSNumber *stride = command->_vertexBufferStrides[bindingIndex];
+        if (stride != nil) {
+            [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
+                               offset:offset attributeStride:stride.unsignedIntegerValue
+                             atIndex:bindingIndex.unsignedIntegerValue];
+        } else {
+            [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
+                               offset:offset atIndex:bindingIndex.unsignedIntegerValue];
+        }
     }
     for (NSNumber *bindingIndex in command->_fragmentBuffers) {
         id buffer = command->_fragmentBuffers[bindingIndex];
@@ -19131,6 +19155,7 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
         _objectThreadgroupMemoryLengths = [NSMutableDictionary dictionary];
         _vertexBuffers = [NSMutableDictionary dictionary];
         _vertexBufferOffsets = [NSMutableDictionary dictionary];
+        _vertexBufferStrides = [NSMutableDictionary dictionary];
         _fragmentBuffers = [NSMutableDictionary dictionary];
         _fragmentBufferOffsets = [NSMutableDictionary dictionary];
     }
@@ -19197,6 +19222,7 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
     [_objectThreadgroupMemoryLengths removeAllObjects];
     [_vertexBuffers removeAllObjects];
     [_vertexBufferOffsets removeAllObjects];
+    [_vertexBufferStrides removeAllObjects];
     [_fragmentBuffers removeAllObjects];
     [_fragmentBufferOffsets removeAllObjects];
     _unsupportedCommand = NO;
@@ -19221,6 +19247,7 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
     if (index != 0) {
         _vertexBuffers[@(index)] = buffer == nil ? [NSNull null] : zpuBuffer;
         _vertexBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
+        [_vertexBufferStrides removeObjectForKey:@(index)];
         return;
     }
     _vertexBuffer = zpuBuffer;
@@ -19250,7 +19277,10 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
     }
     [self setVertexBuffer:buffer offset:offset atIndex:index];
     if (_unsupportedCommand) return;
-    if (index != 0) return;
+    if (index != 0) {
+        _vertexBufferStrides[@(index)] = @(stride);
+        return;
+    }
     _vertexStride = stride;
     _hasVertexStride = YES;
 }

@@ -443,7 +443,8 @@ triangle path:
   resource visibility. The CPU raster ABI fetches vertex data from slot zero;
   additional direct vertex buffer/inline-byte slots (1 through 30) are
   accepted as ZPU-owned metadata with Metal last-write-wins semantics and do
-  not alter slot-zero execution. Unsupported slot indices and foreign
+  not alter slot-zero execution; supported dynamic vertex strides are retained
+  with those extra vertex bindings. Unsupported slot indices and foreign
   resources fail closed. Direct fragment buffer/inline-byte slots (1 through
   30) follow the same rule; fragment slot zero remains the only executable
   uniform-buffer slot in the registered CPU profiles. Direct vertex and
@@ -607,7 +608,7 @@ triangle path:
 - CPU indirect render commands preserve the same one-slot executable constraint
   as the CPU raster ABI for vertex and fragment buffers; descriptor capacity
   beyond slot zero is accepted, retained as CPU-owned last-write-wins state,
-  and replayed through the direct encoder's metadata path without rebasing it
+  including supported dynamic vertex strides, and replayed through the direct encoder's metadata path without rebasing it
   onto slot zero. Copy/reset and non-inherited-buffer replay preserve the
   additional slots, while arbitrary shader resource execution remains outside
   the registered CPU profile.
