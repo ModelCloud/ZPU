@@ -560,6 +560,9 @@ int zpu_metal_render_encoder_set_sample_positions(zpu_metal_render_encoder *enco
  * resolve_texture may be NULL when the multisample surface is intentionally
  * not resolved. */
 int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count, zpu_metal_texture *resolve_texture);
+/* Installs per-sample CPU-owned color planes for an additional 2x/4x MRT
+ * attachment and its optional matching single-sample resolve target. */
+int zpu_metal_render_encoder_set_multisample_color_attachment_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count, zpu_metal_texture *resolve_texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 /* Installs per-sample CPU-owned depth planes for a 2x/4x render pass. */
 int zpu_metal_render_encoder_set_multisample_depth_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count);
 /* Installs per-sample CPU-owned stencil planes and their pass actions for a 2x/4x render pass. */

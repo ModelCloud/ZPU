@@ -97,7 +97,9 @@ triangle path:
   multisample depth/stencil attachments by maintaining independent ZPU depth
   and stencil planes for every sample. Parallel render encoders support ordered
   2x/4x CPU child passes with the same top-left sample positions and resolve
-  semantics; MRT, sparse placement, and direct CPU transfers remain rejected.
+  semantics. Legacy render encoders also support 2x/4x MRT with independent
+  CPU sample planes and per-attachment resolves. Metal 4 MRT, sparse
+  placement, and direct CPU transfers remain rejected.
   2D multisample texture
   views are CPU-owned aliases of every sample plane, including same-size
   compatible color-format reinterpretations.
