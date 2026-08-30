@@ -1616,8 +1616,7 @@ fn drawLine(job: *Job, a: ProjectedVertex, b: ProjectedVertex, y0: usize, y1: us
                 delta_length_squared, 0, 1)
         else
             t;
-        writePixel(job, x, y, a.z + (b.z - a.z) * center_t, depth_adjust,
-            interpolateLineColor(a, b, center_t), lineSampleSelection(job, a, b), stats, true);
+        writePixel(job, x, y, a.z + (b.z - a.z) * center_t, depth_adjust, interpolateLineColor(a, b, center_t), lineSampleSelection(job, a, b), stats, true);
     }
 }
 
