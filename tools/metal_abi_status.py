@@ -41,6 +41,8 @@ SOURCE_SYMBOL_ALIASES = {
     "MTLTexture.replaceRegion": "zpu_metal_texture_replace_region",
     "MTLCommandBuffer.status": "zpu_metal_command_buffer_get_status",
     "MTLCommandBuffer.error": "error",
+    "MTLCommandBuffer.logs": "logs",
+    "MTLDevice.supports32BitFloatFiltering": "supports32BitFloatFiltering",
     "MTLCommandBuffer.waitUntilCompleted": "zpu_metal_command_buffer_wait_until_completed",
     "MTLRenderCommandEncoder.setVertexBuffer": "zpu_metal_render_encoder_set_vertex_buffer",
     "MTLRenderCommandEncoder.setVertexBytes": "zpu_metal_render_encoder_set_vertex_bytes",
