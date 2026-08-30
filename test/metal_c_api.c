@@ -357,6 +357,123 @@ int main(void) {
     zpu_metal_texture_destroy(compute_rg32_uint);
     zpu_metal_texture_destroy(compute_rg32_sint);
 
+    const struct {
+        uint8_t format;
+        zpu_metal_compute_kernel kernel;
+        size_t bytes_per_pixel;
+    } compute_narrow_integer_profiles[] = {
+        {ZPU_METAL_R8_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_R8_UINT, 1},
+        {ZPU_METAL_R8_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_R8_SINT, 1},
+        {ZPU_METAL_RG8_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG8_UINT, 2},
+        {ZPU_METAL_RG8_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG8_SINT, 2},
+        {ZPU_METAL_RGBA8_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_UINT, 4},
+        {ZPU_METAL_RGBA8_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_SINT, 4},
+        {ZPU_METAL_R16_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_R16_UINT, 2},
+        {ZPU_METAL_R16_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_R16_SINT, 2},
+        {ZPU_METAL_RG16_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG16_UINT, 4},
+        {ZPU_METAL_RG16_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG16_SINT, 4},
+        {ZPU_METAL_RGBA16_UINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_UINT, 8},
+        {ZPU_METAL_RGBA16_SINT, ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_SINT, 8},
+    };
+    zpu_metal_texture *compute_narrow_integer_textures[
+        sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0])] = {0};
+    zpu_metal_command_buffer *compute_narrow_integer_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_compute_encoder *compute_narrow_integer_encoder =
+        zpu_metal_command_buffer_compute_encoder(compute_narrow_integer_commands);
+    for (size_t profile = 0;
+         profile < sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0]);
+         ++profile) {
+        const zpu_metal_texture_descriptor descriptor = {
+            .width = 3,
+            .height = 2,
+            .format = compute_narrow_integer_profiles[profile].format,
+        };
+        compute_narrow_integer_textures[profile] =
+            zpu_metal_device_new_texture(device, &descriptor);
+    }
+    if (compute_narrow_integer_commands == NULL || compute_narrow_integer_encoder == NULL) return 50;
+    for (size_t profile = 0;
+         profile < sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0]);
+         ++profile) {
+        if (compute_narrow_integer_textures[profile] == NULL ||
+            zpu_metal_compute_encoder_set_kernel(
+                compute_narrow_integer_encoder, compute_narrow_integer_profiles[profile].kernel) != 0 ||
+            zpu_metal_compute_encoder_set_texture(
+                compute_narrow_integer_encoder, compute_narrow_integer_textures[profile], 0) != 0 ||
+            zpu_metal_compute_encoder_dispatch_threads(
+                compute_narrow_integer_encoder, (zpu_metal_size){3, 2, 1},
+                (zpu_metal_size){2, 2, 1}) != 0) return 51;
+    }
+    if (zpu_metal_compute_encoder_end_encoding(compute_narrow_integer_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(compute_narrow_integer_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(compute_narrow_integer_commands) !=
+            ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 52;
+    uint8_t compute_narrow_integer_pixels[
+        sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0])][3 * 2 * 8] = {{0}};
+    for (size_t profile = 0;
+         profile < sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0]);
+         ++profile) {
+        const size_t bytes_per_pixel = compute_narrow_integer_profiles[profile].bytes_per_pixel;
+        if (zpu_metal_texture_get_bytes(
+                compute_narrow_integer_textures[profile], compute_narrow_integer_pixels[profile],
+                sizeof(compute_narrow_integer_pixels[profile]), 3 * bytes_per_pixel,
+                (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0) return 53;
+        for (size_t y = 0; y < 2; ++y) {
+            for (size_t x = 0; x < 3; ++x) {
+                const uint8_t *pixel = compute_narrow_integer_pixels[profile] +
+                    y * 3 * bytes_per_pixel + x * bytes_per_pixel;
+                const int is_signed = (compute_narrow_integer_profiles[profile].format == ZPU_METAL_R8_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG8_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RGBA8_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_R16_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG16_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RGBA16_SINT);
+                const int channel_count = compute_narrow_integer_profiles[profile].format == ZPU_METAL_R8_UINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_R8_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_R16_UINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_R16_SINT ? 1 :
+                    (compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG8_UINT ||
+                     compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG8_SINT ||
+                     compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG16_UINT ||
+                     compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG16_SINT ? 2 : 4);
+                const int wide_channel = compute_narrow_integer_profiles[profile].format == ZPU_METAL_R16_UINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_R16_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG16_UINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RG16_SINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RGBA16_UINT ||
+                    compute_narrow_integer_profiles[profile].format == ZPU_METAL_RGBA16_SINT;
+                int32_t expected[4] = {(int32_t)x + 1, (int32_t)y + 1,
+                                       (int32_t)(x + y + 1), 0};
+                if (is_signed) {
+                    expected[1] = -((int32_t)y + 1);
+                    expected[2] = (int32_t)(x + y);
+                    expected[3] = wide_channel ? 32767 : 127;
+                } else {
+                    expected[3] = wide_channel ? 65535 : 255;
+                }
+                for (int channel = 0; channel < channel_count; ++channel) {
+                    int32_t actual = 0;
+                    if (wide_channel) {
+                        if (bytes_per_pixel == 2 || bytes_per_pixel == 4 || bytes_per_pixel == 8) {
+                            uint16_t value = 0;
+                            memcpy(&value, pixel + channel * 2, sizeof(value));
+                            actual = is_signed ? (int16_t)value : value;
+                        }
+                    } else {
+                        actual = is_signed ? (int8_t)pixel[channel] : pixel[channel];
+                    }
+                    if (actual != expected[channel]) return 54;
+                }
+            }
+        }
+    }
+    zpu_metal_compute_encoder_destroy(compute_narrow_integer_encoder);
+    zpu_metal_command_buffer_destroy(compute_narrow_integer_commands);
+    for (size_t profile = 0;
+         profile < sizeof(compute_narrow_integer_profiles) / sizeof(compute_narrow_integer_profiles[0]);
+         ++profile) zpu_metal_texture_destroy(compute_narrow_integer_textures[profile]);
+
     const float add_left_values[] = {1.25f, -2.5f, 3.0f, 8.0f};
     const float add_right_values[] = {2.5f, 0.5f, -1.0f, -3.0f};
     const float add_expected[] = {3.75f, -2.0f, 2.0f, 5.0f};
