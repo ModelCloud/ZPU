@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 26u
+#define ZPU_METAL_ABI_VERSION 27u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -523,6 +523,12 @@ int zpu_metal_render_encoder_set_depth_bias(zpu_metal_render_encoder *encoder, f
 int zpu_metal_render_encoder_set_depth_test_bounds(zpu_metal_render_encoder *encoder, float min_bound, float max_bound);
 int zpu_metal_render_encoder_set_pipeline_formats(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format);
 int zpu_metal_render_encoder_set_pipeline_formats_with_stencil(zpu_metal_render_encoder *encoder, uint16_t color_format, uint16_t depth_format, uint16_t stencil_format);
+int zpu_metal_render_encoder_set_raster_sample_count(zpu_metal_render_encoder *encoder, uint8_t sample_count);
+/* Installs CPU-owned sample planes for a 2x/4x render target. The first
+ * sample must be the color attachment passed to the render-encoder factory;
+ * resolve_texture may be NULL when the multisample surface is intentionally
+ * not resolved. */
+int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *sample_textures, size_t sample_count, zpu_metal_texture *resolve_texture);
 int zpu_metal_render_encoder_set_color_attachment(zpu_metal_render_encoder *encoder, zpu_metal_texture *texture, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 /* Maps logical fragment outputs to physical pass attachments. A NULL map with
  * count 0 restores identity mapping; otherwise count must be exactly eight

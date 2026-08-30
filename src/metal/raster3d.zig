@@ -32,6 +32,10 @@ const ProjectedVertex = struct {
 pub const DrawOptions = struct {
     viewport: abi.Viewport,
     scissor: abi.ScissorRect,
+    // Metal's default sample locations are expressed in the top-left pixel
+    // cell, so (0, 0) is the upper-left corner of the pixel. The Apple CPU
+    // profile supplies the per-sample location while replaying MSAA draws.
+    sample_position: [2]f32 = .{ 0.5, 0.5 },
     cull_mode: abi.CullMode = .none,
     winding: abi.Winding = .clockwise,
     fill_mode: abi.TriangleFillMode = .fill,
@@ -90,6 +94,27 @@ pub const StencilFace = struct {
     write_mask: u8 = 0xff,
     reference: u8 = 0,
 };
+
+/// Default Apple sample locations returned by MTLDevice on the supported
+/// 2x/4x profiles. Coordinates are local to a pixel and use Metal's
+/// top-left origin. Native Metal is used as an oracle by the adapter tests;
+/// execution remains entirely in this CPU rasterizer.
+pub fn defaultSamplePosition(sample_count: usize, sample_index: usize) [2]f32 {
+    return switch (sample_count) {
+        1 => .{ 0.5, 0.5 },
+        2 => switch (sample_index) {
+            0 => .{ 0.75, 0.75 },
+            else => .{ 0.25, 0.25 },
+        },
+        4 => switch (sample_index) {
+            0 => .{ 0.375, 0.125 },
+            1 => .{ 0.875, 0.375 },
+            2 => .{ 0.125, 0.625 },
+            else => .{ 0.625, 0.875 },
+        },
+        else => .{ 0.5, 0.5 },
+    };
+}
 
 pub const TargetFormat = enum {
     a8_unorm,
@@ -478,7 +503,7 @@ pub const Target = struct {
         };
     }
 
-    fn readColor(self: *const Target, x: usize, y: usize) [4]f32 {
+    pub fn readColor(self: *const Target, x: usize, y: usize) [4]f32 {
         const row_bytes = self.row(@intCast(y));
         const offset = x * bytesPerPixel(self.format);
         return switch (self.format) {
@@ -1560,8 +1585,8 @@ fn drawTriangle(job: *Job, input: [3]ProjectedVertex, y0: usize, y1: usize, stat
     const edge_sign: f32 = if (positive_area) 1.0 else -1.0;
     for (row_start..row_end) |y| {
         for (x_start..x_end) |x| {
-            const px = @as(f32, @floatFromInt(x)) + 0.5;
-            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            const px = @as(f32, @floatFromInt(x)) + job.options.sample_position[0];
+            const py = @as(f32, @floatFromInt(y)) + job.options.sample_position[1];
             const edge0 = edge(vertices[1], vertices[2], px, py);
             const edge1 = edge(vertices[2], vertices[0], px, py);
             const edge2 = edge(vertices[0], vertices[1], px, py);

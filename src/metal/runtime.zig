@@ -510,6 +510,9 @@ const BeginRenderCommand = struct {
     target: *Texture,
     pass: abi.RenderPassDescriptor,
     color_attachments: [8]?ColorAttachmentCommand = [_]?ColorAttachmentCommand{null} ** 8,
+    sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4,
+    sample_count: u8 = 1,
+    resolve_target: ?*Texture = null,
     depth: ?[]f32 = null,
     depth_texture: ?*Texture = null,
     stencil: ?[]u8 = null,
@@ -828,6 +831,9 @@ pub const CommandBuffer = struct {
         self.status = .committed;
         var active_target: ?*Texture = null;
         var active_color_attachments: [8]?*Texture = [_]?*Texture{null} ** 8;
+        var active_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4;
+        var active_sample_count: usize = 1;
+        var active_resolve_target: ?*Texture = null;
         var active_depth: ?[]f32 = null;
         var active_depth_texture: ?*Texture = null;
         var active_depth_values: ?[]f32 = null;
@@ -850,8 +856,26 @@ pub const CommandBuffer = struct {
         for (self.commands.items) |command| switch (command) {
             .begin_render => |begin_render| {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
+                if (begin_render.sample_count != 1 and begin_render.sample_count != 2 and begin_render.sample_count != 4)
+                    return self.fail(error.InvalidArgument);
+                if (begin_render.sample_count > 1 and (begin_render.depth_texture != null or begin_render.depth != null or
+                    begin_render.stencil_texture != null or begin_render.stencil != null)) return self.fail(error.UnsupportedOperation);
+                if (begin_render.sample_count > 1) {
+                    for (begin_render.color_attachments[1..]) |attachment| if (attachment != null) return self.fail(error.UnsupportedOperation);
+                    for (begin_render.sample_targets[0..begin_render.sample_count]) |sample| {
+                        const texture = sample orelse return self.fail(error.InvalidResource);
+                        if (!validTexture(texture) or texture.device != self.queue.device or !texture.format.isColor() or
+                            texture.width != begin_render.target.width or texture.height != begin_render.target.height or
+                            texture.format != begin_render.target.format) return self.fail(error.InvalidResource);
+                    }
+                } else if (begin_render.resolve_target != null) return self.fail(error.InvalidArgument);
+                if (active_resolve_target) |resolve| {
+                    resolveMultisampleTargets(active_sample_targets, active_sample_count, resolve) catch |err| return self.fail(err);
+                    sparseFlushTexture(resolve);
+                }
                 sparseFlushOptionalTexture(active_target);
                 for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
                 if (active_depth_values) |values| {
                     if (active_depth_store_action == .store) storeDepthTexture(active_depth_texture.?, values);
                     allocator.free(values);
@@ -866,17 +890,35 @@ pub const CommandBuffer = struct {
                 active_color_attachments = [_]?*Texture{null} ** 8;
                 active_target = begin_render.target;
                 active_color_attachments[0] = begin_render.target;
-                sparseSyncTexture(begin_render.target);
+                active_sample_targets = [_]?*Texture{null} ** 4;
+                active_sample_count = begin_render.sample_count;
+                active_resolve_target = begin_render.resolve_target;
+                if (active_sample_count == 1) {
+                    active_sample_targets[0] = begin_render.target;
+                    sparseSyncTexture(begin_render.target);
+                } else {
+                    for (begin_render.sample_targets[0..active_sample_count], 0..) |sample, index| {
+                        active_sample_targets[index] = sample;
+                        sparseSyncTexture(sample.?);
+                    }
+                }
                 for (begin_render.color_attachments, 0..) |attachment, index| {
                     if (attachment) |value| {
                         if (!validTexture(value.texture) or value.texture.device != self.queue.device or
                             !value.texture.format.isColor() or value.texture.width != begin_render.target.width or
                             value.texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         active_color_attachments[index] = value.texture;
-                        sparseSyncTexture(value.texture);
+                        if (active_sample_count == 1) sparseSyncTexture(value.texture);
                         if (value.pass.load_action == .clear) {
-                            var attachment_target = value.texture.asTarget();
-                            raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
+                            if (active_sample_count == 1) {
+                                var attachment_target = value.texture.asTarget();
+                                raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
+                            } else {
+                                for (active_sample_targets[0..active_sample_count]) |sample| {
+                                    var attachment_target = sample.?.asTarget();
+                                    raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
+                                }
+                            }
                         }
                     }
                 }
@@ -931,9 +973,11 @@ pub const CommandBuffer = struct {
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
                 sparseSyncTexture(target_handle);
                 for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
+                for (active_sample_targets[0..active_sample_count]) |sample| sparseSyncOptionalTexture(sample);
                 defer {
                     sparseFlushTexture(target_handle);
                     for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                    for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
                 }
                 sparseSyncOptionalBuffer(draw.vertex_buffer);
                 sparseSyncOptionalBuffer(draw.index_buffer);
@@ -1014,18 +1058,38 @@ pub const CommandBuffer = struct {
                     1;
                 validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
-                for (0..instance_count) |_| {
-                    stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
-                        @constCast(&target),
-                        extra_targets[0..extra_count],
-                        sample_target,
-                        sample_mipmap_targets,
-                        active_depth,
-                        active_stencil,
-                        draw_vertices,
-                        resolved_draw.primitive,
-                        draw_options,
-                    ));
+                if (active_sample_count == 1) {
+                    for (0..instance_count) |_| {
+                        stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
+                            @constCast(&target),
+                            extra_targets[0..extra_count],
+                            sample_target,
+                            sample_mipmap_targets,
+                            active_depth,
+                            active_stencil,
+                            draw_vertices,
+                            resolved_draw.primitive,
+                            draw_options,
+                        ));
+                    }
+                } else {
+                    for (active_sample_targets[0..active_sample_count], 0..) |sample, sample_index| {
+                        var sample_target_value = sample.?.asTarget();
+                        draw_options.sample_position = raster3d.defaultSamplePosition(active_sample_count, sample_index);
+                        for (0..instance_count) |_| {
+                            stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
+                                &sample_target_value,
+                                &.{},
+                                sample_target,
+                                sample_mipmap_targets,
+                                null,
+                                null,
+                                draw_vertices,
+                                resolved_draw.primitive,
+                                draw_options,
+                            ));
+                        }
+                    }
                 }
                 if (resolved_draw.visibility_mode != .disabled) {
                     const visibility_buffer = resolved_draw.visibility_buffer orelse return self.fail(error.InvalidResource);
@@ -1516,8 +1580,13 @@ pub const CommandBuffer = struct {
                 if (wait.event.signaled_value < wait.value) return self.fail(error.InvalidCommand);
             },
         };
+        if (active_resolve_target) |resolve| {
+            resolveMultisampleTargets(active_sample_targets, active_sample_count, resolve) catch |err| return self.fail(err);
+            sparseFlushTexture(resolve);
+        }
         sparseFlushOptionalTexture(active_target);
         for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+        for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
         self.status = .completed;
     }
 
@@ -1538,6 +1607,7 @@ pub const RenderEncoder = struct {
     magic: u64 = render_encoder_magic,
     command_buffer: *CommandBuffer,
     begin_index: usize,
+    pipeline_sample_count: u8 = 1,
     vertex_buffer: ?*Buffer = null,
     vertex_offset: usize = 0,
     vertex_stride: usize = @sizeOf(abi.Vertex),
@@ -1664,6 +1734,42 @@ pub const RenderEncoder = struct {
 
     pub fn setPipelineFormats(self: *RenderEncoder, color_format: u16, depth_format: u16) Error!void {
         return self.setPipelineFormatsWithStencil(color_format, depth_format, 0);
+    }
+
+    pub fn setRasterSampleCount(self: *RenderEncoder, sample_count: u8) Error!void {
+        if (!self.open() or (sample_count != 1 and sample_count != 2 and sample_count != 4)) return error.InvalidArgument;
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |begin_render| if (begin_render.sample_count != sample_count) return error.InvalidArgument,
+            else => return error.InvalidCommand,
+        }
+        self.pipeline_sample_count = sample_count;
+    }
+
+    pub fn setMultisampleTargets(self: *RenderEncoder, textures: ?[*]const ?*Texture, count: usize, resolve: ?*Texture) Error!void {
+        if (!self.open() or (count != 1 and count != 2 and count != 4) or textures == null) return error.InvalidArgument;
+        const values = textures.?;
+        const first = values[0] orelse return error.InvalidResource;
+        if (!validTexture(first) or first.device != self.command_buffer.queue.device or !first.format.isColor()) return error.InvalidResource;
+        for (values[0..count]) |value| {
+            const texture = value orelse return error.InvalidResource;
+            if (!validTexture(texture) or texture.device != first.device or !texture.format.isColor() or
+                texture.width != first.width or texture.height != first.height or texture.format != first.format) return error.InvalidArgument;
+        }
+        if (resolve) |target| {
+            if (!validTexture(target) or target.device != first.device or !target.format.isColor() or
+                target.width != first.width or target.height != first.height or target.format != first.format) return error.InvalidArgument;
+        }
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (first != begin_render.target or resolve == first) return error.InvalidArgument;
+                begin_render.sample_targets = [_]?*Texture{null} ** 4;
+                for (values[0..count], 0..) |value, index| begin_render.sample_targets[index] = value;
+                begin_render.sample_count = @intCast(count);
+                begin_render.resolve_target = resolve;
+            },
+            else => return error.InvalidCommand,
+        }
+        self.pipeline_sample_count = @intCast(count);
     }
 
     pub fn setColorAttachment(self: *RenderEncoder, texture: *Texture, attachment: abi.RenderPassColorAttachmentDescriptor, index: u32) Error!void {
@@ -5716,6 +5822,31 @@ fn validTexture(texture: *Texture) bool {
     return texture.magic == texture_magic and validDevice(texture.device);
 }
 
+fn resolveMultisampleTargets(sample_targets: [4]?*Texture, sample_count: usize, resolve_target: *Texture) Error!void {
+    if ((sample_count != 2 and sample_count != 4) or !validTexture(resolve_target)) return error.InvalidArgument;
+    var samples: [4]raster3d.Target = undefined;
+    for (sample_targets[0..sample_count], 0..) |sample, index| {
+        const texture = sample orelse return error.InvalidResource;
+        if (!validTexture(texture) or texture.device != resolve_target.device or
+            texture.width != resolve_target.width or texture.height != resolve_target.height or
+            texture.format != resolve_target.format) return error.InvalidResource;
+        samples[index] = texture.asTarget();
+    }
+    var destination = resolve_target.asTarget();
+    for (0..destination.height) |y| {
+        for (0..destination.width) |x| {
+            var color = [4]f32{ 0, 0, 0, 0 };
+            for (samples[0..sample_count]) |sample| {
+                const value = sample.readColor(x, y);
+                for (0..4) |channel| color[channel] += value[channel];
+            }
+            const divisor: f32 = @floatFromInt(sample_count);
+            for (0..4) |channel| color[channel] /= divisor;
+            destination.storeColor(x, y, color);
+        }
+    }
+}
+
 fn validFence(fence: *Fence) bool {
     return fence.magic == fence_magic and validDevice(fence.device);
 }
@@ -7949,6 +8080,21 @@ pub export fn zpu_metal_render_encoder_set_pipeline_formats(encoder: ?*RenderEnc
 
 pub export fn zpu_metal_render_encoder_set_pipeline_formats_with_stencil(encoder: ?*RenderEncoder, color_format: u16, depth_format: u16, stencil_format: u16) callconv(.c) c_int {
     (encoder orelse return -1).setPipelineFormatsWithStencil(color_format, depth_format, stencil_format) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_raster_sample_count(encoder: ?*RenderEncoder, sample_count: u8) callconv(.c) c_int {
+    (encoder orelse return -1).setRasterSampleCount(sample_count) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_multisample_targets(
+    encoder: ?*RenderEncoder,
+    sample_textures: ?[*]const ?*Texture,
+    sample_count: usize,
+    resolve_texture: ?*Texture,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setMultisampleTargets(sample_textures, sample_count, resolve_texture) catch |err| return errorCode(err);
     return 0;
 }
 
