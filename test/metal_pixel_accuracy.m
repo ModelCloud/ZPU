@@ -20171,6 +20171,12 @@ int main(void) {
                                                       adapter_metal4_indirect_scratch.length)];
                 [metal4_indirect_build_encoder endEncoding];
                 [metal4_indirect_build_command_buffer endCommandBuffer];
+                /* Size was queried with one active record; the deferred
+                 * Metal 4 CPU build must safely consume both valid records
+                 * after the GPU-addressed count changes before commit. */
+                metal4_indirect_count = 2;
+                memcpy(adapter_metal4_indirect_count_buffer.contents, &metal4_indirect_count,
+                       sizeof(metal4_indirect_count));
                 id<MTL4CommandBuffer> metal4_indirect_build_buffers[] = {metal4_indirect_build_command_buffer};
                 MTL4CommitOptions *metal4_indirect_options = ZPUMetalCreateCPUCommitOptions();
                 __block NSError *metal4_indirect_feedback_error = nil;
