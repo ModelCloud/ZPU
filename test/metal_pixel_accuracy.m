@@ -1394,6 +1394,13 @@ static int test_cpu_indirect_trace_triangles_against_native(
     [indirect_build_encoder buildAccelerationStructure:indirect_structure descriptor:indirect_descriptor
                                           scratchBuffer:indirect_scratch scratchBufferOffset:0];
     [indirect_build_encoder endEncoding];
+    /* The allocation query observed one active record. The deferred build
+     * must still have reserved enough space for the valid second record when
+     * the indirect count changes before commit. The duplicate triangle keeps
+     * the native raw-triangle oracle byte-identical while exercising the
+     * commit-time count read. */
+    instance_count = 2;
+    memcpy(instance_count_buffer.contents, &instance_count, sizeof(instance_count));
     [indirect_build_command_buffer commit];
     [indirect_build_command_buffer waitUntilCompleted];
 
@@ -1479,6 +1486,7 @@ static int test_cpu_indirect_trace_triangles_against_native(
     memcpy(adapter_vertex_buffer.contents, precommit_refit_triangle_vertices,
            sizeof(precommit_refit_triangle_vertices));
     instance_data[0].transformationMatrix = refit_instance_matrix;
+    instance_data[1].transformationMatrix = refit_instance_matrix;
     memcpy(instance_descriptor_buffer.contents, instance_data, sizeof(instance_data));
 
     id<MTLCommandBuffer> refit_bottom_command_buffer = [adapter_queue commandBuffer];
