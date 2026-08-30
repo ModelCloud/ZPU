@@ -377,8 +377,16 @@ int main(void) {
     zpu_metal_render_encoder *mesh_threads_encoder =
         zpu_metal_command_buffer_render_encoder(
             mesh_threads_commands, mesh_threads_texture, &render_pass);
+    zpu_metal_buffer *mesh_threads_visibility =
+        zpu_metal_device_new_buffer(device, sizeof(uint64_t), NULL);
     if (mesh_threads_texture == NULL || mesh_threads_commands == NULL ||
-        mesh_threads_encoder == NULL ||
+        mesh_threads_encoder == NULL || mesh_threads_visibility == NULL ||
+        zpu_metal_render_encoder_set_visibility_result_buffer(
+            mesh_threads_encoder, mesh_threads_visibility) != 0 ||
+        zpu_metal_render_encoder_set_visibility_result_type(
+            mesh_threads_encoder, ZPU_METAL_VISIBILITY_RESET) != 0 ||
+        zpu_metal_render_encoder_set_visibility_result_mode(
+            mesh_threads_encoder, ZPU_METAL_VISIBILITY_COUNTING, 0) != 0 ||
         zpu_metal_render_encoder_draw_mesh_threads(
             mesh_threads_encoder, ZPU_METAL_MESH_FILL_GRADIENT_RGBA8,
             (zpu_metal_size){5, 3, 1}, (zpu_metal_size){1, 1, 1},
@@ -406,8 +414,14 @@ int main(void) {
                                     (zpu_metal_region){{0, 0, 0}, {5, 3, 1}}) != 0 ||
         memcmp(mesh_threads_pixels, expected_mesh_threads_pixels,
                sizeof(mesh_threads_pixels)) != 0) return 48;
+    uint64_t mesh_threads_visibility_count = 0;
+    memcpy(&mesh_threads_visibility_count,
+           zpu_metal_buffer_contents(mesh_threads_visibility),
+           sizeof(mesh_threads_visibility_count));
+    if (mesh_threads_visibility_count != 8) return 101;
     zpu_metal_render_encoder_destroy(mesh_threads_encoder);
     zpu_metal_command_buffer_destroy(mesh_threads_commands);
+    zpu_metal_buffer_destroy(mesh_threads_visibility);
     zpu_metal_texture_destroy(mesh_threads_texture);
 
     zpu_metal_texture_descriptor mapped_mesh_logical_descriptor = mesh_descriptor;
