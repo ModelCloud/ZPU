@@ -1180,10 +1180,12 @@ pub const CommandBuffer = struct {
                             raster3d.defaultSamplePosition(active_sample_count, sample_index);
                         const depth_values: ?[]f32 = if (active_depth_values) |values|
                             values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
-                        else null;
+                        else
+                            null;
                         const stencil_values: ?[]u8 = if (active_stencil_values) |values|
                             values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
-                        else null;
+                        else
+                            null;
                         for (0..instance_count) |_| {
                             stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
                                 &sample_target_value,
@@ -2356,8 +2358,7 @@ pub const RenderEncoder = struct {
         }
     }
 
-    pub fn setMultisampleStencilTargets(self: *RenderEncoder, textures: ?[*]const ?*Texture, count: usize,
-        load_action: u8, store_action: u8, clear_value: u8) Error!void {
+    pub fn setMultisampleStencilTargets(self: *RenderEncoder, textures: ?[*]const ?*Texture, count: usize, load_action: u8, store_action: u8, clear_value: u8) Error!void {
         if (!self.open() or (count != 2 and count != 4) or textures == null or
             load_action > @intFromEnum(abi.LoadAction.clear) or store_action > @intFromEnum(abi.StoreAction.store))
             return error.InvalidArgument;
@@ -8562,7 +8563,11 @@ pub export fn zpu_metal_render_encoder_set_multisample_stencil_targets(
     clear_value: u8,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setMultisampleStencilTargets(
-        sample_textures, sample_count, load_action, store_action, clear_value,
+        sample_textures,
+        sample_count,
+        load_action,
+        store_action,
+        clear_value,
     ) catch |err| return errorCode(err);
     return 0;
 }
