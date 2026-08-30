@@ -93,10 +93,12 @@ triangle path:
   render encoders can store those planes or resolve them into a matching
   single-sample color texture using `MultisampleResolve` or
   `StoreAndMultisampleResolve`; the resolver averages logical sample colors
-  before the destination format encode. This bounded profile rejects MSAA
-  depth/stencil, MRT, parallel render encoders, sparse placement, and direct
-  CPU transfers. 2D multisample texture views are CPU-owned aliases of every
-  sample plane, including same-size compatible color-format reinterpretations.
+  before the destination format encode. This bounded profile supports 2D
+  multisample depth/stencil attachments by maintaining independent ZPU depth
+  and stencil planes for every sample. It still rejects MRT, parallel render
+  encoders, sparse placement, and direct CPU transfers. 2D multisample texture
+  views are CPU-owned aliases of every sample plane, including same-size
+  compatible color-format reinterpretations.
   Custom sample positions are accepted for
   1x/2x/4x passes after finite `[0, 1]` validation and are interpreted in
   Metal's top-left, pixel-local coordinates; other sample counts remain unsupported.
