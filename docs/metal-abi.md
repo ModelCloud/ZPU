@@ -204,7 +204,10 @@ triangle path:
   view-owned ZPU handles over the same bytes, so CPU sampling, rendering, and
   transfers observe the view interpretation while the parent remains the
   storage owner; depth/stencil views remain same-format only, and 2D
-  multisample views alias every sample plane
+  multisample views alias every sample plane; one selected slice can also be
+  exposed as a CPU-owned `MTLTextureType2D` view of a
+  `MTLTextureType2DArray` resource, or as a one-element
+  `MTLTextureType2DArray` view of a 2D resource
 - CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or
   buffer-backed views and return synthetic resource IDs usable by MTL4
   argument tables
@@ -578,7 +581,8 @@ draws, render and compute indirect command buffers, the CPU compute path
   metadata paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and
   legacy/Metal 4 3D mipmap generation, cube/cube-array face and view transfers,
-  packed normalized 2D/3D mipmap raw-byte exactness, 2D float mipmap raw-byte exactness, and
+  one-slice 2D/2D-array view type conversions, packed normalized 2D/3D
+  mipmap raw-byte exactness, 2D float mipmap raw-byte exactness, and
   legacy/Metal 4 visibility result byte exactness, and CPU depth-bounds output
   against an equivalent native Metal fragment-discard oracle,
 and the explicit adapter; it is not a claim that every Metal feature is

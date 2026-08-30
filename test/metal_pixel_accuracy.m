@@ -247,6 +247,115 @@ static int test_texture_view_format_compatibility(
             }
         }
     }
+
+    /* Apple permits a compatible array/non-array texture-type view when the
+     * selected slice range describes one 2D image. Keep this probe beside the
+     * format matrix because the view must alias the exact source bytes, not
+     * merely report the requested type. */
+    MTLTextureDescriptor *native_array_descriptor = [MTLTextureDescriptor new];
+    native_array_descriptor.textureType = MTLTextureType2DArray;
+    native_array_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_array_descriptor.width = 2;
+    native_array_descriptor.height = 2;
+    native_array_descriptor.arrayLength = 2;
+    native_array_descriptor.mipmapLevelCount = 1;
+    native_array_descriptor.storageMode = MTLStorageModeShared;
+    native_array_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_array_source = [native_device newTextureWithDescriptor:native_array_descriptor];
+    id<MTLTexture> adapter_array_source = [adapter_device newTextureWithDescriptor:native_array_descriptor];
+    const uint8_t array_view_source_bytes[] = {
+        0x13, 0x27, 0x3b, 0x4f, 0x5d, 0x71, 0x85, 0x99,
+        0xa7, 0xbb, 0xcf, 0xe3, 0xf1, 0x05, 0x19, 0x2d,
+    };
+    [native_array_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                            mipmapLevel:0
+                                  slice:1
+                              withBytes:array_view_source_bytes
+                            bytesPerRow:2 * 4
+                          bytesPerImage:sizeof(array_view_source_bytes)];
+    [adapter_array_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                             mipmapLevel:0
+                                   slice:1
+                               withBytes:array_view_source_bytes
+                             bytesPerRow:2 * 4
+                           bytesPerImage:sizeof(array_view_source_bytes)];
+    id<MTLTexture> native_array_to_2d =
+        [native_array_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                textureType:MTLTextureType2D
+                                                     levels:NSMakeRange(0, 1)
+                                                     slices:NSMakeRange(1, 1)];
+    id<MTLTexture> adapter_array_to_2d =
+        [adapter_array_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                 textureType:MTLTextureType2D
+                                                      levels:NSMakeRange(0, 1)
+                                                      slices:NSMakeRange(1, 1)];
+    const BOOL native_array_to_2d_accepts = native_array_to_2d != nil;
+    const BOOL adapter_array_to_2d_accepts = adapter_array_to_2d != nil;
+    BOOL array_view_match = native_array_to_2d_accepts == adapter_array_to_2d_accepts;
+    if (native_array_to_2d != nil && adapter_array_to_2d != nil) {
+        uint8_t native_view_bytes[sizeof(array_view_source_bytes)] = {0};
+        uint8_t adapter_view_bytes[sizeof(array_view_source_bytes)] = {0};
+        [native_array_to_2d getBytes:native_view_bytes bytesPerRow:2 * 4
+                          fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+        [adapter_array_to_2d getBytes:adapter_view_bytes bytesPerRow:2 * 4
+                           fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+        array_view_match = array_view_match &&
+            native_array_to_2d.textureType == MTLTextureType2D &&
+            adapter_array_to_2d.textureType == native_array_to_2d.textureType &&
+            native_array_to_2d.arrayLength == 1 &&
+            adapter_array_to_2d.arrayLength == native_array_to_2d.arrayLength &&
+            native_array_to_2d.parentRelativeSlice == 1 &&
+            adapter_array_to_2d.parentRelativeSlice == native_array_to_2d.parentRelativeSlice &&
+            memcmp(native_view_bytes, array_view_source_bytes, sizeof(native_view_bytes)) == 0 &&
+            memcmp(adapter_view_bytes, native_view_bytes, sizeof(native_view_bytes)) == 0;
+    }
+    MTLTextureDescriptor *native_2d_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:2 height:2 mipmapped:NO];
+    native_2d_descriptor.storageMode = MTLStorageModeShared;
+    native_2d_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_2d_source = [native_device newTextureWithDescriptor:native_2d_descriptor];
+    id<MTLTexture> adapter_2d_source = [adapter_device newTextureWithDescriptor:native_2d_descriptor];
+    [native_2d_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0
+                          withBytes:array_view_source_bytes bytesPerRow:2 * 4];
+    [adapter_2d_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0
+                           withBytes:array_view_source_bytes bytesPerRow:2 * 4];
+    id<MTLTexture> native_2d_to_array =
+        [native_2d_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                             textureType:MTLTextureType2DArray
+                                                  levels:NSMakeRange(0, 1)
+                                                  slices:NSMakeRange(0, 1)];
+    id<MTLTexture> adapter_2d_to_array =
+        [adapter_2d_source newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                              textureType:MTLTextureType2DArray
+                                                   levels:NSMakeRange(0, 1)
+                                                   slices:NSMakeRange(0, 1)];
+    const BOOL native_2d_to_array_accepts = native_2d_to_array != nil;
+    const BOOL adapter_2d_to_array_accepts = adapter_2d_to_array != nil;
+    BOOL reverse_view_match = native_2d_to_array_accepts == adapter_2d_to_array_accepts;
+    if (native_2d_to_array != nil && adapter_2d_to_array != nil) {
+        uint8_t native_view_bytes[sizeof(array_view_source_bytes)] = {0};
+        uint8_t adapter_view_bytes[sizeof(array_view_source_bytes)] = {0};
+        [native_2d_to_array getBytes:native_view_bytes bytesPerRow:2 * 4
+                         bytesPerImage:sizeof(native_view_bytes)
+                          fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 slice:0];
+        [adapter_2d_to_array getBytes:adapter_view_bytes bytesPerRow:2 * 4
+                          bytesPerImage:sizeof(adapter_view_bytes)
+                           fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 slice:0];
+        reverse_view_match = reverse_view_match &&
+            native_2d_to_array.textureType == MTLTextureType2DArray &&
+            adapter_2d_to_array.textureType == native_2d_to_array.textureType &&
+            native_2d_to_array.arrayLength == 1 &&
+            adapter_2d_to_array.arrayLength == native_2d_to_array.arrayLength &&
+            memcmp(native_view_bytes, array_view_source_bytes, sizeof(native_view_bytes)) == 0 &&
+            memcmp(adapter_view_bytes, native_view_bytes, sizeof(native_view_bytes)) == 0;
+    }
+    if (!array_view_match || !reverse_view_match) {
+        fprintf(stderr, "metal-pixel: 2D/2D-array texture view mismatch native=%d/%d adapter=%d/%d\n",
+                native_array_to_2d_accepts, native_2d_to_array_accepts,
+                adapter_array_to_2d_accepts, adapter_2d_to_array_accepts);
+        return 144;
+    }
     return mismatch ? 143 : 0;
 }
 
@@ -6536,7 +6645,18 @@ int main(void) {
         id<MTLBuffer> adapter_vertex_buffer =
             [adapter_device newBufferWithBytes:vertices length:sizeof(vertices)
                                        options:MTLResourceStorageModeShared];
-        const NSUInteger adapter_initial_allocated_size = adapter_texture.allocatedSize + adapter_vertex_buffer.length;
+        id<MTLBuffer> native_private_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModePrivate];
+        id<MTLBuffer> adapter_private_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModePrivate];
+        if (native_private_buffer == nil || adapter_private_buffer == nil ||
+            (native_private_buffer.contents != nil) != (adapter_private_buffer.contents != nil)) {
+            fprintf(stderr, "metal-pixel: private buffer CPU visibility mismatch native=%p adapter=%p\n",
+                    native_private_buffer.contents, adapter_private_buffer.contents);
+            return 77;
+        }
+        const NSUInteger adapter_initial_allocated_size =
+            adapter_texture.allocatedSize + adapter_vertex_buffer.length + adapter_private_buffer.length;
         if (adapter_device.currentAllocatedSize != adapter_initial_allocated_size) {
             fprintf(stderr, "metal-pixel: direct CPU allocation accounting failed\n");
             return 19;

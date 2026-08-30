@@ -2335,6 +2335,18 @@ static BOOL zpu_texture_type_is_array(MTLTextureType type) {
         type == MTLTextureTypeCubeArray;
 }
 
+static BOOL zpu_texture_view_types_compatible(MTLTextureType source, MTLTextureType view,
+                                               NSRange sliceRange) {
+    if (source == view) return YES;
+    /* A one-slice 2D image can be exposed as either a scalar 2D texture or a
+     * one-element 2D array. The selected slice is still the same CPU/ZPU
+     * backing image; only the shader-facing texture type changes. */
+    const BOOL two_dimensional_pair =
+        (source == MTLTextureType2DArray && view == MTLTextureType2D) ||
+        (source == MTLTextureType2D && view == MTLTextureType2DArray);
+    return two_dimensional_pair && sliceRange.length == 1;
+}
+
 static BOOL zpu_texture_type_is_supported(MTLTextureType type) {
     return type == MTLTextureType1D || type == MTLTextureType1DArray ||
         type == MTLTextureType2D || type == MTLTextureType2DArray || type == MTLTextureType3D ||
@@ -5504,7 +5516,8 @@ static NSArray *zpu_make_sample_texture_views(ZPUTexture *source, MTLPixelFormat
             sliceRange.location != 0 || sliceRange.length != 1) return nil;
         return [self newTextureViewWithPixelFormat:pixelFormat];
     }
-    if (textureType != _textureType || sliceRange.location > _sliceMipmapTextures.count || sliceRange.length == 0 ||
+    if (!zpu_texture_view_types_compatible(_textureType, textureType, sliceRange) ||
+        sliceRange.location > _sliceMipmapTextures.count || sliceRange.length == 0 ||
         sliceRange.length > _sliceMipmapTextures.count - sliceRange.location ||
         levelRange.location > _mipmapTextures.count || levelRange.length == 0 ||
         levelRange.length > _mipmapTextures.count - levelRange.location) return nil;
@@ -5529,16 +5542,17 @@ static NSArray *zpu_make_sample_texture_views(ZPUTexture *source, MTLPixelFormat
     NSArray *mipmaps = sliceMipmapTextures.firstObject;
     zpu_metal_texture *texture = (zpu_metal_texture *)[mipmaps[0] pointerValue];
     ZPUTexture *view = [[ZPUTexture alloc] initWithOwner:_owner texture:texture
-                                                    type:_textureType pixelFormat:pixelFormat backing:self];
+                                                    type:textureType pixelFormat:pixelFormat backing:self];
     view->_mipmapTextures = [mipmaps copy];
     view->_sliceMipmapTextures = [sliceMipmapTextures copy];
     if (pixelFormat != _pixelFormat) {
         view->_zpuTexture = [view zpuTextureAtLevel:0 slice:0];
         view->_ownsZpuTextures = YES;
     }
-    view->_arrayLength = zpu_texture_type_is_cube(_textureType) ?
-        sliceRange.length / 6 : (zpu_texture_type_is_3d(_textureType) ? 1 : sliceRange.length);
-    view->_depth = zpu_texture_type_is_3d(_textureType) ?
+    view->_arrayLength = zpu_texture_type_is_cube(textureType) ?
+        sliceRange.length / 6 : (zpu_texture_type_is_3d(textureType) ? 1 :
+        (zpu_texture_type_is_array(textureType) ? sliceRange.length : 1));
+    view->_depth = zpu_texture_type_is_3d(textureType) ?
         zpu_texture_depth_at_level(self, levelRange.location) : 1;
     view->_baseMipmapLevel = _baseMipmapLevel + levelRange.location;
     view->_baseSlice = _baseSlice + sliceRange.location;
