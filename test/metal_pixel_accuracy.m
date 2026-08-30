@@ -112,6 +112,22 @@ static const char *const kShaderSource =
     "uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
     "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, int(gid.x + gid.y), 0x7fffffff), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r32_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, 0u, 0u, 0u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_r32_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, 0, 0, 0), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rg32_uint(texture2d<uint, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(uint4(gid.x + 1u, gid.y + 1u, 0u, 0u), gid); }\n"
+    "kernel void zpu_cpu_fill_gradient_rg32_sint(texture2d<int, access::write> output [[texture(0)]], "
+    "uint2 gid [[thread_position_in_grid]]) { "
+    "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+    "output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, 0, 0), gid); }\n"
     "kernel void zpu_cpu_add_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
@@ -15982,6 +15998,10 @@ int main(void) {
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba32_uint() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba32_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_r32_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_r32_sint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rg32_uint() {}\n"
+            "kernel void zpu_cpu_fill_gradient_rg32_sint() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
@@ -16559,13 +16579,17 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 49 ||
+            adapter_library.functionNames.count != 53 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba32_uint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba32_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r32_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_r32_sint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg32_uint"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rg32_sint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
@@ -21277,6 +21301,84 @@ int main(void) {
                 memcmp(native_compute_integer_bytes, adapter_compute_integer_bytes, compute_integer_byte_count) != 0) {
                 fail_with_error("integer compute adapter execution failed", adapter_compute_error);
                 return 47 + (int)format_index;
+            }
+        }
+
+        const struct {
+            MTLPixelFormat format;
+            NSUInteger bytes_per_pixel;
+            NSString *name;
+        } compute_wide_integer_formats[] = {
+            {MTLPixelFormatR32Uint, 4, @"zpu_cpu_fill_gradient_r32_uint"},
+            {MTLPixelFormatR32Sint, 4, @"zpu_cpu_fill_gradient_r32_sint"},
+            {MTLPixelFormatRG32Uint, 8, @"zpu_cpu_fill_gradient_rg32_uint"},
+            {MTLPixelFormatRG32Sint, 8, @"zpu_cpu_fill_gradient_rg32_sint"},
+        };
+        for (NSUInteger format_index = 0;
+             format_index < sizeof(compute_wide_integer_formats) / sizeof(compute_wide_integer_formats[0]);
+             ++format_index) {
+            const NSUInteger bytes_per_pixel = compute_wide_integer_formats[format_index].bytes_per_pixel;
+            const NSUInteger wide_integer_byte_count = (NSUInteger)width * height * bytes_per_pixel;
+            MTLTextureDescriptor *native_wide_integer_descriptor = [compute_texture_descriptor copy];
+            native_wide_integer_descriptor.pixelFormat = compute_wide_integer_formats[format_index].format;
+            MTLTextureDescriptor *adapter_wide_integer_descriptor = [native_wide_integer_descriptor copy];
+            id<MTLTexture> native_wide_integer_texture =
+                [device newTextureWithDescriptor:native_wide_integer_descriptor];
+            id<MTLTexture> adapter_wide_integer_texture =
+                [adapter_device newTextureWithDescriptor:adapter_wide_integer_descriptor];
+            NSError *native_wide_integer_error = nil;
+            NSError *adapter_wide_integer_error = nil;
+            id<MTLFunction> native_wide_integer_function =
+                [library newFunctionWithName:compute_wide_integer_formats[format_index].name];
+            id<MTLComputePipelineState> native_wide_integer_pipeline =
+                [device newComputePipelineStateWithFunction:native_wide_integer_function
+                                                       error:&native_wide_integer_error];
+            id<MTLFunction> adapter_wide_integer_function =
+                ZPUMetalCreateCPUFunction(adapter_device, compute_wide_integer_formats[format_index].name);
+            id<MTLComputePipelineState> adapter_wide_integer_pipeline =
+                [adapter_device newComputePipelineStateWithFunction:adapter_wide_integer_function
+                                                               error:&adapter_wide_integer_error];
+            id<MTLCommandBuffer> native_wide_integer_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_wide_integer_encoder =
+                [native_wide_integer_command_buffer computeCommandEncoder];
+            [native_wide_integer_encoder setComputePipelineState:native_wide_integer_pipeline];
+            [native_wide_integer_encoder setTexture:native_wide_integer_texture atIndex:0];
+            [native_wide_integer_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(3, 2, 1)];
+            [native_wide_integer_encoder endEncoding];
+            [native_wide_integer_command_buffer commit];
+            [native_wide_integer_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_wide_integer_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_wide_integer_encoder =
+                [adapter_wide_integer_command_buffer computeCommandEncoder];
+            [adapter_wide_integer_encoder setComputePipelineState:adapter_wide_integer_pipeline];
+            [adapter_wide_integer_encoder setTexture:adapter_wide_integer_texture atIndex:0];
+            [adapter_wide_integer_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                       threadsPerThreadgroup:MTLSizeMake(3, 2, 1)];
+            [adapter_wide_integer_encoder endEncoding];
+            [adapter_wide_integer_command_buffer commit];
+            [adapter_wide_integer_command_buffer waitUntilCompleted];
+            uint8_t native_wide_integer_bytes[wide_integer_byte_count];
+            uint8_t adapter_wide_integer_bytes[wide_integer_byte_count];
+            [native_wide_integer_texture getBytes:native_wide_integer_bytes
+                                        bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                         fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                        mipmapLevel:0];
+            [adapter_wide_integer_texture getBytes:adapter_wide_integer_bytes
+                                         bytesPerRow:(NSUInteger)width * bytes_per_pixel
+                                          fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                         mipmapLevel:0];
+            if (native_wide_integer_function == nil || native_wide_integer_pipeline == nil ||
+                native_wide_integer_error != nil || native_wide_integer_texture == nil ||
+                native_wide_integer_command_buffer == nil || native_wide_integer_encoder == nil ||
+                native_wide_integer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_wide_integer_function == nil || adapter_wide_integer_pipeline == nil ||
+                adapter_wide_integer_error != nil || adapter_wide_integer_texture == nil ||
+                adapter_wide_integer_command_buffer == nil || adapter_wide_integer_encoder == nil ||
+                adapter_wide_integer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_wide_integer_bytes, adapter_wide_integer_bytes, wide_integer_byte_count) != 0) {
+                fail_with_error("wide integer compute adapter execution failed", adapter_wide_integer_error);
+                return 49 + (int)format_index;
             }
         }
 

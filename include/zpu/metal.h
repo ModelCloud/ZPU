@@ -395,6 +395,12 @@ enum {
      * storage width and the Metal upper-left dispatch grid. */
     ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA32_UINT = 10,
     ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA32_SINT = 11,
+    /* Fixed CPU integer-texture profiles for scalar and dual-channel
+     * 32-bit targets. Unused lanes are ignored by the target format. */
+    ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_UINT = 12,
+    ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_SINT = 13,
+    ZPU_METAL_COMPUTE_FILL_GRADIENT_RG32_UINT = 14,
+    ZPU_METAL_COMPUTE_FILL_GRADIENT_RG32_SINT = 15,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

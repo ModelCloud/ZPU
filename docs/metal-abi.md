@@ -75,7 +75,11 @@ triangle path:
   fixed CPU compute profiles remain explicitly format-specific; the
   `zpu_cpu_fill_gradient_rgba32_uint` and
   `zpu_cpu_fill_gradient_rgba32_sint` profiles write all four lanes of their
-  matching RGBA32 integer textures through the CPU/ZPU path;
+  matching RGBA32 integer textures through the CPU/ZPU path, while the
+  `zpu_cpu_fill_gradient_r32_uint`, `zpu_cpu_fill_gradient_r32_sint`,
+  `zpu_cpu_fill_gradient_rg32_uint`, and `zpu_cpu_fill_gradient_rg32_sint`
+  profiles preserve scalar and dual-channel 32-bit integer lanes in the same
+  upper-left CPU dispatch grid;
 - formats without a corresponding CPU shader profile remain rejected
 - CPU-owned `MTLDevice` identity and capability metadata, including a stable,
   copyable `MTLArchitecture` named `ZPU CPU`; this metadata never wraps or
