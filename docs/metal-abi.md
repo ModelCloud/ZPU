@@ -197,8 +197,8 @@ triangle path:
   logical-to-physical map. Factor-one triangle patches select layers by
   `baseInstance`, while layered mesh draws and layered multisample passes
   remain explicitly rejected
-- buffer-backed texture views that alias storage with checked row strides and
-  preserve the backing resource lifetime
+- buffer-backed 2D and texture-buffer views that alias ZPU storage with checked
+  offsets/row strides and preserve the backing resource lifetime
 - compatible pixel-format views for all supported color and integer formats
   with the same bytes-per-texel create
   view-owned ZPU handles over the same bytes, so CPU sampling, rendering, and

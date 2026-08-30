@@ -2311,7 +2311,12 @@ static uint8_t zpu_visibility_result_type(MTLRenderPassDescriptor *descriptor) {
 }
 
 static BOOL zpu_texture_type_is_1d(MTLTextureType type) {
-    return type == MTLTextureType1D || type == MTLTextureType1DArray;
+    return type == MTLTextureType1D || type == MTLTextureType1DArray ||
+        type == MTLTextureTypeTextureBuffer;
+}
+
+static BOOL zpu_texture_type_is_texture_buffer(MTLTextureType type) {
+    return type == MTLTextureTypeTextureBuffer;
 }
 
 static BOOL zpu_texture_type_is_3d(MTLTextureType type) {
@@ -4646,8 +4651,10 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
     return KERN_SUCCESS;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow {
-    if (descriptor == nil || (descriptor.textureType != MTLTextureType1D && descriptor.textureType != MTLTextureType2D) ||
-        (descriptor.textureType == MTLTextureType1D && descriptor.height != 1) || descriptor.depth != 1 ||
+    if (descriptor == nil) return nil;
+    const BOOL textureBuffer = zpu_texture_type_is_texture_buffer(descriptor.textureType);
+    if ((!textureBuffer && descriptor.textureType != MTLTextureType1D && descriptor.textureType != MTLTextureType2D) ||
+        ((textureBuffer || descriptor.textureType == MTLTextureType1D) && descriptor.height != 1) || descriptor.depth != 1 ||
         descriptor.arrayLength != 1 || descriptor.mipmapLevelCount != 1 || descriptor.sampleCount != 1 ||
         !zpu_buffer_texture_format_supported(descriptor.pixelFormat)) return nil;
     if (descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX) return nil;

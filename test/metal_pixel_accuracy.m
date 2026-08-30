@@ -469,6 +469,61 @@ static int test_texture_view_format_compatibility(
                 adapter_1d_array_to_1d_accepts, adapter_1d_to_array_accepts);
         return 145;
     }
+
+    MTLTextureDescriptor *texture_buffer_descriptor =
+        [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:4
+                                                      resourceOptions:MTLResourceStorageModeShared
+                                                                usage:MTLTextureUsageShaderRead];
+    id<MTLBuffer> native_texture_buffer_storage =
+        [native_device newBufferWithLength:32 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_texture_buffer_storage =
+        [adapter_device newBufferWithLength:32 options:MTLResourceStorageModeShared];
+    const uint8_t texture_buffer_source_bytes[] = {
+        0x41, 0x52, 0x63, 0x74, 0x85, 0x96, 0xa7, 0xb8,
+        0xc9, 0xda, 0xeb, 0xfc, 0x0d, 0x1e, 0x2f, 0x30,
+    };
+    if (native_texture_buffer_storage != nil && adapter_texture_buffer_storage != nil) {
+        memcpy((uint8_t *)native_texture_buffer_storage.contents + 4,
+               texture_buffer_source_bytes, sizeof(texture_buffer_source_bytes));
+        memcpy((uint8_t *)adapter_texture_buffer_storage.contents + 4,
+               texture_buffer_source_bytes, sizeof(texture_buffer_source_bytes));
+    }
+    id<MTLTexture> native_texture_buffer =
+        [native_texture_buffer_storage newTextureWithDescriptor:texture_buffer_descriptor
+                                                         offset:4 bytesPerRow:sizeof(texture_buffer_source_bytes)];
+    id<MTLTexture> adapter_texture_buffer =
+        [adapter_texture_buffer_storage newTextureWithDescriptor:texture_buffer_descriptor
+                                                          offset:4 bytesPerRow:sizeof(texture_buffer_source_bytes)];
+    const BOOL native_texture_buffer_accepts = native_texture_buffer != nil;
+    const BOOL adapter_texture_buffer_accepts = adapter_texture_buffer != nil;
+    BOOL texture_buffer_match = native_texture_buffer_accepts == adapter_texture_buffer_accepts;
+    if (native_texture_buffer != nil && adapter_texture_buffer != nil) {
+        uint8_t native_view_bytes[sizeof(texture_buffer_source_bytes)] = {0};
+        uint8_t adapter_view_bytes[sizeof(texture_buffer_source_bytes)] = {0};
+        [native_texture_buffer getBytes:native_view_bytes bytesPerRow:sizeof(native_view_bytes)
+                            fromRegion:MTLRegionMake1D(0, 4) mipmapLevel:0];
+        [adapter_texture_buffer getBytes:adapter_view_bytes bytesPerRow:sizeof(adapter_view_bytes)
+                             fromRegion:MTLRegionMake1D(0, 4) mipmapLevel:0];
+        texture_buffer_match = texture_buffer_match &&
+            native_texture_buffer.textureType == MTLTextureTypeTextureBuffer &&
+            adapter_texture_buffer.textureType == native_texture_buffer.textureType &&
+            native_texture_buffer.width == 4 && adapter_texture_buffer.width == native_texture_buffer.width &&
+            native_texture_buffer.height == 1 && adapter_texture_buffer.height == native_texture_buffer.height &&
+            native_texture_buffer.buffer == native_texture_buffer_storage &&
+            adapter_texture_buffer.buffer == adapter_texture_buffer_storage &&
+            native_texture_buffer.bufferOffset == 4 &&
+            adapter_texture_buffer.bufferOffset == native_texture_buffer.bufferOffset &&
+            native_texture_buffer.bufferBytesPerRow == sizeof(texture_buffer_source_bytes) &&
+            adapter_texture_buffer.bufferBytesPerRow == native_texture_buffer.bufferBytesPerRow &&
+            memcmp(native_view_bytes, texture_buffer_source_bytes, sizeof(native_view_bytes)) == 0 &&
+            memcmp(adapter_view_bytes, native_view_bytes, sizeof(native_view_bytes)) == 0;
+    }
+    if (!texture_buffer_match) {
+        fprintf(stderr, "metal-pixel: texture-buffer alias mismatch native=%d adapter=%d\n",
+                native_texture_buffer_accepts, adapter_texture_buffer_accepts);
+        return 146;
+    }
     return mismatch ? 143 : 0;
 }
 
