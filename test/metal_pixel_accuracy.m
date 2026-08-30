@@ -19522,6 +19522,39 @@ int main(void) {
             fail_with_error("Metal 4 CPU command submission failed", metal4_error);
             return 60;
         }
+
+        /* Metal 4 argument tables can bind every buffer required by the
+         * registered add profile. The table and the output remain ZPU-owned;
+         * this adapter dispatch is still CPU-only, with the earlier native
+         * buffer result serving as the oracle. */
+        MTL4ArgumentTableDescriptor *metal4_buffer_add_table_descriptor = [MTL4ArgumentTableDescriptor new];
+        metal4_buffer_add_table_descriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> metal4_buffer_add_table =
+            [adapter_device newArgumentTableWithDescriptor:metal4_buffer_add_table_descriptor error:&metal4_error];
+        [metal4_buffer_add_table setAddress:adapter_buffer_add_left.gpuAddress atIndex:0];
+        [metal4_buffer_add_table setAddress:adapter_buffer_add_right.gpuAddress atIndex:1];
+        id<MTLBuffer> metal4_buffer_add_output =
+            [adapter_device newBufferWithLength:sizeof(buffer_add_left_values) options:MTLResourceStorageModeShared];
+        id<MTL4CommandBuffer> metal4_buffer_add_command_buffer = [adapter_device newCommandBuffer];
+        [metal4_buffer_add_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4ComputeCommandEncoder> metal4_buffer_add_encoder =
+            [metal4_buffer_add_command_buffer computeCommandEncoder];
+        [metal4_buffer_add_table setAddress:metal4_buffer_add_output.gpuAddress atIndex:2];
+        [metal4_buffer_add_encoder setComputePipelineState:adapter_buffer_add_pipeline];
+        [metal4_buffer_add_encoder setArgumentTable:metal4_buffer_add_table];
+        [metal4_buffer_add_encoder dispatchThreads:MTLSizeMake(buffer_add_count, 1, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+        [metal4_buffer_add_encoder endEncoding];
+        [metal4_buffer_add_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_buffer_add_command_buffers[] = {metal4_buffer_add_command_buffer};
+        [metal4_queue commit:metal4_buffer_add_command_buffers count:1];
+        if (metal4_buffer_add_table == nil || metal4_buffer_add_output == nil ||
+            metal4_buffer_add_command_buffer == nil || metal4_buffer_add_encoder == nil ||
+            memcmp(native_buffer_add_output.contents, metal4_buffer_add_output.contents,
+                   sizeof(buffer_add_left_values)) != 0) {
+            fail_with_error("Metal 4 CPU buffer add argument-table dispatch failed", metal4_error);
+            return 187;
+        }
         const int metal4_multisample_result = test_metal4_multisample_depth_stencil_against_native(
             device, adapter_device, vertex_function, fragment_function, adapter_mtl4_compiler,
             adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);

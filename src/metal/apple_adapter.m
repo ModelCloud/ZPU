@@ -3084,8 +3084,8 @@ static void zpu_metal4_clear_compute_argument_table(ZPUComputeEncoder *legacy,
                                                       ZPUMTL4ArgumentTable *table) {
     if (legacy == nil || table == nil) return;
     for (NSUInteger index = 0; index < table->_maxBufferBindCount; ++index) {
-        if (index == 0) {
-            [(id<MTLComputeCommandEncoder>)legacy setBuffer:nil offset:0 atIndex:0];
+        if (index == 0 || (legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 && index <= 2)) {
+            [(id<MTLComputeCommandEncoder>)legacy setBuffer:nil offset:0 atIndex:index];
         }
         [(id<MTLComputeCommandEncoder>)legacy setAccelerationStructure:nil atBufferIndex:index];
         [(id<MTLComputeCommandEncoder>)legacy setVisibleFunctionTable:nil atBufferIndex:index];
@@ -13776,6 +13776,9 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     if (_argumentTable->_invalid) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
         if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
+            if (_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 && index <= 2) {
+                [(id<MTLComputeCommandEncoder>)_legacy setBuffer:nil offset:0 atIndex:index];
+            }
             [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
             [(id<MTLComputeCommandEncoder>)_legacy setVisibleFunctionTable:nil atBufferIndex:index];
             [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:nil atBufferIndex:index];
@@ -13798,7 +13801,12 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
         } else if ([resource isKindOfClass:[ZPUIntersectionFunctionTable class]]) {
             [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:
                 (id<MTLIntersectionFunctionTable>)resource atBufferIndex:index];
-        } else if (index == 0) {
+        } else if (index == 0 ||
+                   (index <= 2 && _legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32)) {
+            if (_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 && buffer == nil) {
+                [_owner markError];
+                return;
+            }
             const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
             [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
             [(id<MTLComputeCommandEncoder>)_legacy setVisibleFunctionTable:nil atBufferIndex:index];
