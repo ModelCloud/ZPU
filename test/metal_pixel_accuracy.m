@@ -11925,6 +11925,83 @@ int main(void) {
                     fail_with_error("Metal 4 CPU triangle trace pixel oracle failed", metal4_ray_feedback_error);
                     return 156;
                 }
+
+                MTLIndirectAccelerationStructureInstanceDescriptor metal4_instance_data = {
+                    .transformationMatrix = instance_matrix,
+                    .options = MTLAccelerationStructureInstanceOptionNone,
+                    .mask = UINT32_MAX,
+                    .intersectionFunctionTableOffset = 0,
+                    .userID = 0,
+                    .accelerationStructureID = [adapter_ray_acceleration_structure gpuResourceID],
+                };
+                id<MTLBuffer> adapter_metal4_instance_buffer =
+                    [adapter_device newBufferWithBytes:&metal4_instance_data length:sizeof(metal4_instance_data)
+                                                options:MTLResourceStorageModeShared];
+                MTL4InstanceAccelerationStructureDescriptor *metal4_instance_descriptor =
+                    [MTL4InstanceAccelerationStructureDescriptor new];
+                metal4_instance_descriptor.instanceDescriptorBuffer =
+                    MTL4BufferRangeMake(adapter_metal4_instance_buffer.gpuAddress, UINT64_MAX);
+                metal4_instance_descriptor.instanceDescriptorStride = sizeof(metal4_instance_data);
+                metal4_instance_descriptor.instanceCount = 1;
+                metal4_instance_descriptor.instanceDescriptorType =
+                    MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+                MTLAccelerationStructureSizes metal4_instance_sizes =
+                    [adapter_device accelerationStructureSizesWithDescriptor:metal4_instance_descriptor];
+                id<MTLAccelerationStructure> adapter_metal4_instance_acceleration_structure =
+                    [adapter_device newAccelerationStructureWithSize:metal4_instance_sizes.accelerationStructureSize];
+                id<MTLBuffer> adapter_metal4_instance_scratch =
+                    [adapter_device newBufferWithLength:metal4_instance_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                               metal4_instance_sizes.buildScratchBufferSize
+                                                options:MTLResourceStorageModeShared];
+                id<MTL4CommandBuffer> metal4_instance_build_command_buffer = [adapter_device newCommandBuffer];
+                [metal4_instance_build_command_buffer beginCommandBufferWithAllocator:metal4_ray_allocator];
+                id<MTL4ComputeCommandEncoder> metal4_instance_build_encoder =
+                    [metal4_instance_build_command_buffer computeCommandEncoder];
+                [metal4_instance_build_encoder buildAccelerationStructure:adapter_metal4_instance_acceleration_structure
+                                                                   descriptor:metal4_instance_descriptor
+                                                                scratchBuffer:MTL4BufferRangeMake(
+                                                                    adapter_metal4_instance_scratch.gpuAddress,
+                                                                    adapter_metal4_instance_scratch.length)];
+                [metal4_instance_build_encoder endEncoding];
+                [metal4_instance_build_command_buffer endCommandBuffer];
+                id<MTL4CommandBuffer> metal4_instance_build_buffers[] = {metal4_instance_build_command_buffer};
+                MTL4CommitOptions *metal4_instance_options = ZPUMetalCreateCPUCommitOptions();
+                __block NSError *metal4_instance_feedback_error = nil;
+                [metal4_instance_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                    metal4_instance_feedback_error = feedback.error;
+                }];
+                [metal4_ray_queue commit:metal4_instance_build_buffers count:1 options:metal4_instance_options];
+
+                id<MTLTexture> adapter_metal4_instance_texture =
+                    [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+                id<MTLCommandBuffer> adapter_metal4_instance_command_buffer = [adapter_queue commandBuffer];
+                id<MTLComputeCommandEncoder> adapter_metal4_instance_encoder =
+                    [adapter_metal4_instance_command_buffer computeCommandEncoder];
+                [adapter_metal4_instance_encoder setComputePipelineState:adapter_ray_pipeline];
+                [adapter_metal4_instance_encoder setAccelerationStructure:
+                    adapter_metal4_instance_acceleration_structure atBufferIndex:0];
+                [adapter_metal4_instance_encoder setTexture:adapter_metal4_instance_texture atIndex:0];
+                [adapter_metal4_instance_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                             threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+                [adapter_metal4_instance_encoder endEncoding];
+                [adapter_metal4_instance_command_buffer commit];
+                [adapter_metal4_instance_command_buffer waitUntilCompleted];
+                uint8_t adapter_metal4_instance_pixels[ray_byte_count];
+                [adapter_metal4_instance_texture getBytes:adapter_metal4_instance_pixels bytesPerRow:ray_width * 4
+                                                 fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+                if (adapter_metal4_instance_buffer == nil || metal4_instance_descriptor == nil ||
+                    metal4_instance_sizes.accelerationStructureSize == 0 ||
+                    adapter_metal4_instance_acceleration_structure == nil ||
+                    adapter_metal4_instance_scratch == nil || metal4_instance_build_command_buffer == nil ||
+                    metal4_instance_build_encoder == nil || metal4_instance_feedback_error != nil ||
+                    adapter_metal4_instance_texture == nil || adapter_metal4_instance_command_buffer == nil ||
+                    adapter_metal4_instance_encoder == nil ||
+                    adapter_metal4_instance_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                    memcmp(native_instance_ray_pixels, adapter_metal4_instance_pixels, ray_byte_count) != 0) {
+                    fail_with_error("Metal 4 CPU instance triangle trace pixel oracle failed",
+                                    metal4_instance_feedback_error);
+                    return 158;
+                }
             }
         }
 
