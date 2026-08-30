@@ -2294,6 +2294,14 @@ static int test_multisample_depth_stencil_against_native(
     const NSUInteger sample_counts[] = {2, 4};
     for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
         const NSUInteger sample_count = sample_counts[sample_index];
+        const MTLStoreAction depth_store_actions[] = {
+            MTLStoreActionStore,
+            MTLStoreActionCustomSampleDepthStore,
+        };
+        for (NSUInteger depth_store_index = 0;
+             depth_store_index < sizeof(depth_store_actions) / sizeof(depth_store_actions[0]);
+             ++depth_store_index) {
+    const MTLStoreAction depth_store_action = depth_store_actions[depth_store_index];
     MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
     native_pipeline_descriptor.vertexFunction = native_vertex_function;
     native_pipeline_descriptor.fragmentFunction = native_fragment_function;
@@ -2371,12 +2379,18 @@ static int test_multisample_depth_stencil_against_native(
     native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
     native_pass.depthAttachment.texture = native_depth;
     native_pass.depthAttachment.loadAction = MTLLoadActionClear;
-    native_pass.depthAttachment.storeAction = MTLStoreActionStore;
+    native_pass.depthAttachment.storeAction = depth_store_action;
+    native_pass.depthAttachment.storeActionOptions = MTLStoreActionOptionCustomSamplePositions;
     native_pass.depthAttachment.clearDepth = 1.0;
     native_pass.stencilAttachment.texture = native_depth;
     native_pass.stencilAttachment.loadAction = MTLLoadActionClear;
     native_pass.stencilAttachment.storeAction = MTLStoreActionStore;
     native_pass.stencilAttachment.clearStencil = 7;
+    const MTLSamplePosition sample_positions[] = {
+        {0.13f, 0.27f}, {0.79f, 0.21f}, {0.31f, 0.83f}, {0.87f, 0.69f},
+    };
+    [native_pass setSamplePositions:sample_positions count:sample_count];
+    native_pass.colorAttachments[0].storeActionOptions = MTLStoreActionOptionCustomSamplePositions;
     MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
     adapter_pass.colorAttachments[0].texture = adapter_color;
     adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
@@ -2395,12 +2409,16 @@ static int test_multisample_depth_stencil_against_native(
         return 157;
     }
     [native_encoder setRenderPipelineState:native_pipeline];
+    [native_encoder setColorStoreActionOptions:MTLStoreActionOptionCustomSamplePositions atIndex:0];
+    [native_encoder setDepthStoreActionOptions:MTLStoreActionOptionCustomSamplePositions];
     [native_encoder setDepthStencilState:native_depth_stencil_state];
     [native_encoder setStencilReferenceValue:7];
     [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
     [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
     [native_encoder endEncoding];
     [adapter_encoder setRenderPipelineState:adapter_pipeline];
+    [adapter_encoder setColorStoreActionOptions:MTLStoreActionOptionCustomSamplePositions atIndex:0];
+    [adapter_encoder setDepthStoreActionOptions:MTLStoreActionOptionCustomSamplePositions];
     [adapter_encoder setDepthStencilState:adapter_depth_stencil_state];
     [adapter_encoder setStencilReferenceValue:7];
     [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
@@ -2421,7 +2439,8 @@ static int test_multisample_depth_stencil_against_native(
         memcmp(native_pixels, adapter_pixels, sizeof(native_pixels)) != 0) {
         size_t mismatch = 0;
         while (mismatch < sizeof(native_pixels) && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
-        fprintf(stderr, "metal-pixel: MSAA depth/stencil mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+        fprintf(stderr, "metal-pixel: MSAA depth/stencil mismatch sample_count=%zu depth_store=%ld at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                sample_count, (long)depth_store_action,
                 mismatch, mismatch < sizeof(native_pixels) ? native_pixels[mismatch] : 0,
                 mismatch < sizeof(adapter_pixels) ? adapter_pixels[mismatch] : 0,
                 (long)native_command_buffer.status, (long)adapter_command_buffer.status);
@@ -2429,7 +2448,15 @@ static int test_multisample_depth_stencil_against_native(
         fail_with_error("adapter multisample depth/stencil error", adapter_command_buffer.error);
         return 158;
     }
+    MTLRenderPassDescriptor *invalid_options_pass = [adapter_pass copy];
+    invalid_options_pass.colorAttachments[0].storeActionOptions = (MTLStoreActionOptions)(1u << 12);
+    id<MTLCommandBuffer> invalid_options_command_buffer = [adapter_queue commandBuffer];
+    if ([invalid_options_command_buffer renderCommandEncoderWithDescriptor:invalid_options_pass] != nil) {
+        fprintf(stderr, "metal-pixel: unsupported store action options were accepted\n");
+        return 159;
     }
+    }
+        }
     return 0;
 }
 

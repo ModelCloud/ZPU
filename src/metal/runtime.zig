@@ -2901,7 +2901,14 @@ pub const RenderEncoder = struct {
                 if (!std.math.isFinite(position.x) or !std.math.isFinite(position.y) or
                     position.x < 0 or position.x > 1 or position.y < 0 or position.y > 1)
                     return error.InvalidArgument;
-                sample_positions[index] = position;
+                // Apple programmable sample positions use the top-left pixel
+                // grid with 1/16-pixel coordinates. Keep the public descriptor
+                // values untouched, but quantize the CPU raster state to the
+                // same hardware grid before coverage is evaluated.
+                sample_positions[index] = .{
+                    .x = quantizeMetalSamplePosition(position.x),
+                    .y = quantizeMetalSamplePosition(position.y),
+                };
             }
         }
         switch (self.command_buffer.commands.items[self.begin_index]) {
@@ -7766,12 +7773,23 @@ fn finiteViewport(viewport: abi.Viewport) bool {
         viewport.width >= 0 and viewport.height >= 0;
 }
 
+fn quantizeMetalSamplePosition(value: f32) f32 {
+    return @round(value * 16.0) / 16.0;
+}
+
 fn validPass(pass: abi.RenderPassDescriptor) bool {
     return @intFromEnum(pass.color.load_action) <= @intFromEnum(abi.LoadAction.clear) and
         @intFromEnum(pass.color.store_action) <= @intFromEnum(abi.StoreAction.store) and
         @intFromEnum(pass.depth.load_action) <= @intFromEnum(abi.LoadAction.clear) and
         @intFromEnum(pass.depth.store_action) <= @intFromEnum(abi.StoreAction.store) and
         std.math.isFinite(pass.depth.clear_depth);
+}
+
+test "Apple programmable sample positions use a 1/16 top-left pixel grid" {
+    try std.testing.expectEqual(@as(f32, 0.125), quantizeMetalSamplePosition(0.13));
+    try std.testing.expectEqual(@as(f32, 0.8125), quantizeMetalSamplePosition(0.79));
+    try std.testing.expectEqual(@as(f32, 0.1875), quantizeMetalSamplePosition(0.21));
+    try std.testing.expectEqual(@as(f32, 0.6875), quantizeMetalSamplePosition(0.69));
 }
 
 fn validPrimitive(primitive: abi.PrimitiveType) bool {
