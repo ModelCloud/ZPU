@@ -1195,6 +1195,9 @@ static int test_cpu_trace_triangles_against_native(
     id<MTLAccelerationStructure> acceleration_structure =
         sizes.accelerationStructureSize == 0 ? nil :
         [adapter_device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+    id<MTLAccelerationStructure> copied_acceleration_structure =
+        sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
     id<MTLBuffer> scratch_buffer = [adapter_device
         newBufferWithLength:sizes.buildScratchBufferSize == 0 ? 1 : sizes.buildScratchBufferSize
                     options:MTLResourceStorageModeShared];
@@ -1204,14 +1207,27 @@ static int test_cpu_trace_triangles_against_native(
     if (native_function == nil || adapter_function == nil || native_pipeline == nil ||
         adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
         native_vertex_buffer == nil || adapter_vertex_buffer == nil ||
-        acceleration_structure == nil || scratch_buffer == nil || build_command_buffer == nil ||
+        acceleration_structure == nil || copied_acceleration_structure == nil || scratch_buffer == nil ||
+        build_command_buffer == nil ||
         build_encoder == nil) {
         fail_with_error("CPU trace acceleration resources failed", adapter_error ?: native_error);
         return 157;
     }
     [build_encoder buildAccelerationStructure:acceleration_structure descriptor:acceleration_descriptor
                                 scratchBuffer:scratch_buffer scratchBufferOffset:0];
+    [build_encoder copyAccelerationStructure:acceleration_structure
+                       toAccelerationStructure:copied_acceleration_structure];
     [build_encoder endEncoding];
+    /* AS payload generation is a command-stream operation. Mutating the
+     * source after encoding but before commit must be visible to the CPU/ZPU
+     * build, just as it is to an ordered native Metal command. */
+    const float deferred_triangle_vertices[] = {
+        -0.70f, -0.55f, 0.0f,
+         0.85f, -0.55f, 0.0f,
+         0.10f,  0.80f, 0.0f,
+    };
+    memcpy(native_vertex_buffer.contents, deferred_triangle_vertices, sizeof(deferred_triangle_vertices));
+    memcpy(adapter_vertex_buffer.contents, deferred_triangle_vertices, sizeof(deferred_triangle_vertices));
     [build_command_buffer commit];
     [build_command_buffer waitUntilCompleted];
 
@@ -1226,7 +1242,7 @@ static int test_cpu_trace_triangles_against_native(
               threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
     [native_encoder endEncoding];
     [adapter_encoder setComputePipelineState:adapter_pipeline];
-    [adapter_encoder setAccelerationStructure:acceleration_structure atBufferIndex:0];
+    [adapter_encoder setAccelerationStructure:copied_acceleration_structure atBufferIndex:0];
     [adapter_encoder setTexture:adapter_texture atIndex:0];
     [adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -1440,6 +1456,11 @@ static int test_cpu_indirect_trace_triangles_against_native(
          0.90f, -0.10f, 0.0f,
          0.00f,  1.25f, 0.0f,
     };
+    const float precommit_refit_triangle_vertices[] = {
+        -0.45f, -0.80f, 0.0f,
+         0.45f, -0.80f, 0.0f,
+         0.00f,  0.15f, 0.0f,
+    };
     MTLPackedFloat4x3 refit_instance_matrix = {
         .columns = {
             MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
@@ -1454,7 +1475,8 @@ static int test_cpu_indirect_trace_triangles_against_native(
         return 162;
     }
     memcpy(native_vertex_buffer.contents, refit_native_triangle_vertices, sizeof(refit_native_triangle_vertices));
-    memcpy(adapter_vertex_buffer.contents, refit_triangle_vertices, sizeof(refit_triangle_vertices));
+    memcpy(adapter_vertex_buffer.contents, precommit_refit_triangle_vertices,
+           sizeof(precommit_refit_triangle_vertices));
     instance_data[0].transformationMatrix = refit_instance_matrix;
     memcpy(instance_descriptor_buffer.contents, instance_data, sizeof(instance_data));
 
@@ -1465,6 +1487,9 @@ static int test_cpu_indirect_trace_triangles_against_native(
                                            destination:bottom_level scratchBuffer:bottom_level_scratch
                                      scratchBufferOffset:0];
     [refit_bottom_encoder endEncoding];
+    /* The source changes after the refit is encoded but before the command
+     * buffer commits. The deferred callback must consume these final bytes. */
+    memcpy(adapter_vertex_buffer.contents, refit_triangle_vertices, sizeof(refit_triangle_vertices));
     [refit_bottom_command_buffer commit];
     [refit_bottom_command_buffer waitUntilCompleted];
 

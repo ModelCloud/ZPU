@@ -17404,6 +17404,105 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
     return YES;
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static void zpu_cpu_acceleration_retain_metal4_range(
+    ZPUCommandBuffer *owner, MTL4BufferRange range) {
+    if (owner == nil || range.bufferAddress == 0) return;
+    ZPUBuffer *buffer = nil;
+    NSUInteger offset = 0;
+    if (zpu_metal4_buffer_range(range, [owner device], &buffer, &offset)) {
+        [owner retainResource:buffer];
+    }
+}
+
+static void zpu_cpu_acceleration_retain_descriptor_ranges(
+    ZPUCommandBuffer *owner, MTLAccelerationStructureDescriptor *descriptor) {
+    if (owner == nil || descriptor == nil) return;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
+            for (MTL4AccelerationStructureGeometryDescriptor *geometry in
+                 ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                if ([geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                    MTL4AccelerationStructureTriangleGeometryDescriptor *triangles =
+                        (MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry;
+                    zpu_cpu_acceleration_retain_metal4_range(owner, triangles.vertexBuffer);
+                    zpu_cpu_acceleration_retain_metal4_range(owner, triangles.indexBuffer);
+                    zpu_cpu_acceleration_retain_metal4_range(owner, triangles.transformationMatrixBuffer);
+                }
+            }
+        } else if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
+            MTL4InstanceAccelerationStructureDescriptor *instances =
+                (MTL4InstanceAccelerationStructureDescriptor *)descriptor;
+            zpu_cpu_acceleration_retain_metal4_range(owner, instances.instanceDescriptorBuffer);
+            zpu_cpu_acceleration_retain_metal4_range(owner, instances.motionTransformBuffer);
+        } else if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+            MTL4IndirectInstanceAccelerationStructureDescriptor *instances =
+                (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor;
+            zpu_cpu_acceleration_retain_metal4_range(owner, instances.instanceDescriptorBuffer);
+            zpu_cpu_acceleration_retain_metal4_range(owner, instances.instanceCountBuffer);
+            zpu_cpu_acceleration_retain_metal4_range(owner, instances.motionTransformBuffer);
+            zpu_cpu_acceleration_retain_metal4_range(owner, instances.motionTransformCountBuffer);
+        }
+    }
+}
+
+static BOOL zpu_cpu_acceleration_build_payload(
+    ZPUAccelerationStructure *target, MTLAccelerationStructureDescriptor *descriptor) {
+    if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
+        BOOL traceable = YES;
+        for (MTLAccelerationStructureGeometryDescriptor *geometry in
+             ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+            if (![geometry isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
+                traceable = NO;
+                break;
+            }
+        }
+        if (traceable) return zpu_cpu_acceleration_write_payload(target, descriptor);
+        memset(target->_storage.contents, 0, target->_size);
+        const uint64_t descriptorTag = 1;
+        memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
+        return YES;
+    }
+    if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
+        return zpu_cpu_acceleration_write_instance_payload(
+            target, (MTLInstanceAccelerationStructureDescriptor *)descriptor);
+    }
+    if (@available(macOS 14.0, iOS 17.0, *)) {
+        if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
+            return zpu_cpu_acceleration_write_indirect_instance_payload(
+                target, (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor);
+        }
+    }
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
+            return zpu_cpu_acceleration_write_metal4_instance_payload(
+                target, (MTL4InstanceAccelerationStructureDescriptor *)descriptor);
+        }
+        if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+            return zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
+                target, (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor);
+        }
+        if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
+            BOOL traceable = YES;
+            for (MTL4AccelerationStructureGeometryDescriptor *geometry in
+                 ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                    traceable = NO;
+                    break;
+                }
+            }
+            if (traceable) {
+                return zpu_cpu_acceleration_write_metal4_payload(
+                    target, (MTL4PrimitiveAccelerationStructureDescriptor *)descriptor);
+            }
+        }
+    }
+    memset(target->_storage.contents, 0, target->_size);
+    const uint64_t descriptorTag = [descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]] ? 2 : 3;
+    memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
+    return YES;
+}
+
 @implementation ZPUAccelerationStructureEncoder
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner {
     if ((self = [super init])) {
@@ -17439,84 +17538,21 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         [_owner markError];
         return;
     }
-    if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
-        BOOL traceable = YES;
-        for (MTLAccelerationStructureGeometryDescriptor *geometry in
-             ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
-            if (![geometry isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
-                traceable = NO;
-                break;
-            }
-        }
-        if (traceable) {
-            if (!zpu_cpu_acceleration_write_payload(target, descriptor)) {
-                [_owner markError];
-                return;
-            }
-        } else {
-            memset(target->_storage.contents, 0, target->_size);
-            const uint64_t descriptorTag = 1;
-            memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
-        }
-    } else if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
-        if (!zpu_cpu_acceleration_write_instance_payload(
-                target, (MTLInstanceAccelerationStructureDescriptor *)descriptor)) {
-            [_owner markError];
-            return;
-        }
-    } else {
-        BOOL payload_written = NO;
-        if (@available(macOS 14.0, iOS 17.0, *)) {
-            if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
-                if (!zpu_cpu_acceleration_write_indirect_instance_payload(
-                        target, (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor)) {
-                    [_owner markError];
-                    return;
-                }
-                payload_written = YES;
-            }
-        }
-        if (@available(macOS 26.0, iOS 26.0, *)) {
-            if (!payload_written && [descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
-                if (!zpu_cpu_acceleration_write_metal4_instance_payload(
-                        target, (MTL4InstanceAccelerationStructureDescriptor *)descriptor)) {
-                    [_owner markError];
-                    return;
-                }
-                payload_written = YES;
-            } else if (!payload_written &&
-                       [descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
-                if (!zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
-                        target, (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor)) {
-                    [_owner markError];
-                    return;
-                }
-                payload_written = YES;
-            } else if (!payload_written && [descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
-                BOOL traceable = YES;
-                for (MTL4AccelerationStructureGeometryDescriptor *geometry in
-                     ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
-                    if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
-                        traceable = NO;
-                        break;
-                    }
-                }
-                if (traceable) {
-                    if (!zpu_cpu_acceleration_write_metal4_payload(
-                            target, (MTL4PrimitiveAccelerationStructureDescriptor *)descriptor)) {
-                        [_owner markError];
-                        return;
-                    }
-                    payload_written = YES;
-                }
-            }
-        }
-        if (!payload_written) {
-            memset(target->_storage.contents, 0, target->_size);
-            const uint64_t descriptorTag = [descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]] ? 2 : 3;
-            memcpy(target->_storage.contents, &descriptorTag, sizeof(descriptorTag));
-        }
+    zpu_cpu_acceleration_retain_descriptor_ranges(_owner, descriptor);
+    if (!zpu_defer_operation(_owner, ^BOOL {
+        if (!zpu_cpu_acceleration_build_payload(target, descriptor)) return NO;
+        target->_compactedSize = target->_size / 2 == 0 ? 1 : target->_size / 2;
+        target->_built = YES;
+        target->_compacted = NO;
+        return YES;
+    })) {
+        [_owner markError];
+        return;
     }
+    /* Mark the destination as planned so a later build/refit in the same
+     * command buffer can validate ownership and sizing. The serialized bytes
+     * themselves become visible only when this callback reaches the ZPU
+     * command-stream position at commit. */
     target->_compactedSize = target->_size / 2 == 0 ? 1 : target->_size / 2;
     target->_built = YES;
     target->_compacted = NO;
@@ -17553,64 +17589,76 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         [_owner markError];
         return;
     }
-    BOOL rebuild_payload = NO;
-    BOOL rebuild_failed = NO;
-    if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
-        BOOL traceable = YES;
-        for (MTLAccelerationStructureGeometryDescriptor *geometry in
-             ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
-            if (![geometry isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
-                traceable = NO;
-                break;
+    zpu_cpu_acceleration_retain_descriptor_ranges(_owner, descriptor);
+    if (!zpu_defer_operation(_owner, ^BOOL {
+        BOOL rebuild_payload = NO;
+        BOOL rebuild_failed = NO;
+        if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
+            BOOL traceable = YES;
+            for (MTLAccelerationStructureGeometryDescriptor *geometry in
+                 ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                if (![geometry isKindOfClass:[MTLAccelerationStructureTriangleGeometryDescriptor class]]) {
+                    traceable = NO;
+                    break;
+                }
+            }
+            if (traceable) {
+                rebuild_payload = YES;
+                rebuild_failed = !zpu_cpu_acceleration_write_payload(destination, descriptor);
+            }
+        } else if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
+            rebuild_payload = YES;
+            rebuild_failed = !zpu_cpu_acceleration_write_instance_payload(
+                destination, (MTLInstanceAccelerationStructureDescriptor *)descriptor);
+        } else if (@available(macOS 14.0, iOS 17.0, *)) {
+            if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
+                rebuild_payload = YES;
+                rebuild_failed = !zpu_cpu_acceleration_write_indirect_instance_payload(
+                    destination, (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor);
             }
         }
-        if (traceable) {
-            rebuild_payload = YES;
-            rebuild_failed = !zpu_cpu_acceleration_write_payload(destination, descriptor);
-        }
-    } else if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
-        rebuild_payload = YES;
-        rebuild_failed = !zpu_cpu_acceleration_write_instance_payload(
-            destination, (MTLInstanceAccelerationStructureDescriptor *)descriptor);
-    } else if (@available(macOS 14.0, iOS 17.0, *)) {
-        if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
-            rebuild_payload = YES;
-            rebuild_failed = !zpu_cpu_acceleration_write_indirect_instance_payload(
-                destination, (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor);
-        }
-    }
-    if (!rebuild_payload) {
-        if (@available(macOS 26.0, iOS 26.0, *)) {
-            if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
-                rebuild_payload = YES;
-                rebuild_failed = !zpu_cpu_acceleration_write_metal4_instance_payload(
-                    destination, (MTL4InstanceAccelerationStructureDescriptor *)descriptor);
-            } else if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
-                rebuild_payload = YES;
-                rebuild_failed = !zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
-                    destination, (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor);
-            } else if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
-                BOOL traceable = YES;
-                for (MTL4AccelerationStructureGeometryDescriptor *geometry in
-                     ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
-                    if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
-                        traceable = NO;
-                        break;
+        if (!rebuild_payload) {
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
+                    rebuild_payload = YES;
+                    rebuild_failed = !zpu_cpu_acceleration_write_metal4_instance_payload(
+                        destination, (MTL4InstanceAccelerationStructureDescriptor *)descriptor);
+                } else if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+                    rebuild_payload = YES;
+                    rebuild_failed = !zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
+                        destination, (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor);
+                } else if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
+                    BOOL traceable = YES;
+                    for (MTL4AccelerationStructureGeometryDescriptor *geometry in
+                         ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                        if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                            traceable = NO;
+                            break;
+                        }
+                    }
+                    if (traceable) {
+                        rebuild_payload = YES;
+                        rebuild_failed = !zpu_cpu_acceleration_write_metal4_payload(
+                            destination, (MTL4PrimitiveAccelerationStructureDescriptor *)descriptor);
                     }
                 }
-                if (traceable) {
-                    rebuild_payload = YES;
-                    rebuild_failed = !zpu_cpu_acceleration_write_metal4_payload(
-                        destination, (MTL4PrimitiveAccelerationStructureDescriptor *)descriptor);
-                }
             }
         }
-    }
-    if (rebuild_failed) {
+        if (rebuild_failed) return NO;
+        if (!rebuild_payload && source != destination) {
+            memcpy(destination->_storage.contents, source->_storage.contents, source->_size);
+        }
+        destination->_built = YES;
+        destination->_compacted = NO;
+        destination->_compactedSize = source->_compactedSize;
+        return YES;
+    })) {
         [_owner markError];
         return;
     }
-    if (!rebuild_payload && source != destination) memcpy(destination->_storage.contents, source->_storage.contents, source->_size);
+    /* Keep the destination usable for subsequent encoders recorded in this
+     * command buffer; its bytes are still produced at the deferred callback's
+     * ordered position. */
     destination->_built = YES;
     destination->_compacted = NO;
     destination->_compactedSize = source->_compactedSize;
@@ -17642,7 +17690,18 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         [_owner markError];
         return;
     }
-    memcpy(destination->_storage.contents, source->_storage.contents, copySize);
+    if (!zpu_defer_operation(_owner, ^BOOL {
+        memcpy(destination->_storage.contents, source->_storage.contents, copySize);
+        destination->_built = YES;
+        destination->_compacted = source->_compacted;
+        destination->_compactedSize = source->_compactedSize;
+        return YES;
+    })) {
+        [_owner markError];
+        return;
+    }
+    /* The metadata is known at record time, while the storage copy follows
+     * the source build/copy order in the ZPU command stream. */
     destination->_built = YES;
     destination->_compacted = source->_compacted;
     destination->_compactedSize = source->_compactedSize;
@@ -17669,12 +17728,18 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         [_owner markError];
         return;
     }
-    if (sizeDataType == MTLDataTypeUInt) {
-        const uint32_t value = (uint32_t)size;
-        if (zpu_metal_buffer_write(destination->_zpuBuffer, offset, (const uint8_t *)&value, width) != ZPU_METAL_OK) [_owner markError];
-    } else {
+    if (!zpu_defer_operation(_owner, ^BOOL {
+        if (sizeDataType == MTLDataTypeUInt) {
+            const uint32_t value = (uint32_t)size;
+            return zpu_metal_buffer_write(destination->_zpuBuffer, offset,
+                                          (const uint8_t *)&value, width) == ZPU_METAL_OK;
+        }
         const uint64_t value = (uint64_t)size;
-        if (zpu_metal_buffer_write(destination->_zpuBuffer, offset, (const uint8_t *)&value, width) != ZPU_METAL_OK) [_owner markError];
+        return zpu_metal_buffer_write(destination->_zpuBuffer, offset,
+                                      (const uint8_t *)&value, width) == ZPU_METAL_OK;
+    })) {
+        [_owner markError];
+        return;
     }
     [_owner retainResource:source];
     [_owner retainResource:destination];
@@ -17692,8 +17757,17 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
         [_owner markError];
         return;
     }
-    memset(destination->_storage.contents, 0, destination->_size);
-    memcpy(destination->_storage.contents, source->_storage.contents, copySize);
+    if (!zpu_defer_operation(_owner, ^BOOL {
+        memset(destination->_storage.contents, 0, destination->_size);
+        memcpy(destination->_storage.contents, source->_storage.contents, copySize);
+        destination->_built = YES;
+        destination->_compacted = YES;
+        destination->_compactedSize = copySize;
+        return YES;
+    })) {
+        [_owner markError];
+        return;
+    }
     destination->_built = YES;
     destination->_compacted = YES;
     destination->_compactedSize = copySize;
