@@ -288,8 +288,9 @@ triangle path:
   exact upper-left `(0,0)` coordinates and RGBA8/BGRA8 storage ordering; the
   registered `zpu_cpu_mesh_gradient_rgba8` plus
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
-  CPU/ZPU pixel per mesh-grid thread and supports contiguous RGBA8/BGRA8
-  logical attachments through the opted-in color map; the registered
+  CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,
+  clips it with the recorded scissor rectangle, and supports contiguous
+  RGBA8/BGRA8 logical attachments through the opted-in color map; the registered
   `zpu_cpu_tessellated_triangle_vertex` plus
   `zpu_cpu_tessellated_triangle_fragment` profile accepts factor-one triangle
   patches and rasterizes their three control points through the ordinary
@@ -361,7 +362,7 @@ triangle path:
 - legacy and Metal 4 mesh-threadgroup indirect grid arguments are read from
   the ZPU buffer at commit time; the CPU mesh profile multiplies the deferred
   threadgroup grid by the mesh threadgroup dimensions before clipping to the
-  upper-left render target
+  recorded attachment-global scissor and upper-left render target
 - legacy triangle-patch draws accept half-precision, per-patch-and-per-instance
   tessellation factors and execute factor-one patches, including patch-index,
   control-point-index, and indirect argument buffers. All of those buffers are

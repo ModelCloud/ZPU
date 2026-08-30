@@ -470,6 +470,10 @@ const MeshCommand = struct {
     threads_per_object_threadgroup: abi.Size,
     threads_per_mesh_threadgroup: abi.Size,
     color_attachment_map: [8]u8,
+    // Metal scissor coordinates are attachment-global and top-left-origin.
+    // Keep this state with the deferred command so later encoder mutations
+    // cannot rebase or widen the mesh coverage at commit time.
+    scissor: abi.ScissorRect,
     indirect_buffer: ?*Buffer = null,
     indirect_buffer_offset: usize = 0,
 };
@@ -1626,8 +1630,12 @@ pub const CommandBuffer = struct {
                 var target = output_texture.asTarget();
                 const width = @min(@as(usize, target.width), @as(usize, resolved_mesh.threads_per_grid.width));
                 const height = @min(@as(usize, target.height), @as(usize, resolved_mesh.threads_per_grid.height));
-                for (0..height) |y| {
-                    for (0..width) |x| {
+                const x0 = @min(@as(usize, resolved_mesh.scissor.x), width);
+                const y0 = @min(@as(usize, resolved_mesh.scissor.y), height);
+                const x1 = @min(x0 +| @as(usize, resolved_mesh.scissor.width), width);
+                const y1 = @min(y0 +| @as(usize, resolved_mesh.scissor.height), height);
+                for (y0..y1) |y| {
+                    for (x0..x1) |x| {
                         target.storeColor(x, y, .{
                             (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
                             (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
@@ -3389,6 +3397,7 @@ pub const RenderEncoder = struct {
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
+            .scissor = self.scissor,
         } });
     }
 
@@ -3440,6 +3449,7 @@ pub const RenderEncoder = struct {
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
+            .scissor = self.scissor,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
         } });
@@ -7620,6 +7630,49 @@ test "CPU mesh indirect grid is deferred and uses Metal threadgroup dimensions" 
             expected[pixel + 1] = @intCast(((y + 1) * 255 + 4) / 8);
             expected[pixel + 2] = @intCast(((x + 1) * 255 + 4) / 8);
             expected[pixel + 3] = 255;
+        }
+    }
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &expected, texture.bytes);
+}
+
+test "CPU mesh scissor keeps the Apple top-left grid origin" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    });
+    try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
+    try encoder.drawMeshThreads(
+        1,
+        .{ .width = 5, .height = 3, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+    );
+    // The deferred command must retain the original attachment-global
+    // scissor even when the encoder is changed before commit.
+    try encoder.setScissorRect(.{ .x = 0, .y = 0, .width = 5, .height = 3 });
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+
+    var expected = [_]u8{0} ** (5 * 3 * 4);
+    for (0..3) |y| {
+        for (0..5) |x| {
+            const pixel = (y * 5 + x) * 4;
+            expected[pixel + 3] = 255;
+            if (x >= 1 and x < 4 and y >= 1 and y < 3) {
+                expected[pixel + 0] = @intCast(((x + 1) * 255 + 4) / 8);
+                expected[pixel + 1] = @intCast(((y + 1) * 255 + 4) / 8);
+                expected[pixel + 2] = 64;
+            }
         }
     }
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
