@@ -13338,7 +13338,13 @@ int main(void) {
             adapter_legacy_tile_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
             adapter_legacy_tile_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
             adapter_legacy_tile_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-            adapter_legacy_tile_pass.colorAttachments[1].texture = adapter_legacy_tile_aux_texture;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                adapter_legacy_tile_pass.supportColorAttachmentMapping = YES;
+                adapter_legacy_tile_pass.colorAttachments[0].texture = adapter_legacy_tile_aux_texture;
+                adapter_legacy_tile_pass.colorAttachments[1].texture = adapter_legacy_tile_texture;
+            } else {
+                adapter_legacy_tile_pass.colorAttachments[1].texture = adapter_legacy_tile_aux_texture;
+            }
             adapter_legacy_tile_pass.colorAttachments[1].loadAction = MTLLoadActionClear;
             adapter_legacy_tile_pass.colorAttachments[1].storeAction = MTLStoreActionStore;
             adapter_legacy_tile_pass.colorAttachments[1].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
@@ -13347,7 +13353,21 @@ int main(void) {
             id<MTLCommandBuffer> adapter_legacy_tile_command_buffer = [adapter_queue commandBuffer];
             id<MTLRenderCommandEncoder> adapter_legacy_tile_encoder =
                 [adapter_legacy_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_legacy_tile_pass];
-            [adapter_legacy_tile_encoder setRenderPipelineState:adapter_legacy_tile_pipeline];
+            MTLLogicalToPhysicalColorAttachmentMap *adapter_legacy_tile_map = nil;
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                adapter_legacy_tile_map = [MTLLogicalToPhysicalColorAttachmentMap new];
+                [adapter_legacy_tile_map setPhysicalIndex:1 forLogicalIndex:0];
+                [adapter_legacy_tile_map setPhysicalIndex:0 forLogicalIndex:1];
+                for (NSUInteger index = 2; index < 8; ++index) {
+                    [adapter_legacy_tile_map setPhysicalIndex:index forLogicalIndex:index];
+                }
+            }
+            if (adapter_legacy_tile_encoder != nil && adapter_legacy_tile_pipeline != nil) {
+                if (adapter_legacy_tile_map != nil) {
+                    [adapter_legacy_tile_encoder setColorAttachmentMap:adapter_legacy_tile_map];
+                }
+                [adapter_legacy_tile_encoder setRenderPipelineState:adapter_legacy_tile_pipeline];
+            }
             uint32_t adapter_legacy_tile_stage_bytes = 0x54494c45u;
             [adapter_legacy_tile_encoder setTileBytes:&adapter_legacy_tile_stage_bytes
                                                length:sizeof(adapter_legacy_tile_stage_bytes) atIndex:0];
