@@ -32,14 +32,28 @@ const ProjectedVertex = struct {
 // Apple rasterizes screen coordinates on an 8-bit fractional grid. Keeping
 // this explicit makes CPU interpolation deterministic and matches the native
 // stage-in precision used by the Metal oracle.
-const metal_raster_subpixel_scale: f32 = 256.0;
+const metal_raster_subpixel_scale: f64 = 256.0;
 
-fn quantizeRasterCoordinate(value: f32) f32 {
-    return @round(value * metal_raster_subpixel_scale) / metal_raster_subpixel_scale;
+fn quantizeRasterCoordinate(value: f64) f32 {
+    const quantized = @round(value * metal_raster_subpixel_scale) / metal_raster_subpixel_scale;
+    return @floatCast(quantized);
 }
 
+/// Apple exposes MTLViewport as six doubles. The public portable ABI keeps
+/// its historical float layout, while the Objective-C adapter uses this
+/// internal type so viewport-origin/extent arithmetic is not narrowed before
+/// the top-left pixel grid is selected.
+pub const PreciseViewport = extern struct {
+    origin_x: f64,
+    origin_y: f64,
+    width: f64,
+    height: f64,
+    znear: f64,
+    zfar: f64,
+};
+
 pub const DrawOptions = struct {
-    viewport: abi.Viewport,
+    viewport: PreciseViewport,
     scissor: abi.ScissorRect,
     // Metal's default sample locations are expressed in the top-left pixel
     // cell, so (0, 0) is the upper-left corner of the pixel. The Apple CPU
@@ -1266,13 +1280,13 @@ fn outputTarget(job: *const Job, physical_index: usize) ?*Target {
     return job.extra_targets[extra_index] orelse null;
 }
 
-fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
+fn project(vertex: abi.Vertex, viewport: PreciseViewport) ?ProjectedVertex {
     const p = vertex.position;
     if (!std.math.isFinite(p[0]) or !std.math.isFinite(p[1]) or !std.math.isFinite(p[2]) or !std.math.isFinite(p[3]) or p[3] < clip_w_epsilon) return null;
-    const inverse_w = 1.0 / p[3];
-    const nx = p[0] * inverse_w;
-    const ny = p[1] * inverse_w;
-    const nz = p[2] * inverse_w;
+    const inverse_w_precise: f64 = 1.0 / @as(f64, p[3]);
+    const nx: f64 = @as(f64, p[0]) * inverse_w_precise;
+    const ny: f64 = @as(f64, p[1]) * inverse_w_precise;
+    const nz: f64 = @as(f64, p[2]) * inverse_w_precise;
     if (!std.math.isFinite(nx) or !std.math.isFinite(ny) or !std.math.isFinite(nz)) return null;
     // Apple rasterizes primitive coordinates with an 8-bit fractional screen
     // grid. Keep the CPU path on that same grid before evaluating edge
@@ -1288,8 +1302,8 @@ fn project(vertex: abi.Vertex, viewport: abi.Viewport) ?ProjectedVertex {
         // toward the viewport origin, while the CPU surface is addressed
         // with increasing Y down the image.
         .y = quantizeRasterCoordinate(screen_y),
-        .z = viewport.znear + nz * (viewport.zfar - viewport.znear),
-        .inverse_w = inverse_w,
+        .z = @floatCast(viewport.znear + nz * (viewport.zfar - viewport.znear)),
+        .inverse_w = @floatCast(inverse_w_precise),
         .color = .{ vertex.color.red, vertex.color.green, vertex.color.blue, vertex.color.alpha },
     };
 }

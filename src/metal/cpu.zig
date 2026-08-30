@@ -130,7 +130,14 @@ pub const Encoder = struct {
 
     pub fn setViewport(self: *Encoder, viewport: abi.Viewport) !void {
         if (!self.isOpen()) return error.InvalidCommandEncoder;
-        self.options.viewport = viewport;
+        self.options.viewport = .{
+            .origin_x = @floatCast(viewport.origin_x),
+            .origin_y = @floatCast(viewport.origin_y),
+            .width = @floatCast(viewport.width),
+            .height = @floatCast(viewport.height),
+            .znear = @floatCast(viewport.znear),
+            .zfar = @floatCast(viewport.zfar),
+        };
     }
 
     pub fn setScissorRect(self: *Encoder, scissor: abi.ScissorRect) !void {

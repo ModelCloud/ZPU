@@ -34,6 +34,15 @@ typedef int (*zpu_metal_command_callback)(void *context);
 extern int zpu_metal_command_buffer_append_callback(zpu_metal_command_buffer *command_buffer,
                                                      zpu_metal_command_callback callback,
                                                      void *context);
+/* Apple exposes MTLViewport as six doubles. Keep the stable portable ABI's
+ * float viewport intact, but pass Objective-C encoder state through this
+ * adapter-private precise bridge so CPU rasterization does not narrow the
+ * viewport before selecting attachment-global pixels. */
+typedef struct zpu_metal_precise_viewport {
+    double origin_x, origin_y, width, height, znear, zfar;
+} zpu_metal_precise_viewport;
+extern int zpu_metal_render_encoder_set_viewport_precise(
+    zpu_metal_render_encoder *encoder, zpu_metal_precise_viewport viewport);
 
 /* These enum members are introduced after the adapter's iOS 15 deployment
  * target. Their Metal ABI bit positions are stable, so keep the internal
@@ -19645,9 +19654,9 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
 }
 #pragma clang diagnostic pop
 - (void)setViewport:(MTLViewport)viewport {
-    if (zpu_metal_render_encoder_set_viewport(_zpuEncoder, (zpu_metal_viewport){
-        (float)viewport.originX, (float)viewport.originY, (float)viewport.width,
-        (float)viewport.height, (float)viewport.znear, (float)viewport.zfar,
+    if (zpu_metal_render_encoder_set_viewport_precise(_zpuEncoder, (zpu_metal_precise_viewport){
+        viewport.originX, viewport.originY, viewport.width,
+        viewport.height, viewport.znear, viewport.zfar,
     }) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {

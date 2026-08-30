@@ -27996,6 +27996,94 @@ int main(void) {
             fprintf(stderr, "metal-pixel: negative origin-coordinate mismatch\n");
             return 54;
         }
+
+        /* MTLViewport stores six doubles, whereas the stable portable C
+         * surface intentionally stores float fields. Exercise a viewport
+         * whose large origin/extent pair loses enough low bits when narrowed
+         * to move an edge across Apple's 8-bit raster grid. The adapter must
+         * preserve the Objective-C values through its private precise bridge
+         * while still owning every resource and raster operation in ZPU. */
+        const zpu_metal_vertex precise_viewport_vertices[] = {
+            {{0.99999f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{1.0f, -0.99999f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            {{0.99999f, -1.0f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        };
+        const MTLViewport precise_viewport = {
+            -8192.00001, -8192.00001, 8199.50001, 8199.50001, 0.0, 1.0};
+        id<MTLBuffer> native_precise_viewport_vertex_buffer =
+            [device newBufferWithBytes:precise_viewport_vertices
+                                  length:sizeof(precise_viewport_vertices)
+                                 options:MTLResourceStorageModeShared];
+        id<MTLTexture> native_precise_viewport_texture =
+            [device newTextureWithDescriptor:origin_texture_descriptor];
+        MTLRenderPassDescriptor *native_precise_viewport_pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        native_precise_viewport_pass.colorAttachments[0].texture = native_precise_viewport_texture;
+        native_precise_viewport_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_precise_viewport_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_precise_viewport_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> native_precise_viewport_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_precise_viewport_encoder =
+            [native_precise_viewport_command_buffer
+                renderCommandEncoderWithDescriptor:native_precise_viewport_pass];
+        [native_precise_viewport_encoder setRenderPipelineState:pipeline];
+        [native_precise_viewport_encoder setViewport:precise_viewport];
+        [native_precise_viewport_encoder setScissorRect:full_attachment_scissor];
+        [native_precise_viewport_encoder setVertexBuffer:native_precise_viewport_vertex_buffer
+                                                   offset:0
+                                                  atIndex:0];
+        [native_precise_viewport_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [native_precise_viewport_encoder endEncoding];
+        [native_precise_viewport_command_buffer commit];
+        [native_precise_viewport_command_buffer waitUntilCompleted];
+        uint8_t native_precise_viewport_pixels[byte_count];
+        [native_precise_viewport_texture getBytes:native_precise_viewport_pixels
+                                      bytesPerRow:(NSUInteger)width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                      mipmapLevel:0];
+
+        id<MTLBuffer> adapter_precise_viewport_vertex_buffer =
+            [adapter_device newBufferWithBytes:precise_viewport_vertices
+                                         length:sizeof(precise_viewport_vertices)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLTexture> adapter_precise_viewport_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTLRenderPassDescriptor *adapter_precise_viewport_pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_precise_viewport_pass.colorAttachments[0].texture = adapter_precise_viewport_texture;
+        adapter_precise_viewport_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_precise_viewport_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_precise_viewport_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> adapter_precise_viewport_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_precise_viewport_encoder =
+            [adapter_precise_viewport_command_buffer
+                renderCommandEncoderWithDescriptor:adapter_precise_viewport_pass];
+        [adapter_precise_viewport_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_precise_viewport_encoder setViewport:precise_viewport];
+        [adapter_precise_viewport_encoder setScissorRect:full_attachment_scissor];
+        [adapter_precise_viewport_encoder setVertexBuffer:adapter_precise_viewport_vertex_buffer
+                                                   offset:0
+                                                  atIndex:0];
+        [adapter_precise_viewport_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [adapter_precise_viewport_encoder endEncoding];
+        [adapter_precise_viewport_command_buffer commit];
+        [adapter_precise_viewport_command_buffer waitUntilCompleted];
+        uint8_t adapter_precise_viewport_pixels[byte_count];
+        [adapter_precise_viewport_texture getBytes:adapter_precise_viewport_pixels
+                                       bytesPerRow:(NSUInteger)width * 4
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                       mipmapLevel:0];
+        if (native_precise_viewport_texture == nil || native_precise_viewport_vertex_buffer == nil ||
+            native_precise_viewport_command_buffer == nil || native_precise_viewport_encoder == nil ||
+            native_precise_viewport_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_precise_viewport_texture == nil || adapter_precise_viewport_vertex_buffer == nil ||
+            adapter_precise_viewport_command_buffer == nil || adapter_precise_viewport_encoder == nil ||
+            adapter_precise_viewport_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_precise_viewport_pixels, adapter_precise_viewport_pixels,
+                   sizeof(native_precise_viewport_pixels)) != 0) {
+            fprintf(stderr, "metal-pixel: precise MTLViewport coordinate mismatch\n");
+            return 55;
+        }
         /* Visibility results are produced by the CPU rasterizer from the
          * same covered-fragment/depth/stencil accounting used for color.
          * Native Metal is only the oracle: both adapter resources and writes

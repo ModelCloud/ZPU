@@ -2889,7 +2889,7 @@ pub const RenderEncoder = struct {
     vertex_offset: usize = 0,
     vertex_stride: usize = @sizeOf(abi.Vertex),
     inline_vertices: std.ArrayList(abi.Vertex) = .empty,
-    viewport: abi.Viewport,
+    viewport: raster3d.PreciseViewport,
     scissor: abi.ScissorRect,
     cull_mode: abi.CullMode = .none,
     winding: abi.Winding = .clockwise,
@@ -4065,7 +4065,18 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setViewport(self: *RenderEncoder, viewport: abi.Viewport) Error!void {
-        if (!self.open() or !finiteViewport(viewport)) return error.InvalidArgument;
+        return self.setViewportPrecise(.{
+            .origin_x = @floatCast(viewport.origin_x),
+            .origin_y = @floatCast(viewport.origin_y),
+            .width = @floatCast(viewport.width),
+            .height = @floatCast(viewport.height),
+            .znear = @floatCast(viewport.znear),
+            .zfar = @floatCast(viewport.zfar),
+        });
+    }
+
+    pub fn setViewportPrecise(self: *RenderEncoder, viewport: raster3d.PreciseViewport) Error!void {
+        if (!self.open() or !finitePreciseViewport(viewport)) return error.InvalidArgument;
         self.viewport = viewport;
     }
 
@@ -8026,7 +8037,7 @@ fn validHeap(heap: *const Heap) bool {
     return heap.magic == heap_magic and validDevice(heap.device);
 }
 
-fn finiteViewport(viewport: abi.Viewport) bool {
+fn finitePreciseViewport(viewport: raster3d.PreciseViewport) bool {
     return std.math.isFinite(viewport.origin_x) and std.math.isFinite(viewport.origin_y) and
         std.math.isFinite(viewport.width) and std.math.isFinite(viewport.height) and
         std.math.isFinite(viewport.znear) and std.math.isFinite(viewport.zfar) and
@@ -11365,6 +11376,16 @@ pub export fn zpu_metal_render_encoder_set_vertex_bytes(encoder: ?*RenderEncoder
 
 pub export fn zpu_metal_render_encoder_set_viewport(encoder: ?*RenderEncoder, viewport: abi.Viewport) callconv(.c) c_int {
     (encoder orelse return -1).setViewport(viewport) catch |err| return errorCode(err);
+    return 0;
+}
+
+/// Adapter-private precise bridge for Apple MTLViewport's double-valued
+/// fields. The stable portable C ABI above intentionally remains float-based.
+pub export fn zpu_metal_render_encoder_set_viewport_precise(
+    encoder: ?*RenderEncoder,
+    viewport: raster3d.PreciseViewport,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setViewportPrecise(viewport) catch |err| return errorCode(err);
     return 0;
 }
 
