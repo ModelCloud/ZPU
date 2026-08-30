@@ -1056,10 +1056,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @end
 
 /* Metal 4 exposes machine-learning encoding as a separate command-encoder
- * family. The registered identity and UInt8-add tensor profiles are CPU-owned
- * and deferred; arbitrary ML pipeline graphs still fail closed. Returning an
- * object here is important: selector discovery and encoder lifetime must not
- * depend on Apple's native Metal runtime. */
+ * family. The registered identity, UInt8-add, Float32-add, and Int32-add
+ * tensor profiles are CPU-owned and deferred; arbitrary ML pipeline graphs
+ * still fail closed. Returning an object here is important: selector
+ * discovery and encoder lifetime must not depend on Apple's native Metal
+ * runtime. */
 API_AVAILABLE(macos(26.0), ios(26.0))
 @interface ZPUMTL4MachineLearningEncoder : NSObject <MTL4MachineLearningCommandEncoder> {
 @public
