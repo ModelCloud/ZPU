@@ -12360,6 +12360,13 @@ int main(void) {
             [adapter_array_compute_command_buffer computeCommandEncoder];
         [adapter_array_compute_encoder setComputePipelineState:adapter_array_compute_pipeline];
         [adapter_array_compute_encoder setTexture:adapter_array_compute_texture atIndex:0];
+        /* Texture bindings are per Metal slot. An unrelated slot update must
+         * not replace the array profile's texture-0 state used for CPU/ZPU
+         * slice expansion. */
+        id<MTLTexture> adapter_array_compute_aux_texture =
+            [adapter_device newTextureWithDescriptor:compute_texture_descriptor];
+        [adapter_array_compute_encoder setTexture:adapter_array_compute_aux_texture atIndex:1];
+        [adapter_array_compute_encoder setTexture:nil atIndex:1];
         [adapter_array_compute_encoder dispatchThreads:MTLSizeMake(width, height, 3)
                                    threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
         [adapter_array_compute_encoder endEncoding];
@@ -12395,6 +12402,7 @@ int main(void) {
             native_array_compute_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_array_compute_function != nil && adapter_array_compute_pipeline != nil &&
             adapter_array_compute_texture != nil &&
+            adapter_array_compute_aux_texture != nil &&
             adapter_array_compute_command_buffer.status == MTLCommandBufferStatusCompleted;
         for (NSUInteger slice = 0; slice < 2; ++slice) {
             array_compute_exact = array_compute_exact &&
@@ -14809,10 +14817,15 @@ int main(void) {
         id<MTLTexture> metal4_array_compute_texture =
             [adapter_device newTextureWithDescriptor:compute_array_descriptor];
         MTL4ArgumentTableDescriptor *metal4_array_compute_table_descriptor = [MTL4ArgumentTableDescriptor new];
-        metal4_array_compute_table_descriptor.maxTextureBindCount = 1;
+        metal4_array_compute_table_descriptor.maxTextureBindCount = 2;
         id<MTL4ArgumentTable> metal4_array_compute_table =
             [adapter_device newArgumentTableWithDescriptor:metal4_array_compute_table_descriptor error:&metal4_error];
         [metal4_array_compute_table setTexture:metal4_array_compute_texture.gpuResourceID atIndex:0];
+        /* Keep an unrelated 2D binding in texture 1 while the array profile
+         * executes from texture 0. Metal 4 table application must preserve
+         * both slots without allowing the last setter to change CPU/ZPU
+         * slice expansion. */
+        [metal4_array_compute_table setTexture:adapter_compute_texture.gpuResourceID atIndex:1];
         id<MTL4CommandBuffer> metal4_array_compute_command_buffer = [adapter_device newCommandBuffer];
         [metal4_array_compute_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
         id<MTL4ComputeCommandEncoder> metal4_array_compute_encoder =

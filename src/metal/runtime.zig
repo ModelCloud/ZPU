@@ -3267,9 +3267,8 @@ pub const ComputeEncoder = struct {
     magic: u64 = compute_encoder_magic,
     command_buffer: *CommandBuffer,
     kernel: u8 = 0,
-    texture: ?*Texture = null,
-    texture_index: u32 = 0,
-    array_slice: ?u32 = null,
+    textures: [2]?*Texture = .{ null, null },
+    array_slices: [2]?u32 = .{ null, null },
     buffer: ?*Buffer = null,
     buffer_offset: usize = 0,
     acceleration_structure: ?*Buffer = null,
@@ -3281,6 +3280,14 @@ pub const ComputeEncoder = struct {
 
     fn open(self: *const ComputeEncoder) bool {
         return self.magic == compute_encoder_magic and self.command_buffer.active_encoder == .compute;
+    }
+
+    fn textureIndexForKernel(self: *const ComputeEncoder) usize {
+        return if (self.kernel == 2) 1 else 0;
+    }
+
+    fn textureForKernel(self: *const ComputeEncoder) ?*Texture {
+        return self.textures[self.textureIndexForKernel()];
     }
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
@@ -3327,14 +3334,13 @@ pub const ComputeEncoder = struct {
         if (texture) |value| {
             if (!validTexture(value) or value.device != self.command_buffer.queue.device or !value.format.isColor()) return error.InvalidResource;
         }
-        self.texture = texture;
-        self.texture_index = index;
-        self.array_slice = null;
+        self.textures[index] = texture;
+        self.array_slices[index] = null;
     }
 
     pub fn setArraySlice(self: *ComputeEncoder, slice: u32, index: u32) Error!void {
-        if (!self.open() or self.texture == null or index != self.texture_index) return error.InvalidArgument;
-        self.array_slice = slice;
+        if (!self.open() or index > 1 or self.textures[index] == null) return error.InvalidArgument;
+        self.array_slices[index] = slice;
     }
 
     // Metal 4 exposes copy/fill operations on the compute encoder. They are
@@ -3410,9 +3416,8 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn dispatchThreads(self: *ComputeEncoder, threads_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
-        if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
-            (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
+        if (!self.open() or self.kernel == 0 or self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
         if (self.kernel == 7 and (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
         if ((self.kernel != 3 and self.kernel != 4 and threads_per_grid.depth != 1) or
             threads_per_threadgroup.width == 0 or
@@ -3420,19 +3425,19 @@ pub const ComputeEncoder = struct {
         if (self.kernel != 4 and threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
-            .texture = self.texture.?,
-            .texture_index = self.texture_index,
+            .texture = self.textureForKernel().?,
+            .texture_index = @intCast(self.textureIndexForKernel()),
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
             .acceleration_structure_index = self.acceleration_structure_index,
             .threads_per_grid = threads_per_grid,
-            .array_slice = self.array_slice,
+            .array_slice = self.array_slices[self.textureIndexForKernel()],
         } });
     }
 
     pub fn dispatchThreadgroups(self: *ComputeEncoder, threadgroups_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
-        if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
+        if (!self.open() or self.kernel == 0 or self.textureForKernel() == null) return error.InvalidCommand;
         if ((self.kernel != 3 and self.kernel != 4 and threadgroups_per_grid.depth != 1) or
             (self.kernel != 4 and threads_per_threadgroup.depth != 1) or
             threads_per_threadgroup.width == 0 or threads_per_threadgroup.height == 0) return error.InvalidArgument;
@@ -3447,9 +3452,8 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn dispatchThreadgroupsIndirect(self: *ComputeEncoder, indirect_buffer: *Buffer, indirect_buffer_offset: usize, threads_per_threadgroup: abi.Size) Error!void {
-        if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
-            (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
+        if (!self.open() or self.kernel == 0 or self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
@@ -3457,8 +3461,8 @@ pub const ComputeEncoder = struct {
         if (self.kernel != 4 and threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
-            .texture = self.texture.?,
-            .texture_index = self.texture_index,
+            .texture = self.textureForKernel().?,
+            .texture_index = @intCast(self.textureIndexForKernel()),
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
@@ -3467,7 +3471,7 @@ pub const ComputeEncoder = struct {
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
-            .array_slice = self.array_slice,
+            .array_slice = self.array_slices[self.textureIndexForKernel()],
         } });
     }
 
@@ -3476,16 +3480,15 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn dispatchThreadsIndirectAtOffset(self: *ComputeEncoder, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
-        if (!self.open() or self.kernel == 0 or self.texture == null) return error.InvalidCommand;
-        if (((self.kernel == 1 or self.kernel == 3 or self.kernel == 4) and self.texture_index != 0) or (self.kernel == 2 and
-            (self.texture_index != 1 or self.buffer == null))) return error.InvalidCommand;
+        if (!self.open() or self.kernel == 0 or self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
-            .texture = self.texture.?,
-            .texture_index = self.texture_index,
+            .texture = self.textureForKernel().?,
+            .texture_index = @intCast(self.textureIndexForKernel()),
             .buffer = self.buffer,
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
@@ -3494,7 +3497,7 @@ pub const ComputeEncoder = struct {
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
             .indirect_threads = true,
-            .array_slice = self.array_slice,
+            .array_slice = self.array_slices[self.textureIndexForKernel()],
         } });
     }
 
@@ -6799,6 +6802,35 @@ test "CPU compute acceleration bindings can be explicitly unbound" {
     );
     try encoder.endEncoding();
     destroyComputeEncoder(encoder);
+}
+
+test "CPU compute textures retain independent Metal binding slots" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const source_bytes = [_]u8{ 255, 0, 0, 255 };
+    const source = try createBuffer(device, source_bytes.len, &source_bytes);
+    defer destroyBuffer(source);
+    const destination = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(destination);
+    const unrelated = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(unrelated);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(2);
+    try encoder.setBuffer(source, 0, 0);
+    try encoder.setTexture(destination, 1);
+    try encoder.setTexture(unrelated, 0);
+    try encoder.setTexture(null, 0);
+    try encoder.dispatchThreads(.{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0), destination.bytes[0]);
+    try command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &source_bytes, destination.bytes[0..4]);
 }
 
 test "CPU tile dispatch preserves Metal's upper-left pixel origin" {
