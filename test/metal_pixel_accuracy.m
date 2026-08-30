@@ -21859,6 +21859,111 @@ int main(void) {
             fail_with_error("Metal 4 CPU compute extra binding exactness failed", metal4_error);
             return 190;
         }
+
+        /* The integer texture profiles must also survive the Metal 4
+         * compiler and GPU-addressed argument-table bridge. The command is
+         * still executed by the ZPU CPU encoder; native Metal is used only to
+         * establish the exact four-lane byte oracle. A non-square grid and a
+         * 3x2 threadgroup make both the upper-left row origin and the
+         * out-of-range threadgroup tail observable. */
+        for (NSUInteger format_index = 0; format_index < 2; ++format_index) {
+            const MTLPixelFormat format = compute_integer_formats[format_index];
+            const NSUInteger integer_byte_count = (NSUInteger)width * height * 16;
+            MTLTextureDescriptor *native_integer_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                    width:width height:height mipmapped:NO];
+            native_integer_descriptor.storageMode = MTLStorageModeShared;
+            native_integer_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> native_integer_texture = [device newTextureWithDescriptor:native_integer_descriptor];
+            id<MTLTexture> adapter_integer_texture =
+                [adapter_device newTextureWithDescriptor:native_integer_descriptor];
+            NSError *native_integer_error = nil;
+            NSError *adapter_integer_error = nil;
+            id<MTLFunction> native_integer_function =
+                [library newFunctionWithName:compute_integer_names[format_index]];
+            id<MTLComputePipelineState> native_integer_pipeline =
+                [device newComputePipelineStateWithFunction:native_integer_function error:&native_integer_error];
+            id<MTLCommandBuffer> native_integer_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_integer_encoder =
+                [native_integer_command_buffer computeCommandEncoder];
+            [native_integer_encoder setComputePipelineState:native_integer_pipeline];
+            [native_integer_encoder setTexture:native_integer_texture atIndex:0];
+            [native_integer_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                              threadsPerThreadgroup:MTLSizeMake(3, 2, 1)];
+            [native_integer_encoder endEncoding];
+            [native_integer_command_buffer commit];
+            [native_integer_command_buffer waitUntilCompleted];
+
+            MTL4LibraryFunctionDescriptor *integer_function_descriptor =
+                [MTL4LibraryFunctionDescriptor new];
+            integer_function_descriptor.library = adapter_mtl4_library;
+            integer_function_descriptor.name = compute_integer_names[format_index];
+            MTL4ComputePipelineDescriptor *integer_pipeline_descriptor =
+                [MTL4ComputePipelineDescriptor new];
+            integer_pipeline_descriptor.computeFunctionDescriptor = integer_function_descriptor;
+            integer_pipeline_descriptor.maxTotalThreadsPerThreadgroup = 64;
+            integer_pipeline_descriptor.requiredThreadsPerThreadgroup = MTLSizeMake(3, 2, 1);
+            id<MTLComputePipelineState> adapter_integer_pipeline =
+                [adapter_mtl4_compiler newComputePipelineStateWithDescriptor:integer_pipeline_descriptor
+                                                           compilerTaskOptions:nil
+                                                                         error:&adapter_integer_error];
+            MTL4ArgumentTableDescriptor *integer_table_descriptor =
+                [MTL4ArgumentTableDescriptor new];
+            integer_table_descriptor.maxTextureBindCount = 1;
+            id<MTL4ArgumentTable> integer_table =
+                [adapter_device newArgumentTableWithDescriptor:integer_table_descriptor
+                                                           error:&adapter_integer_error];
+            if (adapter_integer_texture != nil) {
+                [integer_table setTexture:adapter_integer_texture.gpuResourceID atIndex:0];
+            }
+            id<MTL4CommandBuffer> adapter_integer_command_buffer = [adapter_device newCommandBuffer];
+            id<MTL4ComputeCommandEncoder> adapter_integer_encoder = nil;
+            __block NSError *adapter_integer_feedback_error = nil;
+            if (adapter_integer_command_buffer != nil && metal4_allocator != nil) {
+                [adapter_integer_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+                adapter_integer_encoder = [adapter_integer_command_buffer computeCommandEncoder];
+                [adapter_integer_encoder setComputePipelineState:adapter_integer_pipeline];
+                [adapter_integer_encoder setArgumentTable:integer_table];
+                [adapter_integer_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(3, 2, 1)];
+                [adapter_integer_encoder endEncoding];
+                [adapter_integer_command_buffer endCommandBuffer];
+                id<MTL4CommandBuffer> adapter_integer_buffers[] = {adapter_integer_command_buffer};
+                MTL4CommitOptions *adapter_integer_options = ZPUMetalCreateCPUCommitOptions();
+                [adapter_integer_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                    adapter_integer_feedback_error = feedback.error;
+                }];
+                [metal4_queue commit:adapter_integer_buffers count:1 options:adapter_integer_options];
+            }
+            uint8_t native_integer_bytes[integer_byte_count];
+            uint8_t adapter_integer_bytes[integer_byte_count];
+            memset(native_integer_bytes, 0, sizeof(native_integer_bytes));
+            memset(adapter_integer_bytes, 0, sizeof(adapter_integer_bytes));
+            if (native_integer_texture != nil) {
+                [native_integer_texture getBytes:native_integer_bytes
+                                       bytesPerRow:(NSUInteger)width * 16
+                                        fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                       mipmapLevel:0];
+            }
+            if (adapter_integer_texture != nil) {
+                [adapter_integer_texture getBytes:adapter_integer_bytes
+                                        bytesPerRow:(NSUInteger)width * 16
+                                         fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                        mipmapLevel:0];
+            }
+            if (native_integer_function == nil || native_integer_pipeline == nil ||
+                native_integer_error != nil || native_integer_texture == nil ||
+                native_integer_command_buffer == nil || native_integer_encoder == nil ||
+                native_integer_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_integer_pipeline == nil || integer_table == nil ||
+                adapter_integer_command_buffer == nil || adapter_integer_encoder == nil ||
+                adapter_integer_error != nil || adapter_integer_feedback_error != nil ||
+                memcmp(native_integer_bytes, adapter_integer_bytes, integer_byte_count) != 0) {
+                fail_with_error("Metal 4 CPU integer compute exactness failed",
+                                adapter_integer_feedback_error ?: adapter_integer_error ?: native_integer_error);
+                return 191 + (int)format_index;
+            }
+        }
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const int metal4_position_result = test_metal4_position_fragment_grid_against_native(
                 device, adapter_device, library, adapter_mtl4_compiler,
