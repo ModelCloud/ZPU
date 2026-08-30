@@ -2316,7 +2316,6 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
         (descriptor.defaultRasterSampleCount > 1 && (!multisample || descriptor.defaultRasterSampleCount != color.sampleCount)) ||
         (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != zpu_metal_texture_width(colorTexture)) ||
         (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != zpu_metal_texture_height(colorTexture))) return NO;
-    if (hasColor && !zpu_store_action_supported(descriptor.colorAttachments[0].storeAction)) return NO;
     *pass = (zpu_metal_render_pass_descriptor){
         .color = {
             .load_action = hasColor ? zpu_load_action(descriptor.colorAttachments[0].loadAction) : ZPU_METAL_LOAD_DONT_CARE,

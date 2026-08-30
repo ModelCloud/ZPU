@@ -94,8 +94,10 @@ triangle path:
   single-sample color texture using `MultisampleResolve` or
   `StoreAndMultisampleResolve`; the resolver averages logical sample colors
   before the destination format encode. This bounded profile rejects MSAA
-  depth/stencil, MRT, parallel render encoders, sparse placement, texture
-  views, and direct CPU transfers. Custom sample positions are accepted for
+  depth/stencil, MRT, parallel render encoders, sparse placement, and direct
+  CPU transfers. 2D multisample texture views are CPU-owned aliases of every
+  sample plane, including same-size compatible color-format reinterpretations.
+  Custom sample positions are accepted for
   1x/2x/4x passes after finite `[0, 1]` validation and are interpreted in
   Metal's top-left, pixel-local coordinates; other sample counts remain unsupported.
 - buffer and texture resource options preserve the requested storage mode, CPU
@@ -174,8 +176,8 @@ triangle path:
   with the same bytes-per-texel create
   view-owned ZPU handles over the same bytes, so CPU sampling, rendering, and
   transfers observe the view interpretation while the parent remains the
-  storage owner; depth/stencil views remain same-format only, and multisample
-  views remain unsupported
+  storage owner; depth/stencil views remain same-format only, and 2D
+  multisample views alias every sample plane
 - CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or
   buffer-backed views and return synthetic resource IDs usable by MTL4
   argument tables
