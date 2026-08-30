@@ -9067,7 +9067,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     (void)options;
     if (reflection != NULL) *reflection = nil;
     if (descriptor == nil || descriptor.objectFunction != nil || descriptor.meshFunction == nil ||
-        descriptor.fragmentFunction == nil || descriptor.rasterSampleCount != 1 ||
+        descriptor.fragmentFunction == nil ||
+        (descriptor.rasterSampleCount != 1 && descriptor.rasterSampleCount != 2 &&
+         descriptor.rasterSampleCount != 4) ||
         !descriptor.isRasterizationEnabled || descriptor.depthAttachmentPixelFormat != MTLPixelFormatInvalid ||
         descriptor.stencilAttachmentPixelFormat != MTLPixelFormatInvalid) {
         zpu_set_error(error, @"ZPU CPU Metal supports only the registered mesh gradient profile");
@@ -9140,6 +9142,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
     pipeline->_colorAttachmentCount = color_attachment_count;
+    pipeline->_rasterSampleCount = descriptor.rasterSampleCount;
     pipeline->_blendingEnabled = attachment.blendingEnabled;
     pipeline->_sourceRGBBlendFactor = attachment.sourceRGBBlendFactor;
     pipeline->_destinationRGBBlendFactor = attachment.destinationRGBBlendFactor;
@@ -10347,8 +10350,9 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal 4 requires the registered mesh and fragment functions");
         return nil;
     }
-    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1) {
-        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-sample CPU mesh targets");
+    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1 &&
+        descriptor.rasterSampleCount != 2 && descriptor.rasterSampleCount != 4) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-, two-, or four-sample CPU mesh targets");
         return nil;
     }
     MTL4StaticLinkingDescriptor *object_linking = descriptor.objectStaticLinkingDescriptor;
@@ -10435,6 +10439,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         requiredThreadsPerObjectThreadgroup:required_object requiredThreadsPerMeshThreadgroup:required_mesh];
     pipeline->_supportsIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    pipeline->_rasterSampleCount = descriptor.rasterSampleCount == 0 ? 1 : descriptor.rasterSampleCount;
     for (NSUInteger index = 0; index < color_attachment_count; ++index) {
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
@@ -17062,11 +17067,13 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         for (NSUInteger index = 0; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
             colorFormats[index] = (uint16_t)state->_colorPixelFormats[index];
         }
+        const BOOL is_mesh = state->_isMeshPipeline;
         if (zpu_metal_render_encoder_set_pipeline_color_formats(
                 _zpuEncoder, colorFormats, state->_colorAttachmentCount,
                 (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
-            zpu_metal_render_encoder_set_raster_sample_count(_zpuEncoder, 1) != ZPU_METAL_OK ||
-            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, false) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_raster_sample_count(
+                _zpuEncoder, (uint8_t)(is_mesh ? state->_rasterSampleCount : 1)) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, is_mesh) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_blend_state(
                 _zpuEncoder, state->_blendingEnabled,
                 (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,

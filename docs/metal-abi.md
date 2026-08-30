@@ -100,7 +100,8 @@ triangle path:
   attachment signature, and routes its logical output through an opted-in
   logical-to-physical map; the registered mesh-gradient profile maps mesh-grid
   Z one-to-one to layered slices while preserving attachment-global top-left
-  X/Y; arbitrary mesh shader execution remains explicitly rejected, while
+  X/Y; the same registered mesh profile also supports 2x and 4x sample
+  planes and resolves them through the CPU path; arbitrary mesh shader execution remains explicitly rejected, while
   factor-one triangle patches select layers
   by `baseInstance`.
 - CPU-owned 2D multisample and 2D multisample-array textures with
@@ -304,7 +305,9 @@ triangle path:
   clips it with the recorded scissor rectangle, applies fixed profile depth
   0.5 through ZPU depth/stencil/color-write state, preserves the first logical
   color attachment's blend factors, operations, and write mask, and supports
-  contiguous RGBA8/BGRA8 logical attachments through the opted-in color map.
+  contiguous RGBA8/BGRA8 logical attachments through the opted-in color map;
+  its 2x/4x layered sample writes are independently checked against native
+  Metal resolves while preserving the Apple top-left sample grid.
   Tile and mesh
   visibility results use those same ZPU fragment outcomes: boolean results report
   whether any pixel passed, while counting results accumulate passed pixels;
