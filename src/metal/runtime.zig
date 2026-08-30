@@ -925,8 +925,8 @@ pub const CommandBuffer = struct {
                 }
                 if (begin_render.array_target_count > 1 and
                     (begin_render.depth != null or begin_render.stencil != null or
-                     begin_render.depth_texture != null or begin_render.stencil_texture != null or
-                     begin_render.depth_sample_targets[0] != null or begin_render.stencil_sample_targets[0] != null))
+                        begin_render.depth_texture != null or begin_render.stencil_texture != null or
+                        begin_render.depth_sample_targets[0] != null or begin_render.stencil_sample_targets[0] != null))
                     return self.fail(error.UnsupportedOperation);
                 if (begin_render.sample_count > 1 and (begin_render.depth != null or begin_render.stencil != null))
                     return self.fail(error.UnsupportedOperation);
