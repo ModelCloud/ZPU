@@ -1561,6 +1561,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     NSUInteger _alignment;
     ZPUBuffer *_argumentBuffer;
     NSUInteger _argumentOffset;
+    BOOL _bufferBindingEncoder;
     NSString *_label;
     NSMutableArray *_retainedResources;
     NSMutableDictionary *_bindings;
@@ -1568,6 +1569,8 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     NSMutableDictionary *_constants;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner arguments:(NSArray<MTLArgumentDescriptor *> *)arguments;
+- (instancetype)initWithOwner:(ZPUDevice *)owner bufferBinding:(id<MTLBufferBinding>)bufferBinding
+    API_AVAILABLE(macos(13.0), ios(16.0));
 @end
 
 @interface ZPURenderEncoder : NSObject <MTLRenderCommandEncoder> {
@@ -9571,7 +9574,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return arguments == nil ? nil : (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc] initWithOwner:self arguments:arguments];
 }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferBinding:(id<MTLBufferBinding>)bufferBinding API_AVAILABLE(macos(13.0), ios(16.0)) {
-    return bufferBinding == nil ? nil : (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc] initWithOwner:self arguments:@[]];
+    return bufferBinding == nil ? nil :
+        (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc] initWithOwner:self bufferBinding:bufferBinding];
 }
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction error:(NSError **)error {
     return (id<MTLComputePipelineState>)[[ZPUComputePipelineState alloc] initWithOwner:self function:computeFunction error:error];
@@ -15429,6 +15433,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (instancetype)initWithOwner:(ZPUDevice *)owner arguments:(NSArray<MTLArgumentDescriptor *> *)arguments {
     if ((self = [super init])) {
         _owner = owner;
+        _bufferBindingEncoder = NO;
         _alignment = 16;
         _encodedLength = 0;
         _retainedResources = [NSMutableArray array];
@@ -15450,6 +15455,24 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             NSUInteger length = slots * 16;
             if (length > _encodedLength) _encodedLength = length;
         }
+    }
+    return self;
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner bufferBinding:(id<MTLBufferBinding>)bufferBinding {
+    if (bufferBinding == nil) return nil;
+    if ((self = [super init])) {
+        _owner = owner;
+        _bufferBindingEncoder = YES;
+        /* A buffer binding encoder describes one raw pointer argument. Apple's
+         * CPU-visible encoding reserves two 64-bit words before the pointer,
+         * making the ABI 24 bytes long and 8-byte aligned. Keep this layout
+         * local to the CPU adapter; no native Metal encoder is involved. */
+        _encodedLength = 24;
+        _alignment = 8;
+        _retainedResources = [NSMutableArray array];
+        _bindings = [NSMutableDictionary dictionary];
+        _bindingOffsets = [NSMutableDictionary dictionary];
+        _constants = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -15505,6 +15528,25 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (void)writeBindingsToArgumentBuffer {
     if (_argumentBuffer == nil || _argumentBuffer.contents == nil) return;
+    if (_bufferBindingEncoder) {
+        /* MTLDevice's buffer-binding encoder has one relative buffer slot,
+         * whose address is stored at byte offset 16. The offset is folded into
+         * the CPU-owned ZPU GPU address exactly as setBuffer:offset:atIndex:
+         * does for the native binding encoder. */
+        if (_argumentOffset > _argumentBuffer.length ||
+            _argumentBuffer.length - _argumentOffset < 24) return;
+        id object = _bindings[@0];
+        uint64_t address = 0;
+        if ([object isKindOfClass:[ZPUBuffer class]]) {
+            ZPUBuffer *buffer = (ZPUBuffer *)object;
+            const uint64_t offset = [_bindingOffsets[@0] unsignedLongLongValue];
+            if (offset > UINT64_MAX - buffer->_resourceID) return;
+            address = buffer->_resourceID + offset;
+        }
+        memcpy((uint8_t *)_argumentBuffer.contents + _argumentOffset + 16,
+               &address, sizeof(address));
+        return;
+    }
     for (NSNumber *key in _bindings) {
         const NSUInteger index = key.unsignedIntegerValue;
         if (index > (NSUIntegerMax - _argumentOffset) / 16) continue;
@@ -15550,6 +15592,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     [self remember:object atIndex:index offset:0];
 }
 - (void)setBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (_bufferBindingEncoder && index != 0) return;
     if (buffer != nil && !zpu_buffer_belongs_to_device(_owner, (ZPUBuffer *)buffer)) return;
     if (buffer != nil && offset > [(ZPUBuffer *)buffer length]) return;
     [self remember:buffer atIndex:index offset:offset];
@@ -15581,6 +15624,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     for (NSUInteger index = 0; index < range.length; ++index) [self setSamplerState:samplers[index] atIndex:range.location + index];
 }
 - (void *)constantDataAtIndex:(NSUInteger)index {
+    if (_bufferBindingEncoder) return NULL;
     NSNumber *key = @(index);
     NSMutableData *data = _constants[key];
     if (data == nil) {

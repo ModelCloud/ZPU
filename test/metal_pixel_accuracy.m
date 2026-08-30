@@ -11961,6 +11961,55 @@ int main(void) {
         id<MTLBufferBinding> adapter_vertex_binding =
             (id<MTLBufferBinding>)(adapter_legacy_render_reflection.vertexBindings.count == 0 ? nil :
                                    adapter_legacy_render_reflection.vertexBindings[0]);
+        if (@available(macOS 13.0, iOS 16.0, *)) {
+            id<MTLBufferBinding> native_vertex_binding =
+                (id<MTLBufferBinding>)(native_legacy_render_reflection.vertexBindings.count == 0 ? nil :
+                                       native_legacy_render_reflection.vertexBindings[0]);
+            id<MTLArgumentEncoder> native_binding_encoder =
+                native_vertex_binding == nil ? nil : [device newArgumentEncoderWithBufferBinding:native_vertex_binding];
+            id<MTLArgumentEncoder> adapter_binding_encoder =
+                adapter_vertex_binding == nil ? nil :
+                [adapter_device newArgumentEncoderWithBufferBinding:adapter_vertex_binding];
+            id<MTLBuffer> native_binding_buffer =
+                native_binding_encoder == nil ? nil :
+                [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> adapter_binding_buffer =
+                adapter_binding_encoder == nil ? nil :
+                [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+            BOOL buffer_binding_encoder_ok = native_binding_encoder != nil &&
+                adapter_binding_encoder != nil && native_binding_buffer != nil &&
+                adapter_binding_buffer != nil &&
+                native_binding_encoder.encodedLength == adapter_binding_encoder.encodedLength &&
+                native_binding_encoder.alignment == adapter_binding_encoder.alignment;
+            if (buffer_binding_encoder_ok) {
+                memset(native_binding_buffer.contents, 0xa5, native_binding_buffer.length);
+                memset(adapter_binding_buffer.contents, 0xa5, adapter_binding_buffer.length);
+                [native_binding_encoder setArgumentBuffer:native_binding_buffer offset:8];
+                [adapter_binding_encoder setArgumentBuffer:adapter_binding_buffer offset:8];
+                [native_binding_encoder setBuffer:vertex_buffer offset:16 atIndex:0];
+                [adapter_binding_encoder setBuffer:adapter_vertex_buffer offset:16 atIndex:0];
+                uint64_t native_binding_address = 0;
+                uint64_t adapter_binding_address = 0;
+                memcpy(&native_binding_address, (uint8_t *)native_binding_buffer.contents + 24,
+                       sizeof(native_binding_address));
+                memcpy(&adapter_binding_address, (uint8_t *)adapter_binding_buffer.contents + 24,
+                       sizeof(adapter_binding_address));
+                buffer_binding_encoder_ok =
+                    native_binding_address == vertex_buffer.gpuAddress + 16 &&
+                    adapter_binding_address == adapter_vertex_buffer.gpuAddress + 16;
+                for (NSUInteger byte = 0; buffer_binding_encoder_ok && byte < 24; ++byte) {
+                    if (byte >= 16 && byte < 24) continue;
+                    if (((uint8_t *)native_binding_buffer.contents)[8 + byte] !=
+                        ((uint8_t *)adapter_binding_buffer.contents)[8 + byte]) {
+                        buffer_binding_encoder_ok = NO;
+                    }
+                }
+            }
+            if (!buffer_binding_encoder_ok) {
+                fprintf(stderr, "metal-pixel: buffer-binding argument encoder layout mismatch\n");
+                return 187;
+            }
+        }
         MTLStructType *adapter_vertex_struct = adapter_vertex_binding.bufferStructType;
         MTLPointerType *adapter_vertex_pointer = adapter_vertex_binding.bufferPointerType;
         MTLStructMember *adapter_position_member = [adapter_vertex_struct memberByName:@"position"];
