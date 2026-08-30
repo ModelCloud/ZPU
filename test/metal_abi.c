@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include "zpu/metal.h"
 
-_Static_assert(ZPU_METAL_ABI_VERSION == 32u, "Metal ABI version drift");
+_Static_assert(ZPU_METAL_ABI_VERSION == 33u, "Metal ABI version drift");
 _Static_assert(sizeof(zpu_metal_sparse_texture_mapping_arguments) == 32, "Metal sparse mapping arguments drift");
 _Static_assert(ZPU_METAL_DEPTH16_UNORM == 250, "Depth16Unorm value drift");
 _Static_assert(ZPU_METAL_DEPTH24_UNORM_STENCIL8 == 255, "Depth24Unorm_Stencil8 value drift");
