@@ -9959,6 +9959,70 @@ int main(void) {
             return 44;
         }
 
+        /* The array profile uses the same logical float4 gradient as the
+         * 2D profile, but each slice is a separate CPU/ZPU target. Exercise
+         * every color encoding here as well; the native array kernel remains
+         * an oracle only. */
+        for (NSUInteger format_index = 0;
+             format_index < sizeof(generic_compute_formats) / sizeof(generic_compute_formats[0]);
+             ++format_index) {
+            const NSUInteger generic_bytes_per_pixel = generic_compute_formats[format_index].bytes_per_pixel;
+            const NSUInteger generic_slice_bytes = (NSUInteger)width * height * generic_bytes_per_pixel;
+            MTLTextureDescriptor *generic_native_descriptor = [compute_array_descriptor copy];
+            generic_native_descriptor.pixelFormat = generic_compute_formats[format_index].format;
+            id<MTLTexture> generic_native_texture = [device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLTexture> generic_adapter_texture =
+                [adapter_device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLCommandBuffer> generic_native_command_buffer = [queue commandBuffer];
+            id<MTLCommandBuffer> generic_adapter_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> generic_native_encoder =
+                [generic_native_command_buffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> generic_adapter_encoder =
+                [generic_adapter_command_buffer computeCommandEncoder];
+            [generic_native_encoder setComputePipelineState:native_array_compute_pipeline];
+            [generic_native_encoder setTexture:generic_native_texture atIndex:0];
+            [generic_native_encoder dispatchThreads:MTLSizeMake(width, height, 3)
+                                threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [generic_native_encoder endEncoding];
+            [generic_native_command_buffer commit];
+            [generic_native_command_buffer waitUntilCompleted];
+            [generic_adapter_encoder setComputePipelineState:adapter_array_compute_pipeline];
+            [generic_adapter_encoder setTexture:generic_adapter_texture atIndex:0];
+            [generic_adapter_encoder dispatchThreads:MTLSizeMake(width, height, 3)
+                                 threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [generic_adapter_encoder endEncoding];
+            [generic_adapter_command_buffer commit];
+            [generic_adapter_command_buffer waitUntilCompleted];
+            uint8_t generic_native_pixels[2][width * height * 16];
+            uint8_t generic_adapter_pixels[2][width * height * 16];
+            memset(generic_native_pixels, 0, sizeof(generic_native_pixels));
+            memset(generic_adapter_pixels, 0, sizeof(generic_adapter_pixels));
+            for (NSUInteger slice = 0; slice < 2; ++slice) {
+                [generic_native_texture getBytes:generic_native_pixels[slice]
+                                      bytesPerRow:(NSUInteger)width * generic_bytes_per_pixel
+                                    bytesPerImage:generic_slice_bytes
+                                     fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                    mipmapLevel:0 slice:slice];
+                [generic_adapter_texture getBytes:generic_adapter_pixels[slice]
+                                       bytesPerRow:(NSUInteger)width * generic_bytes_per_pixel
+                                     bytesPerImage:generic_slice_bytes
+                                      fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                                     mipmapLevel:0 slice:slice];
+            }
+            BOOL generic_array_exact = generic_native_texture != nil && generic_adapter_texture != nil &&
+                generic_native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                generic_adapter_command_buffer.status == MTLCommandBufferStatusCompleted;
+            for (NSUInteger slice = 0; slice < 2; ++slice) {
+                generic_array_exact = generic_array_exact &&
+                    memcmp(generic_native_pixels[slice], generic_adapter_pixels[slice], generic_slice_bytes) == 0;
+            }
+            if (!generic_array_exact) {
+                fprintf(stderr, "metal-pixel: generic 2D-array CPU compute mismatch for %s\n",
+                        generic_compute_formats[format_index].name);
+                return 181 + (int)format_index;
+            }
+        }
+
         id<MTLFunction> native_three_d_compute_function =
             [library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"];
         id<MTLComputePipelineState> native_three_d_compute_pipeline =
@@ -10018,6 +10082,66 @@ int main(void) {
             memcmp(native_three_d_compute_bytes, adapter_three_d_compute_bytes, three_d_bytes) != 0) {
             fail_with_error("3D CPU compute adapter execution failed", adapter_compute_error);
             return 83;
+        }
+
+        /* The 3D profile records one CPU target per Z slice and uses the
+         * slice index for the blue component. Cover all color encodings so
+         * the Apple top-left X/Y origin and the Z-origin rule are checked
+         * together for every advertised target. */
+        for (NSUInteger format_index = 0;
+             format_index < sizeof(generic_compute_formats) / sizeof(generic_compute_formats[0]);
+             ++format_index) {
+            const NSUInteger generic_bytes_per_pixel = generic_compute_formats[format_index].bytes_per_pixel;
+            const NSUInteger generic_row_bytes = (NSUInteger)three_d_width * generic_bytes_per_pixel;
+            const NSUInteger generic_plane_bytes = generic_row_bytes * three_d_height;
+            const NSUInteger generic_byte_count = generic_plane_bytes * three_d_depth;
+            MTLTextureDescriptor *generic_native_descriptor = [three_d_descriptor copy];
+            generic_native_descriptor.pixelFormat = generic_compute_formats[format_index].format;
+            id<MTLTexture> generic_native_texture = [device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLTexture> generic_adapter_texture =
+                [adapter_device newTextureWithDescriptor:generic_native_descriptor];
+            id<MTLCommandBuffer> generic_native_command_buffer = [queue commandBuffer];
+            id<MTLCommandBuffer> generic_adapter_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> generic_native_encoder =
+                [generic_native_command_buffer computeCommandEncoder];
+            id<MTLComputeCommandEncoder> generic_adapter_encoder =
+                [generic_adapter_command_buffer computeCommandEncoder];
+            [generic_native_encoder setComputePipelineState:native_three_d_compute_pipeline];
+            [generic_native_encoder setTexture:generic_native_texture atIndex:0];
+            [generic_native_encoder dispatchThreads:MTLSizeMake(three_d_width, three_d_height, three_d_depth + 1)
+                                threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+            [generic_native_encoder endEncoding];
+            [generic_native_command_buffer commit];
+            [generic_native_command_buffer waitUntilCompleted];
+            [generic_adapter_encoder setComputePipelineState:adapter_three_d_compute_pipeline];
+            [generic_adapter_encoder setTexture:generic_adapter_texture atIndex:0];
+            [generic_adapter_encoder dispatchThreads:MTLSizeMake(three_d_width, three_d_height, three_d_depth + 1)
+                                 threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+            [generic_adapter_encoder endEncoding];
+            [generic_adapter_command_buffer commit];
+            [generic_adapter_command_buffer waitUntilCompleted];
+            uint8_t generic_native_pixels[three_d_bytes * 4];
+            uint8_t generic_adapter_pixels[three_d_bytes * 4];
+            memset(generic_native_pixels, 0, sizeof(generic_native_pixels));
+            memset(generic_adapter_pixels, 0, sizeof(generic_adapter_pixels));
+            [generic_native_texture getBytes:generic_native_pixels
+                                  bytesPerRow:generic_row_bytes
+                                bytesPerImage:generic_plane_bytes
+                                 fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                mipmapLevel:0 slice:0];
+            [generic_adapter_texture getBytes:generic_adapter_pixels
+                                   bytesPerRow:generic_row_bytes
+                                 bytesPerImage:generic_plane_bytes
+                                  fromRegion:MTLRegionMake3D(0, 0, 0, three_d_width, three_d_height, three_d_depth)
+                                 mipmapLevel:0 slice:0];
+            if (generic_native_texture == nil || generic_adapter_texture == nil ||
+                generic_native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                generic_adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(generic_native_pixels, generic_adapter_pixels, generic_byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: generic 3D CPU compute mismatch for %s\n",
+                        generic_compute_formats[format_index].name);
+                return 182 + (int)format_index;
+            }
         }
 
         /* Indirect array dispatch must preserve Metal's deferred grid
