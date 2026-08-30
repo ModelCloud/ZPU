@@ -28161,6 +28161,50 @@ int main(void) {
             return 67;
         }
 
+        /* Repeat the origin check through the Metal 4 address-table path.
+         * The table changes how vertex bytes are located, not the render
+         * target coordinate system: a negative viewport origin must still be
+         * interpreted in the attachment-global upper-left grid on both axes. */
+        id<MTLTexture> adapter_metal4_negative_origin_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        MTL4RenderPassDescriptor *adapter_metal4_negative_origin_pass = [MTL4RenderPassDescriptor new];
+        adapter_metal4_negative_origin_pass.colorAttachments[0].texture = adapter_metal4_negative_origin_texture;
+        adapter_metal4_negative_origin_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_metal4_negative_origin_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_metal4_negative_origin_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTL4CommandBuffer> adapter_metal4_negative_origin_command_buffer =
+            [adapter_device newCommandBuffer];
+        [adapter_metal4_negative_origin_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4RenderCommandEncoder> adapter_metal4_negative_origin_encoder =
+            [adapter_metal4_negative_origin_command_buffer
+                renderCommandEncoderWithDescriptor:adapter_metal4_negative_origin_pass];
+        [adapter_metal4_negative_origin_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_metal4_negative_origin_encoder setColorAttachmentMap:identity_color_map];
+        [adapter_metal4_negative_origin_encoder setViewport:negative_origin_viewport];
+        [adapter_metal4_negative_origin_encoder setScissorRect:full_attachment_scissor];
+        [adapter_metal4_negative_origin_encoder setArgumentTable:adapter_metal4_origin_table
+                                                          atStages:MTLRenderStageVertex | MTLRenderStageFragment];
+        [adapter_metal4_negative_origin_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                                                   vertexStart:0 vertexCount:12];
+        [adapter_metal4_negative_origin_encoder endEncoding];
+        [adapter_metal4_negative_origin_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> adapter_metal4_negative_origin_command_buffers[] = {
+            adapter_metal4_negative_origin_command_buffer};
+        [metal4_queue commit:adapter_metal4_negative_origin_command_buffers count:1];
+        uint8_t adapter_metal4_negative_origin_pixels[byte_count];
+        [adapter_metal4_negative_origin_texture getBytes:adapter_metal4_negative_origin_pixels
+                                               bytesPerRow:(NSUInteger)width * 4
+                                                fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                               mipmapLevel:0];
+        if (adapter_metal4_negative_origin_texture == nil ||
+            adapter_metal4_negative_origin_command_buffer == nil ||
+            adapter_metal4_negative_origin_encoder == nil ||
+            memcmp(native_negative_origin_pixels, adapter_metal4_negative_origin_pixels,
+                   sizeof(native_negative_origin_pixels)) != 0) {
+            fail_with_error("Metal 4 CPU negative origin-coordinate render failed", metal4_error);
+            return 63;
+        }
+
         /* The render encoder must also clear the CPU-owned state when a
          * caller explicitly unbinds a table for its stages. The second draw
          * has no vertex address and therefore must fail instead of replaying
