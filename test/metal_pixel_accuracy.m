@@ -25969,8 +25969,10 @@ int main(void) {
             [native_array_encoder setArgumentBuffer:native_array_buffer offset:0];
             void *adapter_array_float3_0 = [adapter_array_encoder constantDataAtIndex:9];
             void *adapter_array_float3_1 = [adapter_array_encoder constantDataAtIndex:10];
+            void *adapter_array_resource_constant = [adapter_array_encoder constantDataAtIndex:5];
             void *native_array_float3_0 = [native_array_encoder constantDataAtIndex:9];
             void *native_array_float3_1 = [native_array_encoder constantDataAtIndex:10];
+            void *native_array_resource_constant = [native_array_encoder constantDataAtIndex:5];
             [adapter_array_encoder setBuffer:adapter_copy_buffer offset:8 atIndex:5];
             [adapter_array_encoder setBuffer:adapter_copy_buffer offset:16 atIndex:6];
             uint64_t adapter_array_resource_0 = 0;
@@ -25982,16 +25984,22 @@ int main(void) {
                 (NSUInteger)((uint8_t *)adapter_array_float3_0 - (uint8_t *)adapter_array_buffer.contents);
             const NSUInteger adapter_array_float3_1_offset = adapter_array_float3_1 == NULL ? NSUIntegerMax :
                 (NSUInteger)((uint8_t *)adapter_array_float3_1 - (uint8_t *)adapter_array_buffer.contents);
+            const NSUInteger adapter_array_resource_constant_offset = adapter_array_resource_constant == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_array_resource_constant - (uint8_t *)adapter_array_buffer.contents);
             const NSUInteger native_array_float3_0_offset = native_array_float3_0 == NULL ? NSUIntegerMax :
                 (NSUInteger)((uint8_t *)native_array_float3_0 - (uint8_t *)native_array_buffer.contents);
             const NSUInteger native_array_float3_1_offset = native_array_float3_1 == NULL ? NSUIntegerMax :
                 (NSUInteger)((uint8_t *)native_array_float3_1 - (uint8_t *)native_array_buffer.contents);
+            const NSUInteger native_array_resource_constant_offset = native_array_resource_constant == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_array_resource_constant - (uint8_t *)native_array_buffer.contents);
             if ([adapter_array_encoder encodedLength] != [native_array_encoder encodedLength] ||
                 [adapter_array_encoder alignment] != [native_array_encoder alignment] ||
                 [adapter_array_encoder encodedLength] != 48 || [adapter_array_encoder alignment] != 16 ||
                 adapter_array_float3_0_offset != native_array_float3_0_offset ||
                 adapter_array_float3_1_offset != native_array_float3_1_offset ||
+                adapter_array_resource_constant_offset != native_array_resource_constant_offset ||
                 adapter_array_float3_0_offset != 16 || adapter_array_float3_1_offset != 32 ||
+                adapter_array_resource_constant_offset != 0 ||
                 adapter_array_resource_0 != adapter_copy_buffer.gpuAddress + 8 ||
                 adapter_array_resource_1 != adapter_copy_buffer.gpuAddress + 16) {
                 fprintf(stderr, "metal-pixel: CPU argument array layout mismatch\n");

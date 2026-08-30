@@ -15841,6 +15841,13 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
 - (void *)constantDataAtIndex:(NSUInteger)index {
     if (_bufferBindingEncoder) return NULL;
     NSNumber *key = @(index);
+    /* Native Metal returns the argument-buffer base for resource and
+     * otherwise-undeclared indices once a buffer is bound. Do not fabricate
+     * writable storage for those slots: writes must only be possible through
+     * a declared constant entry. */
+    if (_constantSizes[key] == nil && _argumentBuffer != nil && _argumentBuffer.contents != nil) {
+        return (uint8_t *)_argumentBuffer.contents + _argumentOffset;
+    }
     NSMutableData *data = _constants[key];
     if (data == nil) {
         const NSUInteger size = [_constantSizes[key] unsignedIntegerValue];
