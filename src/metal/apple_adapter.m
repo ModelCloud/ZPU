@@ -235,6 +235,8 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _depth;
     NSUInteger _baseMipmapLevel;
     NSUInteger _baseSlice;
+    NSUInteger _sampleCount;
+    NSArray *_sampleTextures;
     IOSurfaceRef _iosurface;
     NSUInteger _iosurfacePlane;
     BOOL _shareable;
@@ -250,6 +252,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 - (instancetype)initWithOwner:(id)owner texture:(zpu_metal_texture *)texture type:(MTLTextureType)type pixelFormat:(MTLPixelFormat)pixelFormat mipmapSlices:(NSArray *)mipmapSlices;
 - (zpu_metal_texture *)zpuTextureAtLevel:(NSUInteger)level;
 - (zpu_metal_texture *)zpuTextureAtLevel:(NSUInteger)level slice:(NSUInteger)slice;
+- (zpu_metal_texture *)zpuTextureAtLevel:(NSUInteger)level slice:(NSUInteger)slice sample:(NSUInteger)sample;
 - (void)applyDescriptor:(MTLTextureDescriptor *)descriptor;
 @end
 
@@ -732,6 +735,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSize _meshRequiredThreadsPerObjectThreadgroup;
     MTLSize _meshRequiredThreadsPerMeshThreadgroup;
     BOOL _isPatchPipeline;
+    NSUInteger _rasterSampleCount;
     MTLPatchType _patchType;
     NSInteger _patchControlPointCount;
     MTLTessellationControlPointIndexType _tessellationControlPointIndexType;
@@ -1800,6 +1804,43 @@ static BOOL zpu_store_action_supported(MTLStoreAction action) {
     return action == MTLStoreActionDontCare || action == MTLStoreActionStore;
 }
 
+static BOOL zpu_store_action_requests_resolve(MTLStoreAction action) {
+    return action == MTLStoreActionMultisampleResolve || action == MTLStoreActionStoreAndMultisampleResolve;
+}
+
+static BOOL zpu_color_store_action_supported(MTLStoreAction action, BOOL multisample, BOOL hasResolve) {
+    if (zpu_store_action_requests_resolve(action)) return multisample && hasResolve;
+    return zpu_store_action_supported(action);
+}
+
+static BOOL zpu_configure_multisample_targets(ZPUCommandBuffer *owner,
+                                               zpu_metal_render_encoder *encoder,
+                                               ZPUTexture *texture,
+                                               MTLRenderPassColorAttachmentDescriptor *attachment) {
+    if (owner == nil || encoder == NULL || texture == nil || attachment == nil) return NO;
+    const NSUInteger sampleCount = texture.sampleCount;
+    ZPUTexture *resolve = (ZPUTexture *)attachment.resolveTexture;
+    const BOOL hasResolve = resolve != nil;
+    if (sampleCount == 1) return !hasResolve && !zpu_store_action_requests_resolve(attachment.storeAction);
+    if (texture->_textureType != MTLTextureType2DMultisample ||
+        (sampleCount != 2 && sampleCount != 4) || attachment.level != 0 || attachment.slice != 0 ||
+        !zpu_color_store_action_supported(attachment.storeAction, YES, hasResolve)) return NO;
+    if (zpu_store_action_requests_resolve(attachment.storeAction) != hasResolve ||
+        (hasResolve && (![resolve isKindOfClass:[ZPUTexture class]] || resolve.sampleCount != 1 ||
+                        resolve->_textureType != MTLTextureType2D || resolve->_pixelFormat != texture->_pixelFormat ||
+                        resolve.width != texture.width || resolve.height != texture.height))) return NO;
+    zpu_metal_texture *samples[4] = {NULL, NULL, NULL, NULL};
+    for (NSUInteger index = 0; index < sampleCount; ++index) {
+        samples[index] = [texture zpuTextureAtLevel:0 slice:0 sample:index];
+        if (samples[index] == NULL) return NO;
+    }
+    zpu_metal_texture *resolveTexture = hasResolve ? [resolve zpuTextureAtLevel:0 slice:0] : NULL;
+    if (hasResolve && resolveTexture == NULL) return NO;
+    if (zpu_metal_render_encoder_set_multisample_targets(encoder, samples, sampleCount, resolveTexture) != ZPU_METAL_OK) return NO;
+    if (hasResolve) [owner retainResource:resolve];
+    return YES;
+}
+
 static void zpu_set_error(NSError **error, NSString *description) {
     if (error != NULL) {
         *error = [NSError errorWithDomain:@"ZPUMetal" code:ZPU_METAL_INVALID_ARGUMENT
@@ -2021,6 +2062,10 @@ static BOOL zpu_texture_type_is_3d(MTLTextureType type) {
     return type == MTLTextureType3D;
 }
 
+static BOOL zpu_texture_type_is_multisample(MTLTextureType type) {
+    return type == MTLTextureType2DMultisample;
+}
+
 static BOOL zpu_texture_type_is_cube(MTLTextureType type) {
     return type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
 }
@@ -2037,12 +2082,12 @@ static BOOL zpu_texture_type_is_array(MTLTextureType type) {
 static BOOL zpu_texture_type_is_supported(MTLTextureType type) {
     return type == MTLTextureType1D || type == MTLTextureType1DArray ||
         type == MTLTextureType2D || type == MTLTextureType2DArray || type == MTLTextureType3D ||
-        type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
+        type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray || type == MTLTextureType2DMultisample;
 }
 
 static BOOL zpu_render_texture_type_supported(MTLTextureType type) {
     return type == MTLTextureType2D || type == MTLTextureType2DArray ||
-        type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray;
+        type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray || type == MTLTextureType2DMultisample;
 }
 
 /* ZPU stores every non-3D Metal slice as an independent 2D texture. Metal
@@ -2083,6 +2128,7 @@ static BOOL zpu_mipmap_range(NSUInteger sourceSize, NSUInteger destinationSize, 
 }
 
 static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInteger *size) {
+    const BOOL multisample = descriptor != nil && zpu_texture_type_is_multisample(descriptor.textureType);
     if (descriptor == nil || size == NULL ||
         !zpu_texture_type_is_supported(descriptor.textureType) ||
         descriptor.arrayLength == 0 ||
@@ -2090,7 +2136,10 @@ static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInt
         (!zpu_texture_type_is_array(descriptor.textureType) && descriptor.arrayLength != 1) ||
         (zpu_texture_type_is_1d(descriptor.textureType) && descriptor.height != 1) ||
         (zpu_texture_type_is_cube(descriptor.textureType) && descriptor.width != descriptor.height) ||
-        descriptor.mipmapLevelCount == 0 || descriptor.sampleCount != 1 ||
+        descriptor.mipmapLevelCount == 0 ||
+        (multisample ? (descriptor.sampleCount != 2 && descriptor.sampleCount != 4) : descriptor.sampleCount != 1) ||
+        (multisample && (descriptor.arrayLength != 1 || descriptor.mipmapLevelCount != 1 ||
+                         !zpu_color_texture_format_supported(descriptor.pixelFormat))) ||
         descriptor.width > UINT32_MAX || descriptor.height > UINT32_MAX ||
         !zpu_texture_format_supported(descriptor.pixelFormat)) return NO;
     NSUInteger total = 0;
@@ -2117,6 +2166,10 @@ static BOOL zpu_texture_descriptor_size(MTLTextureDescriptor *descriptor, NSUInt
             depth = depth > 1 ? depth / 2 : 1;
         }
         if (total == SIZE_MAX) return NO;
+    }
+    if (multisample) {
+        if (total != 0 && descriptor.sampleCount > SIZE_MAX / total) return NO;
+        total *= descriptor.sampleCount;
     }
     *size = total;
     return YES;
@@ -2230,10 +2283,21 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     if (![color isKindOfClass:[ZPUTexture class]] ||
         !zpu_render_texture_type_supported(color->_textureType) ||
         !zpu_render_pipeline_format_supported(hasColor ? color->_pixelFormat : MTLPixelFormatRGBA8Unorm)) return NO;
+    const BOOL multisample = color.sampleCount > 1;
+    MTLRenderPassColorAttachmentDescriptor *colorAttachment = descriptor.colorAttachments[0];
+    if (hasColor && !zpu_color_store_action_supported(colorAttachment.storeAction, multisample,
+                                                       colorAttachment.resolveTexture != nil)) return NO;
+    if (multisample && (descriptor.depthAttachment.texture != nil || descriptor.stencilAttachment.texture != nil)) return NO;
+    if (multisample) {
+        for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+            if (descriptor.colorAttachments[index].texture != nil) return NO;
+        }
+    }
     zpu_metal_texture *colorTexture = [color zpuTextureAtLevel:hasColor ? descriptor.colorAttachments[0].level : 0
                                                           slice:hasColor ? descriptor.colorAttachments[0].slice : 0];
     if (colorTexture == NULL) return NO;
-    if (descriptor.renderTargetArrayLength > 1 || descriptor.defaultRasterSampleCount > 1 ||
+    if (descriptor.renderTargetArrayLength > 1 ||
+        (descriptor.defaultRasterSampleCount > 1 && (!multisample || descriptor.defaultRasterSampleCount != color.sampleCount)) ||
         (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != zpu_metal_texture_width(colorTexture)) ||
         (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != zpu_metal_texture_height(colorTexture))) return NO;
     if (hasColor && !zpu_store_action_supported(descriptor.colorAttachments[0].storeAction)) return NO;
@@ -4494,6 +4558,28 @@ static void zpu_destroy_texture_arrays(NSArray *sliceMipmapTextures) {
     }
 }
 
+static NSArray *zpu_make_additional_sample_planes(ZPUDevice *owner, ZPUHeap *heap,
+                                                  uint32_t width, uint32_t height,
+                                                  MTLPixelFormat pixelFormat, NSUInteger sampleCount,
+                                                  BOOL placementSparse, BOOL *success) {
+    NSMutableArray *planes = [NSMutableArray arrayWithCapacity:sampleCount > 0 ? sampleCount - 1 : 0];
+    if (sampleCount <= 1) return @[];
+    zpu_metal_texture_descriptor descriptor = {width, height, zpu_pixel_format(pixelFormat)};
+    for (NSUInteger sample = 1; sample < sampleCount; ++sample) {
+        zpu_metal_texture *texture = heap != nil ?
+            zpu_metal_heap_new_texture(heap->_zpuHeap, &descriptor) :
+            zpu_metal_device_new_texture(owner->_zpuDevice, &descriptor);
+        if (texture == NULL) {
+            for (id value in planes) zpu_metal_texture_destroy((zpu_metal_texture *)[value pointerValue]);
+            *success = NO;
+            return nil;
+        }
+        (void)placementSparse;
+        [planes addObject:[NSValue valueWithPointer:texture]];
+    }
+    return [planes copy];
+}
+
 static NSArray *zpu_make_texture_view_slice(NSArray *sourceMipmapTextures, MTLPixelFormat pixelFormat, BOOL *success) {
     NSMutableArray *viewMipmapTextures = [NSMutableArray arrayWithCapacity:sourceMipmapTextures.count];
     for (id value in sourceMipmapTextures) {
@@ -4573,6 +4659,8 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
         _depth = 1;
         _baseMipmapLevel = 0;
         _baseSlice = 0;
+        _sampleCount = 1;
+        _sampleTextures = @[];
         _ownsZpuTextures = NO;
         _resourceID = zpu_register_resource(self);
     }
@@ -4605,6 +4693,11 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
 - (void)dealloc {
     if (_backing == nil && _sparseMappings != nil) zpu_sparse_flush_texture_mappings(self);
     if (_ownsZpuTextures || _backing == nil) zpu_destroy_texture_arrays(_sliceMipmapTextures);
+    if (_ownsZpuTextures) {
+        for (id value in _sampleTextures) {
+            if ([value isKindOfClass:[NSValue class]]) zpu_metal_texture_destroy((zpu_metal_texture *)[value pointerValue]);
+        }
+    }
     if (_iosurface != NULL) CFRelease(_iosurface);
 }
 - (NSString *)label { return _label; }
@@ -4616,7 +4709,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
 - (NSUInteger)height { return zpu_metal_texture_height(_zpuTexture); }
 - (NSUInteger)depth { return _depth; }
 - (NSUInteger)mipmapLevelCount { return _mipmapTextures.count; }
-- (NSUInteger)sampleCount { return 1; }
+- (NSUInteger)sampleCount { return _backing != nil ? [_backing sampleCount] : _sampleCount; }
 - (NSUInteger)arrayLength { return _arrayLength; }
 - (void)applyDescriptor:(MTLTextureDescriptor *)descriptor {
     if (descriptor == nil) return;
@@ -4706,6 +4799,15 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
             total += width * height * bytesPerPixel;
         }
     }
+    for (id value in _sampleTextures) {
+        if (![value isKindOfClass:[NSValue class]]) continue;
+        zpu_metal_texture *texture = (zpu_metal_texture *)[value pointerValue];
+        const NSUInteger width = zpu_metal_texture_width(texture);
+        const NSUInteger height = zpu_metal_texture_height(texture);
+        const NSUInteger bytesPerPixel = zpu_texture_bytes_per_pixel(_pixelFormat);
+        if (height != 0 && width > (SIZE_MAX - total) / (height * bytesPerPixel)) return SIZE_MAX;
+        total += width * height * bytesPerPixel;
+    }
     return total;
 }
 - (id<MTLHeap>)heap { return _backing != nil ? [_backing heap] : (id<MTLHeap>)_heap; }
@@ -4727,6 +4829,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
 - (void)makeAliasable { _aliasable = YES; }
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (void)getBytes:(void *)destination bytesPerRow:(NSUInteger)bytesPerRow fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level {
+    if (_sampleCount != 1) return;
     if (_sparseMappings != nil) {
         if (zpu_texture_type_is_3d(_textureType)) {
             const NSUInteger levelDepth = zpu_texture_depth_at_level(self, level);
@@ -4774,6 +4877,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     (void)zpu_metal_texture_get_bytes(texture, destination, NSUIntegerMax, bytesPerRow, zpu_region(region));
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level withBytes:(const void *)source bytesPerRow:(NSUInteger)bytesPerRow {
+    if (_sampleCount != 1) return;
     if (_sparseMappings != nil) {
         if (zpu_texture_type_is_3d(_textureType)) {
             const NSUInteger levelDepth = zpu_texture_depth_at_level(self, level);
@@ -4821,6 +4925,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     (void)zpu_metal_texture_replace_region(texture, zpu_region(region), source, NSUIntegerMax, bytesPerRow);
 }
 - (void)getBytes:(void *)destination bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice {
+    if (_sampleCount != 1) return;
     if (_sparseMappings != nil) {
         if (zpu_texture_type_is_3d(_textureType)) {
             const NSUInteger levelDepth = zpu_texture_depth_at_level(self, level);
@@ -4871,6 +4976,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     (void)zpu_metal_texture_get_bytes(texture, destination, NSUIntegerMax, bytesPerRow, zpu_region(region));
 }
 - (void)replaceRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)source bytesPerRow:(NSUInteger)bytesPerRow bytesPerImage:(NSUInteger)bytesPerImage {
+    if (_sampleCount != 1) return;
     if (_sparseMappings != nil) {
         if (zpu_texture_type_is_3d(_textureType)) {
             const NSUInteger levelDepth = zpu_texture_depth_at_level(self, level);
@@ -4921,6 +5027,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     (void)zpu_metal_texture_replace_region(texture, zpu_region(region), source, NSUIntegerMax, bytesPerRow);
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat {
+    if (_sampleCount != 1) return nil;
     if (!zpu_texture_view_formats_compatible(_pixelFormat, pixelFormat) ||
         (_sparseMappings != nil && pixelFormat != _pixelFormat)) return nil;
     ZPUTexture *view = [[ZPUTexture alloc] initWithOwner:_owner texture:_zpuTexture
@@ -4946,6 +5053,7 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     return (id<MTLTexture>)view;
 }
 - (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)pixelFormat textureType:(MTLTextureType)textureType levels:(NSRange)levelRange slices:(NSRange)sliceRange {
+    if (_sampleCount != 1) return nil;
     if (textureType != _textureType || sliceRange.location > _sliceMipmapTextures.count || sliceRange.length == 0 ||
         sliceRange.length > _sliceMipmapTextures.count - sliceRange.location ||
         levelRange.location > _mipmapTextures.count || levelRange.length == 0 ||
@@ -5021,6 +5129,12 @@ static NSArray *zpu_make_texture_view_slices(NSArray *sourceSliceMipmapTextures,
     id value = mipmaps[level];
     if (![value isKindOfClass:[NSValue class]]) return NULL;
     return (zpu_metal_texture *)[value pointerValue];
+}
+- (zpu_metal_texture *)zpuTextureAtLevel:(NSUInteger)level slice:(NSUInteger)slice sample:(NSUInteger)sample {
+    if (sample >= [self sampleCount] || level != 0 || slice != 0) return NULL;
+    if (sample == 0) return [self zpuTextureAtLevel:level slice:slice];
+    id value = _sampleTextures[sample - 1];
+    return [value isKindOfClass:[NSValue class]] ? (zpu_metal_texture *)[value pointerValue] : NULL;
 }
 @end
 
@@ -5176,6 +5290,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
     if (@available(macOS 26.0, iOS 26.0, *)) {
         const NSInteger sparsePageSize = (NSInteger)descriptor.placementSparsePageSize;
         if (sparsePageSize != 0) {
+            if (descriptor.sampleCount != 1) return nil;
             const MTLSize tileSize = zpu_sparse_tile_size(descriptor.textureType, descriptor.pixelFormat,
                                                           descriptor.sampleCount, sparsePageSize);
             if (_type != MTLHeapTypePlacement || _storageMode != MTLStorageModePrivate ||
@@ -5229,6 +5344,14 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         [sliceMipmapTextures addObject:mipmaps];
     }
     NSArray *firstSlice = sliceMipmapTextures.firstObject;
+    BOOL sampleSuccess = YES;
+    NSArray *sampleTextures = zpu_make_additional_sample_planes(
+        _owner, self, (uint32_t)descriptor.width, (uint32_t)descriptor.height,
+        descriptor.pixelFormat, descriptor.sampleCount, placementSparse, &sampleSuccess);
+    if (!sampleSuccess) {
+        zpu_destroy_texture_arrays(sliceMipmapTextures);
+        return nil;
+    }
     zpu_metal_texture *texture = (zpu_metal_texture *)[firstSlice[0] pointerValue];
     ZPUTexture *result = [[ZPUTexture alloc] initWithOwner:_owner texture:texture
                                                       type:descriptor.textureType
@@ -5237,6 +5360,9 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
     result->_mipmapTextures = [firstSlice copy];
     result->_arrayLength = descriptor.arrayLength;
     result->_depth = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth : 1;
+    result->_sampleTextures = sampleTextures;
+    result->_sampleCount = descriptor.sampleCount;
+    result->_ownsZpuTextures = descriptor.sampleCount > 1;
     [result applyDescriptor:descriptor];
     return (id<MTLTexture>)result;
 }
@@ -6268,6 +6394,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
+        _rasterSampleCount = descriptor.rasterSampleCount;
         _isPatchPipeline = [_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name];
         _patchType = _isPatchPipeline ? MTLPatchTypeTriangle : MTLPatchTypeNone;
         _patchControlPointCount = _isPatchPipeline ? 3 : -1;
@@ -6325,6 +6452,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _colorPixelFormats[0] = colorFormat;
         _colorAttachmentCount = 1;
         _rasterizationEnabled = NO;
+        _rasterSampleCount = 1;
         _supportsIndirectCommandBuffers = NO;
         _fragmentFunctionName = nil;
         _reflection = (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
@@ -6361,6 +6489,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _colorPixelFormats[0] = colorFormat;
         _colorAttachmentCount = 1;
         _rasterizationEnabled = YES;
+        _rasterSampleCount = 1;
         _supportsIndirectCommandBuffers = NO;
         _fragmentFunctionName = [fragmentFunctionName copy];
         _reflection = (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
@@ -6388,6 +6517,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _fragmentUniform = pipeline->_fragmentUniform;
         _depthPixelFormat = pipeline->_depthPixelFormat;
         _stencilPixelFormat = pipeline->_stencilPixelFormat;
+        _rasterSampleCount = pipeline->_rasterSampleCount;
         _sampleTexture = pipeline->_sampleTexture;
         _supportsAddingVertexBinaryFunctions = pipeline->_supportsAddingVertexBinaryFunctions;
         _supportsAddingFragmentBinaryFunctions = pipeline->_supportsAddingFragmentBinaryFunctions;
@@ -7432,7 +7562,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 #endif
 }
 #pragma clang diagnostic pop
-- (BOOL)supportsTextureSampleCount:(NSUInteger)sampleCount { return sampleCount == 1; }
+- (BOOL)supportsTextureSampleCount:(NSUInteger)sampleCount {
+    return sampleCount == 1 || sampleCount == 2 || sampleCount == 4;
+}
 - (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format {
     /* Apple devices require a 16-byte base/row alignment for linear texture
      * storage. Keep invalid, depth/stencil, and compressed formats at zero:
@@ -7493,14 +7625,17 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     NSUInteger descriptorSize = 0;
     if (!zpu_texture_descriptor_size(descriptor, &descriptorSize)) return nil;
     (void)descriptorSize;
+    BOOL placementSparse = NO;
     if (@available(macOS 26.0, iOS 26.0, *)) {
         const NSInteger sparsePageSize = (NSInteger)descriptor.placementSparsePageSize;
         if (sparsePageSize != 0) {
+            if (descriptor.sampleCount != 1) return nil;
             const MTLSize tileSize = zpu_sparse_tile_size(descriptor.textureType, descriptor.pixelFormat,
                                                           descriptor.sampleCount, sparsePageSize);
             if (descriptor.storageMode != MTLStorageModePrivate ||
                 tileSize.width == 0 ||
                 tileSize.height == 0 || tileSize.depth == 0) return nil;
+            placementSparse = YES;
         }
     }
     const NSUInteger sliceCount = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth :
@@ -7540,6 +7675,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         [sliceMipmapTextures addObject:mipmaps];
     }
     NSArray *firstSlice = sliceMipmapTextures.firstObject;
+    BOOL sampleSuccess = YES;
+    NSArray *sampleTextures = zpu_make_additional_sample_planes(
+        self, nil, (uint32_t)descriptor.width, (uint32_t)descriptor.height,
+        descriptor.pixelFormat, descriptor.sampleCount, placementSparse, &sampleSuccess);
+    if (!sampleSuccess) {
+        zpu_destroy_texture_arrays(sliceMipmapTextures);
+        return nil;
+    }
     ZPUTexture *result = [[ZPUTexture alloc] initWithOwner:self
                                                    texture:(zpu_metal_texture *)[firstSlice[0] pointerValue]
                                                       type:descriptor.textureType
@@ -7547,6 +7690,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
                                              mipmapSlices:sliceMipmapTextures];
     result->_depth = zpu_texture_type_is_3d(descriptor.textureType) ? descriptor.depth : 1;
     result->_arrayLength = descriptor.arrayLength;
+    result->_sampleTextures = sampleTextures;
+    result->_sampleCount = descriptor.sampleCount;
+    result->_ownsZpuTextures = descriptor.sampleCount > 1;
     [result applyDescriptor:descriptor];
     return (id<MTLTexture>)result;
 }
@@ -7567,7 +7713,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     NSUInteger vertexStride = 0;
     BOOL vertexStrideDynamic = NO;
     if (descriptor == nil || descriptor.vertexFunction == nil || descriptor.fragmentFunction == nil ||
-        descriptor.rasterSampleCount != 1 ||
+        (descriptor.rasterSampleCount != 1 && descriptor.rasterSampleCount != 2 && descriptor.rasterSampleCount != 4) ||
         !zpu_depth_format_supported(descriptor.depthAttachmentPixelFormat) ||
         !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat) ||
         (descriptor != nil && !zpu_vertex_layout_supported(descriptor.vertexDescriptor,
@@ -9018,8 +9164,9 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal 4 requires registered vertex and fragment functions");
         return nil;
     }
-    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1) {
-        zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-sample CPU render targets");
+    if (descriptor.rasterSampleCount != 0 && descriptor.rasterSampleCount != 1 &&
+        descriptor.rasterSampleCount != 2 && descriptor.rasterSampleCount != 4) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports only 1x, 2x, and 4x CPU render targets");
         return nil;
     }
     MTL4StaticLinkingDescriptor *vertex_linking = descriptor.vertexStaticLinkingDescriptor;
@@ -10120,8 +10267,16 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
                                           depthAttachmentTexture != nil ? descriptor.depthAttachment.slice : descriptor.stencilAttachment.slice);
         if (texture == nil) return nil;
     }
-    if (colorAttachment.texture != nil && !zpu_store_action_supported(colorAttachment.storeAction)) return nil;
     if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
+    const BOOL multisample = texture.sampleCount > 1;
+    if (colorAttachment.texture != nil && !zpu_color_store_action_supported(
+            colorAttachment.storeAction, multisample, colorAttachment.resolveTexture != nil)) return nil;
+    if (multisample && (descriptor.depthAttachment.texture != nil || descriptor.stencilAttachment.texture != nil)) return nil;
+    if (multisample) {
+        for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+            if (descriptor.colorAttachments[index].texture != nil) return nil;
+        }
+    }
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
     if (colorTexture == NULL) return nil;
@@ -10165,6 +10320,10 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(_zpuCommandBuffer, colorTexture, &pass);
     if (encoder == NULL) return nil;
     [self retainResource:texture];
+    if (!zpu_configure_multisample_targets(self, encoder, texture, colorAttachment)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
     if (!zpu_configure_additional_color_attachments(self, encoder, descriptor)) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
@@ -10222,6 +10381,10 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     }
     if (colorAttachment.texture != nil && !zpu_store_action_supported(colorAttachment.storeAction)) return nil;
     if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
+    /* The bounded CPU profile resolves MSAA at the ordered render-pass
+     * boundary. Parallel child encoders do not expose a reliable final-child
+     * signal, so keep their multisample behavior fail-closed for now. */
+    if (texture.sampleCount > 1) return nil;
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
     if (colorTexture == NULL) return nil;
@@ -10581,6 +10744,11 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(
         _legacyBuffer->_zpuCommandBuffer, colorTexture, &pass);
     if (encoder == NULL) {
+        [self markError];
+        return nil;
+    }
+    if (!zpu_configure_multisample_targets(_legacyBuffer, encoder, color, descriptor.colorAttachments[0])) {
+        zpu_metal_render_encoder_destroy(encoder);
         [self markError];
         return nil;
     }
@@ -14914,6 +15082,7 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         if (zpu_metal_render_encoder_set_pipeline_color_formats(
                 _zpuEncoder, colorFormats, state->_colorAttachmentCount,
                 (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_raster_sample_count(_zpuEncoder, 1) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, false) != ZPU_METAL_OK) {
             [_owner markError];
         }
@@ -14937,8 +15106,9 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
         colorFormats[index] = (uint16_t)state->_colorPixelFormats[index];
     }
     if (zpu_metal_render_encoder_set_pipeline_color_formats(
-            _zpuEncoder, colorFormats, state->_colorAttachmentCount,
-            (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK) [_owner markError];
+        _zpuEncoder, colorFormats, state->_colorAttachmentCount,
+            (uint16_t)state->_depthPixelFormat, (uint16_t)state->_stencilPixelFormat) != ZPU_METAL_OK ||
+        zpu_metal_render_encoder_set_raster_sample_count(_zpuEncoder, (uint8_t)state->_rasterSampleCount) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_multi_target_output(_zpuEncoder, state->_multiTargetOutput) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_sample_texture(_zpuEncoder, state->_sampleTexture) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_fragment_uniform_enabled(_zpuEncoder, state->_fragmentUniform) != ZPU_METAL_OK) [_owner markError];
