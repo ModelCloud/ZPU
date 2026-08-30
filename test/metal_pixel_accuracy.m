@@ -7378,6 +7378,37 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8"
                                   constantValues:[MTLFunctionConstantValues new]
                                              error:&adapter_library_error];
+        BOOL adapter_function_descriptor_ok = YES;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MTLFunctionDescriptor *native_visible_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_visible_descriptor.name = @"zpu_test_visible_secondary";
+            native_visible_descriptor.options = MTLFunctionOptionCompileToBinary;
+            NSError *native_visible_descriptor_error = nil;
+            id<MTLFunction> native_descriptor_function =
+                [library newFunctionWithDescriptor:native_visible_descriptor
+                                               error:&native_visible_descriptor_error];
+            MTLFunctionDescriptor *adapter_visible_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_visible_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_visible_descriptor.options = MTLFunctionOptionCompileToBinary;
+            NSError *adapter_visible_descriptor_error = nil;
+            id<MTLFunction> adapter_descriptor_function =
+                [adapter_library newFunctionWithDescriptor:adapter_visible_descriptor
+                                                       error:&adapter_visible_descriptor_error];
+            MTLFunctionDescriptor *adapter_kernel_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_kernel_descriptor.name = @"zpu_cpu_fill_gradient_rgba8";
+            adapter_kernel_descriptor.options = MTLFunctionOptionCompileToBinary;
+            NSError *adapter_kernel_descriptor_error = nil;
+            id<MTLFunction> adapter_invalid_descriptor_function =
+                [adapter_library newFunctionWithDescriptor:adapter_kernel_descriptor
+                                                       error:&adapter_kernel_descriptor_error];
+            adapter_function_descriptor_ok =
+                native_descriptor_function != nil && native_visible_descriptor_error == nil &&
+                native_descriptor_function.functionType == MTLFunctionTypeVisible &&
+                adapter_descriptor_function != nil && adapter_visible_descriptor_error == nil &&
+                adapter_descriptor_function.functionType == MTLFunctionTypeVisible &&
+                adapter_descriptor_function.options == MTLFunctionOptionCompileToBinary &&
+                adapter_invalid_descriptor_function == nil && adapter_kernel_descriptor_error != nil;
+        }
         __block BOOL adapter_library_completion_called = NO;
         [adapter_device newLibraryWithSource:adapter_cpu_source options:nil completionHandler:^(id<MTLLibrary> library, NSError *library_error) {
             adapter_library_completion_called = library != nil && library_error == nil;
@@ -7388,6 +7419,7 @@ int main(void) {
             adapter_constant_function == nil ||
             !adapter_stage_input_attributes_ok ||
             !adapter_stitched_library_ok ||
+            !adapter_function_descriptor_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
             adapter_library.functionNames.count != 10 ||

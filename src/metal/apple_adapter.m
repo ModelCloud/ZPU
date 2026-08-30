@@ -1178,12 +1178,16 @@ static uint64_t zpu_next_cpu_drawable_id;
     ZPUDevice *_owner;
     NSString *_name;
     MTLFunctionType _functionTypeOverride;
+    MTLFunctionOptions _optionsOverride;
     NSArray *_vertexAttributes;
     NSArray *_stageInputAttributes;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
                   functionType:(MTLFunctionType)functionType;
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType
+                       options:(MTLFunctionOptions)options;
 @end
 
 @interface ZPUFunctionHandle : NSObject <MTLFunctionHandle> {
@@ -8189,14 +8193,20 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 
 @implementation ZPUCPUFunction
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name {
-    return [self initWithOwner:owner name:name functionType:0];
+    return [self initWithOwner:owner name:name functionType:0 options:MTLFunctionOptionNone];
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
                   functionType:(MTLFunctionType)functionType {
+    return [self initWithOwner:owner name:name functionType:functionType options:MTLFunctionOptionNone];
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType
+                       options:(MTLFunctionOptions)options {
     if ((self = [super init])) {
         _owner = owner;
         _name = [name copy];
         _functionTypeOverride = functionType;
+        _optionsOverride = options;
         _vertexAttributes = @[];
         _stageInputAttributes = @[];
         if ([_name isEqualToString:@"zpu_test_stage_in_vertex"]) {
@@ -8244,7 +8254,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (NSArray *)vertexAttributes { return _vertexAttributes; }
 - (NSArray *)stageInputAttributes API_AVAILABLE(macos(10.12), ios(10.0)) { return _stageInputAttributes; }
 - (NSDictionary *)functionConstantsDictionary API_AVAILABLE(macos(10.12), ios(10.0)) { return @{}; }
-- (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return MTLFunctionOptionNone; }
+- (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return _optionsOverride; }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(10.13), ios(11.0)) {
     (void)bufferIndex;
     /* The registered CPU profiles expose ordinary buffer/texture/sampler
@@ -8339,9 +8349,34 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return zpu_function_reflection(functionName);
 }
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal does not specialize arbitrary function descriptors");
-    return nil;
+    if (descriptor == nil || descriptor.name.length == 0 || descriptor.specializedName.length != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal function descriptors require an unaliased registered function");
+        return nil;
+    }
+    if (@available(macOS 12.0, iOS 15.0, *)) {
+        if (descriptor.binaryArchives.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal function descriptors do not search native binary archives");
+            return nil;
+        }
+    }
+    const MTLFunctionOptions options = descriptor.options;
+    if ((options & ~MTLFunctionOptionCompileToBinary) != 0) {
+        zpu_set_error(error, @"ZPU CPU Metal supports only CompileToBinary for function descriptors");
+        return nil;
+    }
+    id<MTLFunction> registered = [self newFunctionWithName:descriptor.name];
+    if (registered == nil || (options != MTLFunctionOptionNone && registered.functionType != MTLFunctionTypeVisible)) {
+        zpu_set_error(error, @"ZPU CPU Metal function descriptor does not name a registered visible function");
+        return nil;
+    }
+    ZPUCPUFunction *function = (ZPUCPUFunction *)registered;
+    if (options == MTLFunctionOptionNone) {
+        if (error != NULL) *error = nil;
+        return registered;
+    }
+    if (error != NULL) *error = nil;
+    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:self->_owner name:function.name
+                                                        functionType:function.functionType options:options];
 }
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor
                  completionHandler:(void (^)(id<MTLFunction> __nullable function, NSError * __nullable error))completionHandler API_AVAILABLE(macos(11.0), ios(14.0)) {
