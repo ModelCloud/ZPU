@@ -305,7 +305,10 @@ triangle path:
   addition with Metal-compatible 32-bit wraparound through that same ZPU-owned
   storage path; the registered `zpu_cpu_ml_add_u32` profile performs deferred
   elementwise UInt32 tensor addition with Metal-compatible 32-bit wraparound
-  through the same ZPU-owned storage path, while arbitrary ML graphs
+  through the same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_add_u16` profile performs deferred elementwise UInt16 tensor
+  addition with Metal-compatible 16-bit wraparound through that same ZPU-owned
+  storage path, while arbitrary ML graphs
   and arbitrary-MSL compiler requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
@@ -337,7 +340,8 @@ triangle path:
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
 - the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_add_u8`,
-  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_add_i32`, and `zpu_cpu_ml_add_u32` Metal 4
+  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_add_i32`, `zpu_cpu_ml_add_u32`, and
+  `zpu_cpu_ml_add_u16` Metal 4
   machine-learning profiles preserve CPU fence update/wait ordering and
   interleave tensor copies and arithmetic with other commands at their encoded
   position in the deferred ZPU command buffer; arbitrary ML graphs remain
