@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
+#include <objc/runtime.h>
 
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
@@ -105,6 +106,25 @@ static void fail_with_error(const char *message, NSError *error) {
     } else {
         fprintf(stderr, "metal-pixel: %s\n", message);
     }
+}
+
+/* The CPU adapter keeps Metal 4 tile/object/mesh bindings as deterministic
+ * stage metadata. Inspect that private representation here so an argument
+ * table replacement test can distinguish an explicit null from a stale
+ * resource without submitting native Metal work. */
+static BOOL zpu_cpu_stage_binding_is_null(id encoder, MTLRenderStages stage,
+                                          NSUInteger index, NSString *kind) {
+    if (encoder == nil || kind == nil) return NO;
+    Ivar legacy_ivar = class_getInstanceVariable(object_getClass(encoder), "_legacy");
+    if (legacy_ivar == NULL) return NO;
+    id legacy = object_getIvar(encoder, legacy_ivar);
+    if (legacy == nil) return NO;
+    Ivar bindings_ivar = class_getInstanceVariable(object_getClass(legacy), "_stageBindings");
+    if (bindings_ivar == NULL) return NO;
+    NSDictionary *bindings = (NSDictionary *)object_getIvar(legacy, bindings_ivar);
+    NSString *key = [NSString stringWithFormat:@"%lu:%lu:%@",
+                     (unsigned long)stage, (unsigned long)index, kind];
+    return [bindings[key] isKindOfClass:[NSNull class]];
 }
 
 static int test_texture_view_format_compatibility(
@@ -10196,6 +10216,39 @@ int main(void) {
             adapter_mtl4_tile_encoder =
                 [adapter_mtl4_tile_command_buffer renderCommandEncoderWithDescriptor:adapter_mtl4_tile_pass];
             [adapter_mtl4_tile_encoder setRenderPipelineState:adapter_mtl4_archived_tile_pipeline];
+
+            /* Zero IDs in a replacement table are explicit null bindings.
+             * Exercise nonzero tile slots because they are represented by the
+             * CPU stage metadata even though the fixed pixel profile does not
+             * consume them. This also verifies that replacing a table with a
+             * smaller table clears slots which no longer exist. */
+            MTL4ArgumentTableDescriptor *adapter_mtl4_tile_state_descriptor = [MTL4ArgumentTableDescriptor new];
+            adapter_mtl4_tile_state_descriptor.maxBufferBindCount = 2;
+            adapter_mtl4_tile_state_descriptor.maxTextureBindCount = 2;
+            adapter_mtl4_tile_state_descriptor.maxSamplerStateBindCount = 2;
+            id<MTL4ArgumentTable> adapter_mtl4_tile_state_table =
+                [adapter_device newArgumentTableWithDescriptor:adapter_mtl4_tile_state_descriptor
+                                                          error:&adapter_mtl4_tile_error];
+            [adapter_mtl4_tile_state_table setAddress:adapter_vertex_buffer.gpuAddress atIndex:1];
+            [adapter_mtl4_tile_state_table setTexture:adapter_mtl4_tile_texture.gpuResourceID atIndex:1];
+            [adapter_mtl4_tile_state_table setSamplerState:adapter_sampler.gpuResourceID atIndex:1];
+            MTL4ArgumentTableDescriptor *adapter_mtl4_tile_empty_state_descriptor = [MTL4ArgumentTableDescriptor new];
+            adapter_mtl4_tile_empty_state_descriptor.maxBufferBindCount = 2;
+            adapter_mtl4_tile_empty_state_descriptor.maxTextureBindCount = 2;
+            adapter_mtl4_tile_empty_state_descriptor.maxSamplerStateBindCount = 2;
+            id<MTL4ArgumentTable> adapter_mtl4_tile_empty_state_table =
+                [adapter_device newArgumentTableWithDescriptor:adapter_mtl4_tile_empty_state_descriptor
+                                                          error:&adapter_mtl4_tile_error];
+            [adapter_mtl4_tile_encoder setArgumentTable:adapter_mtl4_tile_state_table
+                                                 atStages:MTLRenderStageTile];
+            [adapter_mtl4_tile_encoder setArgumentTable:adapter_mtl4_tile_empty_state_table
+                                                 atStages:MTLRenderStageTile];
+            if (!zpu_cpu_stage_binding_is_null(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"buffer") ||
+                !zpu_cpu_stage_binding_is_null(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"texture") ||
+                !zpu_cpu_stage_binding_is_null(adapter_mtl4_tile_encoder, MTLRenderStageTile, 1, @"sampler")) {
+                fprintf(stderr, "metal-pixel: Metal 4 tile argument-table replacement retained a stale slot\n");
+                return 154;
+            }
             [adapter_mtl4_tile_encoder setArgumentTable:adapter_mtl4_tile_stage_table
                                                  atStages:MTLRenderStageTile];
             [adapter_mtl4_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];

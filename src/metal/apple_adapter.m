@@ -1510,6 +1510,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     ZPUMTL4CommandBuffer *_owner;
     ZPURenderEncoder *_legacy;
     ZPUMTL4ArgumentTable *_argumentTable;
+    ZPUMTL4ArgumentTable *_vertexArgumentTable;
+    ZPUMTL4ArgumentTable *_fragmentArgumentTable;
+    ZPUMTL4ArgumentTable *_tileArgumentTable;
+    ZPUMTL4ArgumentTable *_objectArgumentTable;
+    ZPUMTL4ArgumentTable *_meshArgumentTable;
     NSString *_label;
     NSUInteger _tileWidth;
     NSUInteger _tileHeight;
@@ -2528,6 +2533,61 @@ static BOOL zpu_metal4_argument_table_buffer_slot_empty(ZPUMTL4ArgumentTable *ta
     if (table == nil || index >= table->_maxBufferBindCount) return YES;
     return ((const uint64_t *)table->_bufferAddresses.bytes)[index] == 0 &&
            ((const uint64_t *)table->_bufferResources.bytes)[index] == 0;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static void zpu_metal4_clear_render_argument_slot(ZPURenderEncoder *legacy,
+                                                    MTLRenderStages stage,
+                                                    NSUInteger index,
+                                                    BOOL clearBuffer,
+                                                    BOOL clearTexture,
+                                                    BOOL clearSampler) {
+    if (legacy == nil) return;
+    /* The fixed CPU vertex/fragment profiles expose only slot zero. A
+     * nonzero slot is still a valid Metal argument-table slot, but it is not
+     * represented by those bounded profiles and therefore cannot have a
+     * previously-applied CPU binding to clear. Tile/object/mesh bindings are
+     * retained as stage metadata and must clear every slot explicitly. */
+    if (stage == MTLRenderStageVertex) {
+        if (index != 0) return;
+        if (clearBuffer) [(id)legacy setVertexBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
+        if (clearTexture) [(id)legacy setVertexTexture:(id<MTLTexture>)nil atIndex:0];
+        if (clearSampler) [(id)legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:0];
+    } else if (stage == MTLRenderStageFragment) {
+        if (index != 0) return;
+        if (clearBuffer) [(id)legacy setFragmentBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
+        if (clearTexture) [(id)legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:0];
+        if (clearSampler) [(id)legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:0];
+    } else if (stage == MTLRenderStageTile) {
+        if (clearBuffer) [(id)legacy setTileBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        if (clearTexture) [(id)legacy setTileTexture:(id<MTLTexture>)nil atIndex:index];
+        if (clearSampler) [(id)legacy setTileSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+    } else if (stage == zpu_mtl_render_stage_object) {
+        if (clearBuffer) [(id)legacy setObjectBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        if (clearTexture) [(id)legacy setObjectTexture:(id<MTLTexture>)nil atIndex:index];
+        if (clearSampler) [(id)legacy setObjectSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+    } else if (stage == zpu_mtl_render_stage_mesh) {
+        if (clearBuffer) [(id)legacy setMeshBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+        if (clearTexture) [(id)legacy setMeshTexture:(id<MTLTexture>)nil atIndex:index];
+        if (clearSampler) [(id)legacy setMeshSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+    }
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static void zpu_metal4_clear_render_argument_table_stage(ZPURenderEncoder *legacy,
+                                                           MTLRenderStages stage,
+                                                           ZPUMTL4ArgumentTable *table) {
+    if (table == nil) return;
+    const NSUInteger bufferCount = table->_maxBufferBindCount;
+    const NSUInteger textureCount = table->_maxTextureBindCount;
+    const NSUInteger samplerCount = table->_maxSamplerStateBindCount;
+    const NSUInteger slotCount = MAX(bufferCount, MAX(textureCount, samplerCount));
+    for (NSUInteger index = 0; index < slotCount; ++index) {
+        zpu_metal4_clear_render_argument_slot(legacy, stage, index,
+                                               index < bufferCount,
+                                               index < textureCount,
+                                               index < samplerCount);
+    }
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -11716,33 +11776,29 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
         [_owner markError];
         return;
     }
+    ZPUMTL4ArgumentTable *table = (ZPUMTL4ArgumentTable *)argumentTable;
+    if ((stages & MTLRenderStageVertex) != 0) {
+        zpu_metal4_clear_render_argument_table_stage(_legacy, MTLRenderStageVertex, _vertexArgumentTable);
+        _vertexArgumentTable = table;
+    }
+    if ((stages & MTLRenderStageFragment) != 0) {
+        zpu_metal4_clear_render_argument_table_stage(_legacy, MTLRenderStageFragment, _fragmentArgumentTable);
+        _fragmentArgumentTable = table;
+    }
+    if ((stages & MTLRenderStageTile) != 0) {
+        zpu_metal4_clear_render_argument_table_stage(_legacy, MTLRenderStageTile, _tileArgumentTable);
+        _tileArgumentTable = table;
+    }
+    if ((stages & zpu_mtl_render_stage_object) != 0) {
+        zpu_metal4_clear_render_argument_table_stage(_legacy, zpu_mtl_render_stage_object, _objectArgumentTable);
+        _objectArgumentTable = table;
+    }
+    if ((stages & zpu_mtl_render_stage_mesh) != 0) {
+        zpu_metal4_clear_render_argument_table_stage(_legacy, zpu_mtl_render_stage_mesh, _meshArgumentTable);
+        _meshArgumentTable = table;
+    }
     _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
     if (_argumentTable == nil) {
-        if ((stages & MTLRenderStageVertex) != 0) {
-            [(id)_legacy setVertexBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-            [(id)_legacy setVertexTexture:(id<MTLTexture>)nil atIndex:0];
-            [(id)_legacy setVertexSamplerState:(id<MTLSamplerState>)nil atIndex:0];
-        }
-        if ((stages & MTLRenderStageFragment) != 0) {
-            [(id)_legacy setFragmentBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-            [(id)_legacy setFragmentTexture:(id<MTLTexture>)nil atIndex:0];
-            [(id)_legacy setFragmentSamplerState:(id<MTLSamplerState>)nil atIndex:0];
-        }
-        if ((stages & MTLRenderStageTile) != 0) {
-            [(id)_legacy setTileBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-            [(id)_legacy setTileTexture:(id<MTLTexture>)nil atIndex:0];
-            [(id)_legacy setTileSamplerState:(id<MTLSamplerState>)nil atIndex:0];
-        }
-        if ((stages & zpu_mtl_render_stage_object) != 0) {
-            [(id)_legacy setObjectBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-            [(id)_legacy setObjectTexture:(id<MTLTexture>)nil atIndex:0];
-            [(id)_legacy setObjectSamplerState:(id<MTLSamplerState>)nil atIndex:0];
-        }
-        if ((stages & zpu_mtl_render_stage_mesh) != 0) {
-            [(id)_legacy setMeshBuffer:(id<MTLBuffer>)nil offset:0 atIndex:0];
-            [(id)_legacy setMeshTexture:(id<MTLTexture>)nil atIndex:0];
-            [(id)_legacy setMeshSamplerState:(id<MTLSamplerState>)nil atIndex:0];
-        }
         return;
     }
     if (_argumentTable->_invalid) {
@@ -11774,6 +11830,15 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
                 }
                 [_owner markError];
                 return;
+            }
+            if ((stages & MTLRenderStageTile) != 0) {
+                [(id)_legacy setTileBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+            }
+            if ((stages & zpu_mtl_render_stage_object) != 0) {
+                [(id)_legacy setObjectBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
+            }
+            if ((stages & zpu_mtl_render_stage_mesh) != 0) {
+                [(id)_legacy setMeshBuffer:(id<MTLBuffer>)nil offset:0 atIndex:index];
             }
             continue;
         }
@@ -11807,7 +11872,12 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
-        if (index != 0 && textureIDs[index] == 0) continue;
+        if (index != 0 && textureIDs[index] == 0) {
+            if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileTexture:(id<MTLTexture>)nil atIndex:index];
+            if ((stages & zpu_mtl_render_stage_object) != 0) [(id)_legacy setObjectTexture:(id<MTLTexture>)nil atIndex:index];
+            if ((stages & zpu_mtl_render_stage_mesh) != 0) [(id)_legacy setMeshTexture:(id<MTLTexture>)nil atIndex:index];
+            continue;
+        }
         id resource = zpu_resource_for_id(textureIDs[index]);
         if (textureIDs[index] != 0 &&
             (![resource isKindOfClass:[ZPUTexture class]] || ((ZPUTexture *)resource)->_owner != _owner->_owner)) {
@@ -11822,7 +11892,12 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     }
     const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
     for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
-        if (index != 0 && samplerIDs[index] == 0) continue;
+        if (index != 0 && samplerIDs[index] == 0) {
+            if ((stages & MTLRenderStageTile) != 0) [(id)_legacy setTileSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+            if ((stages & zpu_mtl_render_stage_object) != 0) [(id)_legacy setObjectSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+            if ((stages & zpu_mtl_render_stage_mesh) != 0) [(id)_legacy setMeshSamplerState:(id<MTLSamplerState>)nil atIndex:index];
+            continue;
+        }
         id resource = zpu_resource_for_id(samplerIDs[index]);
         if (samplerIDs[index] != 0 &&
             (![resource isKindOfClass:[ZPUSamplerState class]] || ((ZPUSamplerState *)resource)->_owner != _owner->_owner)) {
