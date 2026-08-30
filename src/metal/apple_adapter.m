@@ -8249,7 +8249,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         }
         _vertexAttributes = @[];
         _stageInputAttributes = @[];
-        if ([_name isEqualToString:@"zpu_test_stage_in_vertex"]) {
+        /* Descriptor specializedName changes the public symbol only.  The
+         * registered implementation still owns its vertex/stage metadata;
+         * looking at _name here would silently drop it for aliases. */
+        if ([_implementationName isEqualToString:@"zpu_test_stage_in_vertex"]) {
             NSArray *attributes = @[
                 [[ZPUVertexAttribute alloc] initWithName:@"position" index:0
                                                      type:MTLDataTypeFloat4 active:YES
@@ -8286,10 +8289,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (NSString *)label { return _label; }
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (MTLPatchType)patchType API_AVAILABLE(macos(10.12), ios(10.0)) {
-    return [_name isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? MTLPatchTypeTriangle : MTLPatchTypeNone;
+    return [_implementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? MTLPatchTypeTriangle : MTLPatchTypeNone;
 }
 - (NSInteger)patchControlPointCount API_AVAILABLE(macos(10.12), ios(10.0)) {
-    return [_name isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? 3 : -1;
+    return [_implementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? 3 : -1;
 }
 - (NSArray *)vertexAttributes { return _vertexAttributes; }
 - (NSArray *)stageInputAttributes API_AVAILABLE(macos(10.12), ios(10.0)) { return _stageInputAttributes; }

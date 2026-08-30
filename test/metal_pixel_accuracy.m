@@ -7311,6 +7311,40 @@ int main(void) {
             adapter_stage_color_attribute.isActive &&
             native_stage_input_function.vertexAttributes.count == 2 &&
             native_stage_input_function.stageInputAttributes.count == 2;
+        BOOL adapter_specialized_metadata_ok = YES;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MTLFunctionDescriptor *native_stage_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_stage_descriptor.name = @"zpu_test_stage_in_vertex";
+            native_stage_descriptor.specializedName = @"zpu_test_stage_in_vertex_alias";
+            NSError *native_stage_descriptor_error = nil;
+            id<MTLFunction> native_stage_alias =
+                [library newFunctionWithDescriptor:native_stage_descriptor
+                                               error:&native_stage_descriptor_error];
+            MTLFunctionDescriptor *adapter_stage_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_stage_descriptor.name = @"zpu_test_stage_in_vertex";
+            adapter_stage_descriptor.specializedName = @"zpu_test_stage_in_vertex_alias";
+            NSError *adapter_stage_descriptor_error = nil;
+            id<MTLFunction> adapter_stage_alias =
+                [adapter_library newFunctionWithDescriptor:adapter_stage_descriptor
+                                                       error:&adapter_stage_descriptor_error];
+            MTLVertexAttribute *adapter_alias_position =
+                adapter_stage_alias.vertexAttributes.count == 0 ? nil : adapter_stage_alias.vertexAttributes[0];
+            MTLAttribute *adapter_alias_stage_position =
+                adapter_stage_alias.stageInputAttributes.count == 0 ? nil : adapter_stage_alias.stageInputAttributes[0];
+            adapter_specialized_metadata_ok =
+                native_stage_alias != nil && native_stage_descriptor_error == nil &&
+                native_stage_alias.vertexAttributes.count == 2 &&
+                native_stage_alias.stageInputAttributes.count == 2 &&
+                adapter_stage_alias != nil && adapter_stage_descriptor_error == nil &&
+                adapter_stage_alias.vertexAttributes.count == 2 &&
+                adapter_stage_alias.stageInputAttributes.count == 2 &&
+                [adapter_alias_position.name isEqualToString:@"position"] &&
+                adapter_alias_position.attributeIndex == 0 &&
+                adapter_alias_position.attributeType == MTLDataTypeFloat4 &&
+                [adapter_alias_stage_position.name isEqualToString:@"position"] &&
+                adapter_alias_stage_position.attributeIndex == 0 &&
+                adapter_alias_stage_position.attributeType == MTLDataTypeFloat4;
+        }
         BOOL adapter_stitched_library_ok = YES;
         if (@available(macOS 12.0, iOS 15.0, *)) {
             NSError *native_stitched_error = nil;
@@ -7594,6 +7628,7 @@ int main(void) {
         if (adapter_library == nil || adapter_library_function == nil ||
             adapter_constant_function == nil ||
             !adapter_stage_input_attributes_ok ||
+            !adapter_specialized_metadata_ok ||
             !adapter_stitched_library_ok ||
             !adapter_function_descriptor_ok ||
             !adapter_function_options_ok ||
