@@ -2679,8 +2679,7 @@ pub const CommandBuffer = struct {
                 var resolved = compute;
                 if (compute.indirect_buffer) |indirect_buffer| {
                     if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
-                        !rangeValid(indirect_buffer.bytes.len, compute.indirect_buffer_offset,
-                            if (compute.indirect_threads) 2 * @sizeOf(abi.Size) else @sizeOf(abi.Size)))
+                        !rangeValid(indirect_buffer.bytes.len, compute.indirect_buffer_offset, if (compute.indirect_threads) 2 * @sizeOf(abi.Size) else @sizeOf(abi.Size)))
                         return self.fail(error.InvalidArgument);
                     if (compute.indirect_threads) {
                         resolved.threads_per_grid = .{
@@ -5092,8 +5091,7 @@ pub const ComputeEncoder = struct {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
-            return self.appendBufferAdd(.{ .width = 0, .height = 1, .depth = 1 }, threads_per_threadgroup,
-                indirect_buffer, indirect_buffer_offset, false);
+            return self.appendBufferAdd(.{ .width = 0, .height = 1, .depth = 1 }, threads_per_threadgroup, indirect_buffer, indirect_buffer_offset, false);
         }
         if (self.textureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
@@ -5128,8 +5126,7 @@ pub const ComputeEncoder = struct {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
-            return self.appendBufferAdd(.{ .width = 0, .height = 0, .depth = 1 },
-                .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
+            return self.appendBufferAdd(.{ .width = 0, .height = 0, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
         }
         if (self.textureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
