@@ -1556,6 +1556,34 @@ static int test_cpu_indirect_trace_triangles_against_native(
         fail_with_error("CPU indirect refit trace command failed", adapter_error ?: native_error);
         return 162;
     }
+
+    /* Indirect records carry child acceleration structures only as opaque
+     * resource IDs. The adapter must retain every possible child at encode
+     * time so releasing the caller's last reference before commit cannot make
+     * the deferred CPU build lose the child lookup. */
+    id<MTLAccelerationStructure> lifetime_indirect_structure =
+        [adapter_device newAccelerationStructureWithSize:indirect_sizes.accelerationStructureSize];
+    id<MTLCommandBuffer> lifetime_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> lifetime_encoder =
+        [lifetime_command_buffer accelerationStructureCommandEncoder];
+    if (lifetime_indirect_structure == nil || lifetime_command_buffer == nil || lifetime_encoder == nil) {
+        fail_with_error("CPU indirect lifetime resources failed", adapter_error);
+        return 163;
+    }
+    [lifetime_encoder buildAccelerationStructure:lifetime_indirect_structure descriptor:indirect_descriptor
+                                    scratchBuffer:indirect_scratch scratchBufferOffset:0];
+    [lifetime_encoder endEncoding];
+    bottom_level_encoder = nil;
+    bottom_level_command_buffer = nil;
+    refit_bottom_encoder = nil;
+    refit_bottom_command_buffer = nil;
+    bottom_level = nil;
+    [lifetime_command_buffer commit];
+    [lifetime_command_buffer waitUntilCompleted];
+    if (lifetime_command_buffer.status != MTLCommandBufferStatusCompleted) {
+        fail_with_error("CPU indirect lifetime retention failed", adapter_error);
+        return 163;
+    }
     return 0;
 }
 

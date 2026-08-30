@@ -17421,6 +17421,25 @@ static void zpu_cpu_acceleration_retain_metal4_range(
     }
 }
 
+static void zpu_cpu_acceleration_retain_indirect_child_ids(
+    ZPUCommandBuffer *owner, ZPUBuffer *instanceBuffer, NSUInteger instanceOffset,
+    NSUInteger instanceStride, NSUInteger instanceCount) {
+    if (owner == nil || instanceBuffer == nil || instanceBuffer.contents == NULL ||
+        instanceStride < sizeof(MTLIndirectAccelerationStructureInstanceDescriptor) ||
+        instanceOffset > instanceBuffer.length ||
+        instanceCount > (instanceBuffer.length - instanceOffset) / instanceStride) return;
+    ZPUDevice *device = (ZPUDevice *)[owner device];
+    for (NSUInteger index = 0; index < instanceCount; ++index) {
+        MTLIndirectAccelerationStructureInstanceDescriptor instance;
+        memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
+               sizeof(instance));
+        id value = zpu_resource_for_id(instance.accelerationStructureID._impl);
+        if (zpu_acceleration_structure_belongs_to_device(device, (id<MTLAccelerationStructure>)value)) {
+            [owner retainResource:value];
+        }
+    }
+}
+
 static void zpu_cpu_acceleration_retain_descriptor_ranges(
     ZPUCommandBuffer *owner, MTLAccelerationStructureDescriptor *descriptor) {
     if (owner == nil || descriptor == nil) return;
@@ -17448,6 +17467,32 @@ static void zpu_cpu_acceleration_retain_descriptor_ranges(
             zpu_cpu_acceleration_retain_metal4_range(owner, instances.instanceCountBuffer);
             zpu_cpu_acceleration_retain_metal4_range(owner, instances.motionTransformBuffer);
             zpu_cpu_acceleration_retain_metal4_range(owner, instances.motionTransformCountBuffer);
+            ZPUBuffer *instanceBuffer = nil;
+            NSUInteger instanceOffset = 0;
+            NSUInteger instanceRangeLength = 0;
+            NSUInteger instanceStride = 0;
+            NSUInteger instanceCount = 0;
+            if (zpu_cpu_acceleration_metal4_indirect_instance_buffer(
+                    instances, (ZPUDevice *)[owner device], &instanceBuffer, &instanceOffset,
+                    &instanceRangeLength, &instanceStride, &instanceCount)) {
+                zpu_cpu_acceleration_retain_indirect_child_ids(
+                    owner, instanceBuffer, instanceOffset, instanceStride, instances.maxInstanceCount);
+            }
+        }
+    }
+    if ([descriptor isKindOfClass:[MTLIndirectInstanceAccelerationStructureDescriptor class]]) {
+        MTLIndirectInstanceAccelerationStructureDescriptor *instances =
+            (MTLIndirectInstanceAccelerationStructureDescriptor *)descriptor;
+        ZPUBuffer *instanceBuffer = nil;
+        NSUInteger instanceOffset = 0;
+        NSUInteger instanceRangeLength = 0;
+        NSUInteger instanceStride = 0;
+        NSUInteger instanceCount = 0;
+        if (zpu_cpu_acceleration_indirect_instance_buffer(
+                instances, (ZPUDevice *)[owner device], &instanceBuffer, &instanceOffset,
+                &instanceRangeLength, &instanceStride, &instanceCount)) {
+            zpu_cpu_acceleration_retain_indirect_child_ids(
+                owner, instanceBuffer, instanceOffset, instanceStride, instances.maxInstanceCount);
         }
     }
 }
