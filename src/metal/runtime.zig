@@ -520,6 +520,7 @@ const BeginRenderCommand = struct {
         .{ .x = 0.5, .y = 0.5 },
     },
     resolve_target: ?*Texture = null,
+    resolve_enabled: bool = false,
     depth: ?[]f32 = null,
     depth_texture: ?*Texture = null,
     stencil: ?[]u8 = null,
@@ -909,7 +910,7 @@ pub const CommandBuffer = struct {
                 active_sample_count = begin_render.sample_count;
                 active_custom_sample_positions = begin_render.custom_sample_positions;
                 active_sample_positions = begin_render.sample_positions;
-                active_resolve_target = begin_render.resolve_target;
+                active_resolve_target = if (begin_render.resolve_enabled) begin_render.resolve_target else null;
                 if (active_sample_count == 1) {
                     active_sample_targets[0] = begin_render.target;
                     sparseSyncTexture(begin_render.target);
@@ -1819,6 +1820,7 @@ pub const RenderEncoder = struct {
                 for (values[0..count], 0..) |value, index| begin_render.sample_targets[index] = value;
                 begin_render.sample_count = @intCast(count);
                 begin_render.resolve_target = resolve;
+                begin_render.resolve_enabled = resolve != null;
             },
             else => return error.InvalidCommand,
         }
@@ -1854,12 +1856,18 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setColorStoreAction(self: *RenderEncoder, store_action: u8, index: u32) Error!void {
-        if (!self.open() or index >= 8 or store_action > @intFromEnum(abi.StoreAction.store)) return error.InvalidArgument;
+        if (!self.open() or index >= 8 or store_action > 3) return error.InvalidArgument;
         switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |*begin_render| {
-                const action: abi.StoreAction = @enumFromInt(store_action);
+                const requests_resolve = store_action == 2 or store_action == 3;
+                if (requests_resolve) {
+                    if (index != 0 or begin_render.sample_count == 1 or begin_render.resolve_target == null)
+                        return error.InvalidArgument;
+                }
+                const action: abi.StoreAction = if (store_action == 0) .dont_care else .store;
                 if (index == 0) begin_render.pass.color.store_action = action;
                 if (begin_render.color_attachments[index]) |*attachment| attachment.pass.store_action = action;
+                if (index == 0) begin_render.resolve_enabled = requests_resolve;
             },
             else => return error.InvalidCommand,
         }

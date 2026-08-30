@@ -1064,6 +1064,13 @@ static int test_multisample_resolve_against_native(
             fprintf(stderr, "metal-pixel: %zux multisample encoder creation failed\n", sample_count);
             return 150;
         }
+        /* Resolve actions are mutable encoder state in Metal. Exercise both
+         * resolve enum values after creation so the CPU command stream keeps
+         * the descriptor-provided resolve target while changing the action. */
+        const MTLStoreAction dynamic_store_action = sample_index == 0 ?
+            MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionMultisampleResolve;
+        [native_encoder setColorStoreAction:dynamic_store_action atIndex:0];
+        [adapter_encoder setColorStoreAction:dynamic_store_action atIndex:0];
         [native_encoder setRenderPipelineState:native_pipeline];
         [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
         [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
