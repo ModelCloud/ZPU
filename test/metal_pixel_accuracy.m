@@ -11476,6 +11476,76 @@ int main(void) {
             return 153;
         }
 
+        /* MTL4 argument tables encode acceleration structures and function
+         * tables as resource IDs in buffer slots. Verify that the CPU bridge
+         * resolves those IDs to the same validated legacy bindings and still
+         * produces the exact registered-kernel pixels. */
+        BOOL adapter_metal4_resource_bindings_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            NSError *adapter_metal4_binding_creation_error = nil;
+            MTL4CommandAllocatorDescriptor *adapter_metal4_binding_allocator_descriptor =
+                [MTL4CommandAllocatorDescriptor new];
+            id<MTL4CommandAllocator> adapter_metal4_binding_allocator =
+                [adapter_device newCommandAllocatorWithDescriptor:adapter_metal4_binding_allocator_descriptor
+                                                            error:&adapter_metal4_binding_creation_error];
+            MTL4CommandQueueDescriptor *adapter_metal4_binding_queue_descriptor =
+                [MTL4CommandQueueDescriptor new];
+            id<MTL4CommandQueue> adapter_metal4_binding_queue =
+                [adapter_device newMTL4CommandQueueWithDescriptor:adapter_metal4_binding_queue_descriptor
+                                                              error:&adapter_metal4_binding_creation_error];
+            id<MTLAccelerationStructure> adapter_metal4_bound_acceleration_structure =
+                [adapter_device newAccelerationStructureWithSize:256];
+            MTL4ArgumentTableDescriptor *adapter_metal4_binding_descriptor = [MTL4ArgumentTableDescriptor new];
+            adapter_metal4_binding_descriptor.maxBufferBindCount = 4;
+            adapter_metal4_binding_descriptor.maxTextureBindCount = 1;
+            id<MTL4ArgumentTable> adapter_metal4_binding_table =
+                [adapter_device newArgumentTableWithDescriptor:adapter_metal4_binding_descriptor
+                                                          error:&adapter_metal4_binding_creation_error];
+            [adapter_metal4_binding_table setResource:adapter_metal4_bound_acceleration_structure.gpuResourceID
+                                        atBufferIndex:1];
+            [adapter_metal4_binding_table setResource:adapter_visible_function_table.gpuResourceID
+                                        atBufferIndex:2];
+            [adapter_metal4_binding_table setResource:adapter_intersection_function_table.gpuResourceID
+                                        atBufferIndex:3];
+            [adapter_metal4_binding_table setTexture:adapter_compute_texture.gpuResourceID atIndex:0];
+            id<MTL4CommandBuffer> adapter_metal4_binding_command_buffer = [adapter_device newCommandBuffer];
+            [adapter_metal4_binding_command_buffer beginCommandBufferWithAllocator:adapter_metal4_binding_allocator];
+            id<MTL4ComputeCommandEncoder> adapter_metal4_binding_encoder =
+                [adapter_metal4_binding_command_buffer computeCommandEncoder];
+            [adapter_metal4_binding_encoder setComputePipelineState:adapter_mtl4_compiled_pipeline];
+            [adapter_metal4_binding_encoder setArgumentTable:adapter_metal4_binding_table];
+            [adapter_metal4_binding_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            [adapter_metal4_binding_encoder endEncoding];
+            [adapter_metal4_binding_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> adapter_metal4_binding_buffers[] = {
+                adapter_metal4_binding_command_buffer,
+            };
+            MTL4CommitOptions *adapter_metal4_binding_options = ZPUMetalCreateCPUCommitOptions();
+            __block NSError *adapter_metal4_binding_error = adapter_metal4_binding_creation_error;
+            [adapter_metal4_binding_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                adapter_metal4_binding_error = feedback.error;
+            }];
+            [adapter_metal4_binding_queue commit:adapter_metal4_binding_buffers
+                                           count:1
+                                          options:adapter_metal4_binding_options];
+            uint8_t adapter_metal4_binding_pixels[byte_count];
+            [adapter_compute_texture getBytes:adapter_metal4_binding_pixels
+                                   bytesPerRow:(NSUInteger)width * 4
+                                 fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                mipmapLevel:0];
+            adapter_metal4_resource_bindings_ok =
+                adapter_metal4_binding_allocator != nil && adapter_metal4_binding_queue != nil &&
+                adapter_metal4_bound_acceleration_structure != nil &&
+                adapter_metal4_binding_table != nil && adapter_metal4_binding_command_buffer != nil &&
+                adapter_metal4_binding_encoder != nil && adapter_metal4_binding_error == nil &&
+                memcmp(native_compute_pixels, adapter_metal4_binding_pixels, byte_count) == 0;
+        }
+        if (!adapter_metal4_resource_bindings_ok) {
+            fprintf(stderr, "metal-pixel: Metal 4 CPU resource bindings failed\n");
+            return 154;
+        }
+
         const MTLPixelFormat compute_float_formats[] = {
             MTLPixelFormatR32Float, MTLPixelFormatRGBA16Float,
         };

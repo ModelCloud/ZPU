@@ -2462,6 +2462,65 @@ static BOOL zpu_metal4_argument_table_buffer(ZPUMTL4ArgumentTable *table,
     return YES;
 }
 
+/* Compute argument tables use the same buffer-binding slots for Metal
+ * resources whose native API has a dedicated setter (acceleration
+ * structures and function tables). Keep address bindings buffer-only, but
+ * resolve resource-ID bindings to any CPU-owned resource accepted by the
+ * corresponding CPU encoder setter. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_metal4_argument_table_compute_resource(ZPUMTL4ArgumentTable *table,
+                                                        ZPUDevice *owner,
+                                                        NSUInteger index,
+                                                        id *resource,
+                                                        ZPUBuffer **buffer,
+                                                        NSUInteger *offset) {
+    if (table == nil || resource == NULL || buffer == NULL || offset == NULL ||
+        index >= table->_maxBufferBindCount) return NO;
+    const uint64_t address = ((const uint64_t *)table->_bufferAddresses.bytes)[index];
+    const uint64_t resourceID = ((const uint64_t *)table->_bufferResources.bytes)[index];
+    if (address != 0) {
+        if (!zpu_metal4_buffer_address_offset(owner, (MTLGPUAddress)address, buffer, offset)) return NO;
+        *resource = (id)*buffer;
+        return YES;
+    }
+    if (resourceID == 0) {
+        *resource = nil;
+        *buffer = nil;
+        *offset = 0;
+        return YES;
+    }
+    id value = zpu_resource_for_id(resourceID);
+    if ([value isKindOfClass:[ZPUBuffer class]]) {
+        if (((ZPUBuffer *)value)->_owner != owner) return NO;
+        *resource = value;
+        *buffer = (ZPUBuffer *)value;
+        *offset = 0;
+        return YES;
+    }
+    if ([value isKindOfClass:[ZPUAccelerationStructure class]] &&
+        ((ZPUAccelerationStructure *)value)->_owner == owner) {
+        *resource = value;
+        *buffer = nil;
+        *offset = 0;
+        return YES;
+    }
+    if ([value isKindOfClass:[ZPUVisibleFunctionTable class]] &&
+        ((ZPUVisibleFunctionTable *)value)->_owner == owner) {
+        *resource = value;
+        *buffer = nil;
+        *offset = 0;
+        return YES;
+    }
+    if ([value isKindOfClass:[ZPUIntersectionFunctionTable class]] &&
+        ((ZPUIntersectionFunctionTable *)value)->_owner == owner) {
+        *resource = value;
+        *buffer = nil;
+        *offset = 0;
+        return YES;
+    }
+    return NO;
+}
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_metal4_argument_table_buffer_slot_empty(ZPUMTL4ArgumentTable *table,
                                                          NSUInteger index) {
@@ -11882,25 +11941,34 @@ static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorEx
     if (_argumentTable == nil) return;
     if (_argumentTable->_invalid) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
-        if (index != 0) {
-            if (!zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
-                [_owner markError];
-                return;
-            }
-            continue;
-        }
+        if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) continue;
+        id resource = nil;
         ZPUBuffer *buffer = nil;
         NSUInteger bufferOffset = 0;
-        if (!zpu_metal4_argument_table_buffer(_argumentTable, _owner->_owner, index,
-                                               &buffer, &bufferOffset)) {
+        if (!zpu_metal4_argument_table_compute_resource(_argumentTable, _owner->_owner, index,
+                                                         &resource, &buffer, &bufferOffset)) {
             [_owner markError];
             return;
         }
-        const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
-        [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
-        if (buffer != nil && strides[index] != 0 && strides[index] != NSUIntegerMax) {
-            [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset
-                attributeStride:(NSUInteger)strides[index] atIndex:index];
+        if ([resource isKindOfClass:[ZPUAccelerationStructure class]]) {
+            [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:
+                (id<MTLAccelerationStructure>)resource atBufferIndex:index];
+        } else if ([resource isKindOfClass:[ZPUVisibleFunctionTable class]]) {
+            [(id<MTLComputeCommandEncoder>)_legacy setVisibleFunctionTable:
+                (id<MTLVisibleFunctionTable>)resource atBufferIndex:index];
+        } else if ([resource isKindOfClass:[ZPUIntersectionFunctionTable class]]) {
+            [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:
+                (id<MTLIntersectionFunctionTable>)resource atBufferIndex:index];
+        } else if (index == 0) {
+            const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
+            [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset atIndex:index];
+            if (buffer != nil && strides[index] != 0 && strides[index] != NSUIntegerMax) {
+                [_legacy setBuffer:(id<MTLBuffer>)buffer offset:bufferOffset
+                    attributeStride:(NSUInteger)strides[index] atIndex:index];
+            }
+        } else {
+            [_owner markError];
+            return;
         }
     }
     const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
