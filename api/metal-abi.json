@@ -121,6 +121,7 @@
       "zpu_metal_render_encoder_set_fragment_sampler_reduction_mode",
       "zpu_metal_render_encoder_set_fragment_texture_swizzle",
       "zpu_metal_render_encoder_set_fragment_uniform_enabled",
+      "zpu_metal_render_encoder_set_fragment_position_gradient_enabled",
       "zpu_metal_render_encoder_set_fragment_bytes",
       "zpu_metal_render_encoder_set_fragment_buffer",
       "zpu_metal_render_encoder_set_fragment_buffer_offset",

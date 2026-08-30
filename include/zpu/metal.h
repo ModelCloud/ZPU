@@ -627,6 +627,11 @@ int zpu_metal_render_encoder_set_fragment_sampler_normalized_coordinates(zpu_met
 int zpu_metal_render_encoder_set_fragment_sampler_reduction_mode(zpu_metal_render_encoder *encoder, zpu_metal_sampler_reduction_mode reduction_mode);
 int zpu_metal_render_encoder_set_fragment_texture_swizzle(zpu_metal_render_encoder *encoder, zpu_metal_texture_swizzle red, zpu_metal_texture_swizzle green, zpu_metal_texture_swizzle blue, zpu_metal_texture_swizzle alpha);
 int zpu_metal_render_encoder_set_fragment_uniform_enabled(zpu_metal_render_encoder *encoder, int enabled);
+/* Select the registered CPU fragment profile whose output is Metal's
+ * attachment-global fragment position: ((x + 1) / 8, (y + 1) / 8, 1/4, 1).
+ * The profile is CPU/ZPU-only and exists to make the top-left X/Y grid
+ * contract testable against Apple's native oracle. */
+int zpu_metal_render_encoder_set_fragment_position_gradient_enabled(zpu_metal_render_encoder *encoder, int enabled);
 int zpu_metal_render_encoder_set_fragment_bytes(zpu_metal_render_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_render_encoder_set_fragment_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, uint32_t index);
 int zpu_metal_render_encoder_set_fragment_buffer_offset(zpu_metal_render_encoder *encoder, size_t offset, uint32_t index);

@@ -89,6 +89,7 @@ static NSString *const zpu_cpu_trace_triangles_function_name = @"zpu_cpu_trace_t
 static NSString *const zpu_cpu_tile_gradient_function_name = @"zpu_cpu_tile_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_function_name = @"zpu_cpu_mesh_gradient_rgba8";
 static NSString *const zpu_cpu_mesh_gradient_fragment_name = @"zpu_cpu_mesh_gradient_fragment";
+static NSString *const zpu_cpu_position_gradient_fragment_name = @"zpu_cpu_position_gradient_fragment";
 static NSString *const zpu_cpu_patch_triangle_vertex_name = @"zpu_cpu_tessellated_triangle_vertex";
 static NSString *const zpu_cpu_patch_triangle_fragment_name = @"zpu_cpu_tessellated_triangle_fragment";
 static NSString *const zpu_cpu_layered_vertex_name = @"zpu_cpu_layered_vertex";
@@ -750,6 +751,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _rasterizationEnabled;
     BOOL _supportsIndirectCommandBuffers;
     BOOL _fragmentUniform;
+    BOOL _fragmentPositionGradient;
     MTLPixelFormat _depthPixelFormat;
     MTLPixelFormat _stencilPixelFormat;
     BOOL _sampleTexture;
@@ -7684,6 +7686,9 @@ static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *ver
                                                              MTLBindingAccessReadOnly, 0);
         [fragmentArguments addObject:sampler];
         [fragmentBindings addObject:samplerBinding];
+    } else if ([fragmentName isEqualToString:zpu_cpu_position_gradient_fragment_name]) {
+        /* The profile consumes only Metal's attachment-global fragment
+         * position; it has no resource bindings. */
     }
     return (MTLRenderPipelineReflection *)[[ZPURenderPipelineReflection alloc]
         initWithVertexArguments:vertexArguments fragmentArguments:fragmentArguments
@@ -7796,6 +7801,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         [name isEqualToString:@"zpu_cpu_rg32_sint_fragment"] ||
         [name isEqualToString:zpu_cpu_mesh_gradient_function_name] ||
         [name isEqualToString:zpu_cpu_mesh_gradient_fragment_name] ||
+        [name isEqualToString:zpu_cpu_position_gradient_fragment_name] ||
         zpu_cpu_ml_function_name_supported(name)) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
@@ -7905,6 +7911,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_tile_gradient_function_name,
         zpu_cpu_mesh_gradient_function_name,
         zpu_cpu_mesh_gradient_fragment_name,
+        zpu_cpu_position_gradient_fragment_name,
         zpu_cpu_patch_triangle_vertex_name,
         zpu_cpu_patch_triangle_fragment_name,
         zpu_cpu_layered_vertex_name,
@@ -7966,6 +7973,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _sampleTexture = [_fragmentImplementationName rangeOfString:@"sample" options:NSCaseInsensitiveSearch].location != NSNotFound;
         (void)zpu_vertex_layout_supported(descriptor.vertexDescriptor, &_vertexStride, &_vertexStrideDynamic);
         _fragmentUniform = [_fragmentImplementationName isEqualToString:@"zpu_cpu_uniform_color_fragment"];
+        _fragmentPositionGradient = [_fragmentImplementationName isEqualToString:zpu_cpu_position_gradient_fragment_name];
         _rasterizationEnabled = descriptor.rasterizationEnabled;
         _supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
@@ -8108,6 +8116,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _vertexStrideDynamic = pipeline->_vertexStrideDynamic;
         _supportsIndirectCommandBuffers = pipeline->_supportsIndirectCommandBuffers;
         _fragmentUniform = pipeline->_fragmentUniform;
+        _fragmentPositionGradient = pipeline->_fragmentPositionGradient;
         _depthPixelFormat = pipeline->_depthPixelFormat;
         _stencilPixelFormat = pipeline->_stencilPixelFormat;
         _rasterSampleCount = pipeline->_rasterSampleCount;
@@ -9576,7 +9585,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -10336,6 +10345,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_tile_gradient_function_name,
             zpu_cpu_mesh_gradient_function_name,
             zpu_cpu_mesh_gradient_fragment_name,
+            zpu_cpu_position_gradient_fragment_name,
             zpu_cpu_patch_triangle_vertex_name,
             zpu_cpu_patch_triangle_fragment_name,
             zpu_cpu_layered_vertex_name,
@@ -17978,6 +17988,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
             zpu_metal_render_encoder_set_raster_sample_count(
                 _zpuEncoder, (uint8_t)state->_rasterSampleCount) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, rasterizes) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_fragment_position_gradient_enabled(
+                _zpuEncoder, state->_fragmentPositionGradient) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_blend_state(
                 _zpuEncoder, state->_blendingEnabled,
                 (zpu_metal_blend_factor)state->_sourceRGBBlendFactor,
@@ -18017,6 +18029,8 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     if (zpu_metal_render_encoder_set_multi_target_output(_zpuEncoder, state->_multiTargetOutput) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_sample_texture(_zpuEncoder, state->_sampleTexture) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_fragment_uniform_enabled(_zpuEncoder, state->_fragmentUniform) != ZPU_METAL_OK) [_owner markError];
+    if (zpu_metal_render_encoder_set_fragment_position_gradient_enabled(
+            _zpuEncoder, state->_fragmentPositionGradient) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_rasterization_enabled(_zpuEncoder, state->_rasterizationEnabled) != ZPU_METAL_OK) [_owner markError];
     if (zpu_metal_render_encoder_set_blend_state(
         _zpuEncoder, state->_blendingEnabled,

@@ -7736,6 +7736,125 @@ static int test_metal4_layered_indirect_color_render_against_native(
     return 0;
 }
 
+static int test_position_fragment_grid_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    id<MTLCommandQueue> adapter_queue) {
+    enum { width = 7, height = 5, byte_count = width * height * 4 };
+    id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_test_vertex"];
+    id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_position_gradient"];
+    id<MTLFunction> adapter_vertex = [adapter_library newFunctionWithName:@"zpu_test_vertex"];
+    id<MTLFunction> adapter_fragment =
+        [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"];
+    if (native_vertex == nil || native_fragment == nil || adapter_vertex == nil || adapter_fragment == nil) {
+        fprintf(stderr, "metal-pixel: position profile functions missing native_vertex=%p native_fragment=%p adapter_vertex=%p adapter_fragment=%p\n",
+                native_vertex, native_fragment, adapter_vertex, adapter_fragment);
+        return 238;
+    }
+
+    MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+    native_descriptor.vertexFunction = native_vertex;
+    native_descriptor.fragmentFunction = native_fragment;
+    native_descriptor.rasterSampleCount = 1;
+    native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *native_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+
+    MTLRenderPipelineDescriptor *adapter_descriptor = [MTLRenderPipelineDescriptor new];
+    adapter_descriptor.vertexFunction = adapter_vertex;
+    adapter_descriptor.fragmentFunction = adapter_fragment;
+    adapter_descriptor.rasterSampleCount = 1;
+    adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_descriptor error:&adapter_error];
+
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+    };
+    id<MTLBuffer> native_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    MTLRenderPassDescriptor *adapter_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    adapter_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    id<MTLRenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    const MTLViewport viewport = {1.0, 1.0, 4.0, 3.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {0, 2, width, 2};
+    if (native_encoder != nil) {
+        [native_encoder setViewport:viewport];
+        [native_encoder setScissorRect:scissor];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_encoder endEncoding];
+    }
+    if (adapter_encoder != nil) {
+        [adapter_encoder setViewport:viewport];
+        [adapter_encoder setScissorRect:scissor];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+        [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_encoder endEncoding];
+    }
+    if (native_command_buffer != nil) [native_command_buffer commit];
+    if (adapter_command_buffer != nil) [adapter_command_buffer commit];
+    if (native_command_buffer != nil) [native_command_buffer waitUntilCompleted];
+    if (adapter_command_buffer != nil) [adapter_command_buffer waitUntilCompleted];
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    if (native_texture != nil) {
+        [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    }
+    if (adapter_texture != nil) {
+        [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    }
+    if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        native_buffer == nil || adapter_buffer == nil || native_command_buffer == nil ||
+        adapter_command_buffer == nil || native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: position fragment grid mismatch at byte %zu native=%u adapter=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("native position fragment oracle failed", native_error);
+        fail_with_error("adapter position fragment failed", adapter_error);
+        return 239;
+    }
+    return 0;
+}
+
 API_AVAILABLE(macos(13.0), ios(16.0))
 static int test_mesh_blend_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
@@ -14250,6 +14369,7 @@ int main(void) {
             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
             "kernel void zpu_cpu_mesh_gradient_rgba8() {}\n"
             "fragment float4 zpu_cpu_mesh_gradient_fragment() { return float4(1.0); }\n"
+            "fragment float4 zpu_cpu_position_gradient_fragment() { return float4(1.0); }\n"
             "fragment uint zpu_cpu_r8_uint_fragment() { return 1; }\n"
             "fragment int zpu_cpu_r8_sint_fragment() { return 1; }\n"
             "fragment uint zpu_cpu_r16_uint_fragment() { return 1; }\n"
@@ -14802,10 +14922,11 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 31 ||
+            adapter_library.functionNames.count != 32 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mesh_gradient_rgba8"].functionType != MTLFunctionTypeKernel ||
@@ -16977,6 +17098,14 @@ int main(void) {
                             adapter_mapped_tile_error ?: native_mapped_tile_error);
             return 112;
         }
+
+        /* Native Metal supplies only the oracle position. The adapter uses a
+         * registered CPU fragment profile and must preserve the same
+         * attachment-global top-left X/Y origin across a nonzero viewport and
+         * scissor. */
+        const int position_fragment_result = test_position_fragment_grid_against_native(
+            device, adapter_device, library, adapter_library, adapter_queue);
+        if (position_fragment_result != 0) return position_fragment_result;
 
         if (@available(macOS 13.0, iOS 16.0, *)) {
             const int mesh_blend_result = test_mesh_blend_against_native(

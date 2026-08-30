@@ -2942,6 +2942,7 @@ pub const RenderEncoder = struct {
     stencil_back: raster3d.StencilFace = .{},
     fragment_color: ?[4]f32 = null,
     fragment_uniform_enabled: bool = false,
+    fragment_position_gradient_enabled: bool = false,
     fragment_uniform_buffer: ?*Buffer = null,
     fragment_uniform_buffer_offset: usize = 0,
     visibility_buffer: ?*Buffer = null,
@@ -3006,6 +3007,7 @@ pub const RenderEncoder = struct {
             .blend_color = self.blend_color,
             .stencil_front = self.stencil_front,
             .stencil_back = self.stencil_back,
+            .fragment_position_gradient_enabled = self.fragment_position_gradient_enabled,
             .fragment_color = if (self.fragment_uniform_enabled) self.fragment_color else null,
         };
     }
@@ -3348,6 +3350,7 @@ pub const RenderEncoder = struct {
 
     pub fn setSampleTexture(self: *RenderEncoder, enabled: bool) Error!void {
         if (!self.open()) return error.InvalidCommand;
+        if (enabled and self.fragment_position_gradient_enabled) return error.UnsupportedOperation;
         self.sample_texture = enabled;
     }
 
@@ -3443,6 +3446,12 @@ pub const RenderEncoder = struct {
     pub fn setFragmentUniformEnabled(self: *RenderEncoder, enabled: bool) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.fragment_uniform_enabled = enabled;
+    }
+
+    pub fn setFragmentPositionGradientEnabled(self: *RenderEncoder, enabled: bool) Error!void {
+        if (!self.open()) return error.InvalidCommand;
+        if (enabled and self.sample_texture) return error.UnsupportedOperation;
+        self.fragment_position_gradient_enabled = enabled;
     }
 
     pub fn setFragmentBytes(self: *RenderEncoder, bytes: ?[*]const u8, length: usize, index: u32) Error!void {
@@ -9791,6 +9800,44 @@ test "render state validation rejects invalid CPU Metal state" {
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
 }
 
+test "CPU position fragment uses attachment-global top-left coordinates" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 5, 4, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    try encoder.setViewport(.{
+        .origin_x = 1,
+        .origin_y = 1,
+        .width = 3,
+        .height = 2,
+        .znear = 0,
+        .zfar = 1,
+    });
+    try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
+    try encoder.setFragmentPositionGradientEnabled(true);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 64, 64, 64, 255 }, texture.bytes[(1 * 5 + 1) * 4 ..][0..4]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[0..4]);
+}
+
 test "CPU uniform fragment bytes override interpolated color" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -11538,6 +11585,11 @@ pub export fn zpu_metal_render_encoder_set_fragment_texture_swizzle(encoder: ?*R
 
 pub export fn zpu_metal_render_encoder_set_fragment_uniform_enabled(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
     (encoder orelse return -1).setFragmentUniformEnabled(enabled) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_fragment_position_gradient_enabled(encoder: ?*RenderEncoder, enabled: bool) callconv(.c) c_int {
+    (encoder orelse return -1).setFragmentPositionGradientEnabled(enabled) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -92,6 +92,12 @@ pub const DrawOptions = struct {
     blend_color: [4]f32 = .{ 0, 0, 0, 0 },
     stencil_front: StencilFace = .{},
     stencil_back: StencilFace = .{},
+    // The registered CPU position profile models Metal fragment
+    // [[position]] in attachment-global pixel coordinates. Pixel (0, 0) has
+    // a center at (0.5, 0.5), and the profile intentionally adds 0.5 just as
+    // the native oracle shader does. This remains independent of viewport
+    // origin; viewport/scissor only determine coverage.
+    fragment_position_gradient_enabled: bool = false,
 };
 
 pub const StencilFace = struct {
@@ -1540,6 +1546,13 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
     if (stencil_index) |index| applyStencil(job.stencil.?, index, stencil_state, stencil_state.depth_pass);
     const fragment_color = if (job.sample_texture != null)
         sampleTextureWithSelection(job, color[0], color[1], selection)
+    else if (job.options.fragment_position_gradient_enabled)
+        [4]f32{
+            (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
+            (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
+            0.25,
+            1.0,
+        }
     else
         job.options.fragment_color orelse color;
     const logical_output_count: usize = if (job.options.write_extra_targets)

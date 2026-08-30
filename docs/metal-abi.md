@@ -178,6 +178,12 @@ triangle path:
   the CPU raster path; it also consumes a ZPU-owned 16-byte `float4` buffer
   binding at fragment index 0 with commit-time reads, so writes made before
   commit are visible; other fragment byte layouts remain unsupported
+- the registered `zpu_cpu_position_gradient_fragment` profile evaluates the
+  fragment position entirely in the CPU raster path as attachment-global
+  Metal coordinates: pixel `(x,y)` produces `((x + 1) / 8, (y + 1) / 8,
+  1/4, 1)`. Viewport origin and scissor affect coverage but never rebase the
+  top-left pixel grid; the profile has no resource bindings and is checked
+  byte-for-byte against the native position oracle
 - bounded CPU anisotropic sampler footprints for normalized coordinates and
   linear min/mag filters, with the configured tap count capped for predictable
   CPU work; native Metal remains only the byte-accuracy oracle
