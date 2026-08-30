@@ -27930,6 +27930,72 @@ int main(void) {
             fprintf(stderr, "metal-pixel: Objective-C adapter origin-coordinate mismatch\n");
             return 53;
         }
+
+        /* A viewport origin may lie outside the attachment. Keep that
+         * negative origin in attachment-global top-left coordinates instead
+         * of rebasing the CPU rasterizer to the viewport rectangle. This
+         * catches both X and Y zero-point mistakes while the scissor remains
+         * the full attachment. */
+        const MTLViewport negative_origin_viewport = {-1.0, -1.0, 6.0, 6.0, 0.0, 1.0};
+        const MTLScissorRect full_attachment_scissor = {0, 0, width, height};
+        id<MTLTexture> native_negative_origin_texture =
+            [device newTextureWithDescriptor:origin_texture_descriptor];
+        MTLRenderPassDescriptor *native_negative_origin_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_negative_origin_pass.colorAttachments[0].texture = native_negative_origin_texture;
+        native_negative_origin_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_negative_origin_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_negative_origin_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLCommandBuffer> native_negative_origin_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_negative_origin_encoder =
+            [native_negative_origin_command_buffer renderCommandEncoderWithDescriptor:native_negative_origin_pass];
+        [native_negative_origin_encoder setRenderPipelineState:pipeline];
+        [native_negative_origin_encoder setViewport:negative_origin_viewport];
+        [native_negative_origin_encoder setScissorRect:full_attachment_scissor];
+        [native_negative_origin_encoder setVertexBuffer:origin_vertex_buffer offset:0 atIndex:0];
+        [native_negative_origin_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [native_negative_origin_encoder endEncoding];
+        [native_negative_origin_command_buffer commit];
+        [native_negative_origin_command_buffer waitUntilCompleted];
+        uint8_t native_negative_origin_pixels[byte_count];
+        [native_negative_origin_texture getBytes:native_negative_origin_pixels
+                                      bytesPerRow:(NSUInteger)width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                      mipmapLevel:0];
+
+        id<MTLTexture> adapter_negative_origin_texture =
+            [adapter_device newTextureWithDescriptor:adapter_texture_descriptor];
+        id<MTLCommandBuffer> adapter_negative_origin_command_buffer = [adapter_queue commandBuffer];
+        MTLRenderPassDescriptor *adapter_negative_origin_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_negative_origin_pass.colorAttachments[0].texture = adapter_negative_origin_texture;
+        adapter_negative_origin_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_negative_origin_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_negative_origin_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        id<MTLRenderCommandEncoder> adapter_negative_origin_encoder =
+            [adapter_negative_origin_command_buffer renderCommandEncoderWithDescriptor:adapter_negative_origin_pass];
+        [adapter_negative_origin_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_negative_origin_encoder setViewport:negative_origin_viewport];
+        [adapter_negative_origin_encoder setScissorRect:full_attachment_scissor];
+        [adapter_negative_origin_encoder setVertexBuffer:adapter_origin_vertex_buffer offset:0 atIndex:0];
+        [adapter_negative_origin_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:12];
+        [adapter_negative_origin_encoder endEncoding];
+        [adapter_negative_origin_command_buffer commit];
+        [adapter_negative_origin_command_buffer waitUntilCompleted];
+        uint8_t adapter_negative_origin_pixels[byte_count];
+        [adapter_negative_origin_texture getBytes:adapter_negative_origin_pixels
+                                      bytesPerRow:(NSUInteger)width * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
+                                      mipmapLevel:0];
+        if (native_negative_origin_texture == nil || native_negative_origin_command_buffer == nil ||
+            native_negative_origin_encoder == nil ||
+            native_negative_origin_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_negative_origin_texture == nil || adapter_negative_origin_command_buffer == nil ||
+            adapter_negative_origin_encoder == nil ||
+            adapter_negative_origin_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_negative_origin_pixels, adapter_negative_origin_pixels,
+                   sizeof(native_negative_origin_pixels)) != 0) {
+            fprintf(stderr, "metal-pixel: negative origin-coordinate mismatch\n");
+            return 54;
+        }
         /* Visibility results are produced by the CPU rasterizer from the
          * same covered-fragment/depth/stencil accounting used for color.
          * Native Metal is only the oracle: both adapter resources and writes
