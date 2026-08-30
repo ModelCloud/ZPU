@@ -20,6 +20,12 @@ static const char *const kShaderSource =
     "struct Vertex { float4 position [[position]]; float4 color; };\n"
     "vertex Vertex zpu_test_vertex(uint vertex_id [[vertex_id]], "
     "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
+    "struct LayeredVertex { float4 position [[position]]; float4 color; uint layer [[render_target_array_index]]; };\n"
+    "vertex LayeredVertex zpu_cpu_layered_vertex(uint vertex_id [[vertex_id]], "
+    "uint instance_id [[instance_id]], device const Vertex *vertices [[buffer(0)]]) { "
+    "LayeredVertex output; output.position = vertices[vertex_id].position; "
+    "output.color = vertices[vertex_id].color; output.layer = instance_id; return output; }\n"
+    "fragment float4 zpu_cpu_layered_fragment(LayeredVertex input [[stage_in]]) { return input.color; }\n"
     "struct StageVertex { float4 position [[attribute(0)]]; float4 color [[attribute(1)]]; };\n"
     "vertex Vertex zpu_test_stage_in_vertex(StageVertex input [[stage_in]]) { "
     "Vertex output; output.position = input.position; output.color = input.color; return output; }\n"
@@ -3581,6 +3587,139 @@ static int test_metal4_multisample_mrt_against_native(
     return 0;
 }
 
+static int test_layered_color_render_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    enum { width = 7, height = 5, layers = 3, max_byte_count = width * height * 4 };
+    const MTLPixelFormat formats[] = {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm};
+    const zpu_metal_vertex vertices[] = {
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+    };
+    for (NSUInteger format_index = 0; format_index < sizeof(formats) / sizeof(formats[0]); ++format_index) {
+        const MTLPixelFormat format = formats[format_index];
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+        native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = format;
+        MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
+        adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
+
+        MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
+        texture_descriptor.textureType = MTLTextureType2DArray;
+        texture_descriptor.pixelFormat = format;
+        texture_descriptor.width = width;
+        texture_descriptor.height = height;
+        texture_descriptor.arrayLength = layers;
+        texture_descriptor.mipmapLevelCount = 1;
+        texture_descriptor.sampleCount = 1;
+        texture_descriptor.storageMode = MTLStorageModeShared;
+        texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+            native_buffer == nil || adapter_buffer == nil) {
+            fail_with_error("layered render resource/pipeline allocation", adapter_error ?: native_error);
+            return 183;
+        }
+
+        for (NSUInteger parallel_index = 0; parallel_index < 2; ++parallel_index) {
+            MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            native_pass.renderTargetArrayLength = layers;
+            native_pass.colorAttachments[0].texture = native_texture;
+            native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+            MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+            adapter_pass.colorAttachments[0].texture = adapter_texture;
+
+            id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+            id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+            id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+            id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+            id<MTLParallelRenderCommandEncoder> native_parallel = nil;
+            id<MTLParallelRenderCommandEncoder> adapter_parallel = nil;
+            id<MTLRenderCommandEncoder> native_encoder = nil;
+            id<MTLRenderCommandEncoder> adapter_encoder = nil;
+            if (parallel_index == 0) {
+                native_encoder = [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+                adapter_encoder = [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+            } else {
+                native_parallel = [native_command_buffer parallelRenderCommandEncoderWithDescriptor:native_pass];
+                adapter_parallel = [adapter_command_buffer parallelRenderCommandEncoderWithDescriptor:adapter_pass];
+                native_encoder = [native_parallel renderCommandEncoder];
+                adapter_encoder = [adapter_parallel renderCommandEncoder];
+            }
+            if (native_encoder == nil || adapter_encoder == nil) {
+                fprintf(stderr, "metal-pixel: layered %s encoder creation failed for %s\n",
+                        parallel_index == 0 ? "render" : "parallel", format == MTLPixelFormatRGBA8Unorm ? "RGBA8" : "BGRA8");
+                return 184;
+            }
+            [native_encoder setRenderPipelineState:native_pipeline];
+            [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+            [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 instanceCount:layers];
+            [native_encoder endEncoding];
+            if (native_parallel != nil) [native_parallel endEncoding];
+            [adapter_encoder setRenderPipelineState:adapter_pipeline];
+            [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+            [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 instanceCount:layers];
+            [adapter_encoder endEncoding];
+            if (adapter_parallel != nil) [adapter_parallel endEncoding];
+            [native_command_buffer commit];
+            [adapter_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+            [adapter_command_buffer waitUntilCompleted];
+
+            uint8_t native_pixels[layers][max_byte_count] = {{0}};
+            uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+            for (NSUInteger layer = 0; layer < layers; ++layer) {
+                [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4
+                            bytesPerImage:max_byte_count
+                             fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                             mipmapLevel:0 slice:layer];
+                [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4
+                             bytesPerImage:max_byte_count
+                              fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                              mipmapLevel:0 slice:layer];
+                if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+                    size_t mismatch = 0;
+                    while (mismatch < max_byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+                    fprintf(stderr, "metal-pixel: layered %s %s slice %zu mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                            parallel_index == 0 ? "render" : "parallel", format == MTLPixelFormatRGBA8Unorm ? "RGBA8" : "BGRA8",
+                            layer, mismatch,
+                            mismatch < max_byte_count ? native_pixels[layer][mismatch] : 0,
+                            mismatch < max_byte_count ? adapter_pixels[layer][mismatch] : 0,
+                            (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+                    fail_with_error("native layered render error", native_command_buffer.error);
+                    fail_with_error("adapter layered render error", adapter_command_buffer.error);
+                    return 185;
+                }
+            }
+            if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_command_buffer.status != MTLCommandBufferStatusCompleted) {
+                fprintf(stderr, "metal-pixel: layered %s %s command did not complete\n",
+                        parallel_index == 0 ? "render" : "parallel", format == MTLPixelFormatRGBA8Unorm ? "RGBA8" : "BGRA8");
+                return 186;
+            }
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -3598,9 +3737,11 @@ int main(void) {
             return 3;
         }
         id<MTLFunction> vertex_function = [library newFunctionWithName:@"zpu_test_vertex"];
+        id<MTLFunction> layered_vertex_function = [library newFunctionWithName:@"zpu_cpu_layered_vertex"];
         id<MTLFunction> stage_in_vertex_function = [library newFunctionWithName:@"zpu_test_stage_in_vertex"];
         id<MTLFunction> no_raster_vertex_function = [library newFunctionWithName:@"zpu_test_no_raster_vertex"];
         id<MTLFunction> fragment_function = [library newFunctionWithName:@"zpu_test_fragment"];
+        id<MTLFunction> layered_fragment_function = [library newFunctionWithName:@"zpu_cpu_layered_fragment"];
         id<MTLFunction> r8_uint_fragment_function = [library newFunctionWithName:@"zpu_cpu_r8_uint_fragment"];
         id<MTLFunction> r8_sint_fragment_function = [library newFunctionWithName:@"zpu_cpu_r8_sint_fragment"];
         id<MTLFunction> r16_uint_fragment_function = [library newFunctionWithName:@"zpu_cpu_r16_uint_fragment"];
@@ -3621,7 +3762,8 @@ int main(void) {
         id<MTLFunction> depth_bounds_oracle_fragment = [library newFunctionWithName:@"zpu_test_depth_bounds_oracle"];
         id<MTLFunction> mrt_fragment_function = [library newFunctionWithName:@"zpu_test_mrt_fragment"];
         id<MTLFunction> sample_fragment_function = [library newFunctionWithName:@"zpu_test_sample_fragment"];
-        if (vertex_function == nil || stage_in_vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil ||
+        if (vertex_function == nil || layered_vertex_function == nil || stage_in_vertex_function == nil || no_raster_vertex_function == nil || fragment_function == nil ||
+            layered_fragment_function == nil ||
             r8_uint_fragment_function == nil || r8_sint_fragment_function == nil ||
             r16_uint_fragment_function == nil || r16_sint_fragment_function == nil ||
             rg8_uint_fragment_function == nil || rg8_sint_fragment_function == nil ||
@@ -4749,10 +4891,14 @@ int main(void) {
         }
         id<MTLFunction> adapter_vertex_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_vertex");
+        id<MTLFunction> adapter_layered_vertex_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_vertex");
         id<MTLFunction> adapter_stage_in_vertex_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_stage_in_vertex");
         id<MTLFunction> adapter_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_fragment");
+        id<MTLFunction> adapter_layered_fragment_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_layered_fragment");
         id<MTLFunction> adapter_mrt_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_mrt_fragment");
         id<MTLFunction> adapter_r8_uint_fragment_function =
@@ -4817,6 +4963,10 @@ int main(void) {
             device, adapter_device, vertex_function, mrt_fragment_function,
             adapter_vertex_function, adapter_mrt_fragment_function);
         if (parallel_multisample_mrt_result != 0) return parallel_multisample_mrt_result;
+        const int layered_color_result = test_layered_color_render_against_native(
+            device, adapter_device, layered_vertex_function, layered_fragment_function,
+            adapter_layered_vertex_function, adapter_layered_fragment_function);
+        if (layered_color_result != 0) return layered_color_result;
         const int multisample_depth_stencil_result = test_multisample_depth_stencil_against_native(
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);

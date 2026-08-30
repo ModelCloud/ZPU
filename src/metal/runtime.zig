@@ -448,6 +448,9 @@ const DrawCommand = struct {
     visibility_mode: abi.VisibilityResultMode = .disabled,
     visibility_offset: usize = 0,
     visibility_result_type: abi.VisibilityResultType = .reset,
+    // Direct layered draws use the expanded instance index as the selected
+    // render-target-array slice. Indirect and non-layered draws retain zero.
+    array_index: usize = 0,
 };
 
 const TileCommand = struct {
@@ -511,6 +514,8 @@ const VisibilitySlot = struct {
 const ColorAttachmentCommand = struct {
     texture: *Texture,
     pass: abi.RenderPassColorAttachmentDescriptor,
+    array_targets: [8]?*Texture = [_]?*Texture{null} ** 8,
+    array_target_count: u8 = 1,
     sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4,
     resolve_target: ?*Texture = null,
     resolve_enabled: bool = false,
@@ -520,6 +525,8 @@ const BeginRenderCommand = struct {
     target: *Texture,
     pass: abi.RenderPassDescriptor,
     color_attachments: [8]?ColorAttachmentCommand = [_]?ColorAttachmentCommand{null} ** 8,
+    array_targets: [8]?*Texture = [_]?*Texture{null} ** 8,
+    array_target_count: u8 = 1,
     sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4,
     sample_count: u8 = 1,
     custom_sample_positions: bool = false,
@@ -853,6 +860,9 @@ pub const CommandBuffer = struct {
         self.status = .committed;
         var active_target: ?*Texture = null;
         var active_color_attachments: [8]?*Texture = [_]?*Texture{null} ** 8;
+        var active_array_color_attachments: [8][8]?*Texture = undefined;
+        for (&active_array_color_attachments) |*layers| @memset(layers, null);
+        var active_array_target_count: usize = 1;
         var active_sample_color_attachments: [32]?*Texture = [_]?*Texture{null} ** 32;
         var active_sample_targets: [4]?*Texture = [_]?*Texture{null} ** 4;
         var active_sample_count: usize = 1;
@@ -902,6 +912,22 @@ pub const CommandBuffer = struct {
                 if (!validTexture(begin_render.target)) return self.fail(error.InvalidResource);
                 if (begin_render.sample_count != 1 and begin_render.sample_count != 2 and begin_render.sample_count != 4)
                     return self.fail(error.InvalidArgument);
+                if (begin_render.array_target_count == 0 or begin_render.array_target_count > 8)
+                    return self.fail(error.InvalidArgument);
+                if (begin_render.array_target_count > 1 and begin_render.sample_count != 1)
+                    return self.fail(error.UnsupportedOperation);
+                for (begin_render.array_targets[0..begin_render.array_target_count], 0..) |target, layer| {
+                    const texture = target orelse return self.fail(error.InvalidResource);
+                    if (!validTexture(texture) or texture.device != self.queue.device or !texture.format.isColor() or
+                        texture.width != begin_render.target.width or texture.height != begin_render.target.height or
+                        texture.format != begin_render.target.format or (layer == 0 and texture != begin_render.target))
+                        return self.fail(error.InvalidResource);
+                }
+                if (begin_render.array_target_count > 1 and
+                    (begin_render.depth != null or begin_render.stencil != null or
+                     begin_render.depth_texture != null or begin_render.stencil_texture != null or
+                     begin_render.depth_sample_targets[0] != null or begin_render.stencil_sample_targets[0] != null))
+                    return self.fail(error.UnsupportedOperation);
                 if (begin_render.sample_count > 1 and (begin_render.depth != null or begin_render.stencil != null))
                     return self.fail(error.UnsupportedOperation);
                 if (begin_render.sample_count > 1) {
@@ -954,6 +980,25 @@ pub const CommandBuffer = struct {
                     if (begin_render.stencil_texture != null and begin_render.stencil_sample_targets[0] == null)
                         return self.fail(error.InvalidResource);
                 } else if (begin_render.resolve_target != null) return self.fail(error.InvalidArgument);
+                if (begin_render.sample_count == 1 and begin_render.array_target_count > 1) {
+                    for (begin_render.color_attachments[1..], 1..) |attachment, index| {
+                        if (attachment) |value| {
+                            if (value.array_target_count != begin_render.array_target_count)
+                                return self.fail(error.InvalidArgument);
+                            for (value.array_targets[0..begin_render.array_target_count], 0..) |target, layer| {
+                                const texture = target orelse return self.fail(error.InvalidResource);
+                                if (!validTexture(texture) or texture.device != self.queue.device or
+                                    !texture.format.isColor() or texture.width != begin_render.target.width or
+                                    texture.height != begin_render.target.height or texture.format != value.texture.format or
+                                    (layer == 0 and texture != value.texture))
+                                    return self.fail(error.InvalidResource);
+                            }
+                            if (value.resolve_enabled) return self.fail(error.UnsupportedOperation);
+                        } else if (index != 0 and begin_render.color_attachments[index] != null) {
+                            return self.fail(error.InvalidResource);
+                        }
+                    }
+                }
                 resolveMultisampleColorAttachments(
                     active_sample_targets,
                     active_sample_color_attachments,
@@ -962,6 +1007,9 @@ pub const CommandBuffer = struct {
                 ) catch |err| return self.fail(err);
                 sparseFlushOptionalTexture(active_target);
                 for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+                for (active_array_color_attachments) |attachment_layers| {
+                    for (attachment_layers[0..active_array_target_count]) |attachment| sparseFlushOptionalTexture(attachment);
+                }
                 for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
                 for (active_sample_color_attachments) |sample| sparseFlushOptionalTexture(sample);
                 if (active_depth_values) |values| {
@@ -988,9 +1036,14 @@ pub const CommandBuffer = struct {
                 }
                 reset_visibility_slots.clearRetainingCapacity();
                 active_color_attachments = [_]?*Texture{null} ** 8;
+                for (&active_array_color_attachments) |*layers| @memset(layers, null);
                 active_sample_color_attachments = [_]?*Texture{null} ** 32;
                 active_target = begin_render.target;
                 active_color_attachments[0] = begin_render.target;
+                active_array_target_count = begin_render.array_target_count;
+                for (begin_render.array_targets[0..active_array_target_count], 0..) |target, layer| {
+                    active_array_color_attachments[0][layer] = target;
+                }
                 active_sample_targets = [_]?*Texture{null} ** 4;
                 active_sample_count = begin_render.sample_count;
                 active_custom_sample_positions = begin_render.custom_sample_positions;
@@ -1016,7 +1069,18 @@ pub const CommandBuffer = struct {
                             value.texture.height != begin_render.target.height) return self.fail(error.InvalidResource);
                         active_color_attachments[index] = value.texture;
                         if (active_sample_count == 1) {
-                            sparseSyncTexture(value.texture);
+                            const array_targets = if (index == 0)
+                                begin_render.array_targets[0..active_array_target_count]
+                            else
+                                value.array_targets[0..active_array_target_count];
+                            for (array_targets, 0..) |target, layer| {
+                                const array_target = if (active_array_target_count == 1 and target == null)
+                                    value.texture
+                                else
+                                    target orelse return self.fail(error.InvalidResource);
+                                active_array_color_attachments[index][layer] = array_target;
+                                sparseSyncTexture(array_target);
+                            }
                         } else if (index != 0) {
                             for (value.sample_targets[0..active_sample_count], 0..) |sample, sample_index| {
                                 const sample_texture = sample orelse return self.fail(error.InvalidResource);
@@ -1027,8 +1091,10 @@ pub const CommandBuffer = struct {
                         }
                         if (value.pass.load_action == .clear) {
                             if (active_sample_count == 1) {
-                                var attachment_target = value.texture.asTarget();
-                                raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
+                                for (active_array_color_attachments[index][0..active_array_target_count]) |array_attachment| {
+                                    var attachment_target = (array_attachment orelse return self.fail(error.InvalidResource)).asTarget();
+                                    raster3d.clearTarget(&attachment_target, toTargetColor(value.pass.clear_color));
+                                }
                             } else {
                                 for (0..active_sample_count) |sample_index| {
                                     const sample = if (index == 0)
@@ -1121,7 +1187,10 @@ pub const CommandBuffer = struct {
                 }
             },
             .draw => |draw| {
-                const target_handle = active_target orelse return self.fail(error.InvalidCommand);
+                const array_index = if (active_array_target_count > 1) draw.array_index else 0;
+                if (array_index >= active_array_target_count) return self.fail(error.InvalidArgument);
+                const target_handle = active_array_color_attachments[0][array_index] orelse
+                    (active_target orelse return self.fail(error.InvalidCommand));
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
                 sparseSyncTexture(target_handle);
                 for (active_color_attachments) |attachment| sparseSyncOptionalTexture(attachment);
@@ -1202,7 +1271,12 @@ pub const CommandBuffer = struct {
                 }
                 var extra_count: usize = 0;
                 for (active_color_attachments[1..], 0..) |attachment, physical_index| {
-                    if (attachment) |value| {
+                    if (attachment) |attachment_value| {
+                        const value = if (active_array_target_count > 1)
+                            active_array_color_attachments[physical_index + 1][array_index] orelse
+                                return self.fail(error.InvalidResource)
+                        else
+                            attachment_value;
                         extra_targets_storage[physical_index] = value.asTarget();
                         extra_targets[physical_index] = &extra_targets_storage[physical_index];
                         extra_count = @max(extra_count, physical_index + 1);
@@ -1781,6 +1855,9 @@ pub const CommandBuffer = struct {
         ) catch |err| return self.fail(err);
         sparseFlushOptionalTexture(active_target);
         for (active_color_attachments) |attachment| sparseFlushOptionalTexture(attachment);
+        for (active_array_color_attachments) |attachment_layers| {
+            for (attachment_layers[0..active_array_target_count]) |attachment| sparseFlushOptionalTexture(attachment);
+        }
         for (active_sample_targets[0..active_sample_count]) |sample| sparseFlushOptionalTexture(sample);
         for (active_sample_color_attachments) |sample| sparseFlushOptionalTexture(sample);
         self.status = .completed;
@@ -1996,6 +2073,66 @@ pub const RenderEncoder = struct {
             else => return error.InvalidCommand,
         }
         self.pipeline_sample_count = @intCast(count);
+    }
+
+    /// Select the ZPU-owned slices used by a direct layered render pass.
+    /// Metal's render-target-array index is represented by the direct draw's
+    /// instance index; the CPU runtime never creates a native array target.
+    pub fn setRenderTargetArray(self: *RenderEncoder, textures: ?[*]const *Texture, count: usize) Error!void {
+        if (!self.open() or textures == null or count == 0 or count > 8) return error.InvalidArgument;
+        const values = textures.?;
+        const first = values[0];
+        if (!validTexture(first) or first.device != self.command_buffer.queue.device or !first.format.isColor())
+            return error.InvalidResource;
+        for (values[0..count]) |texture| {
+            if (!validTexture(texture) or texture.device != first.device or !texture.format.isColor() or
+                texture.width != first.width or texture.height != first.height or texture.format != first.format)
+                return error.InvalidArgument;
+        }
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (begin_render.sample_count != 1 or first != begin_render.target) return error.InvalidArgument;
+                begin_render.array_targets = [_]?*Texture{null} ** 8;
+                for (values[0..count], 0..) |texture, index| begin_render.array_targets[index] = texture;
+                begin_render.array_target_count = @intCast(count);
+            },
+            else => return error.InvalidCommand,
+        }
+    }
+
+    pub fn setColorAttachmentArrayTargets(
+        self: *RenderEncoder,
+        textures: ?[*]const *Texture,
+        count: usize,
+        attachment: abi.RenderPassColorAttachmentDescriptor,
+        index: u32,
+    ) Error!void {
+        if (!self.open() or textures == null or index == 0 or index >= 8 or count == 0 or count > 8)
+            return error.InvalidArgument;
+        const values = textures.?;
+        const first = values[0];
+        if (!validTexture(first) or first.device != self.command_buffer.queue.device or !first.format.isColor())
+            return error.InvalidResource;
+        for (values[0..count]) |texture| {
+            if (!validTexture(texture) or texture.device != first.device or !texture.format.isColor() or
+                texture.width != first.width or texture.height != first.height or texture.format != first.format)
+                return error.InvalidArgument;
+        }
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |*begin_render| {
+                if (begin_render.sample_count != 1 or begin_render.array_target_count != count or
+                    first.width != begin_render.target.width or first.height != begin_render.target.height)
+                    return error.InvalidArgument;
+                var color_attachment = ColorAttachmentCommand{
+                    .texture = first,
+                    .pass = attachment,
+                    .array_target_count = @intCast(count),
+                };
+                for (values[0..count], 0..) |texture, layer| color_attachment.array_targets[layer] = texture;
+                begin_render.color_attachments[index] = color_attachment;
+            },
+            else => return error.InvalidCommand,
+        }
     }
 
     pub fn setMultisampleColorAttachmentTargets(
@@ -2626,6 +2763,13 @@ pub const RenderEncoder = struct {
         }
     }
 
+    fn renderTargetArrayCount(self: *const RenderEncoder) usize {
+        switch (self.command_buffer.commands.items[self.begin_index]) {
+            .begin_render => |begin_render| return begin_render.array_target_count,
+            else => return 0,
+        }
+    }
+
     pub fn setVertexBuffer(self: *RenderEncoder, buffer: ?*Buffer, offset: usize, index: u32) Error!void {
         if (!self.open()) return error.InvalidCommand;
         if (index != 0) return error.UnsupportedOperation;
@@ -2715,6 +2859,9 @@ pub const RenderEncoder = struct {
         if (!self.open() or !validPrimitive(primitive)) return error.InvalidCommand;
         if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (instance_count == 0 or vertex_count == 0) return;
+        const array_target_count = self.renderTargetArrayCount();
+        if (array_target_count == 0 or (array_target_count > 1 and instance_count > array_target_count))
+            return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
         const source = try self.sourceVertices(&owned_source);
         defer if (owned_source) |vertices| allocator.free(vertices);
@@ -2743,12 +2890,14 @@ pub const RenderEncoder = struct {
                 .visibility_mode = self.visibility_mode,
                 .visibility_offset = self.visibility_offset,
                 .visibility_result_type = self.visibility_result_type,
+                .array_index = if (array_target_count > 1) instance else 0,
             } });
         }
     }
 
     pub fn drawPrimitivesIndirect(self: *RenderEncoder, primitive: abi.PrimitiveType, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 16)) return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
         const source = try self.sourceVertices(&owned_source);
@@ -2789,6 +2938,9 @@ pub const RenderEncoder = struct {
         if (self.sample_texture and self.fragment_texture == null) return error.InvalidResource;
         if (!validBuffer(index_buffer) or index_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (instance_count == 0 or index_count == 0) return;
+        const array_target_count = self.renderTargetArrayCount();
+        if (array_target_count == 0 or (array_target_count > 1 and instance_count > array_target_count))
+            return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
         const source = try self.sourceVertices(&owned_source);
         defer if (owned_source) |vertices| allocator.free(vertices);
@@ -2823,12 +2975,14 @@ pub const RenderEncoder = struct {
                 .visibility_mode = self.visibility_mode,
                 .visibility_offset = self.visibility_offset,
                 .visibility_result_type = self.visibility_result_type,
+                .array_index = if (array_target_count > 1) instance else 0,
             } });
         }
     }
 
     pub fn drawIndexedPrimitivesIndirect(self: *RenderEncoder, primitive: abi.PrimitiveType, index_type: abi.IndexType, index_buffer: *Buffer, index_buffer_offset: usize, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or !validPrimitive(primitive) or !validIndexType(index_type) or !validBuffer(index_buffer) or !validBuffer(indirect_buffer)) return error.InvalidArgument;
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         if (index_buffer.device != self.command_buffer.queue.device or indirect_buffer.device != self.command_buffer.queue.device) return error.InvalidArgument;
         if (indirect_buffer_offset % @alignOf(u32) != 0 or !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 20)) return error.InvalidArgument;
         var owned_source: ?[]abi.Vertex = null;
@@ -2866,6 +3020,7 @@ pub const RenderEncoder = struct {
 
     pub fn dispatchThreadsPerTile(self: *RenderEncoder, kernel: u8, tile_size: abi.Size, threads_per_tile: abi.Size) Error!void {
         if (!self.open()) return error.InvalidCommand;
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
             else => return error.InvalidCommand,
@@ -2897,6 +3052,7 @@ pub const RenderEncoder = struct {
         threads_per_mesh_threadgroup: abi.Size,
     ) Error!void {
         if (!self.open()) return error.InvalidCommand;
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
             else => return error.InvalidCommand,
@@ -2927,6 +3083,7 @@ pub const RenderEncoder = struct {
         threads_per_mesh_threadgroup: abi.Size,
     ) Error!void {
         if (!self.open()) return error.InvalidCommand;
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         if (threads_per_grid.width == 0 or threads_per_grid.height == 0 or threads_per_grid.depth != 1 or
             threads_per_object_threadgroup.width != 1 or threads_per_object_threadgroup.height != 1 or
             threads_per_object_threadgroup.depth != 1 or !validMeshThreadgroup(threads_per_mesh_threadgroup))
@@ -2946,6 +3103,7 @@ pub const RenderEncoder = struct {
         threads_per_mesh_threadgroup: abi.Size,
     ) Error!void {
         if (!self.open()) return error.InvalidCommand;
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
             else => return error.InvalidCommand,
@@ -2990,6 +3148,7 @@ pub const RenderEncoder = struct {
         indirect_buffer: ?*Buffer,
         indirect_buffer_offset: usize,
     ) Error!void {
+        if (self.renderTargetArrayCount() > 1) return error.UnsupportedOperation;
         const control_point_index_alignment: usize = switch (control_point_index_type) {
             .uint16 => @alignOf(u16),
             .uint32, .none => @alignOf(u32),
@@ -4434,7 +4593,10 @@ pub fn beginRender(command_buffer: *CommandBuffer, texture: *Texture, pass: abi.
     errdefer command_buffer.active_encoder = .none;
     const begin_index = try command_buffer.append(.{ .begin_render = .{ .target = texture, .pass = pass } });
     switch (command_buffer.commands.items[begin_index]) {
-        .begin_render => |*begin_render| begin_render.color_attachments[0] = .{ .texture = texture, .pass = pass.color },
+        .begin_render => |*begin_render| {
+            begin_render.color_attachments[0] = .{ .texture = texture, .pass = pass.color };
+            begin_render.array_targets[0] = texture;
+        },
         else => return error.InvalidCommand,
     }
     const result = allocator.create(RenderEncoder) catch return error.OutOfMemory;
@@ -7840,6 +8002,40 @@ test "depth texture attachment rejects farther fragments" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[0..4]);
 }
 
+test "CPU render encoder maps direct instances to array color layers" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    var layers: [3]*Texture = undefined;
+    for (&layers) |*layer| {
+        layer.* = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    }
+    defer for (layers) |layer| destroyTexture(layer);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -1, 1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, layers[0], .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    });
+    try encoder.setRenderTargetArray(&layers, layers.len);
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, layers.len);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    for (layers) |layer| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
+    }
+}
+
 test "CPU render encoder leaves depth disabled until a state is bound" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -8753,6 +8949,31 @@ pub export fn zpu_metal_render_encoder_set_multisample_targets(
     resolve_texture: ?*Texture,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setMultisampleTargets(sample_textures, sample_count, resolve_texture) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_render_target_array(
+    encoder: ?*RenderEncoder,
+    textures: ?[*]const *Texture,
+    count: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setRenderTargetArray(textures, count) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_color_attachment_array_targets(
+    encoder: ?*RenderEncoder,
+    textures: ?[*]const *Texture,
+    count: usize,
+    attachment: ?*const abi.RenderPassColorAttachmentDescriptor,
+    index: u32,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setColorAttachmentArrayTargets(
+        textures,
+        count,
+        (attachment orelse return -1).*,
+        index,
+    ) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -57,6 +57,8 @@ static NSString *const zpu_cpu_mesh_gradient_function_name = @"zpu_cpu_mesh_grad
 static NSString *const zpu_cpu_mesh_gradient_fragment_name = @"zpu_cpu_mesh_gradient_fragment";
 static NSString *const zpu_cpu_patch_triangle_vertex_name = @"zpu_cpu_tessellated_triangle_vertex";
 static NSString *const zpu_cpu_patch_triangle_fragment_name = @"zpu_cpu_tessellated_triangle_fragment";
+static NSString *const zpu_cpu_layered_vertex_name = @"zpu_cpu_layered_vertex";
+static NSString *const zpu_cpu_layered_fragment_name = @"zpu_cpu_layered_fragment";
 /* MTLRenderStageObject/Mesh are introduced in iOS 16, while the shared
  * function-handle selector is available from iOS 15. Keep the ABI bit values
  * here so the adapter remains deployable to iOS 15 and still recognizes the
@@ -2045,6 +2047,24 @@ static ZPUTexture *zpu_hidden_color_target(ZPUDevice *owner, ZPUTexture *attachm
     return (ZPUTexture *)[owner newTextureWithDescriptor:descriptor];
 }
 
+static BOOL zpu_configure_render_target_array(
+    zpu_metal_render_encoder *encoder, ZPUTexture *texture, id attachment,
+    NSUInteger arrayLength, NSUInteger sampleCount) {
+    if (encoder == NULL || texture == nil || attachment == nil) return NO;
+    if (arrayLength <= 1) return YES;
+    if (arrayLength > ZPU_METAL_MAX_COLOR_ATTACHMENTS || sampleCount != 1 ||
+        texture->_textureType != MTLTextureType2DArray || texture.sampleCount != 1 ||
+        [attachment resolveTexture] != nil ||
+        [attachment slice] > texture->_sliceMipmapTextures.count ||
+        arrayLength > texture->_sliceMipmapTextures.count - [attachment slice]) return NO;
+    zpu_metal_texture *targets[ZPU_METAL_MAX_COLOR_ATTACHMENTS] = {NULL};
+    for (NSUInteger layer = 0; layer < arrayLength; ++layer) {
+        targets[layer] = [texture zpuTextureAtLevel:[attachment level] slice:[attachment slice] + layer];
+        if (targets[layer] == NULL) return NO;
+    }
+    return zpu_metal_render_encoder_set_render_target_array(encoder, targets, arrayLength) == ZPU_METAL_OK;
+}
+
 static BOOL zpu_configure_additional_color_attachments(ZPUCommandBuffer *owner,
                                                         zpu_metal_render_encoder *encoder,
                                                         MTLRenderPassDescriptor *descriptor,
@@ -2058,6 +2078,32 @@ static BOOL zpu_configure_additional_color_attachments(ZPUCommandBuffer *owner,
             !zpu_render_pipeline_format_supported(texture->_pixelFormat)) return NO;
         const BOOL multisample = sampleCount > 1;
         const BOOL hasResolve = attachment.resolveTexture != nil;
+        const NSUInteger arrayLength = descriptor.renderTargetArrayLength == 0 ? 1 : descriptor.renderTargetArrayLength;
+        if (arrayLength > 1) {
+            if (multisample || texture->_textureType != MTLTextureType2DArray || hasResolve ||
+                !zpu_store_action_supported(attachment.storeAction) ||
+                attachment.slice > texture->_sliceMipmapTextures.count ||
+                arrayLength > texture->_sliceMipmapTextures.count - attachment.slice) return NO;
+            zpu_metal_texture *targets[ZPU_METAL_MAX_COLOR_ATTACHMENTS] = {NULL};
+            for (NSUInteger layer = 0; layer < arrayLength; ++layer) {
+                targets[layer] = [texture zpuTextureAtLevel:attachment.level slice:attachment.slice + layer];
+                if (targets[layer] == NULL) return NO;
+            }
+            const zpu_metal_render_pass_color_attachment_descriptor pass = {
+                .load_action = zpu_load_action(attachment.loadAction),
+                .store_action = zpu_store_action(attachment.storeAction),
+                .clear_color = {
+                    (float)attachment.clearColor.red,
+                    (float)attachment.clearColor.green,
+                    (float)attachment.clearColor.blue,
+                    (float)attachment.clearColor.alpha,
+                },
+            };
+            if (zpu_metal_render_encoder_set_color_attachment_array_targets(
+                    encoder, targets, arrayLength, &pass, index) != ZPU_METAL_OK) return NO;
+            [owner retainResource:texture];
+            continue;
+        }
         if (multisample) {
             ZPUTexture *resolve = (ZPUTexture *)attachment.resolveTexture;
             if (texture.sampleCount != sampleCount || texture->_textureType != MTLTextureType2DMultisample ||
@@ -2124,6 +2170,32 @@ static BOOL zpu_configure_additional_metal4_color_attachments(ZPUCommandBuffer *
         const BOOL multisample = sampleCount > 1;
         ZPUTexture *resolve = (ZPUTexture *)[attachment resolveTexture];
         const BOOL hasResolve = resolve != nil;
+        const NSUInteger arrayLength = descriptor.renderTargetArrayLength == 0 ? 1 : descriptor.renderTargetArrayLength;
+        if (arrayLength > 1) {
+            if (multisample || texture->_textureType != MTLTextureType2DArray || hasResolve ||
+                !zpu_store_action_supported([attachment storeAction]) ||
+                [attachment slice] > texture->_sliceMipmapTextures.count ||
+                arrayLength > texture->_sliceMipmapTextures.count - [attachment slice]) return NO;
+            zpu_metal_texture *targets[ZPU_METAL_MAX_COLOR_ATTACHMENTS] = {NULL};
+            for (NSUInteger layer = 0; layer < arrayLength; ++layer) {
+                targets[layer] = [texture zpuTextureAtLevel:[attachment level] slice:[attachment slice] + layer];
+                if (targets[layer] == NULL) return NO;
+            }
+            const zpu_metal_render_pass_color_attachment_descriptor pass = {
+                .load_action = zpu_load_action([attachment loadAction]),
+                .store_action = zpu_store_action([attachment storeAction]),
+                .clear_color = {
+                    (float)[attachment clearColor].red,
+                    (float)[attachment clearColor].green,
+                    (float)[attachment clearColor].blue,
+                    (float)[attachment clearColor].alpha,
+                },
+            };
+            if (zpu_metal_render_encoder_set_color_attachment_array_targets(
+                    encoder, targets, arrayLength, &pass, index) != ZPU_METAL_OK) return NO;
+            [owner retainResource:texture];
+            continue;
+        }
         if (multisample) {
             if (texture.sampleCount != sampleCount || texture->_textureType != MTLTextureType2DMultisample ||
                 (sampleCount != 2 && sampleCount != 4) || [attachment level] != 0 || [attachment slice] != 0 ||
@@ -2436,7 +2508,9 @@ static BOOL zpu_metal4_render_pass_descriptor(ZPUDevice *owner,
     zpu_metal_texture *colorTexture = [color zpuTextureAtLevel:hasColor ? descriptor.colorAttachments[0].level : 0
                                                           slice:hasColor ? descriptor.colorAttachments[0].slice : 0];
     if (colorTexture == NULL) return NO;
-    if (descriptor.renderTargetArrayLength > 1 ||
+    if (descriptor.renderTargetArrayLength > ZPU_METAL_MAX_COLOR_ATTACHMENTS ||
+        (descriptor.renderTargetArrayLength > 1 &&
+         (!hasColor || descriptor.depthAttachment.texture != nil || descriptor.stencilAttachment.texture != nil)) ||
         (descriptor.defaultRasterSampleCount > 1 && (!multisample || descriptor.defaultRasterSampleCount != color.sampleCount)) ||
         (descriptor.renderTargetWidth != 0 && descriptor.renderTargetWidth != zpu_metal_texture_width(colorTexture)) ||
         (descriptor.renderTargetHeight != 0 && descriptor.renderTargetHeight != zpu_metal_texture_height(colorTexture))) return NO;
@@ -6737,6 +6811,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_mesh_gradient_fragment_name,
         zpu_cpu_patch_triangle_vertex_name,
         zpu_cpu_patch_triangle_fragment_name,
+        zpu_cpu_layered_vertex_name,
+        zpu_cpu_layered_fragment_name,
         @"zpu_cpu_rgba8_uint_fragment",
         @"zpu_cpu_rgba8_sint_fragment",
         @"zpu_cpu_r8_uint_fragment",
@@ -8364,7 +8440,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_rg16_uint_fragment zpu_cpu_rg16_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity"];
+                                                        source:@"zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_rg16_uint_fragment zpu_cpu_rg16_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -9011,6 +9087,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             zpu_cpu_mesh_gradient_fragment_name,
             zpu_cpu_patch_triangle_vertex_name,
             zpu_cpu_patch_triangle_fragment_name,
+            zpu_cpu_layered_vertex_name,
+            zpu_cpu_layered_fragment_name,
             @"zpu_cpu_rgba8_uint_fragment",
             @"zpu_cpu_rgba8_sint_fragment",
             @"zpu_cpu_r8_uint_fragment",
@@ -10683,6 +10761,9 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
     if (colorTexture == NULL) return nil;
+    if (descriptor.renderTargetArrayLength > 1 &&
+        (colorAttachment.texture == nil || descriptor.depthAttachment.texture != nil ||
+         descriptor.stencilAttachment.texture != nil)) return nil;
     zpu_metal_texture *depthTexture = NULL;
     zpu_metal_texture *stencilTexture = NULL;
     zpu_metal_render_pass_descriptor pass = {
@@ -10730,6 +10811,12 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     if (encoder == NULL) return nil;
     [self retainResource:texture];
     if (!zpu_configure_multisample_targets(self, encoder, texture, colorAttachment)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
+    if (!zpu_configure_render_target_array(encoder, texture, colorAttachment,
+                                           descriptor.renderTargetArrayLength == 0 ? 1 : descriptor.renderTargetArrayLength,
+                                           texture.sampleCount)) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
     }
@@ -10810,6 +10897,9 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
     if (colorTexture == NULL) return nil;
+    if (descriptor.renderTargetArrayLength > 1 &&
+        (colorAttachment.texture == nil || descriptor.depthAttachment.texture != nil ||
+         descriptor.stencilAttachment.texture != nil)) return nil;
     zpu_metal_texture *depthTexture = NULL;
     zpu_metal_texture *stencilTexture = NULL;
     zpu_metal_render_pass_descriptor pass = {
@@ -11176,6 +11266,14 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         return nil;
     }
     if (!zpu_configure_multisample_targets(_legacyBuffer, encoder, color, descriptor.colorAttachments[0])) {
+        zpu_metal_render_encoder_destroy(encoder);
+        [self markError];
+        return nil;
+    }
+    if (!zpu_configure_render_target_array(
+            encoder, color, descriptor.colorAttachments[0],
+            descriptor.renderTargetArrayLength == 0 ? 1 : descriptor.renderTargetArrayLength,
+            color.sampleCount)) {
         zpu_metal_render_encoder_destroy(encoder);
         [self markError];
         return nil;
@@ -13970,6 +14068,13 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             ZPU_METAL_LOAD_LOAD : _stencilLoadAction;
     if (multisample && !zpu_configure_multisample_targets(
             _owner, encoder, _texture, _descriptor.colorAttachments[0])) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
+    if (!zpu_configure_render_target_array(
+            encoder, _texture, _descriptor.colorAttachments[0],
+            _descriptor.renderTargetArrayLength == 0 ? 1 : _descriptor.renderTargetArrayLength,
+            _texture.sampleCount)) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
     }

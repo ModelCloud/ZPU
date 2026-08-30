@@ -88,6 +88,11 @@ triangle path:
   plane per z slice, including mip-level depth reduction, explicit
   `bytesPerImage` transfers, 3D views, heap placement, and legacy/Metal 4
   texture and buffer copies plus center-sampled mipmap generation
+- CPU-owned direct layered color render passes for up to eight 2D-array slices.
+  The expanded direct instance index selects the corresponding ZPU-owned
+  slice, preserving Apple's top-left X/Y pixel grid while keeping execution
+  entirely on the CPU. Layered depth/stencil planes, indirect layered draws,
+  and layered multisample passes remain explicitly rejected.
 - CPU-owned 2D multisample textures with Apple-verified 2x and 4x default
   sample locations, represented as independent ZPU sample planes. Ordered
   render encoders can store those planes or resolve them into a matching
