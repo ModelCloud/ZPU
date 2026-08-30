@@ -3395,7 +3395,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
                 const source_row = command.buffer_offset + y * row_bytes;
                 for (0..width) |x| {
                     const source_offset = source_row + x * 4;
-                    target.storeColor(x, y, .{
+                    target.storeColorWithNativeSrgb(x, y, .{
                         @as(f32, @floatFromInt(source.bytes[source_offset + 0])) * byte_to_float,
                         @as(f32, @floatFromInt(source.bytes[source_offset + 1])) * byte_to_float,
                         @as(f32, @floatFromInt(source.bytes[source_offset + 2])) * byte_to_float,
