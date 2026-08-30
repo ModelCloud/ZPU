@@ -7546,16 +7546,38 @@ int main(void) {
             NSUInteger bytes_per_pixel;
             const char *name;
         } generic_compute_formats[] = {
+            {MTLPixelFormatA8Unorm, 1, "A8Unorm"},
             {MTLPixelFormatR8Unorm, 1, "R8Unorm"},
+            {MTLPixelFormatR8Unorm_sRGB, 1, "R8Unorm_sRGB"},
+            {MTLPixelFormatR8Snorm, 1, "R8Snorm"},
             {MTLPixelFormatR16Unorm, 2, "R16Unorm"},
+            {MTLPixelFormatR16Snorm, 2, "R16Snorm"},
             {MTLPixelFormatR16Float, 2, "R16Float"},
             {MTLPixelFormatRG8Unorm, 2, "RG8Unorm"},
+            {MTLPixelFormatRG8Unorm_sRGB, 2, "RG8Unorm_sRGB"},
+            {MTLPixelFormatRG8Snorm, 2, "RG8Snorm"},
             {MTLPixelFormatRG16Unorm, 4, "RG16Unorm"},
+            {MTLPixelFormatRG16Snorm, 4, "RG16Snorm"},
             {MTLPixelFormatRG16Float, 4, "RG16Float"},
             {MTLPixelFormatRGBA8Unorm, 4, "RGBA8Unorm"},
+            {MTLPixelFormatRGBA8Unorm_sRGB, 4, "RGBA8Unorm_sRGB"},
+            {MTLPixelFormatRGBA8Snorm, 4, "RGBA8Snorm"},
             {MTLPixelFormatBGRA8Unorm, 4, "BGRA8Unorm"},
+            {MTLPixelFormatBGRA8Unorm_sRGB, 4, "BGRA8Unorm_sRGB"},
+            {MTLPixelFormatR32Float, 4, "R32Float"},
             {MTLPixelFormatRGBA16Unorm, 8, "RGBA16Unorm"},
+            {MTLPixelFormatRGBA16Snorm, 8, "RGBA16Snorm"},
+            {MTLPixelFormatRGBA16Float, 8, "RGBA16Float"},
+            {MTLPixelFormatRG32Float, 8, "RG32Float"},
             {MTLPixelFormatRGBA32Float, 16, "RGBA32Float"},
+            {MTLPixelFormatB5G6R5Unorm, 2, "B5G6R5Unorm"},
+            {MTLPixelFormatA1BGR5Unorm, 2, "A1BGR5Unorm"},
+            {MTLPixelFormatABGR4Unorm, 2, "ABGR4Unorm"},
+            {MTLPixelFormatBGR5A1Unorm, 2, "BGR5A1Unorm"},
+            {MTLPixelFormatRGB10A2Unorm, 4, "RGB10A2Unorm"},
+            {MTLPixelFormatBGR10A2Unorm, 4, "BGR10A2Unorm"},
+            {MTLPixelFormatRG11B10Float, 4, "RG11B10Float"},
+            {MTLPixelFormatRGB9E5Float, 4, "RGB9E5Float"},
         };
         for (NSUInteger format_index = 0;
              format_index < sizeof(generic_compute_formats) / sizeof(generic_compute_formats[0]);
