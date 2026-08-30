@@ -4052,6 +4052,83 @@ int main(void) {
             return 98;
         }
 
+        /* 32-bit float filtering is an adapter capability backed by the CPU
+         * sampler. Keep the source in R32Float so this exercises the same
+         * native-precision path that supports32BitFloatFiltering describes;
+         * native Metal is used only to provide the byte-for-byte oracle. */
+        if (![device supports32BitFloatFiltering] ||
+            !adapter_device.supports32BitFloatFiltering) {
+            fprintf(stderr, "metal-pixel: 32-bit float filtering capability mismatch\n");
+            return 137;
+        }
+        const float float_sample_values[] = {0.0f, 1.0f, 0.5f, 1.0f};
+        MTLTextureDescriptor *native_float_sample_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                                                width:2 height:2 mipmapped:NO];
+        native_float_sample_descriptor.storageMode = MTLStorageModeShared;
+        native_float_sample_descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> native_float_sample_source =
+            [device newTextureWithDescriptor:native_float_sample_descriptor];
+        id<MTLTexture> adapter_float_sample_source =
+            [adapter_device newTextureWithDescriptor:native_float_sample_descriptor];
+        [native_float_sample_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                      mipmapLevel:0 withBytes:float_sample_values bytesPerRow:2 * sizeof(float)];
+        [adapter_float_sample_source replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
+                                       mipmapLevel:0 withBytes:float_sample_values bytesPerRow:2 * sizeof(float)];
+        id<MTLTexture> native_float_sample_output =
+            [device newTextureWithDescriptor:sample_output_descriptor];
+        id<MTLTexture> adapter_float_sample_output =
+            [adapter_device newTextureWithDescriptor:sample_output_descriptor];
+        if (native_float_sample_source == nil || adapter_float_sample_source == nil ||
+            native_float_sample_output == nil || adapter_float_sample_output == nil) {
+            fprintf(stderr, "metal-pixel: 32-bit float filtering resource allocation failed\n");
+            return 138;
+        }
+        MTLRenderPassDescriptor *native_float_sample_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_float_sample_pass.colorAttachments[0].texture = native_float_sample_output;
+        native_float_sample_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_float_sample_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_float_sample_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> native_float_sample_command_buffer = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_float_sample_encoder =
+            [native_float_sample_command_buffer renderCommandEncoderWithDescriptor:native_float_sample_pass];
+        [native_float_sample_encoder setRenderPipelineState:native_sample_pipeline];
+        [native_float_sample_encoder setVertexBuffer:native_linear_vertex_buffer offset:0 atIndex:0];
+        [native_float_sample_encoder setFragmentTexture:native_float_sample_source atIndex:0];
+        [native_float_sample_encoder setFragmentSamplerState:native_linear_sample_sampler atIndex:0];
+        [native_float_sample_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_float_sample_encoder endEncoding];
+        [native_float_sample_command_buffer commit];
+        [native_float_sample_command_buffer waitUntilCompleted];
+        MTLRenderPassDescriptor *adapter_float_sample_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        adapter_float_sample_pass.colorAttachments[0].texture = adapter_float_sample_output;
+        adapter_float_sample_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        adapter_float_sample_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        adapter_float_sample_pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+        id<MTLCommandBuffer> adapter_float_sample_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> adapter_float_sample_encoder =
+            [adapter_float_sample_command_buffer renderCommandEncoderWithDescriptor:adapter_float_sample_pass];
+        [adapter_float_sample_encoder setRenderPipelineState:adapter_sample_pipeline];
+        [adapter_float_sample_encoder setVertexBuffer:adapter_linear_vertex_buffer offset:0 atIndex:0];
+        [adapter_float_sample_encoder setFragmentTexture:adapter_float_sample_source atIndex:0];
+        [adapter_float_sample_encoder setFragmentSamplerState:adapter_linear_sample_sampler atIndex:0];
+        [adapter_float_sample_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_float_sample_encoder endEncoding];
+        [adapter_float_sample_command_buffer commit];
+        [adapter_float_sample_command_buffer waitUntilCompleted];
+        uint8_t native_float_sample_bytes[byte_count];
+        uint8_t adapter_float_sample_bytes[byte_count];
+        [native_float_sample_output getBytes:native_float_sample_bytes bytesPerRow:(NSUInteger)width * 4
+                                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_float_sample_output getBytes:adapter_float_sample_bytes bytesPerRow:(NSUInteger)width * 4
+                                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_float_sample_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_float_sample_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_float_sample_bytes, adapter_float_sample_bytes, byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: 32-bit float linear filtering mismatch\n");
+            return 139;
+        }
+
         /* Metal chooses minification and magnification filters from the
          * fragment footprint when mipmapping is disabled. A 16x16 source
          * projected over the four-pixel square forces minification, so this

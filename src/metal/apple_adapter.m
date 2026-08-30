@@ -6998,7 +6998,10 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (BOOL)isDepth24Stencil8PixelFormatSupported { return NO; }
 - (MTLReadWriteTextureTier)readWriteTextureSupport { return MTLReadWriteTextureTier1; }
 - (BOOL)areRasterOrderGroupsSupported { return NO; }
-- (BOOL)supports32BitFloatFiltering { return NO; }
+/* The CPU sampler performs nearest and linear filtering directly on the
+ * decoded 32-bit float texels. This is an adapter capability; it does not
+ * imply that a native Apple Metal device is used for execution. */
+- (BOOL)supports32BitFloatFiltering { return YES; }
 - (BOOL)supports32BitMSAA { return NO; }
 - (BOOL)supportsQueryTextureLOD { return NO; }
 - (BOOL)supportsBCTextureCompression { return NO; }
