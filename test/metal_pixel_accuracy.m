@@ -7141,6 +7141,160 @@ static int test_layered_mesh_against_native(
     return 0;
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static int test_mtl4_layered_mesh_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library) {
+    enum { width = 5, height = 3, layers = 3, byte_count = width * height * 4 };
+    id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_cpu_layered_vertex"];
+    id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_layered_position_gradient"];
+    if (native_vertex == nil || native_fragment == nil || adapter_library == nil) return 229;
+
+    MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+    native_descriptor.vertexFunction = native_vertex;
+    native_descriptor.fragmentFunction = native_fragment;
+    native_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    native_descriptor.rasterSampleCount = 1;
+    native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *native_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+
+    NSError *adapter_error = nil;
+    MTL4CompilerDescriptor *compiler_descriptor = [MTL4CompilerDescriptor new];
+    id<MTL4Compiler> compiler =
+        [adapter_device newCompilerWithDescriptor:compiler_descriptor error:&adapter_error];
+    MTL4LibraryFunctionDescriptor *mesh_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+    mesh_function_descriptor.library = adapter_library;
+    mesh_function_descriptor.name = @"zpu_cpu_mesh_gradient_rgba8";
+    MTL4LibraryFunctionDescriptor *fragment_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+    fragment_function_descriptor.library = adapter_library;
+    fragment_function_descriptor.name = @"zpu_cpu_mesh_gradient_fragment";
+    MTL4MeshRenderPipelineDescriptor *mesh_descriptor = [MTL4MeshRenderPipelineDescriptor new];
+    mesh_descriptor.meshFunctionDescriptor = mesh_function_descriptor;
+    mesh_descriptor.fragmentFunctionDescriptor = fragment_function_descriptor;
+    mesh_descriptor.rasterSampleCount = 1;
+    mesh_descriptor.maxTotalThreadsPerObjectThreadgroup = 1;
+    mesh_descriptor.maxTotalThreadsPerMeshThreadgroup = 1;
+    mesh_descriptor.requiredThreadsPerObjectThreadgroup = MTLSizeMake(1, 1, 1);
+    mesh_descriptor.requiredThreadsPerMeshThreadgroup = MTLSizeMake(1, 1, 1);
+    mesh_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [compiler newRenderPipelineStateWithDescriptor:mesh_descriptor
+                                    compilerTaskOptions:nil
+                                                  error:&adapter_error];
+
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.textureType = MTLTextureType2DArray;
+    texture_descriptor.arrayLength = layers;
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.renderTargetArrayLength = layers;
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    const MTLViewport native_viewport = {0.0, 0.0, width, height, 0.0, 1.0};
+    const MTLViewport adapter_viewport = {2.0, 1.0, 3.0, 2.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {1, 1, 3, 2};
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}},
+    };
+    id<MTLBuffer> native_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    if (native_encoder != nil) {
+        [native_encoder setViewport:native_viewport];
+        [native_encoder setScissorRect:scissor];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6
+                          instanceCount:layers baseInstance:0];
+        [native_encoder endEncoding];
+    }
+
+    MTL4CommandAllocatorDescriptor *allocator_descriptor = [MTL4CommandAllocatorDescriptor new];
+    id<MTL4CommandAllocator> allocator =
+        [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&adapter_error];
+    MTL4CommandQueueDescriptor *queue_descriptor = [MTL4CommandQueueDescriptor new];
+    id<MTL4CommandQueue> adapter_queue =
+        [adapter_device newMTL4CommandQueueWithDescriptor:queue_descriptor error:&adapter_error];
+    MTL4RenderPassDescriptor *adapter_pass = [MTL4RenderPassDescriptor new];
+    adapter_pass.renderTargetArrayLength = layers;
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    adapter_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    id<MTL4CommandBuffer> adapter_command_buffer = [adapter_device newCommandBuffer];
+    [adapter_command_buffer beginCommandBufferWithAllocator:allocator];
+    id<MTL4RenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    if (adapter_encoder != nil) {
+        [adapter_encoder setViewport:adapter_viewport];
+        [adapter_encoder setScissorRect:scissor];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder drawMeshThreads:MTLSizeMake(width, height, layers)
+               threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                 threadsPerMeshThreadgroup:MTLSizeMake(1, 1, 1)];
+        [adapter_encoder endEncoding];
+    }
+    [adapter_command_buffer endCommandBuffer];
+    id<MTL4CommandBuffer> adapter_command_buffers[] = {adapter_command_buffer};
+    MTL4CommitOptions *commit_options = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *adapter_feedback_error = nil;
+    [commit_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        adapter_feedback_error = feedback.error;
+    }];
+    [adapter_queue commit:adapter_command_buffers count:1 options:commit_options];
+    [native_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+
+    uint8_t native_pixels[layers][byte_count] = {{0}};
+    uint8_t adapter_pixels[layers][byte_count] = {{0}};
+    for (NSUInteger layer = 0; layer < layers; ++layer) {
+        if (native_texture != nil) {
+            [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+                           fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        }
+        if (adapter_texture != nil) {
+            [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+                            fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        }
+        if (memcmp(native_pixels[layer], adapter_pixels[layer], byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: Metal 4 layered mesh slice %zu mismatch at byte %zu native=%u adapter=%u\n",
+                    layer, mismatch, mismatch < byte_count ? native_pixels[layer][mismatch] : 0,
+                    mismatch < byte_count ? adapter_pixels[layer][mismatch] : 0);
+            fail_with_error("native Metal 4 layered mesh oracle failed", native_error);
+            fail_with_error("adapter Metal 4 layered mesh failed", adapter_error);
+            return 230;
+        }
+    }
+    if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        native_buffer == nil || native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_queue == nil || allocator == nil || adapter_command_buffer == nil || adapter_encoder == nil ||
+        adapter_feedback_error != nil) {
+        fail_with_error("native Metal 4 layered mesh completion/routing failed", native_error);
+        fail_with_error("adapter Metal 4 layered mesh completion failed", adapter_error);
+        return 231;
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -15346,6 +15500,15 @@ int main(void) {
             const int layered_mesh_result = test_layered_mesh_against_native(
                 device, adapter_device, library, adapter_default_library, adapter_queue);
             if (layered_mesh_result != 0) return layered_mesh_result;
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            /* Metal 4 uses the same attachment-global, upper-left grid as the
+             * legacy encoder. Keep a separate native reference so forwarding
+             * through the CPU/ZPU legacy path is checked at the public MTL4
+             * boundary as well. */
+            const int mtl4_layered_mesh_result = test_mtl4_layered_mesh_against_native(
+                device, adapter_device, library, adapter_default_library);
+            if (mtl4_layered_mesh_result != 0) return mtl4_layered_mesh_result;
         }
 
         BOOL adapter_mesh_indirect_exact = YES;
