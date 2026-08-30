@@ -7379,9 +7379,11 @@ int main(void) {
                                   constantValues:[MTLFunctionConstantValues new]
                                              error:&adapter_library_error];
         BOOL adapter_function_descriptor_ok = YES;
+        BOOL adapter_specialized_link_ok = YES;
         if (@available(macOS 11.0, iOS 14.0, *)) {
             MTLFunctionDescriptor *native_visible_descriptor = [MTLFunctionDescriptor functionDescriptor];
             native_visible_descriptor.name = @"zpu_test_visible_secondary";
+            native_visible_descriptor.specializedName = @"zpu_test_visible_secondary_specialized";
             native_visible_descriptor.options = MTLFunctionOptionCompileToBinary;
             NSError *native_visible_descriptor_error = nil;
             id<MTLFunction> native_descriptor_function =
@@ -7389,6 +7391,7 @@ int main(void) {
                                                error:&native_visible_descriptor_error];
             MTLFunctionDescriptor *adapter_visible_descriptor = [MTLFunctionDescriptor functionDescriptor];
             adapter_visible_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_visible_descriptor.specializedName = @"zpu_test_visible_secondary_specialized";
             adapter_visible_descriptor.options = MTLFunctionOptionCompileToBinary;
             NSError *adapter_visible_descriptor_error = nil;
             id<MTLFunction> adapter_descriptor_function =
@@ -7404,10 +7407,58 @@ int main(void) {
             adapter_function_descriptor_ok =
                 native_descriptor_function != nil && native_visible_descriptor_error == nil &&
                 native_descriptor_function.functionType == MTLFunctionTypeVisible &&
+                [native_descriptor_function.name isEqualToString:@"zpu_test_visible_secondary_specialized"] &&
+                native_descriptor_function.label == nil &&
                 adapter_descriptor_function != nil && adapter_visible_descriptor_error == nil &&
                 adapter_descriptor_function.functionType == MTLFunctionTypeVisible &&
+                [adapter_descriptor_function.name isEqualToString:@"zpu_test_visible_secondary_specialized"] &&
+                adapter_descriptor_function.label == nil &&
                 adapter_descriptor_function.options == MTLFunctionOptionCompileToBinary &&
                 adapter_invalid_descriptor_function == nil && adapter_kernel_descriptor_error != nil;
+        }
+        if (@available(macOS 12.0, iOS 15.0, tvOS 16.0, *)) {
+            MTLFunctionDescriptor *native_specialized_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            native_specialized_descriptor.name = @"zpu_test_visible_secondary";
+            native_specialized_descriptor.specializedName = @"zpu_test_visible_secondary_render_alias";
+            native_specialized_descriptor.options = MTLFunctionOptionCompileToBinary;
+            NSError *native_specialized_error = nil;
+            id<MTLFunction> native_specialized_function =
+                [library newFunctionWithDescriptor:native_specialized_descriptor
+                                               error:&native_specialized_error];
+            MTLFunctionDescriptor *adapter_specialized_descriptor = [MTLFunctionDescriptor functionDescriptor];
+            adapter_specialized_descriptor.name = @"zpu_test_visible_secondary";
+            adapter_specialized_descriptor.specializedName = @"zpu_test_visible_secondary_render_alias";
+            adapter_specialized_descriptor.options = MTLFunctionOptionCompileToBinary;
+            NSError *adapter_specialized_error = nil;
+            id<MTLFunction> adapter_specialized_function =
+                [adapter_library newFunctionWithDescriptor:adapter_specialized_descriptor
+                                                       error:&adapter_specialized_error];
+            MTLRenderPipelineDescriptor *native_specialized_pipeline_descriptor = [pipeline_descriptor copy];
+            native_specialized_pipeline_descriptor.supportAddingVertexBinaryFunctions = YES;
+            MTLLinkedFunctions *native_specialized_links = [MTLLinkedFunctions new];
+            native_specialized_links.functions = @[native_specialized_function];
+            native_specialized_pipeline_descriptor.vertexLinkedFunctions = native_specialized_links;
+            id<MTLRenderPipelineState> native_specialized_pipeline =
+                [device newRenderPipelineStateWithDescriptor:native_specialized_pipeline_descriptor
+                                                        error:&native_specialized_error];
+            MTLRenderPipelineDescriptor *adapter_specialized_pipeline_descriptor =
+                [adapter_pipeline_descriptor copy];
+            adapter_specialized_pipeline_descriptor.supportAddingVertexBinaryFunctions = YES;
+            MTLLinkedFunctions *adapter_specialized_links = [MTLLinkedFunctions new];
+            adapter_specialized_links.functions = @[adapter_specialized_function];
+            adapter_specialized_pipeline_descriptor.vertexLinkedFunctions = adapter_specialized_links;
+            id<MTLRenderPipelineState> adapter_specialized_pipeline =
+                [adapter_device newRenderPipelineStateWithDescriptor:adapter_specialized_pipeline_descriptor
+                                                                 error:&adapter_specialized_error];
+            adapter_specialized_link_ok =
+                native_specialized_function != nil && native_specialized_pipeline != nil &&
+                native_specialized_error == nil &&
+                adapter_specialized_function != nil && adapter_specialized_pipeline != nil &&
+                adapter_specialized_error == nil &&
+                [adapter_specialized_function.name isEqualToString:@"zpu_test_visible_secondary_render_alias"] &&
+                adapter_specialized_function.label == nil &&
+                adapter_specialized_function.functionType == MTLFunctionTypeVisible &&
+                adapter_specialized_function.options == MTLFunctionOptionCompileToBinary;
         }
         __block BOOL adapter_library_completion_called = NO;
         [adapter_device newLibraryWithSource:adapter_cpu_source options:nil completionHandler:^(id<MTLLibrary> library, NSError *library_error) {
@@ -7420,6 +7471,7 @@ int main(void) {
             !adapter_stage_input_attributes_ok ||
             !adapter_stitched_library_ok ||
             !adapter_function_descriptor_ok ||
+            !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
             adapter_library.functionNames.count != 10 ||

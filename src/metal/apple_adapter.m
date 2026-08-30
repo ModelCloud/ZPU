@@ -1177,6 +1177,8 @@ static uint64_t zpu_next_cpu_drawable_id;
 @public
     ZPUDevice *_owner;
     NSString *_name;
+    NSString *_implementationName;
+    NSString *_label;
     MTLFunctionType _functionTypeOverride;
     MTLFunctionOptions _optionsOverride;
     NSArray *_vertexAttributes;
@@ -1186,6 +1188,10 @@ static uint64_t zpu_next_cpu_drawable_id;
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
                   functionType:(MTLFunctionType)functionType;
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+                  functionType:(MTLFunctionType)functionType
+                       options:(MTLFunctionOptions)options;
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+              specializedName:(NSString *)specializedName
                   functionType:(MTLFunctionType)functionType
                        options:(MTLFunctionOptions)options;
 @end
@@ -6062,6 +6068,10 @@ static NSString *zpu_compute_visible_function_name_for_name(NSString *name) {
             [name isEqualToString:@"zpu_test_visible_secondary"]) ? name : nil;
 }
 
+static NSString *zpu_cpu_function_implementation_name(ZPUCPUFunction *function) {
+    return function->_implementationName.length != 0 ? function->_implementationName : function->_name;
+}
+
 static BOOL zpu_append_visible_function_names(
     ZPUDevice *owner, NSArray<id<MTLFunction>> *functions, NSMutableSet<NSString *> *allNames,
     NSMutableArray<NSString *> *exportedNames, NSError **error, BOOL exportHandles) {
@@ -6073,7 +6083,8 @@ static BOOL zpu_append_visible_function_names(
             return NO;
         }
         NSString *name = cpuFunction->_name;
-        if (name.length == 0 || zpu_compute_visible_function_name_for_name(name) == nil ||
+        NSString *implementationName = zpu_cpu_function_implementation_name(cpuFunction);
+        if (name.length == 0 || zpu_compute_visible_function_name_for_name(implementationName) == nil ||
             [allNames containsObject:name]) {
             zpu_set_error(error, @"ZPU CPU Metal render pipeline has an invalid or duplicate linked function");
             return NO;
@@ -7129,8 +7140,10 @@ static BOOL zpu_append_legacy_compute_functions(
             return NO;
         }
         NSString *name = cpuFunction->_name;
+        NSString *implementationName = zpu_cpu_function_implementation_name(cpuFunction);
         if (name.length == 0 ||
-            zpu_compute_visible_function_name_for_name(name) == nil || [name isEqualToString:baseName] ||
+            zpu_compute_visible_function_name_for_name(implementationName) == nil ||
+            [implementationName isEqualToString:baseName] ||
             [allNames containsObject:name]) {
             zpu_set_error(error, @"ZPU CPU Metal compute pipeline has an invalid or duplicate linked function");
             return NO;
@@ -8202,9 +8215,18 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
                   functionType:(MTLFunctionType)functionType
                        options:(MTLFunctionOptions)options {
+    return [self initWithOwner:owner name:name specializedName:nil
+                  functionType:functionType options:options];
+}
+- (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
+              specializedName:(NSString *)specializedName
+                  functionType:(MTLFunctionType)functionType
+                       options:(MTLFunctionOptions)options {
     if ((self = [super init])) {
         _owner = owner;
-        _name = [name copy];
+        _implementationName = [name copy];
+        _name = [(specializedName.length != 0 ? specializedName : name) copy];
+        _label = nil;
         _functionTypeOverride = functionType;
         _optionsOverride = options;
         _vertexAttributes = @[];
@@ -8243,8 +8265,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     if ([_name rangeOfString:@"fragment" options:NSCaseInsensitiveSearch].location != NSNotFound) return MTLFunctionTypeFragment;
     return MTLFunctionTypeKernel;
 }
-- (NSString *)label { return _name; }
-- (void)setLabel:(NSString *)label { _name = [label copy]; }
+- (NSString *)label { return _label; }
+- (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (MTLPatchType)patchType API_AVAILABLE(macos(10.12), ios(10.0)) {
     return [_name isEqualToString:zpu_cpu_patch_triangle_vertex_name] ? MTLPatchTypeTriangle : MTLPatchTypeNone;
 }
@@ -8349,8 +8371,8 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     return zpu_function_reflection(functionName);
 }
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
-    if (descriptor == nil || descriptor.name.length == 0 || descriptor.specializedName.length != 0) {
-        zpu_set_error(error, @"ZPU CPU Metal function descriptors require an unaliased registered function");
+    if (descriptor == nil || descriptor.name.length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal function descriptors require a registered function name");
         return nil;
     }
     if (@available(macOS 12.0, iOS 15.0, *)) {
@@ -8376,6 +8398,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
     if (error != NULL) *error = nil;
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:self->_owner name:function.name
+                                                   specializedName:descriptor.specializedName
                                                         functionType:function.functionType options:options];
 }
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor
