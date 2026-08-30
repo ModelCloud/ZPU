@@ -2706,6 +2706,7 @@ static int test_layered_depth_stencil_only_render_against_native(
         return 165;
     }
 
+    for (NSUInteger parallel_index = 0; parallel_index < 2; ++parallel_index) {
     MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
     native_pass.renderTargetArrayLength = layers;
     native_pass.depthAttachment.texture = native_depth;
@@ -2723,12 +2724,21 @@ static int test_layered_depth_stencil_only_render_against_native(
     id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
     id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
     id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLParallelRenderCommandEncoder> native_parallel = nil;
+    id<MTLParallelRenderCommandEncoder> adapter_parallel = nil;
     id<MTLRenderCommandEncoder> native_encoder =
-        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        parallel_index == 0 ? [native_command_buffer renderCommandEncoderWithDescriptor:native_pass] : nil;
     id<MTLRenderCommandEncoder> adapter_encoder =
-        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        parallel_index == 0 ? [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass] : nil;
+    if (parallel_index != 0) {
+        native_parallel = [native_command_buffer parallelRenderCommandEncoderWithDescriptor:native_pass];
+        adapter_parallel = [adapter_command_buffer parallelRenderCommandEncoderWithDescriptor:adapter_pass];
+        native_encoder = [native_parallel renderCommandEncoder];
+        adapter_encoder = [adapter_parallel renderCommandEncoder];
+    }
     if (native_encoder == nil || adapter_encoder == nil) {
-        fprintf(stderr, "metal-pixel: layered depth/stencil-only encoder creation failed\n");
+        fprintf(stderr, "metal-pixel: layered depth/stencil-only %s encoder creation failed\n",
+                parallel_index == 0 ? "render" : "parallel");
         return 166;
     }
     const MTLViewport viewport = {1.0, 1.0, width - 2.0, height - 2.0, 0.0, 1.0};
@@ -2744,6 +2754,7 @@ static int test_layered_depth_stencil_only_render_against_native(
     [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6
                       instanceCount:layers - 1 baseInstance:1];
     [native_encoder endEncoding];
+    if (native_parallel != nil) [native_parallel endEncoding];
     [adapter_encoder setViewport:viewport];
     [adapter_encoder setScissorRect:scissor];
     [adapter_encoder setRenderPipelineState:adapter_pipeline];
@@ -2755,6 +2766,7 @@ static int test_layered_depth_stencil_only_render_against_native(
     [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6
                        instanceCount:layers - 1 baseInstance:1];
     [adapter_encoder endEncoding];
+    if (adapter_parallel != nil) [adapter_parallel endEncoding];
     [native_command_buffer commit];
     [adapter_command_buffer commit];
     [native_command_buffer waitUntilCompleted];
@@ -2788,8 +2800,8 @@ static int test_layered_depth_stencil_only_render_against_native(
             size_t stencil_mismatch = 0;
             while (stencil_mismatch < stencil_byte_count &&
                    native_stencil_pixels[layer][stencil_mismatch] == adapter_stencil_pixels[layer][stencil_mismatch]) stencil_mismatch += 1;
-            fprintf(stderr, "metal-pixel: layered depth/stencil-only slice %zu mismatch depth@%zu=%u/%u stencil@%zu=%u/%u statuses=%ld/%ld\n",
-                    layer, depth_mismatch,
+            fprintf(stderr, "metal-pixel: layered depth/stencil-only %s slice %zu mismatch depth@%zu=%u/%u stencil@%zu=%u/%u statuses=%ld/%ld\n",
+                    parallel_index == 0 ? "render" : "parallel", layer, depth_mismatch,
                     depth_mismatch < depth_byte_count ? native_depth_pixels[layer][depth_mismatch] : 0,
                     depth_mismatch < depth_byte_count ? adapter_depth_pixels[layer][depth_mismatch] : 0,
                     stencil_mismatch,
@@ -2807,9 +2819,11 @@ static int test_layered_depth_stencil_only_render_against_native(
         memcmp(native_stencil_pixels[0], native_stencil_pixels[1], stencil_byte_count) == 0 ||
         memcmp(native_depth_pixels[1], native_depth_pixels[2], depth_byte_count) != 0 ||
         memcmp(native_stencil_pixels[1], native_stencil_pixels[2], stencil_byte_count) != 0) {
-        fprintf(stderr, "metal-pixel: layered depth/stencil-only routing or completion failed statuses=%ld/%ld\n",
+        fprintf(stderr, "metal-pixel: layered depth/stencil-only %s routing or completion failed statuses=%ld/%ld\n",
+                parallel_index == 0 ? "render" : "parallel",
                 (long)native_command_buffer.status, (long)adapter_command_buffer.status);
         return 168;
+    }
     }
     return 0;
 }
