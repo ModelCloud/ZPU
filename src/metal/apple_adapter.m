@@ -19128,9 +19128,13 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
         const NSUInteger offset = [command->_vertexBufferOffsets[bindingIndex] unsignedIntegerValue];
         NSNumber *stride = command->_vertexBufferStrides[bindingIndex];
         if (stride != nil) {
-            [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
-                               offset:offset attributeStride:stride.unsignedIntegerValue
-                             atIndex:bindingIndex.unsignedIntegerValue];
+            if (@available(macOS 14.0, iOS 17.0, *)) {
+                [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
+                                   offset:offset attributeStride:stride.unsignedIntegerValue
+                                 atIndex:bindingIndex.unsignedIntegerValue];
+            } else {
+                [encoder->_owner markError];
+            }
         } else {
             [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
                                offset:offset atIndex:bindingIndex.unsignedIntegerValue];
