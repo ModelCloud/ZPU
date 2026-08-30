@@ -665,6 +665,22 @@ API_AVAILABLE(macos(13.0), ios(16.0))
 - (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength;
 @end
 
+/* Tensor bindings are a Metal 4-only refinement of the common binding
+ * metadata. Keep the older buffer/texture binding class available to older
+ * deployment targets, and use this CPU-owned subclass for MTLTensorBinding
+ * reflection so no native Metal object is imported into the adapter. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+@interface ZPUTensorBinding : ZPUBinding <MTLTensorBinding> {
+@public
+    MTLTensorDataType _tensorDataType;
+    MTLDataType _indexType;
+    MTLTensorExtents *_tensorDimensions;
+}
+- (void)setTensorDataType:(MTLTensorDataType)tensorDataType
+                indexType:(MTLDataType)indexType
+               dimensions:(MTLTensorExtents *)dimensions;
+@end
+
 API_AVAILABLE(macos(10.11), ios(8.0))
 @interface ZPUComputePipelineReflection : MTLComputePipelineReflection {
 @public
@@ -7356,6 +7372,20 @@ API_AVAILABLE(macos(10.12), ios(10.0))
 }
 @end
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+@implementation ZPUTensorBinding
+- (void)setTensorDataType:(MTLTensorDataType)tensorDataType
+                indexType:(MTLDataType)indexType
+               dimensions:(MTLTensorExtents *)dimensions {
+    _tensorDataType = tensorDataType;
+    _indexType = indexType;
+    _tensorDimensions = [dimensions copy];
+}
+- (MTLTensorDataType)tensorDataType { return _tensorDataType; }
+- (MTLDataType)indexType { return _indexType; }
+- (MTLTensorExtents *)dimensions { return _tensorDimensions; }
+@end
+
 @implementation ZPUComputePipelineReflection
 - (instancetype)initWithArguments:(NSArray *)arguments bindings:(NSArray *)bindings {
     if ((self = [super init])) {
@@ -10557,6 +10587,23 @@ static id<MTLFunction> zpu_mtl4_resolve_library_function(
 - (NSArray *)bindings { return _bindings ?: @[]; }
 @end
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
+    if ([functionName isEqualToString:zpu_cpu_ml_add_u8_function_name]) return MTLTensorDataTypeUInt8;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_f32_function_name]) return MTLTensorDataTypeFloat32;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_i32_function_name]) return MTLTensorDataTypeInt32;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_u32_function_name]) return MTLTensorDataTypeUInt32;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_u16_function_name]) return MTLTensorDataTypeUInt16;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_i16_function_name]) return MTLTensorDataTypeInt16;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_i8_function_name]) return MTLTensorDataTypeInt8;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_f16_function_name]) return MTLTensorDataTypeFloat16;
+    if ([functionName isEqualToString:zpu_cpu_ml_add_bf16_function_name]) return MTLTensorDataTypeBFloat16;
+    /* The identity profile is intentionally polymorphic and accepts every
+     * tensor storage format supported by the CPU tensor layer. None is the
+     * only reflection value that does not falsely claim one format. */
+    return MTLTensorDataTypeNone;
+}
+
 @implementation ZPUMTL4MachineLearningPipeline
 - (instancetype)initWithOwner:(ZPUDevice *)owner
                      descriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
@@ -10605,24 +10652,33 @@ static id<MTLFunction> zpu_mtl4_resolve_library_function(
         }
         _intermediatesHeapSize = 0;
         if (identity) {
-            ZPUBinding *input = [[ZPUBinding alloc] initWithName:@"input"
-                                                             type:zpu_mtl_binding_type_tensor
-                                                           access:MTLBindingAccessReadOnly index:0];
-            ZPUBinding *output = [[ZPUBinding alloc] initWithName:@"output"
-                                                              type:zpu_mtl_binding_type_tensor
-                                                            access:MTLBindingAccessWriteOnly index:1];
+            ZPUTensorBinding *input = [[ZPUTensorBinding alloc] initWithName:@"input"
+                                                                         type:zpu_mtl_binding_type_tensor
+                                                                       access:MTLBindingAccessReadOnly index:0];
+            [input setTensorDataType:zpu_mtl4_ml_tensor_data_type(functionName)
+                           indexType:MTLDataTypeInt dimensions:inputDimensions[0]];
+            ZPUTensorBinding *output = [[ZPUTensorBinding alloc] initWithName:@"output"
+                                                                          type:zpu_mtl_binding_type_tensor
+                                                                        access:MTLBindingAccessWriteOnly index:1];
+            [output setTensorDataType:zpu_mtl4_ml_tensor_data_type(functionName)
+                            indexType:MTLDataTypeInt
+                           dimensions:inputDimensions[1] ?: inputDimensions[0]];
             _reflection = [[ZPUMTL4MachineLearningPipelineReflection alloc]
                 initWithBindings:@[input, output]];
         } else {
-            ZPUBinding *left = [[ZPUBinding alloc] initWithName:@"left"
-                                                            type:zpu_mtl_binding_type_tensor
-                                                          access:MTLBindingAccessReadOnly index:0];
-            ZPUBinding *right = [[ZPUBinding alloc] initWithName:@"right"
-                                                             type:zpu_mtl_binding_type_tensor
-                                                           access:MTLBindingAccessReadOnly index:1];
-            ZPUBinding *output = [[ZPUBinding alloc] initWithName:@"output"
-                                                              type:zpu_mtl_binding_type_tensor
-                                                            access:MTLBindingAccessWriteOnly index:2];
+            const MTLTensorDataType tensorDataType = zpu_mtl4_ml_tensor_data_type(functionName);
+            ZPUTensorBinding *left = [[ZPUTensorBinding alloc] initWithName:@"left"
+                                                                        type:zpu_mtl_binding_type_tensor
+                                                                      access:MTLBindingAccessReadOnly index:0];
+            [left setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:inputDimensions[0]];
+            ZPUTensorBinding *right = [[ZPUTensorBinding alloc] initWithName:@"right"
+                                                                         type:zpu_mtl_binding_type_tensor
+                                                                       access:MTLBindingAccessReadOnly index:1];
+            [right setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:inputDimensions[1]];
+            ZPUTensorBinding *output = [[ZPUTensorBinding alloc] initWithName:@"output"
+                                                                          type:zpu_mtl_binding_type_tensor
+                                                                        access:MTLBindingAccessWriteOnly index:2];
+            [output setTensorDataType:tensorDataType indexType:MTLDataTypeInt dimensions:inputDimensions[2]];
             _reflection = [[ZPUMTL4MachineLearningPipelineReflection alloc]
                 initWithBindings:@[left, right, output]];
         }

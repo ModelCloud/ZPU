@@ -19669,6 +19669,16 @@ int main(void) {
                                          strides:metal4_ml_identity_packed_strides
                                 fromSliceOrigin:metal4_ml_identity_zero
                                 sliceDimensions:metal4_ml_identity_dimensions];
+        id<MTLBinding> metal4_ml_identity_input_binding =
+            metal4_ml_identity_pipeline.reflection.bindings.count > 0 ?
+                metal4_ml_identity_pipeline.reflection.bindings[0] : nil;
+        id<MTLBinding> metal4_ml_identity_output_binding =
+            metal4_ml_identity_pipeline.reflection.bindings.count > 1 ?
+                metal4_ml_identity_pipeline.reflection.bindings[1] : nil;
+        id<MTLTensorBinding> metal4_ml_identity_input_tensor_binding =
+            (id<MTLTensorBinding>)metal4_ml_identity_input_binding;
+        id<MTLTensorBinding> metal4_ml_identity_output_tensor_binding =
+            (id<MTLTensorBinding>)metal4_ml_identity_output_binding;
         if (metal4_ml_identity_library == nil ||
             [metal4_ml_identity_library newFunctionWithName:@"zpu_cpu_ml_identity"] == nil ||
             metal4_ml_identity_pipeline == nil || metal4_ml_identity_error != nil ||
@@ -19677,6 +19687,18 @@ int main(void) {
             metal4_ml_identity_pipeline.reflection.bindings.count != 2 ||
             metal4_ml_identity_pipeline.reflection.bindings[0].type != (MTLBindingType)37 ||
             metal4_ml_identity_pipeline.reflection.bindings[1].type != (MTLBindingType)37 ||
+            ![metal4_ml_identity_input_binding conformsToProtocol:@protocol(MTLTensorBinding)] ||
+            ![metal4_ml_identity_output_binding conformsToProtocol:@protocol(MTLTensorBinding)] ||
+            metal4_ml_identity_input_tensor_binding.tensorDataType != MTLTensorDataTypeNone ||
+            metal4_ml_identity_output_tensor_binding.tensorDataType != MTLTensorDataTypeNone ||
+            metal4_ml_identity_input_tensor_binding.indexType != MTLDataTypeInt ||
+            metal4_ml_identity_output_tensor_binding.indexType != MTLDataTypeInt ||
+            metal4_ml_identity_input_tensor_binding.dimensions.rank != 2 ||
+            metal4_ml_identity_output_tensor_binding.dimensions.rank != 2 ||
+            [metal4_ml_identity_input_tensor_binding.dimensions extentAtDimensionIndex:0] != 4 ||
+            [metal4_ml_identity_input_tensor_binding.dimensions extentAtDimensionIndex:1] != 3 ||
+            [metal4_ml_identity_output_tensor_binding.dimensions extentAtDimensionIndex:0] != 4 ||
+            [metal4_ml_identity_output_tensor_binding.dimensions extentAtDimensionIndex:1] != 3 ||
             metal4_ml_identity_table == nil || metal4_ml_identity_encoder == nil ||
             metal4_ml_identity_fence == nil ||
             metal4_ml_identity_feedback_error != nil ||
@@ -19830,11 +19852,44 @@ int main(void) {
                                strides:metal4_ml_identity_packed_strides
                       fromSliceOrigin:metal4_ml_identity_zero
                        sliceDimensions:metal4_ml_identity_dimensions];
+        id<MTLBinding> metal4_ml_add_left_binding =
+            metal4_ml_add_pipeline.reflection.bindings.count > 0 ?
+                metal4_ml_add_pipeline.reflection.bindings[0] : nil;
+        id<MTLBinding> metal4_ml_add_right_binding =
+            metal4_ml_add_pipeline.reflection.bindings.count > 1 ?
+                metal4_ml_add_pipeline.reflection.bindings[1] : nil;
+        id<MTLBinding> metal4_ml_add_output_binding =
+            metal4_ml_add_pipeline.reflection.bindings.count > 2 ?
+                metal4_ml_add_pipeline.reflection.bindings[2] : nil;
+        id<MTLTensorBinding> metal4_ml_add_left_tensor_binding =
+            (id<MTLTensorBinding>)metal4_ml_add_left_binding;
+        id<MTLTensorBinding> metal4_ml_add_right_tensor_binding =
+            (id<MTLTensorBinding>)metal4_ml_add_right_binding;
+        id<MTLTensorBinding> metal4_ml_add_output_tensor_binding =
+            (id<MTLTensorBinding>)metal4_ml_add_output_binding;
         if (metal4_ml_add_pipeline == nil || metal4_ml_add_error != nil ||
             metal4_ml_add_pipeline.reflection.bindings.count != 3 ||
             metal4_ml_add_pipeline.reflection.bindings[0].index != 0 ||
             metal4_ml_add_pipeline.reflection.bindings[1].index != 1 ||
             metal4_ml_add_pipeline.reflection.bindings[2].index != 2 ||
+            ![metal4_ml_add_left_binding conformsToProtocol:@protocol(MTLTensorBinding)] ||
+            ![metal4_ml_add_right_binding conformsToProtocol:@protocol(MTLTensorBinding)] ||
+            ![metal4_ml_add_output_binding conformsToProtocol:@protocol(MTLTensorBinding)] ||
+            metal4_ml_add_left_tensor_binding.tensorDataType != MTLTensorDataTypeUInt8 ||
+            metal4_ml_add_right_tensor_binding.tensorDataType != MTLTensorDataTypeUInt8 ||
+            metal4_ml_add_output_tensor_binding.tensorDataType != MTLTensorDataTypeUInt8 ||
+            metal4_ml_add_left_tensor_binding.indexType != MTLDataTypeInt ||
+            metal4_ml_add_right_tensor_binding.indexType != MTLDataTypeInt ||
+            metal4_ml_add_output_tensor_binding.indexType != MTLDataTypeInt ||
+            metal4_ml_add_left_tensor_binding.dimensions.rank != 2 ||
+            metal4_ml_add_right_tensor_binding.dimensions.rank != 2 ||
+            metal4_ml_add_output_tensor_binding.dimensions.rank != 2 ||
+            [metal4_ml_add_left_tensor_binding.dimensions extentAtDimensionIndex:0] != 4 ||
+            [metal4_ml_add_left_tensor_binding.dimensions extentAtDimensionIndex:1] != 3 ||
+            [metal4_ml_add_right_tensor_binding.dimensions extentAtDimensionIndex:0] != 4 ||
+            [metal4_ml_add_right_tensor_binding.dimensions extentAtDimensionIndex:1] != 3 ||
+            [metal4_ml_add_output_tensor_binding.dimensions extentAtDimensionIndex:0] != 4 ||
+            [metal4_ml_add_output_tensor_binding.dimensions extentAtDimensionIndex:1] != 3 ||
             metal4_ml_add_table == nil || metal4_ml_add_encoder == nil ||
             metal4_ml_add_command_buffer == nil || metal4_ml_add_feedback_error != nil ||
             memcmp(metal4_ml_add_values, metal4_ml_add_expected, sizeof(metal4_ml_add_values)) != 0) {

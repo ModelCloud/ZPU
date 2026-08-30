@@ -525,6 +525,11 @@ triangle path:
   retain Metal's default `nil` `pipelineState.reflection` behavior while the
   legacy `options:reflection:` creation selectors return the same fixed CPU
   binding metadata
+- Metal 4 CPU machine-learning pipeline reflection exposes tensor bindings as
+  `MTLTensorBinding` objects, including the profile's tensor data type, Metal's
+  required `int` index type, and descriptor-provided default dimensions; the
+  polymorphic identity profile reports `MTLTensorDataTypeNone` rather than
+  claiming a single storage format
 - registered CPU library functions expose matching binding reflection with a
   `nil` user annotation; unregistered functions and arbitrary specialized
   descriptors remain unsupported
