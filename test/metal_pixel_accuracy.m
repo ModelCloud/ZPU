@@ -13380,6 +13380,7 @@ int main(void) {
             [adapter_legacy_tile_encoder setTileBuffer:adapter_vertex_buffer offset:0 atIndex:0];
             [adapter_legacy_tile_encoder setTileTexture:adapter_legacy_tile_texture atIndex:0];
             [adapter_legacy_tile_encoder setTileSamplerState:adapter_sampler atIndex:0];
+            [adapter_legacy_tile_encoder setViewport:(MTLViewport){2, 1, 3, 2, 0, 1}];
             [adapter_legacy_tile_encoder setScissorRect:(MTLScissorRect){1, 1, 3, 2}];
             [adapter_legacy_tile_encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:0];
             [adapter_legacy_tile_encoder dispatchThreadsPerTile:MTLSizeMake(2, 2, 1)];
@@ -13881,8 +13882,9 @@ int main(void) {
             [adapter_legacy_mesh_encoder setMeshTexture:adapter_legacy_mesh_texture atIndex:0];
             [adapter_legacy_mesh_encoder setMeshSamplerState:adapter_sampler atIndex:0];
             /* Mesh-grid coordinates stay in the attachment-global Apple
-             * top-left space. This non-zero scissor must clip the deferred
-             * CPU/ZPU writes without rebasing the gradient to (0, 0). */
+             * top-left space. Neither this viewport origin nor the non-zero
+             * scissor may rebase the deferred CPU/ZPU gradient to (0, 0). */
+            [adapter_legacy_mesh_encoder setViewport:(MTLViewport){2, 1, 3, 2, 0, 1}];
             [adapter_legacy_mesh_encoder setScissorRect:(MTLScissorRect){1, 1, 3, 2}];
             [adapter_legacy_mesh_encoder drawMeshThreadgroups:MTLSizeMake(3, 2, 1)
                                    threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)

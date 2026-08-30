@@ -7600,6 +7600,9 @@ test "CPU tile dispatch clips in the attachment-global top-left grid" {
         0xff,
     );
     try encoder.setStencilReference(7, 7);
+    // Tile invocation coordinates are attachment-global as well; viewport
+    // origin does not move the tile thread grid.
+    try encoder.setViewport(.{ .origin_x = 2, .origin_y = 1, .width = 3, .height = 2, .znear = 0, .zfar = 1 });
     try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
     try encoder.dispatchThreadsPerTile(
         1,
@@ -7804,6 +7807,9 @@ test "CPU mesh scissor keeps the Apple top-left grid origin" {
     var encoder = try beginRender(command_buffer, texture, .{
         .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } },
     });
+    // Mesh grid coordinates remain attachment-global; a viewport origin must
+    // not rebase the CPU profile's invocation-to-pixel mapping.
+    try encoder.setViewport(.{ .origin_x = 2, .origin_y = 1, .width = 3, .height = 2, .znear = 0, .zfar = 1 });
     try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
     try encoder.drawMeshThreads(
         1,
