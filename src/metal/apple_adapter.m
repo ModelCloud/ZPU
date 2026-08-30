@@ -75,6 +75,7 @@ static NSString *const zpu_cpu_argument_buffer_function_name = @"zpu_cpu_argumen
  * for the public reflection/layout contract in the test suite. */
 static NSString *const zpu_cpu_argument_buffer_array_function_name = @"zpu_cpu_argument_buffer_array";
 static NSString *const zpu_cpu_tensor_argument_buffer_function_name = @"zpu_cpu_tensor_argument_buffer";
+static NSString *const zpu_cpu_tensor_argument_buffer_array_function_name = @"zpu_cpu_tensor_argument_buffer_array";
 
 static BOOL zpu_cpu_ml_add_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_add_u8_function_name] ||
@@ -8054,6 +8055,32 @@ static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_argument_buffer_function_reflection(NSString *name) {
+    if ([name isEqualToString:zpu_cpu_tensor_argument_buffer_array_function_name]) {
+        const NSInteger dynamicDimensionValues[] = {-1, -1};
+        MTLTensorExtents *dynamicDimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:dynamicDimensionValues];
+        ZPUTensorReferenceType *tensorReference = [[ZPUTensorReferenceType alloc]
+            initWithTensorDataType:MTLTensorDataTypeFloat32 indexType:MTLDataTypeInt
+                         dimensions:dynamicDimensions access:MTLBindingAccessReadWrite];
+        ZPUArrayType *tensorArray = [[ZPUArrayType alloc]
+            initWithElementType:MTLDataTypeTensor arrayLength:2 stride:8
+              argumentIndexStride:1 structType:nil arrayType:nil
+              textureReferenceType:nil pointerType:nil tensorReferenceType:tensorReference];
+        ZPUStructMember *inputs = [[ZPUStructMember alloc] initWithName:@"inputs" offset:0
+            dataType:MTLDataTypeArray argumentIndex:0];
+        [inputs setStructType:nil arrayType:tensorArray tensorReferenceType:nil];
+        MTLStructType *structType = [[ZPUStructType alloc] initWithMembers:@[inputs]];
+        ZPUBinding *binding = zpu_reflection_binding(@"args", MTLBindingTypeBuffer,
+                                                      MTLBindingAccessReadOnly, 0);
+        [binding setBufferDataSize:16 dataType:MTLDataTypeStruct];
+        binding->_bufferAlignment = 8;
+        binding->_bufferPointerType = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                      alignment:8 dataSize:16 structType:structType];
+        binding->_bufferStructType = structType;
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[binding] userAnnotation:nil];
+    }
     if ([name isEqualToString:zpu_cpu_tensor_argument_buffer_function_name]) {
         const NSInteger dynamicDimensionValues[] = {-1, -1};
         MTLTensorExtents *dynamicDimensions =
@@ -10031,7 +10058,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_matmul_f32 zpu_cpu_tensor_argument_buffer"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_matmul_f32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -10856,6 +10883,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_argument_buffer_function_name,
             zpu_cpu_argument_buffer_array_function_name,
             zpu_cpu_tensor_argument_buffer_function_name,
+            zpu_cpu_tensor_argument_buffer_array_function_name,
         ]) {
             if (zpu_source_contains_identifier(source, name)) [names addObject:name];
         }

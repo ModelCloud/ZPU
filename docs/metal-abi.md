@@ -597,9 +597,11 @@ triangle path:
 - registered CPU library functions expose matching binding reflection with a
   `nil` user annotation; unregistered functions and arbitrary specialized
   descriptors remain unsupported. The fixed
-  `zpu_cpu_tensor_argument_buffer` profile also exposes a native-matching
-  `MTLTensorReferenceType` for a rank-2 Float32 tensor with dynamic extents;
-  that profile is metadata-only because Metal has no portable CPU tensor
+  `zpu_cpu_tensor_argument_buffer` and
+  `zpu_cpu_tensor_argument_buffer_array` profiles also expose
+  native-matching `MTLTensorReferenceType` metadata for rank-2 Float32
+  tensors with dynamic extents, including tensor array element reflection;
+  those profiles are metadata-only because Metal has no portable CPU tensor
   argument-encoder setter
 - CPU indirect compute commands for those registered kernels; the command
   buffer inherits the ZPU encoder's texture bindings and records pipeline,
