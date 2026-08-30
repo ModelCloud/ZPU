@@ -613,34 +613,36 @@ fn runParallelBand(context: *ParallelDraw, band_index: usize, comptime count_wor
 }
 
 fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
-    const aligned: []align(4) u8 = @alignCast(bytes);
-    const words = std.mem.bytesAsSlice(u32, aligned);
-    const start = words.len * lane_index / parallel_band_count;
-    const end = words.len * (lane_index + 1) / parallel_band_count;
-    @memset(words[start..end], pattern);
+    const word_count = bytes.len / @sizeOf(u32);
+    const start = word_count * lane_index / parallel_band_count;
+    const end = word_count * (lane_index + 1) / parallel_band_count;
+    for (start..end) |word_index| {
+        std.mem.writeInt(u32, bytes[word_index * @sizeOf(u32) ..][0..@sizeOf(u32)], pattern, .little);
+    }
 }
 
 fn fillPatternRectLane(bytes: []u8, width: u32, rect: Rect, pattern: u32, lane_index: usize) void {
     if (rect.width == 0 or rect.height == 0) return;
-    const aligned: []align(4) u8 = @alignCast(bytes);
-    const words = std.mem.bytesAsSlice(u32, aligned);
     const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / parallel_band_count;
     const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / parallel_band_count;
     const x: usize = @intCast(rect.x);
     for (first_row..last_row) |y| {
         const start = y * width + x;
-        @memset(words[start..][0..rect.width], pattern);
+        for (start..start + rect.width) |pixel_index| {
+            std.mem.writeInt(u32, bytes[pixel_index * @sizeOf(u32) ..][0..@sizeOf(u32)], pattern, .little);
+        }
     }
 }
 
 fn fillPatternRectAll(bytes: []u8, width: u32, rect: Rect, pattern: u32) void {
     if (rect.width == 0 or rect.height == 0) return;
-    const words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(bytes)));
     const x: usize = @intCast(rect.x);
     const first_y: usize = @intCast(rect.y);
     for (first_y..first_y + rect.height) |y| {
         const start = y * width + x;
-        @memset(words[start..][0..rect.width], pattern);
+        for (start..start + rect.width) |pixel_index| {
+            std.mem.writeInt(u32, bytes[pixel_index * @sizeOf(u32) ..][0..@sizeOf(u32)], pattern, .little);
+        }
     }
 }
 
@@ -1209,6 +1211,19 @@ test "parallel worker shuts down and restarts without detached execution" {
     try std.testing.expect(clearImagesParallel(&color, 0xaabbccdd, &depth, 0x01020304));
     shutdownParallelWorkers();
     try std.testing.expectEqual(@as(u32, 0xaabbccdd), std.mem.readInt(u32, color[0..4], .little));
+}
+
+test "parallel clears accept byte-offset image slices" {
+    var color_storage: [65]u8 align(4) = [_]u8{0xa5} ** 65;
+    var depth_storage: [65]u8 align(4) = [_]u8{0xa5} ** 65;
+    const color = color_storage[1..65];
+    const depth = depth_storage[1..65];
+    defer shutdownParallelWorkers();
+    try std.testing.expect(clearImagesParallel(color, 0x11223344, depth, 0x55667788));
+    for (0..16) |index| {
+        try std.testing.expectEqual(@as(u32, 0x11223344), std.mem.readInt(u32, color[index * 4 ..][0..4], .little));
+        try std.testing.expectEqual(@as(u32, 0x55667788), std.mem.readInt(u32, depth[index * 4 ..][0..4], .little));
+    }
 }
 
 const ParallelShutdownProbe = struct {
