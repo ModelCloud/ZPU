@@ -8241,12 +8241,12 @@ test "depth texture attachment rejects farther fragments" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[0..4]);
 }
 
-test "CPU render encoder maps direct instances to array color layers" {
+test "CPU render encoder maps direct instances and base instance to array color layers" {
     const device = try createDevice();
     defer destroyDevice(device);
     const queue = try createQueue(device);
     defer destroyQueue(queue);
-    var layers: [3]*Texture = undefined;
+    var layers: [4]*Texture = undefined;
     for (&layers) |*layer| {
         layer.* = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
     }
@@ -8266,16 +8266,17 @@ test "CPU render encoder maps direct instances to array color layers" {
     });
     try encoder.setRenderTargetArray(&layers, layers.len);
     try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
-    try encoder.drawPrimitives(.triangle, 0, vertices.len, layers.len);
+    try encoder.drawPrimitivesWithBaseInstance(.triangle, 0, vertices.len, layers.len - 1, 1);
     try encoder.endEncoding();
     destroyRenderEncoder(encoder);
     try command_buffer.commit();
-    for (layers) |layer| {
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, layers[0].bytes[0..4]);
+    for (layers[1..]) |layer| {
         try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
     }
 }
 
-test "CPU render encoder maps indirect instances and base instance to array color layers" {
+test "CPU render encoder maps indirect and indexed base instances to array color layers" {
     const device = try createDevice();
     defer destroyDevice(device);
     const queue = try createQueue(device);
@@ -8338,6 +8339,27 @@ test "CPU render encoder maps indirect instances and base instance to array colo
     try indexed_command_buffer.commit();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, indexed_layers[0].bytes[0..4]);
     for (indexed_layers[1..]) |layer| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
+    }
+
+    var direct_indexed_layers: [4]*Texture = undefined;
+    for (&direct_indexed_layers) |*layer| {
+        layer.* = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    }
+    defer for (direct_indexed_layers) |layer| destroyTexture(layer);
+    var direct_indexed_command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(direct_indexed_command_buffer);
+    var direct_indexed_encoder = try beginRender(direct_indexed_command_buffer, direct_indexed_layers[0], .{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    });
+    try direct_indexed_encoder.setRenderTargetArray(&direct_indexed_layers, direct_indexed_layers.len);
+    try direct_indexed_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try direct_indexed_encoder.drawIndexedPrimitivesWithBaseVertexAndInstance(.triangle, indices.len, .uint16, index_buffer, 0, direct_indexed_layers.len - 1, 0, 1);
+    try direct_indexed_encoder.endEncoding();
+    destroyRenderEncoder(direct_indexed_encoder);
+    try direct_indexed_command_buffer.commit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, direct_indexed_layers[0].bytes[0..4]);
+    for (direct_indexed_layers[1..]) |layer| {
         try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, layer.bytes[0..4]);
     }
 }
