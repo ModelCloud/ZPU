@@ -2278,6 +2278,14 @@ static BOOL zpu_render_pipeline_format_supported(MTLPixelFormat format) {
         zpu_integer_render_format_supported(format);
 }
 
+/* Mipmap generation is a filtered color operation.  Keep this predicate
+ * separate from render-target validation: integer formats are valid render
+ * targets for the fixed CPU fragment profiles, but Metal does not define a
+ * filterable integer texel conversion for generateMipmaps. */
+static BOOL zpu_mipmap_format_supported(MTLPixelFormat format) {
+    return zpu_color_texture_format_supported(format);
+}
+
 static BOOL zpu_render_pipeline_format_supported_for_fragment(MTLPixelFormat format, NSString *fragmentName) {
     if (format == MTLPixelFormatInvalid) return YES;
     if (zpu_color_texture_format_supported(format)) {
@@ -15706,7 +15714,7 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
-        !zpu_render_pipeline_format_supported(zpuTexture->_pixelFormat) ||
+        !zpu_mipmap_format_supported(zpuTexture->_pixelFormat) ||
         zpuTexture.mipmapLevelCount < 2) {
         [_owner markError];
         return;
@@ -17901,7 +17909,7 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
 - (void)generateMipmapsForTexture:(id<MTLTexture>)texture {
     ZPUTexture *zpuTexture = (ZPUTexture *)texture;
     if (!zpu_texture_belongs_to_device([_owner device], zpuTexture) ||
-        !zpu_render_pipeline_format_supported(zpuTexture->_pixelFormat) ||
+        !zpu_mipmap_format_supported(zpuTexture->_pixelFormat) ||
         zpuTexture.mipmapLevelCount < 2) { [_owner markError]; return; }
     if (zpu_texture_type_is_3d(zpuTexture->_textureType)) {
         if (zpu_srgb_texture_format(zpuTexture->_pixelFormat)) {

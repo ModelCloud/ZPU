@@ -4693,6 +4693,59 @@ static int test_srgb_3d_mipmaps_against_native(
     return 0;
 }
 
+static int test_integer_mipmaps_fail_closed(id<MTLDevice> adapter_device) {
+    /* Apple documents generateMipmaps as requiring a color-filterable
+     * texture. Do not execute the invalid native operation as an oracle: the
+     * current AGX driver aborts while compiling that invalid blit instead of
+     * returning a command-buffer error. Valid mipmap formats are compared to
+     * native above; this test checks that the CPU adapter preserves Apple's
+     * rejection boundary without dispatching native Metal. */
+    enum { width = 4, height = 4, mipmap_levels = 3 };
+    const struct {
+        MTLPixelFormat format;
+        NSUInteger bytes_per_pixel;
+        const char *name;
+    } formats[] = {
+        {MTLPixelFormatR8Uint, 1, "R8Uint mipmaps"},
+        {MTLPixelFormatRG16Sint, 4, "RG16Sint mipmaps"},
+        {MTLPixelFormatRGB10A2Uint, 4, "RGB10A2Uint mipmaps"},
+        {MTLPixelFormatRGBA32Uint, 16, "RGBA32Uint mipmaps"},
+    };
+    for (NSUInteger index = 0; index < sizeof(formats) / sizeof(formats[0]); ++index) {
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[index].format
+                                                                width:width height:height mipmapped:YES];
+        descriptor.mipmapLevelCount = mipmap_levels;
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:descriptor];
+        if (adapter_texture == nil) {
+            fprintf(stderr, "metal-pixel: %s texture allocation failed\n", formats[index].name);
+            return 158;
+        }
+
+        const NSUInteger source_bytes = width * height * formats[index].bytes_per_pixel;
+        uint8_t source[source_bytes];
+        for (NSUInteger byte = 0; byte < source_bytes; ++byte) source[byte] = (uint8_t)(byte * 17u + 3u);
+        [adapter_texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                            mipmapLevel:0 withBytes:source
+                          bytesPerRow:width * formats[index].bytes_per_pixel];
+
+        id<MTLCommandBuffer> adapter_command_buffer = [[adapter_device newCommandQueue] commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_encoder = [adapter_command_buffer blitCommandEncoder];
+        [adapter_encoder generateMipmapsForTexture:adapter_texture];
+        [adapter_encoder endEncoding];
+        [adapter_command_buffer commit];
+        [adapter_command_buffer waitUntilCompleted];
+        if (adapter_command_buffer.status != MTLCommandBufferStatusError) {
+            fprintf(stderr, "metal-pixel: %s integer mipmap did not fail closed status=%ld\n",
+                    formats[index].name, (long)adapter_command_buffer.status);
+            return 159;
+        }
+    }
+    return 0;
+}
+
 static int test_integer_render_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function,
@@ -11373,6 +11426,8 @@ int main(void) {
               adapter_rgba32_sint_fragment_function, adapter_rg32_uint_fragment_function,
               adapter_rg32_sint_fragment_function]);
         if (integer_render_result != 0) return integer_render_result;
+        const int integer_mipmap_result = test_integer_mipmaps_fail_closed(adapter_device);
+        if (integer_mipmap_result != 0) return integer_mipmap_result;
         const int snorm_mipmap_result = test_snorm_mipmaps_against_native(device, adapter_device);
         if (snorm_mipmap_result != 0) return snorm_mipmap_result;
         const int packed_render_result = test_packed_render_against_native(
