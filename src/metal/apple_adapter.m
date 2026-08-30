@@ -4997,6 +4997,7 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
         !zpu_tensor_layout_for_descriptor(descriptor, &layout) ||
         bufferOffset > storageBuffer.length || layout.size > storageBuffer.length - bufferOffset ||
         ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 && backingBuffer != nil && bufferOffset != 0) ||
+        (layout.elementBits < 8 && backingBuffer != nil && (bufferOffset % 128) != 0) ||
         (backingBuffer != nil && descriptor.storageMode != backingBuffer.storageMode)) {
         zpu_set_error(error, @"ZPU CPU Metal tensor descriptor or backing range is invalid");
         return nil;

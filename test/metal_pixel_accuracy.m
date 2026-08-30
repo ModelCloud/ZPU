@@ -10261,6 +10261,24 @@ int main(void) {
                     return 118;
                 }
 
+                MTLTensorDescriptor *buffer_subbyte_descriptor = [subbyte_descriptor copy];
+                buffer_subbyte_descriptor.strides =
+                    [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 256}];
+                id<MTLBuffer> buffer_subbyte_storage =
+                    [adapter_device newBufferWithLength:512 options:MTLResourceStorageModeShared];
+                NSError *buffer_subbyte_error = nil;
+                id<MTLTensor> aligned_buffer_subbyte_tensor =
+                    [buffer_subbyte_storage newTensorWithDescriptor:buffer_subbyte_descriptor
+                                                               offset:128 error:&buffer_subbyte_error];
+                id<MTLTensor> unaligned_buffer_subbyte_tensor =
+                    [buffer_subbyte_storage newTensorWithDescriptor:buffer_subbyte_descriptor
+                                                               offset:1 error:&buffer_subbyte_error];
+                if (aligned_buffer_subbyte_tensor == nil || unaligned_buffer_subbyte_tensor != nil ||
+                    buffer_subbyte_error == nil) {
+                    fail_with_error("CPU packed tensor buffer offset validation failed", buffer_subbyte_error);
+                    return 119;
+                }
+
                 const uint8_t subbyte_copy_initial_values[] = {0xa1, 0xb2, 0xc3};
                 const uint8_t subbyte_copy_committed_values[] = {0x4d, 0x5e, 0x6f};
                 const uint8_t subbyte_copy_sentinel_values[] = {0xff, 0xee, 0xdd};
