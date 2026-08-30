@@ -261,6 +261,102 @@ int main(void) {
     zpu_metal_texture_destroy(compute_rgba32_uint);
     zpu_metal_texture_destroy(compute_rgba32_sint);
 
+    const zpu_metal_texture_descriptor compute_r32_uint_descriptor = {
+        .width = 3,
+        .height = 2,
+        .format = ZPU_METAL_R32_UINT,
+    };
+    zpu_metal_texture_descriptor compute_r32_sint_descriptor = compute_r32_uint_descriptor;
+    compute_r32_sint_descriptor.format = ZPU_METAL_R32_SINT;
+    zpu_metal_texture_descriptor compute_rg32_uint_descriptor = compute_r32_uint_descriptor;
+    compute_rg32_uint_descriptor.format = ZPU_METAL_RG32_UINT;
+    zpu_metal_texture_descriptor compute_rg32_sint_descriptor = compute_r32_uint_descriptor;
+    compute_rg32_sint_descriptor.format = ZPU_METAL_RG32_SINT;
+    zpu_metal_texture *compute_r32_uint =
+        zpu_metal_device_new_texture(device, &compute_r32_uint_descriptor);
+    zpu_metal_texture *compute_r32_sint =
+        zpu_metal_device_new_texture(device, &compute_r32_sint_descriptor);
+    zpu_metal_texture *compute_rg32_uint =
+        zpu_metal_device_new_texture(device, &compute_rg32_uint_descriptor);
+    zpu_metal_texture *compute_rg32_sint =
+        zpu_metal_device_new_texture(device, &compute_rg32_sint_descriptor);
+    zpu_metal_command_buffer *compute_32bit_commands =
+        zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_compute_encoder *compute_32bit_encoder =
+        zpu_metal_command_buffer_compute_encoder(compute_32bit_commands);
+    if (compute_r32_uint == NULL || compute_r32_sint == NULL ||
+        compute_rg32_uint == NULL || compute_rg32_sint == NULL ||
+        compute_32bit_commands == NULL || compute_32bit_encoder == NULL ||
+        zpu_metal_compute_encoder_set_kernel(
+            compute_32bit_encoder, ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_UINT) != 0 ||
+        zpu_metal_compute_encoder_set_texture(compute_32bit_encoder, compute_r32_uint, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            compute_32bit_encoder, (zpu_metal_size){3, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_compute_encoder_set_kernel(
+            compute_32bit_encoder, ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_SINT) != 0 ||
+        zpu_metal_compute_encoder_set_texture(compute_32bit_encoder, compute_r32_sint, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            compute_32bit_encoder, (zpu_metal_size){3, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_compute_encoder_set_kernel(
+            compute_32bit_encoder, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG32_UINT) != 0 ||
+        zpu_metal_compute_encoder_set_texture(compute_32bit_encoder, compute_rg32_uint, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            compute_32bit_encoder, (zpu_metal_size){3, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_compute_encoder_set_kernel(
+            compute_32bit_encoder, ZPU_METAL_COMPUTE_FILL_GRADIENT_RG32_SINT) != 0 ||
+        zpu_metal_compute_encoder_set_texture(compute_32bit_encoder, compute_rg32_sint, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            compute_32bit_encoder, (zpu_metal_size){3, 2, 1}, (zpu_metal_size){2, 2, 1}) != 0 ||
+        zpu_metal_compute_encoder_end_encoding(compute_32bit_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(compute_32bit_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(compute_32bit_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 48;
+    const uint32_t compute_r32_uint_expected[] = {
+        1, 2, 3,
+        1, 2, 3,
+    };
+    const int32_t compute_r32_sint_expected[] = {
+        1, 2, 3,
+        1, 2, 3,
+    };
+    const uint32_t compute_rg32_uint_expected[] = {
+        1, 1, 2, 1, 3, 1,
+        1, 2, 2, 2, 3, 2,
+    };
+    const int32_t compute_rg32_sint_expected[] = {
+        1, -1, 2, -1, 3, -1,
+        1, -2, 2, -2, 3, -2,
+    };
+    uint32_t compute_r32_uint_pixels[sizeof(compute_r32_uint_expected) / sizeof(uint32_t)] = {0};
+    int32_t compute_r32_sint_pixels[sizeof(compute_r32_sint_expected) / sizeof(int32_t)] = {0};
+    uint32_t compute_rg32_uint_pixels[sizeof(compute_rg32_uint_expected) / sizeof(uint32_t)] = {0};
+    int32_t compute_rg32_sint_pixels[sizeof(compute_rg32_sint_expected) / sizeof(int32_t)] = {0};
+    if (zpu_metal_texture_get_bytes(
+            compute_r32_uint, compute_r32_uint_pixels, sizeof(compute_r32_uint_pixels), 3 * 4,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(
+            compute_r32_sint, compute_r32_sint_pixels, sizeof(compute_r32_sint_pixels), 3 * 4,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(
+            compute_rg32_uint, compute_rg32_uint_pixels, sizeof(compute_rg32_uint_pixels), 3 * 8,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        zpu_metal_texture_get_bytes(
+            compute_rg32_sint, compute_rg32_sint_pixels, sizeof(compute_rg32_sint_pixels), 3 * 8,
+            (zpu_metal_region){{0, 0, 0}, {3, 2, 1}}) != 0 ||
+        memcmp(compute_r32_uint_pixels, compute_r32_uint_expected,
+               sizeof(compute_r32_uint_expected)) != 0 ||
+        memcmp(compute_r32_sint_pixels, compute_r32_sint_expected,
+               sizeof(compute_r32_sint_expected)) != 0 ||
+        memcmp(compute_rg32_uint_pixels, compute_rg32_uint_expected,
+               sizeof(compute_rg32_uint_expected)) != 0 ||
+        memcmp(compute_rg32_sint_pixels, compute_rg32_sint_expected,
+               sizeof(compute_rg32_sint_expected)) != 0) return 49;
+    zpu_metal_compute_encoder_destroy(compute_32bit_encoder);
+    zpu_metal_command_buffer_destroy(compute_32bit_commands);
+    zpu_metal_texture_destroy(compute_r32_uint);
+    zpu_metal_texture_destroy(compute_r32_sint);
+    zpu_metal_texture_destroy(compute_rg32_uint);
+    zpu_metal_texture_destroy(compute_rg32_sint);
+
     const float add_left_values[] = {1.25f, -2.5f, 3.0f, 8.0f};
     const float add_right_values[] = {2.5f, 0.5f, -1.0f, -3.0f};
     const float add_expected[] = {3.75f, -2.0f, 2.0f, 5.0f};
