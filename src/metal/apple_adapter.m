@@ -6294,8 +6294,15 @@ static BOOL zpu_texture_view_formats_compatible(MTLPixelFormat source, MTLPixelF
     /* Apple texture views reinterpret the texel bytes, rather than converting
      * them. On the tested macOS/iOS Metal implementations, every supported
      * color or integer format with the same bytes-per-texel is view-compatible
-     * (including component-count and numeric-type changes). Keep depth/stencil
-     * views conservative because their attachment rules are format-specific. */
+     * (including component-count and numeric-type changes). The documented
+     * combined-depth parents additionally expose stencil-only views; other
+     * depth/stencil reinterpretations remain format-specific. */
+    if ((source == MTLPixelFormatDepth32Float_Stencil8 && view == MTLPixelFormatX32_Stencil8) ||
+        (source == MTLPixelFormatX32_Stencil8 && view == MTLPixelFormatDepth32Float_Stencil8)) return YES;
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE || TARGET_OS_MACCATALYST
+    if ((source == MTLPixelFormatDepth24Unorm_Stencil8 && view == MTLPixelFormatX24_Stencil8) ||
+        (source == MTLPixelFormatX24_Stencil8 && view == MTLPixelFormatDepth24Unorm_Stencil8)) return YES;
+#endif
     if (!zpu_color_texture_format_supported(source) && !zpu_integer_texture_format_supported(source)) return source == view;
     if (!zpu_color_texture_format_supported(view) && !zpu_integer_texture_format_supported(view)) return source == view;
     return zpu_texture_bytes_per_pixel(source) == zpu_texture_bytes_per_pixel(view);

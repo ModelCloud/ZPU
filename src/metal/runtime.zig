@@ -218,9 +218,13 @@ fn isStencilTextureFormat(format: TextureFormat) bool {
 fn textureFormatsViewCompatible(source: TextureFormat, view: TextureFormat) bool {
     if (source == view) return true;
     // Metal views reinterpret shared texel bytes. Apple accepts all color and
-    // integer formats with the same bytes-per-texel; depth/stencil formats
-    // remain conservative because their attachment interpretation is not a
-    // color/integer reinterpretation.
+    // integer formats with the same bytes-per-texel. The two documented
+    // combined-depth parents also expose a stencil-only view with the same
+    // packed storage; other depth/stencil reinterpretations remain invalid.
+    if ((source == .depth32_float_stencil8 and view == .x32_stencil8) or
+        (source == .x32_stencil8 and view == .depth32_float_stencil8) or
+        (source == .depth24_unorm_stencil8 and view == .x24_stencil8) or
+        (source == .x24_stencil8 and view == .depth24_unorm_stencil8)) return true;
     if (isDepthTextureFormat(source) or isStencilTextureFormat(source) or
         isDepthTextureFormat(view) or isStencilTextureFormat(view)) return false;
     return source.bytesPerPixel() == view.bytesPerPixel();
@@ -9829,6 +9833,28 @@ test "compatible texture views reinterpret shared storage" {
         try std.testing.expectEqual(case.format, compatible.format);
         try std.testing.expectEqual(@intFromPtr(wide_source.bytes.ptr), @intFromPtr(compatible.bytes.ptr));
     }
+
+    const depth_stencil = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.depth32_float_stencil8));
+    defer destroyTexture(depth_stencil);
+    const x32_view = try createTextureView(depth_stencil, @intFromEnum(abi.PixelFormat.x32_stencil8));
+    defer destroyTexture(x32_view);
+    try std.testing.expectEqual(TextureFormat.x32_stencil8, x32_view.format);
+    try std.testing.expectEqual(@intFromPtr(depth_stencil.bytes.ptr), @intFromPtr(x32_view.bytes.ptr));
+    const depth_from_x32 = try createTextureView(x32_view, @intFromEnum(abi.PixelFormat.depth32_float_stencil8));
+    defer destroyTexture(depth_from_x32);
+    try std.testing.expectEqual(TextureFormat.depth32_float_stencil8, depth_from_x32.format);
+    try std.testing.expectEqual(@intFromPtr(depth_stencil.bytes.ptr), @intFromPtr(depth_from_x32.bytes.ptr));
+
+    const legacy_depth_stencil = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.depth24_unorm_stencil8));
+    defer destroyTexture(legacy_depth_stencil);
+    const x24_view = try createTextureView(legacy_depth_stencil, @intFromEnum(abi.PixelFormat.x24_stencil8));
+    defer destroyTexture(x24_view);
+    try std.testing.expectEqual(TextureFormat.x24_stencil8, x24_view.format);
+    try std.testing.expectEqual(@intFromPtr(legacy_depth_stencil.bytes.ptr), @intFromPtr(x24_view.bytes.ptr));
+    const legacy_depth_from_x24 = try createTextureView(x24_view, @intFromEnum(abi.PixelFormat.depth24_unorm_stencil8));
+    defer destroyTexture(legacy_depth_from_x24);
+    try std.testing.expectEqual(TextureFormat.depth24_unorm_stencil8, legacy_depth_from_x24.format);
+    try std.testing.expectEqual(@intFromPtr(legacy_depth_stencil.bytes.ptr), @intFromPtr(legacy_depth_from_x24.bytes.ptr));
 }
 
 test "indexed render encoding produces the same pixels as direct vertices" {

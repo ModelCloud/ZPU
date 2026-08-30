@@ -9685,14 +9685,30 @@ static int test_adapter_packed_depth_stencil_blit_options(id<MTLDevice> adapter_
         fprintf(stderr, "metal-pixel: packed D24 adapter capability missing\n");
         return 232;
     }
+    MTLTextureDescriptor *depth32_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                            width:2 height:2 mipmapped:NO];
+    depth32_descriptor.storageMode = MTLStorageModeShared;
+    depth32_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    id<MTLTexture> depth32_parent = [adapter_device newTextureWithDescriptor:depth32_descriptor];
+    id<MTLTexture> x32_view = [depth32_parent newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    id<MTLTexture> depth32_reverse = [x32_view newTextureViewWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8];
+    if (depth32_parent == nil || x32_view == nil || depth32_reverse == nil ||
+        x32_view.pixelFormat != MTLPixelFormatX32_Stencil8 ||
+        depth32_reverse.pixelFormat != MTLPixelFormatDepth32Float_Stencil8) {
+        fprintf(stderr, "metal-pixel: combined depth/stencil texture view compatibility failed\n");
+        return 241;
+    }
     for (NSUInteger format_index = 0; format_index < sizeof(formats) / sizeof(formats[0]); ++format_index) {
         MTLTextureDescriptor *descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:formats[format_index].format
                                                                 width:width height:height mipmapped:NO];
         descriptor.storageMode = MTLStorageModeShared;
-        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView;
         id<MTLTexture> source_texture = [adapter_device newTextureWithDescriptor:descriptor];
         id<MTLTexture> destination_texture = [adapter_device newTextureWithDescriptor:descriptor];
+        id<MTLTexture> paired_view = [source_texture newTextureViewWithPixelFormat:
+            formats[format_index].depth ? MTLPixelFormatX24_Stencil8 : MTLPixelFormatDepth24Unorm_Stencil8];
         id<MTLBuffer> depth_buffer =
             [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
         id<MTLBuffer> stencil_buffer =
@@ -9701,11 +9717,17 @@ static int test_adapter_packed_depth_stencil_blit_options(id<MTLDevice> adapter_
             [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
         id<MTLBuffer> upload_stencil_buffer =
             [adapter_device newBufferWithLength:buffer_byte_count options:MTLResourceStorageModeShared];
-        if (source_texture == nil || destination_texture == nil || depth_buffer == nil || stencil_buffer == nil ||
+        if (source_texture == nil || destination_texture == nil || paired_view == nil || depth_buffer == nil || stencil_buffer == nil ||
             upload_depth_buffer == nil || upload_stencil_buffer == nil) {
             fprintf(stderr, "metal-pixel: packed D24 adapter allocation failed for format %lu\n",
                     (unsigned long)formats[format_index].format);
             return 233;
+        }
+        if (paired_view.pixelFormat != (formats[format_index].depth ? MTLPixelFormatX24_Stencil8 :
+                                        MTLPixelFormatDepth24Unorm_Stencil8)) {
+            fprintf(stderr, "metal-pixel: packed D24 adapter paired view mismatch for format %lu\n",
+                    (unsigned long)formats[format_index].format);
+            return 242;
         }
         uint8_t raw[raw_byte_count];
         for (NSUInteger index = 0; index < width * height; ++index) {
