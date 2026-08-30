@@ -4805,11 +4805,25 @@ static BOOL zpu_tensor_layout_for_descriptor(MTLTensorDescriptor *descriptor, ZP
     }
     if (descriptor.strides != nil && rank > 1) {
         if (elementBits < 8) {
-            if (layout->strides[1] > SIZE_MAX / elementBits ||
-                (layout->strides[1] * elementBits) % (128 * 8) != 0) return NO;
-        } else if ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 &&
-                   (layout->strides[1] > SIZE_MAX / elementSize ||
-                    (layout->strides[1] * elementSize) % 64 != 0)) return NO;
+            /* Sub-byte strides are expressed in elements, while Apple's
+             * alignment rule is expressed in bytes. Apply the 128-byte
+             * requirement to every outer dimension, not just the first
+             * row, so a 3D tensor cannot expose a misaligned Z plane. */
+            for (NSUInteger index = 1; index < rank; ++index) {
+                if (layout->strides[index] > SIZE_MAX / elementBits ||
+                    (layout->strides[index] * elementBits) % (128 * 8) != 0) return NO;
+            }
+        }
+        if ((descriptor.usage & MTLTensorUsageMachineLearning) != 0) {
+            if (layout->strides[1] > SIZE_MAX / elementSize ||
+                (layout->strides[1] * elementSize) % 64 != 0) return NO;
+            /* Metal ML descriptors require dimensions above the innermost
+             * two to be tightly stacked after the aligned second stride. */
+            for (NSUInteger index = 2; index < rank; ++index) {
+                if (layout->strides[index - 1] > SIZE_MAX / layout->dimensions[index - 1] ||
+                    layout->strides[index] != layout->strides[index - 1] * layout->dimensions[index - 1]) return NO;
+            }
+        }
     }
     NSUInteger lastElement = rank == 0 ? 0 : 1;
     if (rank != 0) {
@@ -4979,6 +4993,7 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
     ZPUTensorLayout layout;
     if (owner == nil || storageBuffer == nil || storageBuffer->_owner != owner ||
         (backingBuffer != nil && backingBuffer != storageBuffer && backingBuffer->_owner != owner) ||
+        (backingBuffer == nil && descriptor != nil && descriptor.strides != nil) ||
         !zpu_tensor_layout_for_descriptor(descriptor, &layout) ||
         bufferOffset > storageBuffer.length || layout.size > storageBuffer.length - bufferOffset ||
         ((descriptor.usage & MTLTensorUsageMachineLearning) != 0 && backingBuffer != nil && bufferOffset != 0) ||

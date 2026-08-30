@@ -10113,6 +10113,33 @@ int main(void) {
                 return 113;
             }
 
+            /* Descriptor strides are buffer-view metadata. Direct tensors
+             * must remain compact and must reject a caller-supplied stride
+             * array; ML tensors additionally require every outer stride to
+             * be the exact packed continuation of the aligned second row. */
+            MTLTensorDescriptor *direct_strided_descriptor = [tensor_descriptor copy];
+            direct_strided_descriptor.strides = tensor_buffer_strides;
+            NSError *direct_strided_error = nil;
+            id<MTLTensor> direct_strided_tensor =
+                [adapter_device newTensorWithDescriptor:direct_strided_descriptor error:&direct_strided_error];
+            const NSInteger rank3_values[] = {2, 2, 2};
+            MTLTensorExtents *rank3_dimensions =
+                [[MTLTensorExtents alloc] initWithRank:3 values:rank3_values];
+            MTLTensorDescriptor *noncontiguous_ml_descriptor = [metal4_ml_buffer_descriptor copy];
+            noncontiguous_ml_descriptor.dimensions = rank3_dimensions;
+            noncontiguous_ml_descriptor.strides =
+                [[MTLTensorExtents alloc] initWithRank:3 values:(const NSInteger[]){1, 64, 256}];
+            NSError *noncontiguous_ml_error = nil;
+            id<MTLTensor> noncontiguous_ml_tensor =
+                [metal4_ml_buffer newTensorWithDescriptor:noncontiguous_ml_descriptor
+                                                     offset:0 error:&noncontiguous_ml_error];
+            if (direct_strided_tensor != nil || direct_strided_error == nil ||
+                noncontiguous_ml_tensor != nil || noncontiguous_ml_error == nil) {
+                fail_with_error("CPU tensor stride validation accepted an invalid layout",
+                                direct_strided_error ?: noncontiguous_ml_error);
+                return 117;
+            }
+
             if (@available(macOS 26.4, iOS 26.4, *)) {
                 const uint8_t subbyte_initial_values[] = {0xa1, 0xb2, 0xc3};
                 uint8_t subbyte_adapter_values[sizeof(subbyte_initial_values)] = {0};
@@ -10218,6 +10245,20 @@ int main(void) {
                 if (native_uint4_available && !native_uint4_oracle_ok) {
                     fail_with_error("native UInt4 tensor transfer oracle mismatch", error);
                     return 114;
+                }
+
+                MTLTensorDescriptor *misaligned_subbyte_descriptor = [subbyte_descriptor copy];
+                misaligned_subbyte_descriptor.dimensions = rank3_dimensions;
+                misaligned_subbyte_descriptor.strides =
+                    [[MTLTensorExtents alloc] initWithRank:3 values:(const NSInteger[]){1, 256, 513}];
+                NSError *misaligned_subbyte_error = nil;
+                id<MTLTensor> misaligned_subbyte_tensor =
+                    [metal4_ml_buffer newTensorWithDescriptor:misaligned_subbyte_descriptor
+                                                         offset:0 error:&misaligned_subbyte_error];
+                if (misaligned_subbyte_tensor != nil || misaligned_subbyte_error == nil) {
+                    fail_with_error("CPU packed tensor stride validation accepted an invalid layout",
+                                    misaligned_subbyte_error);
+                    return 118;
                 }
 
                 const uint8_t subbyte_copy_initial_values[] = {0xa1, 0xb2, 0xc3};
