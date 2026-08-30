@@ -185,6 +185,8 @@ pub const TargetFormat = enum {
     rg32_uint,
     rg32_sint,
     rg32_float,
+    rgba32_uint,
+    rgba32_sint,
     rgba32_float,
     b5g6r5_unorm,
     a1bgr5_unorm,
@@ -220,7 +222,7 @@ pub const Target = struct {
             .rgba8_unorm, .rgba8_unorm_srgb, .rgba8_snorm, .rgba8_uint, .rgba8_sint, .bgra8_unorm, .bgra8_unorm_srgb, .r32_uint, .r32_sint, .r32_float => 4,
             .rgba16_unorm, .rgba16_snorm, .rgba16_uint, .rgba16_sint, .rgba16_float => 8,
             .rg32_uint, .rg32_sint, .rg32_float => 8,
-            .rgba32_float => 16,
+            .rgba32_uint, .rgba32_sint, .rgba32_float => 16,
             .b5g6r5_unorm, .a1bgr5_unorm, .abgr4_unorm, .bgr5a1_unorm => 2,
             .rgb10a2_unorm, .rgb10a2_uint, .bgr10a2_unorm, .rg11b10_float, .rgb9e5_float => 4,
         };
@@ -639,6 +641,18 @@ pub const Target = struct {
                 0,
                 1,
             },
+            .rgba32_uint => .{
+                @floatFromInt(std.mem.readInt(u32, row_bytes[offset..][0..4], .little)),
+                @floatFromInt(std.mem.readInt(u32, row_bytes[offset + 4 ..][0..4], .little)),
+                @floatFromInt(std.mem.readInt(u32, row_bytes[offset + 8 ..][0..4], .little)),
+                @floatFromInt(std.mem.readInt(u32, row_bytes[offset + 12 ..][0..4], .little)),
+            },
+            .rgba32_sint => .{
+                @floatFromInt(std.mem.readInt(i32, row_bytes[offset..][0..4], .little)),
+                @floatFromInt(std.mem.readInt(i32, row_bytes[offset + 4 ..][0..4], .little)),
+                @floatFromInt(std.mem.readInt(i32, row_bytes[offset + 8 ..][0..4], .little)),
+                @floatFromInt(std.mem.readInt(i32, row_bytes[offset + 12 ..][0..4], .little)),
+            },
             .rgba32_float => .{
                 readF32(row_bytes, offset),     readF32(row_bytes, offset + 4),
                 readF32(row_bytes, offset + 8), readF32(row_bytes, offset + 12),
@@ -859,6 +873,18 @@ pub const Target = struct {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS32(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentS32(row_bytes, offset + 4, color[1]);
             },
+            .rgba32_uint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentU32(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentU32(row_bytes, offset + 4, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeIntegerFragmentU32(row_bytes, offset + 8, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeIntegerFragmentU32(row_bytes, offset + 12, color[3]);
+            },
+            .rgba32_sint => {
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeIntegerFragmentS32(row_bytes, offset, color[0]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeIntegerFragmentS32(row_bytes, offset + 4, color[1]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.blue)) != 0) writeIntegerFragmentS32(row_bytes, offset + 8, color[2]);
+                if ((write_mask & @intFromEnum(abi.ColorWriteMask.alpha)) != 0) writeIntegerFragmentS32(row_bytes, offset + 12, color[3]);
+            },
             .rgba32_float => {
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.red)) != 0) writeF32(row_bytes, offset, color[0]);
                 if ((write_mask & @intFromEnum(abi.ColorWriteMask.green)) != 0) writeF32(row_bytes, offset + 4, color[1]);
@@ -1011,6 +1037,18 @@ pub const Target = struct {
             .rg32_sint => {
                 writeIntegerClearS32(row_bytes, offset, color[0]);
                 writeIntegerClearS32(row_bytes, offset + 4, color[1]);
+            },
+            .rgba32_uint => {
+                writeIntegerClearU32(row_bytes, offset, color[0]);
+                writeIntegerClearU32(row_bytes, offset + 4, color[1]);
+                writeIntegerClearU32(row_bytes, offset + 8, color[2]);
+                writeIntegerClearU32(row_bytes, offset + 12, color[3]);
+            },
+            .rgba32_sint => {
+                writeIntegerClearS32(row_bytes, offset, color[0]);
+                writeIntegerClearS32(row_bytes, offset + 4, color[1]);
+                writeIntegerClearS32(row_bytes, offset + 8, color[2]);
+                writeIntegerClearS32(row_bytes, offset + 12, color[3]);
             },
             .rgb10a2_uint => {
                 const bits = clearPackedU10(color[0]) |
@@ -2446,6 +2484,37 @@ test "registered integer color targets encode every channel width" {
         var target = try Target.init(&pixels, 1, 1, case.bytes_per_pixel, case.format);
         target.storeColor(0, 0, color);
         try std.testing.expectEqual(case.expected, std.mem.readInt(u64, &pixels, .little));
+    }
+}
+
+test "wide integer color targets preserve all channels and masks" {
+    const color = [4]f32{ 0.125, 0.5, 0.875, 1 };
+    const uint_expected = [_]u32{ 0x20000000, 0x80000000, 0xe0000000, 0xffffffff };
+    const sint_expected = [_]i32{ 0x10000000, 0x40000000, 0x70000000, 0x7fffffff };
+
+    var uint_pixels = [_]u8{0} ** 16;
+    var uint_target = try Target.init(&uint_pixels, 1, 1, 16, .rgba32_uint);
+    uint_target.storeColor(0, 0, color);
+    for (uint_expected, 0..) |expected, channel| {
+        try std.testing.expectEqual(expected, std.mem.readInt(u32, uint_pixels[channel * 4 ..][0..4], .little));
+    }
+    const uint_preserved = uint_pixels;
+    uint_target.writeColor(0, 0, .{ 0, 0, 0, 0 }, @intFromEnum(abi.ColorWriteMask.red));
+    try std.testing.expectEqualSlices(u8, uint_preserved[4..], uint_pixels[4..]);
+    uint_target.clearColor(0, 0, .{ 17, 34, 51, 68 });
+    for ([_]u32{ 17, 34, 51, 68 }, 0..) |expected, channel| {
+        try std.testing.expectEqual(expected, std.mem.readInt(u32, uint_pixels[channel * 4 ..][0..4], .little));
+    }
+
+    var sint_pixels = [_]u8{0} ** 16;
+    var sint_target = try Target.init(&sint_pixels, 1, 1, 16, .rgba32_sint);
+    sint_target.storeColor(0, 0, color);
+    for (sint_expected, 0..) |expected, channel| {
+        try std.testing.expectEqual(expected, std.mem.readInt(i32, sint_pixels[channel * 4 ..][0..4], .little));
+    }
+    sint_target.clearColor(0, 0, .{ -17, -34, 51, 68 });
+    for ([_]i32{ -17, -34, 51, 68 }, 0..) |expected, channel| {
+        try std.testing.expectEqual(expected, std.mem.readInt(i32, sint_pixels[channel * 4 ..][0..4], .little));
     }
 }
 

@@ -62,6 +62,8 @@ static const char *const kShaderSource =
     "fragment uint4 zpu_cpu_rgb10a2_uint_fragment(Vertex input [[stage_in]]) { return uint4(input.color.r * 1023.0, input.color.g * 1023.0, input.color.b * 1023.0, input.color.a * 3.0); }\n"
     "fragment uint4 zpu_cpu_rgba16_uint_fragment(Vertex input [[stage_in]]) { return uint4(input.color * 65535.0); }\n"
     "fragment int4 zpu_cpu_rgba16_sint_fragment(Vertex input [[stage_in]]) { return int4(input.color * 32767.0); }\n"
+    "fragment uint4 zpu_cpu_rgba32_uint_fragment(Vertex input [[stage_in]]) { return uint4(input.color * 4294967295.0); }\n"
+    "fragment int4 zpu_cpu_rgba32_sint_fragment(Vertex input [[stage_in]]) { return int4(input.color * 2147483647.0); }\n"
     "fragment uint2 zpu_cpu_rg32_uint_fragment(Vertex input [[stage_in]]) { return uint2(input.color.rg * 4294967295.0); }\n"
     "fragment int2 zpu_cpu_rg32_sint_fragment(Vertex input [[stage_in]]) { return int2(input.color.rg * 2147483647.0); }\n"
     "fragment float4 zpu_test_uniform_fragment(Vertex input [[stage_in]], "
@@ -4621,12 +4623,12 @@ static int test_integer_render_against_native(
     NSArray<id<MTLFunction>> *native_fragments,
     id<MTLFunction> adapter_vertex_function,
     NSArray<id<MTLFunction>> *adapter_fragments) {
-    enum { width = 8, height = 8, max_byte_count = width * height * 8, vertex_count = 6 };
+    enum { width = 8, height = 8, max_byte_count = width * height * 16, vertex_count = 6 };
     const struct {
         MTLPixelFormat format;
         NSUInteger fragment_index;
         NSUInteger bytes_per_pixel;
-        uint8_t expected[8];
+        uint8_t expected[16];
         const char *name;
     } cases[] = {
         {MTLPixelFormatR8Uint, 0, 1, {31}, "R8Uint"},
@@ -4644,8 +4646,10 @@ static int test_integer_render_against_native(
         {MTLPixelFormatRGB10A2Uint, 12, 4, {0x7f, 0xfc, 0xf7, 0xf7}, "RGB10A2Uint"},
         {MTLPixelFormatRGBA16Uint, 13, 8, {0xff, 0x1f, 0xff, 0x7f, 0xff, 0xdf, 0xff, 0xff}, "RGBA16Uint"},
         {MTLPixelFormatRGBA16Sint, 14, 8, {0xff, 0x0f, 0xff, 0x3f, 0xff, 0x6f, 0xff, 0x7f}, "RGBA16Sint"},
-        {MTLPixelFormatRG32Uint, 15, 8, {0, 0, 0x00, 0x20, 0, 0, 0, 0x80}, "RG32Uint"},
-        {MTLPixelFormatRG32Sint, 16, 8, {0, 0, 0x00, 0x10, 0, 0, 0, 0x40}, "RG32Sint"},
+        {MTLPixelFormatRGBA32Uint, 15, 16, {0, 0, 0x00, 0x20, 0, 0, 0, 0x80, 0, 0, 0, 0xe0, 0xff, 0xff, 0xff, 0xff}, "RGBA32Uint"},
+        {MTLPixelFormatRGBA32Sint, 16, 16, {0, 0, 0, 0x10, 0, 0, 0, 0x40, 0, 0, 0, 0x70, 0xff, 0xff, 0xff, 0x7f}, "RGBA32Sint"},
+        {MTLPixelFormatRG32Uint, 17, 8, {0, 0, 0x00, 0x20, 0, 0, 0, 0x80}, "RG32Uint"},
+        {MTLPixelFormatRG32Sint, 18, 8, {0, 0, 0x00, 0x10, 0, 0, 0, 0x40}, "RG32Sint"},
     };
     const zpu_metal_vertex vertices[vertex_count] = {
         {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.125f, 0.500f, 0.875f, 1.0f}},
@@ -9914,6 +9918,8 @@ int main(void) {
         id<MTLFunction> rgb10a2_uint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rgb10a2_uint_fragment"];
         id<MTLFunction> rgba16_uint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rgba16_uint_fragment"];
         id<MTLFunction> rgba16_sint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rgba16_sint_fragment"];
+        id<MTLFunction> rgba32_uint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rgba32_uint_fragment"];
+        id<MTLFunction> rgba32_sint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rgba32_sint_fragment"];
         id<MTLFunction> rg32_uint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rg32_uint_fragment"];
         id<MTLFunction> rg32_sint_fragment_function = [library newFunctionWithName:@"zpu_cpu_rg32_sint_fragment"];
         id<MTLFunction> depth_bounds_oracle_fragment = [library newFunctionWithName:@"zpu_test_depth_bounds_oracle"];
@@ -9930,6 +9936,7 @@ int main(void) {
             rgba8_uint_fragment_function == nil || rgba8_sint_fragment_function == nil ||
             rgb10a2_uint_fragment_function == nil ||
             rgba16_uint_fragment_function == nil || rgba16_sint_fragment_function == nil ||
+            rgba32_uint_fragment_function == nil || rgba32_sint_fragment_function == nil ||
             rg32_uint_fragment_function == nil || rg32_sint_fragment_function == nil ||
             depth_bounds_oracle_fragment == nil || mrt_fragment_function == nil || sample_fragment_function == nil) {
             fprintf(stderr, "metal-pixel: test functions missing\n");
@@ -11144,6 +11151,10 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_rgba16_uint_fragment");
         id<MTLFunction> adapter_rgba16_sint_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_rgba16_sint_fragment");
+        id<MTLFunction> adapter_rgba32_uint_fragment_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_rgba32_uint_fragment");
+        id<MTLFunction> adapter_rgba32_sint_fragment_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_rgba32_sint_fragment");
         id<MTLFunction> adapter_rg32_uint_fragment_function =
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_rg32_uint_fragment");
         id<MTLFunction> adapter_rg32_sint_fragment_function =
@@ -11271,7 +11282,8 @@ int main(void) {
               r32_uint_fragment_function, r32_sint_fragment_function,
               rgba8_uint_fragment_function, rgba8_sint_fragment_function,
               rgb10a2_uint_fragment_function, rgba16_uint_fragment_function,
-              rgba16_sint_fragment_function, rg32_uint_fragment_function,
+              rgba16_sint_fragment_function, rgba32_uint_fragment_function,
+              rgba32_sint_fragment_function, rg32_uint_fragment_function,
               rg32_sint_fragment_function],
             adapter_vertex_function,
             @[adapter_r8_uint_fragment_function, adapter_r8_sint_fragment_function,
@@ -11281,7 +11293,8 @@ int main(void) {
               adapter_r32_uint_fragment_function, adapter_r32_sint_fragment_function,
               adapter_rgba8_uint_fragment_function, adapter_rgba8_sint_fragment_function,
               adapter_rgb10a2_uint_fragment_function, adapter_rgba16_uint_fragment_function,
-              adapter_rgba16_sint_fragment_function, adapter_rg32_uint_fragment_function,
+              adapter_rgba16_sint_fragment_function, adapter_rgba32_uint_fragment_function,
+              adapter_rgba32_sint_fragment_function, adapter_rg32_uint_fragment_function,
               adapter_rg32_sint_fragment_function]);
         if (integer_render_result != 0) return integer_render_result;
         const int snorm_mipmap_result = test_snorm_mipmaps_against_native(device, adapter_device);
@@ -15996,6 +16009,8 @@ int main(void) {
             "fragment uint4 zpu_cpu_rgb10a2_uint_fragment() { return uint4(1); }\n"
             "fragment uint4 zpu_cpu_rgba16_uint_fragment() { return uint4(1); }\n"
             "fragment int4 zpu_cpu_rgba16_sint_fragment() { return int4(1); }\n"
+            "fragment uint4 zpu_cpu_rgba32_uint_fragment() { return uint4(1); }\n"
+            "fragment int4 zpu_cpu_rgba32_sint_fragment() { return int4(1); }\n"
             "fragment uint2 zpu_cpu_rg32_uint_fragment() { return uint2(1); }\n"
             "fragment int2 zpu_cpu_rg32_sint_fragment() { return int2(1); }\n"
             "[[visible]] float4 zpu_test_visible(float4 value) { return value; }\n"
@@ -16093,6 +16108,7 @@ int main(void) {
                 @"zpu_cpu_rgba8_uint_fragment", @"zpu_cpu_rgba8_sint_fragment",
                 @"zpu_cpu_rgb10a2_uint_fragment",
                 @"zpu_cpu_rgba16_uint_fragment", @"zpu_cpu_rgba16_sint_fragment",
+                @"zpu_cpu_rgba32_uint_fragment", @"zpu_cpu_rgba32_sint_fragment",
                 @"zpu_cpu_rg32_uint_fragment", @"zpu_cpu_rg32_sint_fragment",
             ];
             for (NSString *reflection_name in reflection_names) {
@@ -16533,7 +16549,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 45 ||
+            adapter_library.functionNames.count != 47 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -16570,6 +16586,8 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_rgb10a2_uint_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_rgba16_uint_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_rgba16_sint_fragment"].functionType != MTLFunctionTypeFragment ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_rgba32_uint_fragment"].functionType != MTLFunctionTypeFragment ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_rgba32_sint_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_rg32_uint_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_rg32_sint_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_test_visible"].functionType != MTLFunctionTypeVisible ||

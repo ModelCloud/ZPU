@@ -129,7 +129,8 @@ pub const TextureFormat = enum {
             self == .b5g6r5_unorm or self == .a1bgr5_unorm or self == .abgr4_unorm or self == .bgr5a1_unorm or
             self == .rgb10a2_unorm or self == .rgb10a2_uint or self == .bgr10a2_unorm or self == .rg11b10_float or self == .rgb9e5_float or
             self == .r32_uint or self == .r32_sint or self == .r32_float or self == .rgba16_unorm or self == .rgba16_snorm or self == .rgba16_uint or self == .rgba16_sint or self == .rgba16_float or
-            self == .rg32_uint or self == .rg32_sint or self == .rg32_float or self == .rgba32_float;
+            self == .rg32_uint or self == .rg32_sint or self == .rg32_float or
+            self == .rgba32_uint or self == .rgba32_sint or self == .rgba32_float;
     }
 
     fn isIntegerColor(self: TextureFormat) bool {
@@ -137,7 +138,7 @@ pub const TextureFormat = enum {
             self == .rg8_uint or self == .rg8_sint or self == .rg16_uint or self == .rg16_sint or
             self == .rgba8_uint or self == .rgba8_sint or self == .rgb10a2_uint or
             self == .r32_uint or self == .r32_sint or self == .rg32_uint or self == .rg32_sint or
-            self == .rgba16_uint or self == .rgba16_sint;
+            self == .rgba16_uint or self == .rgba16_sint or self == .rgba32_uint or self == .rgba32_sint;
     }
 };
 
@@ -419,7 +420,8 @@ pub const Texture = struct {
                 .rg32_uint => .rg32_uint,
                 .rg32_sint => .rg32_sint,
                 .rg32_float => .rg32_float,
-                .rgba32_uint, .rgba32_sint => unreachable,
+                .rgba32_uint => .rgba32_uint,
+                .rgba32_sint => .rgba32_sint,
                 .rgba32_float => .rgba32_float,
                 .depth16_unorm, .depth32_float, .stencil8, .depth24_unorm_stencil8, .depth32_float_stencil8, .x32_stencil8, .x24_stencil8 => unreachable,
             },
@@ -3581,6 +3583,8 @@ pub const RenderEncoder = struct {
                         @intFromEnum(abi.PixelFormat.rg32_uint) => abi.PixelFormat.rg32_uint,
                         @intFromEnum(abi.PixelFormat.rg32_sint) => abi.PixelFormat.rg32_sint,
                         @intFromEnum(abi.PixelFormat.rg32_float) => abi.PixelFormat.rg32_float,
+                        @intFromEnum(abi.PixelFormat.rgba32_uint) => abi.PixelFormat.rgba32_uint,
+                        @intFromEnum(abi.PixelFormat.rgba32_sint) => abi.PixelFormat.rgba32_sint,
                         @intFromEnum(abi.PixelFormat.rgba32_float) => abi.PixelFormat.rgba32_float,
                         else => return error.UnsupportedFormat,
                     };
