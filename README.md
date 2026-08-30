@@ -121,6 +121,7 @@ with Keyboard() as k:
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
 | Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
+| Mosaic renderer | 🧪 Scalar packet parity foundation | The hierarchy-first packetized tile renderer has validated hierarchy/HZB planning, physical packet streams, prepared primitives, and a scalar differential gate. See [`design/mosaic-renderer.md`](design/mosaic-renderer.md). |
 | 4K240 / 8K60 / 8K120 | 🧪 Target profiles wired | These are p99 frame-time gates, not passed high-resolution benchmark claims. |
 | 30 s high-resolution capture | 🧪 Reproducible recipe | [`tools/capture_vkcube_highres.sh`](tools/capture_vkcube_highres.sh) captures VP9 WebM when the selected gate is green. |
 

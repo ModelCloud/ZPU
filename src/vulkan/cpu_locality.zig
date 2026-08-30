@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_caps = @import("build_caps.zig");
+const tile_profile = @import("tile_profile.zig");
 
 const CpuSet = if (builtin.os.tag == .linux) std.os.linux.cpu_set_t else [1]usize;
 const cpu_capacity = @sizeOf(CpuSet) * 8;
@@ -10,12 +12,7 @@ const bits_per_word = @bitSizeOf(usize);
 
 pub const Role = enum(usize) {
     render = 0,
-    raster_1 = 1,
-    raster_2 = 2,
-    raster_3 = 3,
-    raster_4 = 4,
     present = 5,
-    raster_5 = 6,
 };
 
 var mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
@@ -23,7 +20,9 @@ var initialized = false;
 var selected_cpus: [cpu_capacity]usize = undefined;
 var selected_count: usize = 0;
 var selected_node: ?usize = null;
+var selected_tile_profile: tile_profile.Profile = tile_profile.baseline;
 threadlocal var pinned_role: ?Role = null;
+threadlocal var pinned_cpu: ?usize = null;
 
 fn contains(set: CpuSet, cpu: usize) bool {
     return set[cpu / bits_per_word] & (@as(usize, 1) << @intCast(cpu % bits_per_word)) != 0;
@@ -92,9 +91,9 @@ fn prioritizeCacheLocalPair(scores: []const u64) void {
     var largest_group: usize = 0;
     for (0..selected_count) |first| {
         var group_size: usize = 0;
-        for (0..selected_count) |second| if (shareCache(selected_cpus[first], selected_cpus[second])) {
-            group_size += 1;
-        };
+        for (0..selected_count) |second| {
+            if (shareCache(selected_cpus[first], selected_cpus[second])) group_size += 1;
+        }
         if (group_size > largest_group or (group_size == largest_group and scores[first] > scores[anchor])) {
             anchor = first;
             largest_group = group_size;
@@ -129,7 +128,6 @@ fn rankSelectedCpus(allowed: CpuSet) void {
     var scores = [_]u64{0} ** cpu_capacity;
     for (selected_cpus[0..selected_count], 0..) |cpu, index| scores[index] = capacityScore(cpu);
     std.os.linux.sched_setaffinity(0, &allowed) catch {};
-    // Stable insertion sort: ties retain the inherited affinity ordering.
     for (1..selected_count) |index| {
         const cpu = selected_cpus[index];
         const score = scores[index];
@@ -141,8 +139,6 @@ fn rankSelectedCpus(allowed: CpuSet) void {
         selected_cpus[destination] = cpu;
         scores[destination] = score;
     }
-    // Two-core 3D shares substantial color/depth traffic. Keep the selected
-    // pair in one cache domain when the inherited affinity offers such a pair.
     prioritizeCacheLocalPair(scores[0..selected_count]);
 }
 
@@ -152,7 +148,6 @@ fn discoverLinux() void {
     var node_counts = [_]usize{0} ** cpu_capacity;
     var initial_node: usize = 0;
     _ = std.os.linux.getcpu(null, &initial_node);
-
     for (0..cpu_capacity) |cpu| {
         if (!contains(allowed, cpu)) continue;
         var one = singleton(cpu);
@@ -164,7 +159,6 @@ fn discoverLinux() void {
         }
     }
     std.os.linux.sched_setaffinity(0, &allowed) catch {};
-
     var best_node: ?usize = null;
     var best_count: usize = 0;
     for (node_counts, 0..) |count, node| {
@@ -180,10 +174,6 @@ fn discoverLinux() void {
         };
         selected_node = node;
     }
-
-    // getcpu can be unavailable under a restrictive seccomp profile. CPU
-    // pinning still remains useful, so preserve the process affinity in that
-    // case and omit only the NUMA memory-policy syscall.
     if (selected_count == 0) for (0..cpu_capacity) |cpu| if (contains(allowed, cpu)) {
         selected_cpus[selected_count] = cpu;
         selected_count += 1;
@@ -196,16 +186,41 @@ fn ensureInitialized() void {
     defer _ = std.c.pthread_mutex_unlock(&mutex);
     if (initialized) return;
     initialized = true;
+    // Mosaic triangle kernels are not linked by this module. Keep this
+    // capability independent from the surface SIMD dispatcher: a v3 surface
+    // artifact must not make an experimental 3D kernel executable.
+    selected_tile_profile = tile_profile.detect(build_caps.standalone);
     if (builtin.os.tag == .linux) discoverLinux();
 }
 
 fn roleCpuIndex(role: Role, cpu_count: usize) usize {
     std.debug.assert(cpu_count != 0);
-    return if (role == .render or cpu_count == 1) 0 else 1;
+    return switch (role) {
+        .render => 0,
+        .present => @min(@as(usize, 1), cpu_count - 1),
+    };
 }
 
-/// Pins the current ZPU execution thread to a deterministic CPU within the
-/// process's inherited affinity mask and chosen NUMA node.
+fn workerCpuIndex(worker_index: usize, cpu_count: usize) usize {
+    std.debug.assert(cpu_count != 0);
+    if (cpu_count <= 1) return 0;
+    return 1 + worker_index % (cpu_count - 1);
+}
+
+pub fn rasterTileProfile() tile_profile.Profile {
+    ensureInitialized();
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    return selected_tile_profile;
+}
+
+pub fn selectedCpuCount() usize {
+    ensureInitialized();
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    return selected_count;
+}
+
 pub fn pinCurrent(role: Role) bool {
     if (builtin.os.tag != .linux) return false;
     if (pinned_role == role) return true;
@@ -221,16 +236,25 @@ pub fn pinCurrent(role: Role) bool {
     }
     std.os.linux.sched_setaffinity(0, &role_mask) catch return false;
     pinned_role = role;
+    pinned_cpu = selected_cpus[role_index];
     return true;
 }
 
 pub fn pinRasterWorker(worker_index: usize) bool {
-    const roles = [_]Role{ .raster_1, .raster_2, .raster_3, .raster_4, .raster_5 };
-    return pinCurrent(roles[worker_index % roles.len]);
+    if (builtin.os.tag != .linux) return false;
+    ensureInitialized();
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    if (selected_count == 0) return false;
+    const role_index = workerCpuIndex(worker_index, selected_count);
+    if (pinned_cpu == selected_cpus[role_index]) return true;
+    var worker_mask = singleton(selected_cpus[role_index]);
+    std.os.linux.sched_setaffinity(0, &worker_mask) catch return false;
+    pinned_role = null;
+    pinned_cpu = selected_cpus[role_index];
+    return true;
 }
 
-/// Applies the NUMA policy before first touch, then requests transparent huge
-/// pages for large internal caches to reduce remote faults and TLB pressure.
 pub fn prepareMemory(bytes: []u8) void {
     if (builtin.os.tag != .linux or bytes.len < 2 * 1024 * 1024) return;
     ensureInitialized();
@@ -241,15 +265,12 @@ pub fn prepareMemory(bytes: []u8) void {
     if (end <= start) return;
     const address: [*]align(page_size) u8 = @ptrFromInt(start);
     const length = end - start;
-
     _ = std.c.pthread_mutex_lock(&mutex);
     const node = selected_node;
     _ = std.c.pthread_mutex_unlock(&mutex);
     if (node) |chosen_node| {
         var node_mask = [_]usize{0} ** @typeInfo(CpuSet).array.len;
         node_mask[chosen_node / bits_per_word] |= @as(usize, 1) << @intCast(chosen_node % bits_per_word);
-        // MPOL_BIND = 2. The mapping is not touched yet, so no migration flag
-        // is needed: every subsequent first fault is allocated on this node.
         _ = std.os.linux.syscall6(.mbind, start, length, 2, @intFromPtr(&node_mask), chosen_node + 1, 0);
     }
     std.posix.madvise(address, length, std.posix.MADV.HUGEPAGE) catch {};
@@ -263,15 +284,26 @@ test "CPU masks select exactly one requested processor" {
     try std.testing.expectEqual(@as(usize, 1), @popCount(set[cpu / bits_per_word]));
 }
 
-test "ZPU roles never select more than two CPUs" {
-    for (std.enums.values(Role)) |role| {
-        try std.testing.expectEqual(@as(usize, 0), roleCpuIndex(role, 1));
-        try std.testing.expect(roleCpuIndex(role, 2) <= 1);
-        try std.testing.expect(roleCpuIndex(role, 8) <= 1);
-    }
+test "raster roles fan out when CPUs are available" {
     try std.testing.expectEqual(@as(usize, 0), roleCpuIndex(.render, 8));
-    try std.testing.expectEqual(@as(usize, 1), roleCpuIndex(.raster_1, 8));
     try std.testing.expectEqual(@as(usize, 1), roleCpuIndex(.present, 8));
+}
+
+test "raster worker assignment has no fixed role ceiling" {
+    const cpu_counts = [_]usize{ 1, 2, 6, 32, 64, 128 };
+    for (cpu_counts) |cpu_count| {
+        var seen = [_]bool{false} ** 128;
+        const worker_count = if (cpu_count <= 1) 1 else cpu_count - 1;
+        for (0..worker_count) |worker| {
+            const cpu = workerCpuIndex(worker, cpu_count);
+            try std.testing.expect(cpu < cpu_count);
+            try std.testing.expect(!seen[cpu]);
+            seen[cpu] = true;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 6), workerCpuIndex(5, 8));
+    try std.testing.expectEqual(@as(usize, 32), workerCpuIndex(31, 128));
+    try std.testing.expectEqual(@as(usize, 1), workerCpuIndex(127, 128));
 }
 
 test "Linux CPU-list parser recognizes cache-sharing ranges" {
@@ -279,4 +311,11 @@ test "Linux CPU-list parser recognizes cache-sharing ranges" {
     try std.testing.expect(cpuListContains("0-3,8,10-12\n", 8));
     try std.testing.expect(cpuListContains("0-3,8,10-12\n", 11));
     try std.testing.expect(!cpuListContains("0-3,8,10-12\n", 9));
+}
+
+test "runtime raster tile profile is internally valid" {
+    const profile = rasterTileProfile();
+    try std.testing.expect(profile.scheduler_w >= profile.micro_w);
+    try std.testing.expect(profile.scheduler_h >= profile.micro_h);
+    try std.testing.expect(profile.vector_lanes == 1 or profile.vector_lanes == 4 or profile.vector_lanes == 8 or profile.vector_lanes == 16);
 }

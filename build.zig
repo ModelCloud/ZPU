@@ -11,7 +11,8 @@ pub fn build(b: *std.Build) void {
     // `-Dv3-kernels=false` produces fully kernel-free baseline artifacts for
     // the ISA disassembly evidence gates.
     const v3_kernels_enabled = b.option(bool, "v3-kernels", "Link the separately compiled x86-64-v3 eight-lane kernel objects") orelse true;
-    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse true;
+    const core_only = b.option(bool, "core-only", "Run only dependency-free render foundation compiler/tests") orelse false;
+    const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse !core_only;
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{});
     if (b.option([]const u8, "search-prefix", "Extra library search prefix for cross builds (e.g. /usr/lib/aarch64-linux-gnu)")) |prefix| {
@@ -20,9 +21,16 @@ pub fn build(b: *std.Build) void {
 
     const v3_tier_applicable = target.result.cpu.arch == .x86_64;
     const v3_available = v3_kernels_enabled and v3_tier_applicable;
+    const host_test_xcb = enable_xcb and target.result.cpu.arch == b.graph.host.result.cpu.arch and target.result.os.tag == b.graph.host.result.os.tag;
 
     const build_config = b.addOptions();
     build_config.addOption(bool, "v3_kernels", v3_available);
+    build_config.addOption(bool, "surface_avx2", v3_available);
+    build_config.addOption(bool, "mosaic_primitive_avx2", false);
+    build_config.addOption(bool, "mosaic_pixel_avx2", false);
+    build_config.addOption(bool, "surface_avx512", false);
+    build_config.addOption(bool, "mosaic_primitive_avx512", false);
+    build_config.addOption(bool, "mosaic_pixel_avx512", false);
     const build_config_module = build_config.createModule();
 
     // Kernel-free twin configuration: identical sources and flags except the
@@ -31,8 +39,57 @@ pub fn build(b: *std.Build) void {
     // keeping the strongest evidence inside the normal test contract.
     const clean_config = b.addOptions();
     clean_config.addOption(bool, "v3_kernels", false);
+    clean_config.addOption(bool, "surface_avx2", false);
+    clean_config.addOption(bool, "mosaic_primitive_avx2", false);
+    clean_config.addOption(bool, "mosaic_pixel_avx2", false);
+    clean_config.addOption(bool, "surface_avx512", false);
+    clean_config.addOption(bool, "mosaic_primitive_avx512", false);
+    clean_config.addOption(bool, "mosaic_pixel_avx512", false);
     const clean_config_module = clean_config.createModule();
     const release_fast = .ReleaseFast;
+
+    // This path is intentionally small and dependency-free. CI runs it before
+    // installing kcov/X11/Vulkan packages so render-planning compiler failures
+    // cannot be hidden behind an integration setup failure.
+    if (core_only) {
+        const render_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/mosaic_backend.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_render_test = b.addRunArtifact(render_test);
+        const locality_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_locality.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        locality_test.root_module.link_libc = true;
+        const run_locality_test = b.addRunArtifact(locality_test);
+        const prepared_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/prepared_primitives.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_prepared_test = b.addRunArtifact(prepared_test);
+        const scalar_packet_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        const run_scalar_packet_test = b.addRunArtifact(scalar_packet_test);
+        const scalar_packet_cpu_cube_test = b.addTest(.{
+            .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet_cpu_cube_test.zig"), .target = b.graph.host, .optimize = .Debug }),
+        });
+        scalar_packet_cpu_cube_test.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
+        scalar_packet_cpu_cube_test.root_module.link_libc = true;
+        const run_scalar_packet_cpu_cube_test = b.addRunArtifact(scalar_packet_cpu_cube_test);
+        // The default core-only build is a compile gate. Keep execution on the
+        // explicit `test` step so CI can enforce compilation before behavior.
+        b.getInstallStep().dependOn(&render_test.step);
+        b.getInstallStep().dependOn(&locality_test.step);
+        b.getInstallStep().dependOn(&prepared_test.step);
+        b.getInstallStep().dependOn(&scalar_packet_test.step);
+        b.getInstallStep().dependOn(&scalar_packet_cpu_cube_test.step);
+        const test_step = b.step("test", "Run dependency-free render foundation tests");
+        test_step.dependOn(&run_render_test.step);
+        test_step.dependOn(&run_locality_test.step);
+        test_step.dependOn(&run_prepared_test.step);
+        test_step.dependOn(&run_scalar_packet_test.step);
+        test_step.dependOn(&run_scalar_packet_cpu_cube_test.step);
+        return;
+    }
 
     const v3_kernels_main: ?*std.Build.Step.Compile =
         if (v3_available) addV3Kernels(b, target, "zpu-x86-64-v3-kernels") else null;
@@ -346,7 +403,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
     });
     benchmark_vulkan_transfer_tests.root_module.link_libc = true;
-    if (enable_xcb) benchmark_vulkan_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    if (host_test_xcb) benchmark_vulkan_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
     const run_benchmark_vulkan_transfer_tests = b.addRunArtifact(benchmark_vulkan_transfer_tests);
     run_benchmark_vulkan_transfer_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_vulkan_transfer_tests.step);
@@ -354,10 +411,18 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_host_transfer.zig"), .target = b.graph.host, .optimize = .Debug }),
     });
     benchmark_vulkan_host_transfer_tests.root_module.link_libc = true;
-    if (enable_xcb) benchmark_vulkan_host_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
+    if (host_test_xcb) benchmark_vulkan_host_transfer_tests.root_module.linkSystemLibrary("xcb", .{});
     const run_benchmark_vulkan_host_transfer_tests = b.addRunArtifact(benchmark_vulkan_host_transfer_tests);
     run_benchmark_vulkan_host_transfer_tests.step.dependOn(&require_limited.step);
     test_step.dependOn(&run_benchmark_vulkan_host_transfer_tests.step);
+    const scalar_packet_cpu_cube_tests = b.addTest(.{
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/render/scalar_packet_cpu_cube_test.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    scalar_packet_cpu_cube_tests.root_module.addImport("cpu_cube", b.createModule(.{ .root_source_file = b.path("src/vulkan/cpu_cube.zig"), .target = b.graph.host, .optimize = .Debug }));
+    scalar_packet_cpu_cube_tests.root_module.link_libc = true;
+    const run_scalar_packet_cpu_cube_tests = b.addRunArtifact(scalar_packet_cpu_cube_tests);
+    run_scalar_packet_cpu_cube_tests.step.dependOn(&require_limited.step);
+    test_step.dependOn(&run_scalar_packet_cpu_cube_tests.step);
     const benchmark_cli_tests = b.addSystemCommand(&.{"bash"});
     benchmark_cli_tests.addFileArg(b.path("test/benchmark_cli.sh"));
     benchmark_cli_tests.addArtifactArg(benchmark);
