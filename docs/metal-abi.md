@@ -433,7 +433,11 @@ triangle path:
 - direct and indexed render draws read ZPU vertex and index buffer bindings at
   commit time; inline `setVertexBytes` data remains an encode-time snapshot,
   and filled-geometry oracles avoid conflating point raster coordinates with
-  resource visibility
+  resource visibility. The CPU raster ABI fetches vertex data from slot zero;
+  additional direct vertex buffer/inline-byte slots (1 through 30) are
+  accepted as ZPU-owned metadata with Metal last-write-wins semantics and do
+  not alter slot-zero execution. Unsupported slot indices and foreign
+  resources fail closed.
 - direct and indexed indirect render draws read their ZPU argument buffers at
   commit time, including `vertexStart`, `instanceCount`, `indexStart`, and
   signed `baseVertex`; indexed `indexStart` is converted from elements to
@@ -587,10 +591,12 @@ triangle path:
   tessellation-factor buffers, offsets, strides, and draw ranges are retained
   in the CPU-owned ICB, while fractional/non-uniform factors and arbitrary
   tessellation shader execution fail closed at replay
-- CPU indirect render commands preserve the same one-slot constraint as the
-  CPU raster ABI for vertex and fragment buffers; descriptor capacity beyond
-  slot zero is accepted as metadata, but recording a non-zero binding fails
-  closed instead of silently rebinding it at slot zero
+- CPU indirect render commands preserve the same one-slot executable constraint
+  as the CPU raster ABI for vertex and fragment buffers; descriptor capacity
+  beyond slot zero is accepted as metadata, but recording a non-zero indirect
+  binding fails closed instead of silently rebinding it at slot zero. This
+  intentional distinction keeps direct Metal setter compatibility broad while
+  keeping indirect command replay bounded and explicit.
 - Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice

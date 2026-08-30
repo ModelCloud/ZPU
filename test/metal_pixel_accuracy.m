@@ -7861,6 +7861,141 @@ static int test_position_fragment_grid_against_native(
     return 0;
 }
 
+static int test_direct_extra_vertex_bindings_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    id<MTLCommandQueue> adapter_queue) {
+    enum { width = 7, height = 5, byte_count = width * height * 4 };
+    id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_test_vertex"];
+    id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_fragment"];
+    id<MTLFunction> adapter_vertex = [adapter_library newFunctionWithName:@"zpu_cpu_vertex"];
+    id<MTLFunction> adapter_fragment = [adapter_library newFunctionWithName:@"zpu_cpu_fragment"];
+    if (native_vertex == nil || native_fragment == nil || adapter_vertex == nil || adapter_fragment == nil) {
+        fprintf(stderr, "metal-pixel: extra vertex binding profile functions missing\n");
+        return 246;
+    }
+
+    MTLRenderPipelineDescriptor *native_descriptor = [MTLRenderPipelineDescriptor new];
+    native_descriptor.vertexFunction = native_vertex;
+    native_descriptor.fragmentFunction = native_fragment;
+    native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *native_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_descriptor error:&native_error];
+
+    MTLRenderPipelineDescriptor *adapter_descriptor = [MTLRenderPipelineDescriptor new];
+    adapter_descriptor.vertexFunction = adapter_vertex;
+    adapter_descriptor.fragmentFunction = adapter_fragment;
+    adapter_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_descriptor error:&adapter_error];
+
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+
+    const zpu_metal_vertex vertices[] = {
+        {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        {{ 0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        {{-0.75f, -0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        {{ 0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+        {{-0.75f,  0.75f, 0.5f, 1.0f}, {0.25f, 0.5f, 0.75f, 1.0f}},
+    };
+    const uint8_t extra_bytes[16] = {
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80,
+        0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0xff,
+    };
+    uint8_t extra_buffer_bytes[32] = {0};
+    memcpy(extra_buffer_bytes + 16, extra_bytes, sizeof(extra_bytes));
+    id<MTLBuffer> native_vertex_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_vertex_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native_extra_buffer =
+        [native_device newBufferWithBytes:extra_buffer_bytes length:sizeof(extra_buffer_bytes)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_extra_buffer =
+        [adapter_device newBufferWithBytes:extra_buffer_bytes length:sizeof(extra_buffer_bytes)
+                                   options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    MTLRenderPassDescriptor *adapter_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    adapter_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    id<MTLRenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    if (native_encoder != nil) {
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+        [native_encoder setVertexBuffer:native_extra_buffer offset:16 atIndex:1];
+        [native_encoder setVertexBufferOffset:16 atIndex:1];
+        [native_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
+        [native_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
+        [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_encoder endEncoding];
+    }
+    if (adapter_encoder != nil) {
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_encoder setVertexBuffer:adapter_extra_buffer offset:16 atIndex:1];
+        [adapter_encoder setVertexBufferOffset:16 atIndex:1];
+        [adapter_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:2];
+        [adapter_encoder setVertexBytes:extra_bytes length:sizeof(extra_bytes) atIndex:30];
+        [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_encoder endEncoding];
+    }
+    if (native_command_buffer != nil) [native_command_buffer commit];
+    if (adapter_command_buffer != nil) [adapter_command_buffer commit];
+    if (native_command_buffer != nil) [native_command_buffer waitUntilCompleted];
+    if (adapter_command_buffer != nil) [adapter_command_buffer waitUntilCompleted];
+
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    if (native_texture != nil) {
+        [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    }
+    if (adapter_texture != nil) {
+        [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    }
+    if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        native_vertex_buffer == nil || adapter_vertex_buffer == nil || native_extra_buffer == nil ||
+        adapter_extra_buffer == nil || native_command_buffer == nil || adapter_command_buffer == nil ||
+        native_encoder == nil || adapter_encoder == nil ||
+        native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels, adapter_pixels, byte_count) != 0) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: direct extra vertex bindings mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0,
+                native_command_buffer == nil ? -1L : (long)native_command_buffer.status,
+                adapter_command_buffer == nil ? -1L : (long)adapter_command_buffer.status);
+        fail_with_error("native extra vertex binding oracle failed", native_error);
+        fail_with_error("adapter extra vertex binding failed", adapter_error);
+        return 247;
+    }
+    return 0;
+}
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static int test_metal4_position_fragment_grid_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
@@ -17396,6 +17531,9 @@ int main(void) {
         const int position_fragment_result = test_position_fragment_grid_against_native(
             device, adapter_device, library, adapter_library, adapter_queue);
         if (position_fragment_result != 0) return position_fragment_result;
+        const int extra_vertex_binding_result = test_direct_extra_vertex_bindings_against_native(
+            device, adapter_device, library, adapter_library, adapter_queue);
+        if (extra_vertex_binding_result != 0) return extra_vertex_binding_result;
 
         if (@available(macOS 13.0, iOS 16.0, *)) {
             const int mesh_blend_result = test_mesh_blend_against_native(

@@ -17366,6 +17366,57 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     return YES;
 }
 
+/* The portable raster ABI consumes vertex slot zero. Metal still permits
+ * callers to bind additional, unused vertex slots, however, and those calls
+ * must not be accidentally rebased onto slot zero or poison an otherwise
+ * valid draw. Keep the extra bindings as CPU-owned encoder metadata so the
+ * public setter semantics remain last-write-wins without introducing a
+ * second vertex-fetch ABI. Apple exposes 31 buffer slots per stage. */
+static BOOL zpu_render_vertex_extra_index_valid(ZPURenderEncoder *encoder, NSUInteger index) {
+    if (index == 0 || index >= 31) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL zpu_render_vertex_record_extra_buffer(ZPURenderEncoder *encoder,
+                                                   id<MTLBuffer> buffer, NSUInteger offset,
+                                                   NSUInteger index) {
+    ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
+    if (!zpu_render_vertex_extra_index_valid(encoder, index) ||
+        (buffer != nil && (!zpu_buffer_belongs_to_device([encoder->_owner device], zpuBuffer) ||
+                           offset > buffer.length))) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    NSString *bufferKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"buffer");
+    NSString *offsetKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferOffset");
+    NSString *bytesKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bytes");
+    encoder->_stageBindings[bufferKey] = buffer == nil ? (id)[NSNull null] : (id)buffer;
+    encoder->_stageBindings[offsetKey] = @(buffer == nil ? 0 : offset);
+    [encoder->_stageBindings removeObjectForKey:bytesKey];
+    if (buffer != nil) [encoder->_owner retainResource:buffer];
+    return YES;
+}
+
+static BOOL zpu_render_vertex_record_extra_bytes(ZPURenderEncoder *encoder,
+                                                  const void *bytes, NSUInteger length,
+                                                  NSUInteger index) {
+    if (!zpu_render_vertex_extra_index_valid(encoder, index) ||
+        (bytes == NULL && length != 0)) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    NSString *bufferKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"buffer");
+    NSString *offsetKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bufferOffset");
+    NSString *bytesKey = zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"bytes");
+    encoder->_stageBindings[bytesKey] = [NSData dataWithBytes:bytes length:length];
+    [encoder->_stageBindings removeObjectForKey:bufferKey];
+    [encoder->_stageBindings removeObjectForKey:offsetKey];
+    return YES;
+}
+
 @implementation ZPURenderEncoder
 
 - (instancetype)initWithOwner:(ZPUCommandBuffer *)owner encoder:(zpu_metal_render_encoder *)encoder {
@@ -17417,6 +17468,10 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     }
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_vertex_record_extra_buffer(self, buffer, offset, index);
+        return;
+    }
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
     if ((buffer != nil && !zpu_buffer_belongs_to_device([_owner device], zpuBuffer)) || index > UINT32_MAX) {
         [_owner markError];
@@ -17429,6 +17484,16 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
             (uint32_t)index) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setVertexBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index {
+    if (index != 0) {
+        if (!zpu_render_vertex_extra_index_valid(self, index)) return;
+        id buffer = _stageBindings[zpu_render_stage_binding_key(MTLRenderStageVertex, index, @"buffer")];
+        if (buffer == nil || buffer == (id)[NSNull null]) {
+            [_owner markError];
+            return;
+        }
+        (void)zpu_render_vertex_record_extra_buffer(self, (id<MTLBuffer>)buffer, offset, index);
+        return;
+    }
     [self setVertexBuffer:(id<MTLBuffer>)_vertexBuffer offset:offset atIndex:index];
 }
 - (void)setVertexBuffers:(const id<MTLBuffer> __nullable [__nonnull])buffers offsets:(const NSUInteger [__nonnull])offsets withRange:(NSRange)range {
@@ -17439,10 +17504,22 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     }
 }
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index {
+    if (index != 0) {
+        (void)zpu_render_vertex_record_extra_bytes(self, bytes, length, index);
+        return;
+    }
     if (index > UINT32_MAX || zpu_metal_render_encoder_set_vertex_bytes(
             _zpuEncoder, bytes, length, (uint32_t)index) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
+    if (index != 0) {
+        if (index >= 31 || stride == NSUIntegerMax || stride < sizeof(zpu_metal_vertex)) {
+            [_owner markError];
+            return;
+        }
+        [self setVertexBuffer:buffer offset:offset atIndex:index];
+        return;
+    }
     if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
     [self setVertexBuffer:buffer offset:offset atIndex:index];
 }
@@ -17454,18 +17531,41 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     if (buffers == NULL || offsets == NULL || strides == NULL) { [_owner markError]; return; }
     if (range.location > UINT32_MAX || range.length > UINT32_MAX - range.location) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < range.length; ++index) {
-        if (![self applyVertexAttributeStride:strides[index] allowStaticToken:YES]) {
+        const NSUInteger bindingIndex = range.location + index;
+        if (bindingIndex == 0) {
+            if (![self applyVertexAttributeStride:strides[index] allowStaticToken:YES]) {
+                [_owner markError];
+                continue;
+            }
+        } else if (bindingIndex >= 31 ||
+                   (strides[index] != NSUIntegerMax && strides[index] < sizeof(zpu_metal_vertex))) {
             [_owner markError];
             continue;
         }
-        [self setVertexBuffer:buffers[index] offset:offsets[index] atIndex:range.location + index];
+        [self setVertexBuffer:buffers[index] offset:offsets[index] atIndex:bindingIndex];
     }
 }
 - (void)setVertexBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
+    if (index != 0) {
+        if (index >= 31 || stride == NSUIntegerMax || stride < sizeof(zpu_metal_vertex)) {
+            [_owner markError];
+            return;
+        }
+        [self setVertexBufferOffset:offset atIndex:index];
+        return;
+    }
     if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
     [self setVertexBufferOffset:offset atIndex:index];
 }
 - (void)setVertexBytes:(const void *)bytes length:(NSUInteger)length attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index API_AVAILABLE(macos(14.0), ios(17.0)) {
+    if (index != 0) {
+        if (index >= 31 || stride == NSUIntegerMax || stride < sizeof(zpu_metal_vertex)) {
+            [_owner markError];
+            return;
+        }
+        [self setVertexBytes:bytes length:length atIndex:index];
+        return;
+    }
     if (![self applyVertexAttributeStride:stride allowStaticToken:NO]) { [_owner markError]; return; }
     [self setVertexBytes:bytes length:length atIndex:index];
 }
