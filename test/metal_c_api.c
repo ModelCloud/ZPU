@@ -480,7 +480,7 @@ int main(void) {
     zpu_metal_texture *patch_reference_texture =
         zpu_metal_device_new_texture(device, &mesh_descriptor);
     const uint16_t initial_patch_factors[] = {0, 0, 0, 0};
-    const uint16_t committed_patch_factors[] = {0x3c00, 0x3c00, 0x3c00, 0x3c00};
+    const uint16_t committed_patch_factors[] = {0x4000, 0x4000, 0x4000, 0x4000};
     zpu_metal_buffer *patch_factor_buffer = zpu_metal_device_new_buffer(
         device, sizeof(initial_patch_factors), initial_patch_factors);
     zpu_metal_command_buffer *patch_commands =
@@ -502,6 +502,7 @@ int main(void) {
         zpu_metal_render_encoder_set_tessellation_factor_buffer(
             patch_encoder, patch_factor_buffer, 0, sizeof(committed_patch_factors)) != 0 ||
         zpu_metal_render_encoder_set_tessellation_factor_scale(patch_encoder, 1.0f) != 0 ||
+        zpu_metal_render_encoder_set_patch_max_tessellation_factor(patch_encoder, 2) != 0 ||
         zpu_metal_render_encoder_draw_patches(
             patch_encoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3, 0, 1, NULL, 0, 1, 0,
             ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_NONE, NULL, 0) != 0 ||
