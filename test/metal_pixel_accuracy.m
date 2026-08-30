@@ -5470,7 +5470,8 @@ static int test_layered_patch_against_native(
 static int test_native_tessellation_patch_against_cpu(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_tessellated_vertex_function, id<MTLFunction> native_fragment_function,
-    id<MTLFunction> adapter_patch_vertex_function, id<MTLFunction> adapter_patch_fragment_function) {
+    id<MTLFunction> adapter_patch_vertex_function, id<MTLFunction> adapter_patch_fragment_function,
+    uint16_t factor_half) {
     enum { width = 9, height = 7, layers = 3, max_byte_count = width * height * 4 };
     const zpu_metal_vertex vertices[] = {
         {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
@@ -5478,9 +5479,9 @@ static int test_native_tessellation_patch_against_cpu(
         {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
     };
     const uint16_t factors[] = {
-        0x4000, 0x4000, 0x4000, 0x4000,
-        0x4000, 0x4000, 0x4000, 0x4000,
-        0x4000, 0x4000, 0x4000, 0x4000,
+        factor_half, factor_half, factor_half, factor_half,
+        factor_half, factor_half, factor_half, factor_half,
+        factor_half, factor_half, factor_half, factor_half,
     };
     if (native_tessellated_vertex_function == nil || native_fragment_function == nil ||
         adapter_patch_vertex_function == nil || adapter_patch_fragment_function == nil) return 241;
@@ -9248,8 +9249,12 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_tessellated_triangle_fragment");
         const int native_tessellation_result = test_native_tessellation_patch_against_cpu(
             device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
-            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4000);
         if (native_tessellation_result != 0) return native_tessellation_result;
+        const int native_tessellation_factor4_result = test_native_tessellation_patch_against_cpu(
+            device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4400);
+        if (native_tessellation_factor4_result != 0) return native_tessellation_factor4_result;
         const int layered_patch_result = test_layered_patch_against_native(
             device, adapter_device, layered_vertex_function, fragment_function,
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);
