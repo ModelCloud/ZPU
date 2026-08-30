@@ -3149,6 +3149,7 @@ static BOOL zpu_metal4_buffer_range(MTL4BufferRange range, ZPUDevice *owner,
     if (buffer == NULL || offset == NULL || range.bufferAddress == 0 ||
         (range.length != UINT64_MAX && range.length > (uint64_t)NSUIntegerMax)) return NO;
     if (!zpu_metal4_buffer_address_offset(owner, range.bufferAddress, buffer, offset)) return NO;
+    if (*offset > (*buffer).length) return NO;
     return range.length == UINT64_MAX || range.length <= (uint64_t)(*buffer).length - *offset;
 }
 
@@ -6647,6 +6648,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_cpu_acceleration_metal4_instance_triangle_count(
     MTL4InstanceAccelerationStructureDescriptor *descriptor, NSUInteger *triangleCount);
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_cpu_acceleration_metal4_indirect_instance_triangle_count(
+    MTL4IndirectInstanceAccelerationStructureDescriptor *descriptor, NSUInteger *triangleCount);
+
 static NSUInteger zpu_acceleration_structure_size_for_descriptor(
     MTLAccelerationStructureDescriptor *descriptor)
     API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
@@ -6701,6 +6706,12 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
             NSUInteger instanceTriangleCount = 0;
             if (zpu_cpu_acceleration_metal4_instance_triangle_count(
                     (MTL4InstanceAccelerationStructureDescriptor *)descriptor, &instanceTriangleCount)) {
+                triangleCount = instanceTriangleCount;
+            }
+        } else if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+            NSUInteger instanceTriangleCount = 0;
+            if (zpu_cpu_acceleration_metal4_indirect_instance_triangle_count(
+                    (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor, &instanceTriangleCount)) {
                 triangleCount = instanceTriangleCount;
             }
         }
@@ -16932,6 +16943,150 @@ static BOOL zpu_cpu_acceleration_write_metal4_instance_payload(
     return YES;
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_cpu_acceleration_metal4_indirect_instance_buffer(
+    MTL4IndirectInstanceAccelerationStructureDescriptor *descriptor, ZPUDevice *owner,
+    ZPUBuffer **instanceBuffer, NSUInteger *instanceOffset, NSUInteger *instanceRangeLength,
+    NSUInteger *instanceStride, NSUInteger *instanceCount) {
+    if (descriptor == nil || owner == nil || instanceBuffer == NULL || instanceOffset == NULL ||
+        instanceRangeLength == NULL || instanceStride == NULL || instanceCount == NULL ||
+        descriptor.instanceDescriptorType != MTLAccelerationStructureInstanceDescriptorTypeIndirect) return NO;
+    const NSUInteger elementSize = sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
+    const NSUInteger stride = descriptor.instanceDescriptorStride == 0 ? elementSize :
+        descriptor.instanceDescriptorStride;
+    if (stride < elementSize || stride % 4 != 0 ||
+        !zpu_metal4_buffer_range(descriptor.instanceDescriptorBuffer, owner,
+                                 instanceBuffer, instanceOffset) ||
+        (*instanceBuffer).contents == NULL) return NO;
+    const NSUInteger available = descriptor.instanceDescriptorBuffer.length == UINT64_MAX ?
+        (*instanceBuffer).length - *instanceOffset : (NSUInteger)descriptor.instanceDescriptorBuffer.length;
+    if (descriptor.maxInstanceCount > available / stride) return NO;
+
+    ZPUBuffer *countBuffer = nil;
+    NSUInteger countOffset = 0;
+    if (!zpu_metal4_buffer_range(descriptor.instanceCountBuffer, owner, &countBuffer, &countOffset) ||
+        countOffset % sizeof(uint32_t) != 0 || countOffset > countBuffer.length ||
+        countBuffer.length - countOffset < sizeof(uint32_t) ||
+        (descriptor.instanceCountBuffer.length != UINT64_MAX &&
+         descriptor.instanceCountBuffer.length < sizeof(uint32_t))) return NO;
+    uint32_t count = 0;
+    memcpy(&count, (const uint8_t *)countBuffer.contents + countOffset, sizeof(count));
+    if ((NSUInteger)count > descriptor.maxInstanceCount || (NSUInteger)count > available / stride) return NO;
+    *instanceRangeLength = available;
+    *instanceStride = stride;
+    *instanceCount = count;
+    return YES;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_cpu_acceleration_metal4_indirect_instance_triangle_count(
+    MTL4IndirectInstanceAccelerationStructureDescriptor *descriptor, NSUInteger *triangleCount) {
+    if (descriptor == nil || triangleCount == NULL || descriptor.instanceDescriptorBuffer.bufferAddress == 0 ||
+        descriptor.instanceCountBuffer.bufferAddress == 0) return NO;
+    const uint64_t base = (uint64_t)descriptor.instanceDescriptorBuffer.bufferAddress &
+        ~(zpu_resource_address_stride - 1);
+    id resource = zpu_resource_for_id(base);
+    ZPUDevice *owner = [resource isKindOfClass:[ZPUBuffer class]] ? ((ZPUBuffer *)resource)->_owner : nil;
+    if (owner == nil) return NO;
+    ZPUBuffer *instanceBuffer = nil;
+    NSUInteger instanceOffset = 0;
+    NSUInteger instanceRangeLength = 0;
+    NSUInteger instanceStride = 0;
+    NSUInteger instanceCount = 0;
+    if (!zpu_cpu_acceleration_metal4_indirect_instance_buffer(
+            descriptor, owner, &instanceBuffer, &instanceOffset, &instanceRangeLength,
+            &instanceStride, &instanceCount)) return NO;
+    NSUInteger total = 0;
+    for (NSUInteger index = 0; index < instanceCount; ++index) {
+        MTLIndirectAccelerationStructureInstanceDescriptor instance;
+        memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
+               sizeof(instance));
+        ZPUAccelerationStructure *child = zpu_cpu_acceleration_metal4_instance_child(&instance, owner);
+        if (child == nil) return NO;
+        NSUInteger childCount = 0;
+        NSUInteger childOffset = 0;
+        if (child->_built && zpu_cpu_acceleration_payload_info(child, &childCount, &childOffset)) {
+            (void)childOffset;
+        } else {
+            if (child->_size < ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET) return NO;
+            childCount = (child->_size - ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET) /
+                sizeof(zpu_metal_cpu_acceleration_triangle);
+        }
+        if (childCount > NSUIntegerMax - total) return NO;
+        total += childCount;
+    }
+    (void)instanceRangeLength;
+    *triangleCount = total;
+    return YES;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
+    ZPUAccelerationStructure *target, MTL4IndirectInstanceAccelerationStructureDescriptor *descriptor) {
+    if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 || descriptor == nil ||
+        descriptor.instanceDescriptorBuffer.bufferAddress == 0 || descriptor.instanceCountBuffer.bufferAddress == 0) return NO;
+    ZPUBuffer *instanceBuffer = nil;
+    NSUInteger instanceOffset = 0;
+    NSUInteger instanceRangeLength = 0;
+    NSUInteger instanceStride = 0;
+    NSUInteger instanceCount = 0;
+    if (!zpu_cpu_acceleration_metal4_indirect_instance_buffer(
+            descriptor, target->_owner, &instanceBuffer, &instanceOffset, &instanceRangeLength,
+            &instanceStride, &instanceCount)) return NO;
+    NSUInteger triangleCount = 0;
+    for (NSUInteger index = 0; index < instanceCount; ++index) {
+        MTLIndirectAccelerationStructureInstanceDescriptor instance;
+        memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
+               sizeof(instance));
+        ZPUAccelerationStructure *child = zpu_cpu_acceleration_metal4_instance_child(&instance, target->_owner);
+        NSUInteger childCount = 0;
+        NSUInteger childOffset = 0;
+        if (child == nil || !child->_built || !zpu_cpu_acceleration_payload_info(child, &childCount, &childOffset) ||
+            childCount > NSUIntegerMax - triangleCount) return NO;
+        triangleCount += childCount;
+    }
+    if (triangleCount > UINT32_MAX || triangleCount > (target->_size - 256) /
+            sizeof(zpu_metal_cpu_acceleration_triangle)) return NO;
+    memset(target->_storage.contents, 0, target->_size);
+    zpu_metal_cpu_acceleration_structure_header header = {
+        .magic = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
+        .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
+        .triangle_count = (uint32_t)triangleCount,
+        .flags = triangleCount == 0 ? 0u : 1u,
+        .triangle_offset = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET,
+        .reserved = {0, 0, 0},
+    };
+    memcpy(target->_storage.contents, &header, sizeof(header));
+    NSUInteger destinationIndex = 0;
+    for (NSUInteger index = 0; index < instanceCount; ++index) {
+        MTLIndirectAccelerationStructureInstanceDescriptor instance;
+        memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
+               sizeof(instance));
+        if (instance.options != MTLAccelerationStructureInstanceOptionNone || instance.mask != UINT32_MAX ||
+            instance.intersectionFunctionTableOffset != 0) return NO;
+        ZPUAccelerationStructure *child = zpu_cpu_acceleration_metal4_instance_child(&instance, target->_owner);
+        NSUInteger childCount = 0;
+        NSUInteger childOffset = 0;
+        if (child == nil || !child->_built || !zpu_cpu_acceleration_payload_info(child, &childCount, &childOffset)) return NO;
+        for (NSUInteger triangleIndex = 0; triangleIndex < childCount; ++triangleIndex) {
+            zpu_metal_cpu_acceleration_triangle triangle;
+            memcpy(&triangle, (const uint8_t *)child->_storage.contents + childOffset +
+                   triangleIndex * sizeof(triangle), sizeof(triangle));
+            for (NSUInteger vertex = 0; vertex < 3; ++vertex) {
+                float transformed[3];
+                if (!zpu_cpu_acceleration_transform_position(&instance.transformationMatrix,
+                                                               &triangle.positions[vertex * 3], transformed)) return NO;
+                memcpy(&triangle.positions[vertex * 3], transformed, sizeof(transformed));
+            }
+            memcpy((uint8_t *)target->_storage.contents + ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET +
+                       destinationIndex * sizeof(triangle), &triangle, sizeof(triangle));
+            destinationIndex += 1;
+        }
+    }
+    (void)instanceRangeLength;
+    return YES;
+}
+
 static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
                                                 MTLAccelerationStructureDescriptor *descriptor) {
     if (!zpu_acceleration_storage_range_valid(target, target->_size) ||
@@ -17149,6 +17304,12 @@ static BOOL zpu_cpu_acceleration_write_indirect_instance_payload(
             zpu_metal_cpu_acceleration_triangle triangle;
             memcpy(&triangle, (const uint8_t *)child->_storage.contents + childOffset +
                    triangleIndex * sizeof(triangle), sizeof(triangle));
+            for (NSUInteger vertex = 0; vertex < 3; ++vertex) {
+                float transformed[3];
+                if (!zpu_cpu_acceleration_transform_position(&instance.transformationMatrix,
+                                                               &triangle.positions[vertex * 3], transformed)) return NO;
+                memcpy(&triangle.positions[vertex * 3], transformed, sizeof(transformed));
+            }
             memcpy((uint8_t *)target->_storage.contents + ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET +
                        destinationIndex * sizeof(triangle), &triangle, sizeof(triangle));
             destinationIndex += 1;
@@ -17323,6 +17484,14 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
                     return;
                 }
                 payload_written = YES;
+            } else if (!payload_written &&
+                       [descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+                if (!zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
+                        target, (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor)) {
+                    [_owner markError];
+                    return;
+                }
+                payload_written = YES;
             } else if (!payload_written && [descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
                 BOOL traceable = YES;
                 for (MTL4AccelerationStructureGeometryDescriptor *geometry in
@@ -17416,6 +17585,10 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
                 rebuild_payload = YES;
                 rebuild_failed = !zpu_cpu_acceleration_write_metal4_instance_payload(
                     destination, (MTL4InstanceAccelerationStructureDescriptor *)descriptor);
+            } else if ([descriptor isKindOfClass:[MTL4IndirectInstanceAccelerationStructureDescriptor class]]) {
+                rebuild_payload = YES;
+                rebuild_failed = !zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
+                    destination, (MTL4IndirectInstanceAccelerationStructureDescriptor *)descriptor);
             } else if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
                 BOOL traceable = YES;
                 for (MTL4AccelerationStructureGeometryDescriptor *geometry in

@@ -560,9 +560,10 @@ triangle path:
   command encoder supports build, refit, copy, compact-size, and compaction
   metadata/storage operations; refit rebuilds supported CPU triangle and
   instance payloads from current ZPU-owned geometry; the fixed Float3 triangle
-  trace profile traverses CPU-serialized legacy and Metal 4 primitive and
-  bounded instance geometry, while arbitrary ray intersection execution
-  remains fail-closed
+  trace profile traverses CPU-serialized legacy and Metal 4 primitive,
+  bounded, and indirect instance geometry, including active instance-count
+  buffer ranges and packed affine transforms; arbitrary ray intersection
+  execution remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level

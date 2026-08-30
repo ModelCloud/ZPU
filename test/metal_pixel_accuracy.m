@@ -1327,8 +1327,17 @@ static int test_cpu_indirect_trace_triangles_against_native(
     id<MTLBuffer> instance_count_buffer =
         [adapter_device newBufferWithBytes:&instance_count length:sizeof(instance_count)
                                    options:MTLResourceStorageModeShared];
+    MTLPackedFloat4x3 indirect_identity_matrix = {
+        .columns = {
+            MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 1.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 0.0f, 1.0f),
+            MTLPackedFloat3Make(0.0f, 0.0f, 0.0f),
+        },
+    };
     MTLIndirectAccelerationStructureInstanceDescriptor instance_data[2] = {
         {
+            .transformationMatrix = indirect_identity_matrix,
             .options = MTLAccelerationStructureInstanceOptionNone,
             .mask = UINT32_MAX,
             .intersectionFunctionTableOffset = 0,
@@ -1414,6 +1423,112 @@ static int test_cpu_indirect_trace_triangles_against_native(
                 mismatch < byte_count ? adapter_pixels[mismatch] : 0);
         fail_with_error("CPU indirect trace command failed", adapter_error ?: native_error);
         return 161;
+    }
+
+    /* Refit both levels after changing the CPU-owned vertex bytes. The
+     * indirect TLAS must re-read the count/descriptor records and copy the
+     * newly rebuilt child payload into its destination; it must not retain the
+     * triangles captured by the original build. Native Metal remains only the
+     * pixel oracle through the same raw-triangle compute kernel. */
+    const float refit_triangle_vertices[] = {
+        -0.90f, -0.40f, 0.0f,
+         0.90f, -0.40f, 0.0f,
+         0.00f,  0.95f, 0.0f,
+    };
+    const float refit_native_triangle_vertices[] = {
+        -0.90f, -0.10f, 0.0f,
+         0.90f, -0.10f, 0.0f,
+         0.00f,  1.25f, 0.0f,
+    };
+    MTLPackedFloat4x3 refit_instance_matrix = {
+        .columns = {
+            MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 1.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 0.0f, 1.0f),
+            MTLPackedFloat3Make(0.0f, 0.30f, 0.0f),
+        },
+    };
+    if (native_vertex_buffer.contents == NULL || adapter_vertex_buffer.contents == NULL ||
+        instance_descriptor_buffer.contents == NULL) {
+        fail_with_error("CPU indirect refit vertex contents failed", adapter_error);
+        return 162;
+    }
+    memcpy(native_vertex_buffer.contents, refit_native_triangle_vertices, sizeof(refit_native_triangle_vertices));
+    memcpy(adapter_vertex_buffer.contents, refit_triangle_vertices, sizeof(refit_triangle_vertices));
+    instance_data[0].transformationMatrix = refit_instance_matrix;
+    memcpy(instance_descriptor_buffer.contents, instance_data, sizeof(instance_data));
+
+    id<MTLCommandBuffer> refit_bottom_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> refit_bottom_encoder =
+        [refit_bottom_command_buffer accelerationStructureCommandEncoder];
+    [refit_bottom_encoder refitAccelerationStructure:bottom_level descriptor:bottom_level_descriptor
+                                           destination:bottom_level scratchBuffer:bottom_level_scratch
+                                     scratchBufferOffset:0];
+    [refit_bottom_encoder endEncoding];
+    [refit_bottom_command_buffer commit];
+    [refit_bottom_command_buffer waitUntilCompleted];
+
+    id<MTLAccelerationStructure> refit_indirect_structure =
+        [adapter_device newAccelerationStructureWithSize:indirect_sizes.accelerationStructureSize];
+    id<MTLCommandBuffer> refit_indirect_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> refit_indirect_encoder =
+        [refit_indirect_command_buffer accelerationStructureCommandEncoder];
+    [refit_indirect_encoder refitAccelerationStructure:indirect_structure descriptor:indirect_descriptor
+                                            destination:refit_indirect_structure scratchBuffer:indirect_scratch
+                                      scratchBufferOffset:0];
+    [refit_indirect_encoder endEncoding];
+    [refit_indirect_command_buffer commit];
+    [refit_indirect_command_buffer waitUntilCompleted];
+
+    id<MTLCommandBuffer> refit_native_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> refit_native_encoder = [refit_native_command_buffer computeCommandEncoder];
+    [refit_native_encoder setComputePipelineState:native_pipeline];
+    [refit_native_encoder setBuffer:native_vertex_buffer offset:0 atIndex:0];
+    [refit_native_encoder setTexture:native_texture atIndex:0];
+    [refit_native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                    threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [refit_native_encoder endEncoding];
+    [refit_native_command_buffer commit];
+    [refit_native_command_buffer waitUntilCompleted];
+
+    id<MTLCommandBuffer> refit_adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> refit_adapter_encoder = [refit_adapter_command_buffer computeCommandEncoder];
+    [refit_adapter_encoder setComputePipelineState:adapter_pipeline];
+    [refit_adapter_encoder setAccelerationStructure:refit_indirect_structure atBufferIndex:0];
+    [refit_adapter_encoder setTexture:adapter_texture atIndex:0];
+    [refit_adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                     threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [refit_adapter_encoder endEncoding];
+    [refit_adapter_command_buffer commit];
+    [refit_adapter_command_buffer waitUntilCompleted];
+
+    uint8_t refit_native_pixels[byte_count] = {0};
+    uint8_t refit_adapter_pixels[byte_count] = {0};
+    [native_texture getBytes:refit_native_pixels bytesPerRow:(NSUInteger)width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:refit_adapter_pixels bytesPerRow:(NSUInteger)width * 4
+                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    if (refit_bottom_command_buffer == nil || refit_bottom_encoder == nil ||
+        refit_bottom_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        refit_indirect_structure == nil || refit_indirect_command_buffer == nil ||
+        refit_indirect_encoder == nil ||
+        refit_indirect_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        refit_native_command_buffer == nil || refit_native_encoder == nil ||
+        refit_native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        refit_adapter_command_buffer == nil || refit_adapter_encoder == nil ||
+        refit_adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels, refit_native_pixels, byte_count) == 0 ||
+        memcmp(refit_native_pixels, refit_adapter_pixels, byte_count) != 0 ||
+        refit_native_pixels[(0 * width + 4) * 4] != 255 ||
+        refit_native_pixels[(0 * width + 3) * 4] != 255 ||
+        refit_native_pixels[(6 * width + 4) * 4] != 0) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && refit_native_pixels[mismatch] == refit_adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: indirect refit CPU trace/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? refit_native_pixels[mismatch] : 0,
+                mismatch < byte_count ? refit_adapter_pixels[mismatch] : 0);
+        fail_with_error("CPU indirect refit trace command failed", adapter_error ?: native_error);
+        return 162;
     }
     return 0;
 }
@@ -19949,6 +20064,88 @@ int main(void) {
                     fail_with_error("Metal 4 CPU instance triangle trace pixel oracle failed",
                                     metal4_instance_feedback_error);
                     return 158;
+                }
+
+                /* Metal 4's indirect descriptor supplies both the instance
+                 * records and the active count through GPU-address ranges.
+                 * The adapter must resolve those ranges to CPU-owned ZPU
+                 * buffers, flatten only the active records, and preserve the
+                 * packed affine transform. */
+                MTLIndirectAccelerationStructureInstanceDescriptor metal4_indirect_data[2] = {0};
+                metal4_indirect_data[0] = metal4_instance_data;
+                uint32_t metal4_indirect_count = 1;
+                id<MTLBuffer> adapter_metal4_indirect_instance_buffer =
+                    [adapter_device newBufferWithBytes:metal4_indirect_data length:sizeof(metal4_indirect_data)
+                                                options:MTLResourceStorageModeShared];
+                id<MTLBuffer> adapter_metal4_indirect_count_buffer =
+                    [adapter_device newBufferWithBytes:&metal4_indirect_count length:sizeof(metal4_indirect_count)
+                                                options:MTLResourceStorageModeShared];
+                MTL4IndirectInstanceAccelerationStructureDescriptor *metal4_indirect_descriptor =
+                    [MTL4IndirectInstanceAccelerationStructureDescriptor new];
+                metal4_indirect_descriptor.instanceDescriptorBuffer = MTL4BufferRangeMake(
+                    adapter_metal4_indirect_instance_buffer.gpuAddress, sizeof(metal4_indirect_data));
+                metal4_indirect_descriptor.instanceDescriptorStride = sizeof(metal4_indirect_data[0]);
+                metal4_indirect_descriptor.maxInstanceCount = 2;
+                metal4_indirect_descriptor.instanceCountBuffer = MTL4BufferRangeMake(
+                    adapter_metal4_indirect_count_buffer.gpuAddress, sizeof(metal4_indirect_count));
+                metal4_indirect_descriptor.instanceDescriptorType =
+                    MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+                MTLAccelerationStructureSizes metal4_indirect_sizes =
+                    [adapter_device accelerationStructureSizesWithDescriptor:metal4_indirect_descriptor];
+                id<MTLAccelerationStructure> adapter_metal4_indirect_acceleration_structure =
+                    [adapter_device newAccelerationStructureWithSize:metal4_indirect_sizes.accelerationStructureSize];
+                id<MTLBuffer> adapter_metal4_indirect_scratch =
+                    [adapter_device newBufferWithLength:metal4_indirect_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                           metal4_indirect_sizes.buildScratchBufferSize
+                                                   options:MTLResourceStorageModeShared];
+                id<MTL4CommandBuffer> metal4_indirect_build_command_buffer = [adapter_device newCommandBuffer];
+                [metal4_indirect_build_command_buffer beginCommandBufferWithAllocator:metal4_ray_allocator];
+                id<MTL4ComputeCommandEncoder> metal4_indirect_build_encoder =
+                    [metal4_indirect_build_command_buffer computeCommandEncoder];
+                [metal4_indirect_build_encoder buildAccelerationStructure:
+                    adapter_metal4_indirect_acceleration_structure descriptor:metal4_indirect_descriptor
+                    scratchBuffer:MTL4BufferRangeMake(adapter_metal4_indirect_scratch.gpuAddress,
+                                                      adapter_metal4_indirect_scratch.length)];
+                [metal4_indirect_build_encoder endEncoding];
+                [metal4_indirect_build_command_buffer endCommandBuffer];
+                id<MTL4CommandBuffer> metal4_indirect_build_buffers[] = {metal4_indirect_build_command_buffer};
+                MTL4CommitOptions *metal4_indirect_options = ZPUMetalCreateCPUCommitOptions();
+                __block NSError *metal4_indirect_feedback_error = nil;
+                [metal4_indirect_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                    metal4_indirect_feedback_error = feedback.error;
+                }];
+                [metal4_ray_queue commit:metal4_indirect_build_buffers count:1 options:metal4_indirect_options];
+
+                id<MTLTexture> adapter_metal4_indirect_texture =
+                    [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+                id<MTLCommandBuffer> adapter_metal4_indirect_command_buffer = [adapter_queue commandBuffer];
+                id<MTLComputeCommandEncoder> adapter_metal4_indirect_encoder =
+                    [adapter_metal4_indirect_command_buffer computeCommandEncoder];
+                [adapter_metal4_indirect_encoder setComputePipelineState:adapter_ray_pipeline];
+                [adapter_metal4_indirect_encoder setAccelerationStructure:
+                    adapter_metal4_indirect_acceleration_structure atBufferIndex:0];
+                [adapter_metal4_indirect_encoder setTexture:adapter_metal4_indirect_texture atIndex:0];
+                [adapter_metal4_indirect_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                             threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+                [adapter_metal4_indirect_encoder endEncoding];
+                [adapter_metal4_indirect_command_buffer commit];
+                [adapter_metal4_indirect_command_buffer waitUntilCompleted];
+                uint8_t adapter_metal4_indirect_pixels[ray_byte_count];
+                [adapter_metal4_indirect_texture getBytes:adapter_metal4_indirect_pixels bytesPerRow:ray_width * 4
+                                               fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+                if (adapter_metal4_indirect_instance_buffer == nil ||
+                    adapter_metal4_indirect_count_buffer == nil || metal4_indirect_descriptor == nil ||
+                    metal4_indirect_sizes.accelerationStructureSize == 0 ||
+                    adapter_metal4_indirect_acceleration_structure == nil ||
+                    adapter_metal4_indirect_scratch == nil || metal4_indirect_build_command_buffer == nil ||
+                    metal4_indirect_build_encoder == nil || metal4_indirect_feedback_error != nil ||
+                    adapter_metal4_indirect_texture == nil || adapter_metal4_indirect_command_buffer == nil ||
+                    adapter_metal4_indirect_encoder == nil ||
+                    adapter_metal4_indirect_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                    memcmp(native_instance_ray_pixels, adapter_metal4_indirect_pixels, ray_byte_count) != 0) {
+                    fail_with_error("Metal 4 CPU indirect instance triangle trace pixel oracle failed",
+                                    metal4_indirect_feedback_error);
+                    return 163;
                 }
             }
         }
