@@ -3874,6 +3874,7 @@ static int test_layered_icb_base_instance_render_against_native(
         {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
         {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
     };
+    const uint16_t indices[] = {0, 1, 2};
     MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
     native_pipeline_descriptor.vertexFunction = native_vertex_function;
     native_pipeline_descriptor.fragmentFunction = native_fragment_function;
@@ -3893,6 +3894,10 @@ static int test_layered_icb_base_instance_render_against_native(
         [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
     id<MTLBuffer> adapter_buffer =
         [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native_index_buffer =
+        [native_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_index_buffer =
+        [adapter_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
     MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
     texture_descriptor.textureType = MTLTextureType2DArray;
     texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -3906,24 +3911,27 @@ static int test_layered_icb_base_instance_render_against_native(
     id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
     id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
     if (native_pipeline == nil || adapter_pipeline == nil || native_buffer == nil || adapter_buffer == nil ||
-        native_texture == nil || adapter_texture == nil) {
+        native_index_buffer == nil || adapter_index_buffer == nil || native_texture == nil || adapter_texture == nil) {
         fail_with_error("layered ICB base-instance resource/pipeline allocation", adapter_error ?: native_error);
         return 226;
     }
 
     MTLIndirectCommandBufferDescriptor *icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
-    icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+    icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
     icb_descriptor.inheritPipelineState = YES;
     icb_descriptor.inheritBuffers = YES;
     icb_descriptor.maxVertexBufferBindCount = 1;
     id<MTLIndirectCommandBuffer> native_icb =
-        [native_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:1 options:0];
+        [native_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:2 options:0];
     id<MTLIndirectCommandBuffer> adapter_icb =
-        [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:1
+        [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:2
                                                         options:MTLResourceStorageModeShared];
     id<MTLIndirectRenderCommand> native_command = [native_icb indirectRenderCommandAtIndex:0];
     id<MTLIndirectRenderCommand> adapter_command = [adapter_icb indirectRenderCommandAtIndex:0];
-    if (native_icb == nil || adapter_icb == nil || native_command == nil || adapter_command == nil) {
+    id<MTLIndirectRenderCommand> native_indexed_command = [native_icb indirectRenderCommandAtIndex:1];
+    id<MTLIndirectRenderCommand> adapter_indexed_command = [adapter_icb indirectRenderCommandAtIndex:1];
+    if (native_icb == nil || adapter_icb == nil || native_command == nil || adapter_command == nil ||
+        native_indexed_command == nil || adapter_indexed_command == nil) {
         fprintf(stderr, "metal-pixel: layered ICB base-instance allocation failed\n");
         return 227;
     }
@@ -3931,6 +3939,12 @@ static int test_layered_icb_base_instance_render_against_native(
                      instanceCount:layers - 1 baseInstance:1];
     [adapter_command drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
                       instanceCount:layers - 1 baseInstance:1];
+    [native_indexed_command drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt16
+                                       indexBuffer:native_index_buffer indexBufferOffset:0
+                                    instanceCount:layers - 1 baseVertex:0 baseInstance:1];
+    [adapter_indexed_command drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt16
+                                        indexBuffer:adapter_index_buffer indexBufferOffset:0
+                                     instanceCount:layers - 1 baseVertex:0 baseInstance:1];
 
     MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
     native_pass.renderTargetArrayLength = layers;
@@ -3959,14 +3973,15 @@ static int test_layered_icb_base_instance_render_against_native(
     [native_encoder setRenderPipelineState:native_pipeline];
     [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
     [native_encoder useResource:native_buffer usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+    [native_encoder useResource:native_index_buffer usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
     [native_encoder useResource:native_icb usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
-    [native_encoder executeCommandsInBuffer:native_icb withRange:NSMakeRange(0, 1)];
+    [native_encoder executeCommandsInBuffer:native_icb withRange:NSMakeRange(0, 2)];
     [native_encoder endEncoding];
     [adapter_encoder setViewport:viewport];
     [adapter_encoder setScissorRect:scissor];
     [adapter_encoder setRenderPipelineState:adapter_pipeline];
     [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
-    [adapter_encoder executeCommandsInBuffer:adapter_icb withRange:NSMakeRange(0, 1)];
+    [adapter_encoder executeCommandsInBuffer:adapter_icb withRange:NSMakeRange(0, 2)];
     [adapter_encoder endEncoding];
     [native_command_buffer commit];
     [adapter_command_buffer commit];
