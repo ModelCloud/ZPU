@@ -17862,6 +17862,7 @@ int main(void) {
          * both the upper-left (0,0) origin and clipped edge tiles are tested
          * at every pixel. */
         BOOL adapter_mtl4_tile_exact = YES;
+        BOOL adapter_mtl4_tile_invalid_lod_rejected = YES;
         NSError *adapter_mtl4_tile_error = nil;
         id<MTLRenderPipelineState> adapter_mtl4_tile_pipeline = nil;
         id<MTLRenderPipelineState> adapter_mtl4_archived_tile_pipeline = nil;
@@ -18028,6 +18029,42 @@ int main(void) {
                                           fromRegion:MTLRegionMake2D(0, 0, 5, 3)
                                          mipmapLevel:0];
             }
+
+            /* Tile-stage sampler LOD clamps are CPU metadata today, but the
+             * public setter still has to preserve Metal's validation
+             * contract. Use a separate command buffer so the negative clamp
+             * cannot contaminate the pixel-exact dispatch above. */
+            MTL4RenderPassDescriptor *invalid_lod_pass = [MTL4RenderPassDescriptor new];
+            invalid_lod_pass.colorAttachments[0].texture = adapter_mtl4_tile_texture;
+            invalid_lod_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            invalid_lod_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTL4CommandBuffer> invalid_lod_command_buffer = [adapter_device newCommandBuffer];
+            if (invalid_lod_pass == nil || invalid_lod_command_buffer == nil) {
+                adapter_mtl4_tile_invalid_lod_rejected = NO;
+            } else {
+                [invalid_lod_command_buffer beginCommandBufferWithAllocator:adapter_mtl4_tile_allocator];
+                id<MTL4RenderCommandEncoder> invalid_lod_encoder =
+                    [invalid_lod_command_buffer renderCommandEncoderWithDescriptor:invalid_lod_pass];
+                if (invalid_lod_encoder == nil || adapter_mtl4_archived_tile_pipeline == nil) {
+                    adapter_mtl4_tile_invalid_lod_rejected = NO;
+                } else {
+                    [invalid_lod_encoder setRenderPipelineState:adapter_mtl4_archived_tile_pipeline];
+                    [(id)invalid_lod_encoder setTileSamplerState:adapter_sampler
+                                                     lodMinClamp:-1.0f
+                                                     lodMaxClamp:4.0f
+                                                          atIndex:0];
+                    [invalid_lod_encoder endEncoding];
+                    [invalid_lod_command_buffer endCommandBuffer];
+                    id<MTL4CommandBuffer> invalid_lod_buffers[] = {invalid_lod_command_buffer};
+                    MTL4CommitOptions *invalid_lod_options = ZPUMetalCreateCPUCommitOptions();
+                    __block NSError *invalid_lod_error = nil;
+                    [invalid_lod_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                        invalid_lod_error = feedback.error;
+                    }];
+                    [adapter_mtl4_tile_queue commit:invalid_lod_buffers count:1 options:invalid_lod_options];
+                    adapter_mtl4_tile_invalid_lod_rejected = invalid_lod_error != nil;
+                }
+            }
             uint8_t expected_tile_pixels[5 * 3 * 4];
             for (NSUInteger y = 0; y < 3; ++y) {
                 for (NSUInteger x = 0; x < 5; ++x) {
@@ -18064,6 +18101,7 @@ int main(void) {
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.width == 2 &&
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.height == 2 &&
                 adapter_mtl4_tile_pipeline.requiredThreadsPerTileThreadgroup.depth == 1 &&
+                adapter_mtl4_tile_invalid_lod_rejected &&
                 memcmp(adapter_mtl4_tile_pixels, expected_tile_pixels,
                        sizeof(expected_tile_pixels)) == 0;
         }

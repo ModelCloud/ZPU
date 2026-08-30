@@ -19158,6 +19158,16 @@ static BOOL zpu_render_stage_record_value(ZPURenderEncoder *encoder, MTLRenderSt
     return YES;
 }
 
+static BOOL zpu_render_stage_lod_clamps_valid(ZPURenderEncoder *encoder,
+                                               float lodMinClamp, float lodMaxClamp) {
+    if (!isfinite(lodMinClamp) || !isfinite(lodMaxClamp) || lodMinClamp < 0.0f ||
+        lodMaxClamp < lodMinClamp) {
+        [encoder->_owner markError];
+        return NO;
+    }
+    return YES;
+}
+
 /* The portable raster ABI consumes vertex slot zero. Metal still permits
  * callers to bind additional, unused vertex slots, however, and those calls
  * must not be accidentally rebased onto slot zero or poison an otherwise
@@ -19752,7 +19762,8 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     }
 }
 - (void)setObjectSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    if (!zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_object, sampler, index)) return;
+    if (!zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_object, sampler, index) ||
+        !zpu_render_stage_lod_clamps_valid(self, lodMinClamp, lodMaxClamp)) return;
     (void)zpu_render_stage_record_value(self, zpu_mtl_render_stage_object, @"samplerLodClamps",
                                         @[ @(lodMinClamp), @(lodMaxClamp) ], index);
 }
@@ -19812,7 +19823,8 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     }
 }
 - (void)setMeshSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(13.0), ios(16.0)) {
-    if (!zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_mesh, sampler, index)) return;
+    if (!zpu_render_stage_record_sampler(self, zpu_mtl_render_stage_mesh, sampler, index) ||
+        !zpu_render_stage_lod_clamps_valid(self, lodMinClamp, lodMaxClamp)) return;
     (void)zpu_render_stage_record_value(self, zpu_mtl_render_stage_mesh, @"samplerLodClamps",
                                         @[ @(lodMinClamp), @(lodMaxClamp) ], index);
 }
@@ -19869,7 +19881,8 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     }
 }
 - (void)setTileSamplerState:(id<MTLSamplerState>)sampler lodMinClamp:(float)lodMinClamp lodMaxClamp:(float)lodMaxClamp atIndex:(NSUInteger)index API_AVAILABLE(macos(11.0), macCatalyst(14.0), ios(11.0), tvos(14.5)) {
-    if (!zpu_render_stage_record_sampler(self, MTLRenderStageTile, sampler, index)) return;
+    if (!zpu_render_stage_record_sampler(self, MTLRenderStageTile, sampler, index) ||
+        !zpu_render_stage_lod_clamps_valid(self, lodMinClamp, lodMaxClamp)) return;
     (void)zpu_render_stage_record_value(self, MTLRenderStageTile, @"samplerLodClamps",
                                         @[ @(lodMinClamp), @(lodMaxClamp) ], index);
 }
