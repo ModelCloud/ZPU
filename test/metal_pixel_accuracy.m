@@ -145,7 +145,19 @@ static const char *const kShaderSource =
     "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; "
     "output[gid] = zpu_cpu_float_to_bfloat16(zpu_cpu_bfloat16_to_float(left[gid]) + "
-    "zpu_cpu_bfloat16_to_float(right[gid])); }\n";
+    "zpu_cpu_bfloat16_to_float(right[gid])); }\n"
+    "kernel void zpu_cpu_ml_add_i4_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; "
+    "uint value = 0; for (uint shift = 0; shift < 8; shift += 4) { "
+    "int l = int((left[gid] >> shift) & 0xfu); int r = int((right[gid] >> shift) & 0xfu); "
+    "if (l >= 8) l -= 16; if (r >= 8) r -= 16; "
+    "value |= uint((l + r) & 0xf) << shift; } output[gid] = uchar(value); }\n"
+    "kernel void zpu_cpu_ml_add_u4_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; "
+    "output[gid] = uchar((uint(left[gid] & 0xfu) + uint(right[gid] & 0xfu)) & 0xfu) | "
+    "uchar(((uint(left[gid] >> 4) + uint(right[gid] >> 4)) & 0xfu) << 4); }\n";
 
 static void fail_with_error(const char *message, NSError *error) {
     if (error != nil) {
@@ -21206,6 +21218,152 @@ int main(void) {
             fail_with_error("Metal 4 CPU packed Int4 identity failed",
                             metal4_ml_int4_identity_error ?: metal4_ml_int4_identity_feedback_error);
             return 171;
+        }
+
+        /* Packed Int4 and UInt4 addition uses the same nibble representation
+         * as tensor copies. Compare each CPU/ZPU result with an independent
+         * native Metal byte-kernel oracle; the adapter itself never dispatches
+         * this work to Apple's command queue. */
+        if (@available(macOS 26.4, iOS 26.4, *)) {
+            const BOOL packed_add_signed[] = {YES, NO};
+            const char *packed_add_names[] = {"zpu_cpu_ml_add_i4", "zpu_cpu_ml_add_u4"};
+            const char *packed_add_oracle_names[] = {
+                "zpu_cpu_ml_add_i4_oracle", "zpu_cpu_ml_add_u4_oracle",
+            };
+            const uint8_t packed_add_left_initial[] = {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc};
+            const uint8_t packed_add_left_committed[] = {0x87, 0x69, 0x4b, 0x2d, 0x0f, 0xe1};
+            const uint8_t packed_add_right_values[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+            const uint8_t packed_add_sentinel[] = {0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa};
+            for (NSUInteger packed_add_index = 0; packed_add_index < 2; ++packed_add_index) {
+                NSError *packed_add_error = nil;
+                MTL4LibraryFunctionDescriptor *packed_add_function_descriptor =
+                    [MTL4LibraryFunctionDescriptor new];
+                packed_add_function_descriptor.library = metal4_ml_identity_library;
+                packed_add_function_descriptor.name =
+                    [NSString stringWithUTF8String:packed_add_names[packed_add_index]];
+                MTL4MachineLearningPipelineDescriptor *packed_add_descriptor =
+                    [MTL4MachineLearningPipelineDescriptor new];
+                packed_add_descriptor.label = packed_add_signed[packed_add_index] ?
+                    @"zpu-cpu-ml-int4-add" : @"zpu-cpu-ml-uint4-add";
+                packed_add_descriptor.machineLearningFunctionDescriptor = packed_add_function_descriptor;
+                [packed_add_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:0];
+                [packed_add_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:1];
+                [packed_add_descriptor setInputDimensions:metal4_ml_identity_dimensions atBufferIndex:2];
+                id<MTL4MachineLearningPipelineState> packed_add_pipeline =
+                    [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                        packed_add_descriptor error:&packed_add_error];
+                MTLTensorDescriptor *packed_add_tensor_descriptor =
+                    [metal4_ml_identity_tensor_descriptor copy];
+                packed_add_tensor_descriptor.dataType = packed_add_signed[packed_add_index] ?
+                    MTLTensorDataTypeInt4 : MTLTensorDataTypeUInt4;
+                id<MTLTensor> packed_add_left =
+                    [adapter_device newTensorWithDescriptor:packed_add_tensor_descriptor
+                                                       error:&packed_add_error];
+                id<MTLTensor> packed_add_right =
+                    [adapter_device newTensorWithDescriptor:packed_add_tensor_descriptor
+                                                       error:&packed_add_error];
+                id<MTLTensor> packed_add_output =
+                    [adapter_device newTensorWithDescriptor:packed_add_tensor_descriptor
+                                                       error:&packed_add_error];
+                [packed_add_left replaceSliceOrigin:metal4_ml_identity_zero
+                                      sliceDimensions:metal4_ml_identity_dimensions
+                                            withBytes:packed_add_left_initial
+                                              strides:metal4_ml_identity_packed_strides];
+                [packed_add_right replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:packed_add_right_values
+                                               strides:metal4_ml_identity_packed_strides];
+                [packed_add_output replaceSliceOrigin:metal4_ml_identity_zero
+                                        sliceDimensions:metal4_ml_identity_dimensions
+                                              withBytes:packed_add_sentinel
+                                                strides:metal4_ml_identity_packed_strides];
+                MTL4ArgumentTableDescriptor *packed_add_table_descriptor =
+                    [MTL4ArgumentTableDescriptor new];
+                packed_add_table_descriptor.maxBufferBindCount = 3;
+                id<MTL4ArgumentTable> packed_add_table =
+                    [adapter_device newArgumentTableWithDescriptor:packed_add_table_descriptor
+                                                               error:&packed_add_error];
+                [packed_add_table setResource:packed_add_left.gpuResourceID atBufferIndex:0];
+                [packed_add_table setResource:packed_add_right.gpuResourceID atBufferIndex:1];
+                [packed_add_table setResource:packed_add_output.gpuResourceID atBufferIndex:2];
+                id<MTL4CommandBuffer> packed_add_command_buffer = [adapter_device newCommandBuffer];
+                [packed_add_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+                id<MTL4MachineLearningCommandEncoder> packed_add_encoder =
+                    [packed_add_command_buffer machineLearningCommandEncoder];
+                [packed_add_encoder setPipelineState:packed_add_pipeline];
+                [packed_add_encoder setArgumentTable:packed_add_table];
+                [packed_add_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+                [packed_add_left replaceSliceOrigin:metal4_ml_identity_zero
+                                      sliceDimensions:metal4_ml_identity_dimensions
+                                            withBytes:packed_add_left_committed
+                                              strides:metal4_ml_identity_packed_strides];
+                [packed_add_encoder endEncoding];
+                [packed_add_command_buffer endCommandBuffer];
+                id<MTL4CommandBuffer> packed_add_command_buffers[] = {packed_add_command_buffer};
+                MTL4CommitOptions *packed_add_options = ZPUMetalCreateCPUCommitOptions();
+                __block NSError *packed_add_feedback_error = nil;
+                [packed_add_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                    packed_add_feedback_error = feedback.error;
+                }];
+                [metal4_queue commit:packed_add_command_buffers count:1 options:packed_add_options];
+                uint8_t packed_add_values[sizeof(packed_add_sentinel)] = {0};
+                [packed_add_output getBytes:packed_add_values
+                                    strides:metal4_ml_identity_packed_strides
+                           fromSliceOrigin:metal4_ml_identity_zero
+                           sliceDimensions:metal4_ml_identity_dimensions];
+
+                NSError *packed_add_native_error = nil;
+                id<MTLFunction> packed_add_native_function =
+                    [library newFunctionWithName:[NSString stringWithUTF8String:
+                        packed_add_oracle_names[packed_add_index]]];
+                id<MTLComputePipelineState> packed_add_native_pipeline =
+                    [device newComputePipelineStateWithFunction:packed_add_native_function
+                                                           error:&packed_add_native_error];
+                id<MTLBuffer> packed_add_native_left =
+                    [device newBufferWithBytes:packed_add_left_committed
+                                        length:sizeof(packed_add_left_committed)
+                                       options:MTLResourceStorageModeShared];
+                id<MTLBuffer> packed_add_native_right =
+                    [device newBufferWithBytes:packed_add_right_values
+                                        length:sizeof(packed_add_right_values)
+                                       options:MTLResourceStorageModeShared];
+                id<MTLBuffer> packed_add_native_output =
+                    [device newBufferWithLength:sizeof(packed_add_values)
+                                         options:MTLResourceStorageModeShared];
+                id<MTLCommandBuffer> packed_add_native_command_buffer = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> packed_add_native_encoder =
+                    [packed_add_native_command_buffer computeCommandEncoder];
+                [packed_add_native_encoder setComputePipelineState:packed_add_native_pipeline];
+                [packed_add_native_encoder setBuffer:packed_add_native_left offset:0 atIndex:0];
+                [packed_add_native_encoder setBuffer:packed_add_native_right offset:0 atIndex:1];
+                [packed_add_native_encoder setBuffer:packed_add_native_output offset:0 atIndex:2];
+                [packed_add_native_encoder dispatchThreads:MTLSizeMake(6, 1, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                [packed_add_native_encoder endEncoding];
+                [packed_add_native_command_buffer commit];
+                [packed_add_native_command_buffer waitUntilCompleted];
+                const uint8_t *packed_add_native_values =
+                    (const uint8_t *)packed_add_native_output.contents;
+                id<MTLTensorBinding> packed_add_binding = packed_add_pipeline.reflection.bindings.count > 0 ?
+                    (id<MTLTensorBinding>)packed_add_pipeline.reflection.bindings[0] : nil;
+                if (packed_add_pipeline == nil || packed_add_error != nil ||
+                    packed_add_left == nil || packed_add_right == nil || packed_add_output == nil ||
+                    packed_add_table == nil || packed_add_encoder == nil ||
+                    packed_add_command_buffer == nil || packed_add_feedback_error != nil ||
+                    packed_add_binding == nil || packed_add_binding.tensorDataType !=
+                        (packed_add_signed[packed_add_index] ? MTLTensorDataTypeInt4 : MTLTensorDataTypeUInt4) ||
+                    packed_add_binding.indexType != MTLDataTypeInt ||
+                    packed_add_native_function == nil || packed_add_native_pipeline == nil ||
+                    packed_add_native_error != nil || packed_add_native_command_buffer.status !=
+                        MTLCommandBufferStatusCompleted || packed_add_native_values == NULL ||
+                    memcmp(packed_add_values, packed_add_native_values, sizeof(packed_add_values)) != 0) {
+                    fail_with_error(packed_add_signed[packed_add_index] ?
+                                    "Metal 4 CPU packed Int4 add profile failed" :
+                                    "Metal 4 CPU packed UInt4 add profile failed",
+                                    packed_add_error ?: packed_add_feedback_error ?: packed_add_native_error);
+                    return 172 + (int)packed_add_index;
+                }
+            }
         }
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native

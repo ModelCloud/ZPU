@@ -317,7 +317,9 @@ triangle path:
   elementwise Float16 tensor addition through the same ZPU-owned storage path,
   while the registered `zpu_cpu_ml_add_bf16` profile performs deferred
   elementwise BFloat16 tensor addition through explicit CPU widening and
-  round-to-nearest-even packing on the same ZPU-owned storage path. Arbitrary ML graphs
+  round-to-nearest-even packing on the same ZPU-owned storage path; the
+  registered `zpu_cpu_ml_add_i4` and `zpu_cpu_ml_add_u4` profiles perform
+  deferred packed low/high-nibble addition with modulo-16 results. Arbitrary ML graphs
   and arbitrary-MSL compiler requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
