@@ -8489,6 +8489,82 @@ test "CPU layered triangle patches map base instances on the top-left grid" {
     }
 }
 
+test "CPU layered triangle patches preserve per-layer depth and stencil" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const far_vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.75, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+    };
+    const near_vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.25, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+    };
+    const factors = [_]u16{
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+        0x3c00, 0x3c00, 0x3c00, 0x3c00,
+    };
+    const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(factors)), @ptrCast(&factors));
+    defer destroyBuffer(factor_buffer);
+    var colors: [3]*Texture = undefined;
+    var depths: [3]*Texture = undefined;
+    var stencils: [3]*Texture = undefined;
+    for (0..colors.len) |index| {
+        colors[index] = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        depths[index] = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.depth32_float));
+        stencils[index] = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.stencil8));
+    }
+    defer for (0..colors.len) |index| {
+        destroyTexture(colors[index]);
+        destroyTexture(depths[index]);
+        destroyTexture(stencils[index]);
+    };
+    const pass = abi.RenderPassDescriptor{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+        .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+    };
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, colors[0], pass);
+    try encoder.setRenderTargetArray(&colors, colors.len);
+    try encoder.setDepthTextureArray(&depths, depths.len);
+    try encoder.setStencilTextureArray(&stencils, stencils.len, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 0);
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less), true);
+    try encoder.setStencilState(true, @intFromEnum(abi.CompareFunction.always), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.keep), @intFromEnum(abi.StencilOperation.replace), 0xff, 0xff);
+    try encoder.setStencilReference(7, 7);
+    try encoder.setViewport(.{ .origin_x = 1, .origin_y = 1, .width = 3, .height = 2, .znear = 0, .zfar = 1 });
+    try encoder.setScissorRect(.{ .x = 1, .y = 1, .width = 3, .height = 2 });
+    try encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf([4]u16));
+    try encoder.setVertexBytes(@ptrCast(&far_vertices), @sizeOf(@TypeOf(far_vertices)), 0);
+    try encoder.drawPatches(1, 3, 0, 1, null, 0, 2, 1, .none, null, 0);
+    try encoder.setVertexBytes(@ptrCast(&near_vertices), @sizeOf(@TypeOf(near_vertices)), 0);
+    try encoder.drawPatches(1, 3, 0, 1, null, 0, 2, 1, .none, null, 0);
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    const in_bounds_pixel = (1 * 5 + 2) * 4;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 255, 255 }, colors[0].bytes[in_bounds_pixel .. in_bounds_pixel + 4]);
+    for (colors[1..]) |color| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 255, 0, 255 }, color.bytes[in_bounds_pixel .. in_bounds_pixel + 4]);
+    }
+    const clear_depth_value: f32 = 1.0;
+    const clear_depth = std.mem.asBytes(&clear_depth_value);
+    const near_depth_value: f32 = 0.25;
+    const near_depth = std.mem.asBytes(&near_depth_value);
+    const in_bounds_depth = in_bounds_pixel;
+    try std.testing.expectEqualSlices(u8, clear_depth, depths[0].bytes[in_bounds_depth .. in_bounds_depth + 4]);
+    for (depths[1..]) |depth| try std.testing.expectEqualSlices(u8, near_depth, depth.bytes[in_bounds_depth .. in_bounds_depth + 4]);
+    const in_bounds_stencil = 1 * 5 + 2;
+    try std.testing.expectEqual(@as(u8, 0), stencils[0].bytes[in_bounds_stencil]);
+    for (stencils[1..]) |stencil| try std.testing.expectEqual(@as(u8, 7), stencil.bytes[in_bounds_stencil]);
+}
+
 test "CPU layered depth and stencil attachments stay per-layer" {
     const device = try createDevice();
     defer destroyDevice(device);
