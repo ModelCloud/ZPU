@@ -22059,9 +22059,12 @@ int main(void) {
          * establish the exact four-lane byte oracle. A non-square grid and a
          * 3x2 threadgroup make both the upper-left row origin and the
          * out-of-range threadgroup tail observable. */
-        for (NSUInteger format_index = 0; format_index < 2; ++format_index) {
-            const MTLPixelFormat format = compute_rgba32_formats[format_index];
-            const NSUInteger integer_byte_count = (NSUInteger)width * height * 16;
+        for (NSUInteger format_index = 0;
+             format_index < sizeof(compute_integer_formats) / sizeof(compute_integer_formats[0]);
+             ++format_index) {
+            const MTLPixelFormat format = compute_integer_formats[format_index].format;
+            const NSUInteger bytes_per_pixel = compute_integer_formats[format_index].bytes_per_pixel;
+            const NSUInteger integer_byte_count = (NSUInteger)width * height * bytes_per_pixel;
             MTLTextureDescriptor *native_integer_descriptor =
                 [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                                     width:width height:height mipmapped:NO];
@@ -22073,7 +22076,7 @@ int main(void) {
             NSError *native_integer_error = nil;
             NSError *adapter_integer_error = nil;
             id<MTLFunction> native_integer_function =
-                [library newFunctionWithName:compute_rgba32_names[format_index]];
+                [library newFunctionWithName:compute_integer_formats[format_index].name];
             id<MTLComputePipelineState> native_integer_pipeline =
                 [device newComputePipelineStateWithFunction:native_integer_function error:&native_integer_error];
             id<MTLCommandBuffer> native_integer_command_buffer = [queue commandBuffer];
@@ -22090,7 +22093,7 @@ int main(void) {
             MTL4LibraryFunctionDescriptor *integer_function_descriptor =
                 [MTL4LibraryFunctionDescriptor new];
             integer_function_descriptor.library = adapter_mtl4_library;
-            integer_function_descriptor.name = compute_rgba32_names[format_index];
+            integer_function_descriptor.name = compute_integer_formats[format_index].name;
             MTL4ComputePipelineDescriptor *integer_pipeline_descriptor =
                 [MTL4ComputePipelineDescriptor new];
             integer_pipeline_descriptor.computeFunctionDescriptor = integer_function_descriptor;
@@ -22134,13 +22137,13 @@ int main(void) {
             memset(adapter_integer_bytes, 0, sizeof(adapter_integer_bytes));
             if (native_integer_texture != nil) {
                 [native_integer_texture getBytes:native_integer_bytes
-                                       bytesPerRow:(NSUInteger)width * 16
+                                       bytesPerRow:(NSUInteger)width * bytes_per_pixel
                                         fromRegion:MTLRegionMake2D(0, 0, width, height)
                                        mipmapLevel:0];
             }
             if (adapter_integer_texture != nil) {
                 [adapter_integer_texture getBytes:adapter_integer_bytes
-                                        bytesPerRow:(NSUInteger)width * 16
+                                        bytesPerRow:(NSUInteger)width * bytes_per_pixel
                                          fromRegion:MTLRegionMake2D(0, 0, width, height)
                                         mipmapLevel:0];
             }
