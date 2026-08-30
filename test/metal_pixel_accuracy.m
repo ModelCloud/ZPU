@@ -3864,6 +3864,146 @@ static int test_layered_indexed_base_instance_render_against_native(
     return 0;
 }
 
+static int test_layered_icb_base_instance_render_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    enum { width = 9, height = 7, layers = 4, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.78f, -0.43f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.21f,  0.84f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+    };
+    MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+    native_pipeline_descriptor.vertexFunction = native_vertex_function;
+    native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+    native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_pipeline_descriptor.supportIndirectCommandBuffers = YES;
+    MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
+    adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+    adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
+    id<MTLBuffer> native_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
+    texture_descriptor.textureType = MTLTextureType2DArray;
+    texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    texture_descriptor.width = width;
+    texture_descriptor.height = height;
+    texture_descriptor.arrayLength = layers;
+    texture_descriptor.mipmapLevelCount = 1;
+    texture_descriptor.sampleCount = 1;
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    if (native_pipeline == nil || adapter_pipeline == nil || native_buffer == nil || adapter_buffer == nil ||
+        native_texture == nil || adapter_texture == nil) {
+        fail_with_error("layered ICB base-instance resource/pipeline allocation", adapter_error ?: native_error);
+        return 226;
+    }
+
+    MTLIndirectCommandBufferDescriptor *icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+    icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+    icb_descriptor.inheritPipelineState = YES;
+    icb_descriptor.inheritBuffers = YES;
+    icb_descriptor.maxVertexBufferBindCount = 1;
+    id<MTLIndirectCommandBuffer> native_icb =
+        [native_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:1 options:0];
+    id<MTLIndirectCommandBuffer> adapter_icb =
+        [adapter_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:1
+                                                        options:MTLResourceStorageModeShared];
+    id<MTLIndirectRenderCommand> native_command = [native_icb indirectRenderCommandAtIndex:0];
+    id<MTLIndirectRenderCommand> adapter_command = [adapter_icb indirectRenderCommandAtIndex:0];
+    if (native_icb == nil || adapter_icb == nil || native_command == nil || adapter_command == nil) {
+        fprintf(stderr, "metal-pixel: layered ICB base-instance allocation failed\n");
+        return 227;
+    }
+    [native_command drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                     instanceCount:layers - 1 baseInstance:1];
+    [adapter_command drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                      instanceCount:layers - 1 baseInstance:1];
+
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.renderTargetArrayLength = layers;
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+    MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    id<MTLRenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    if (native_encoder == nil || adapter_encoder == nil) {
+        fprintf(stderr, "metal-pixel: layered ICB base-instance encoder allocation failed\n");
+        return 228;
+    }
+    const MTLViewport viewport = {1.0, 1.0, width - 2.0, height - 2.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {1, 1, width - 2, height - 2};
+    [native_encoder setViewport:viewport];
+    [native_encoder setScissorRect:scissor];
+    [native_encoder setRenderPipelineState:native_pipeline];
+    [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+    [native_encoder useResource:native_buffer usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+    [native_encoder useResource:native_icb usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+    [native_encoder executeCommandsInBuffer:native_icb withRange:NSMakeRange(0, 1)];
+    [native_encoder endEncoding];
+    [adapter_encoder setViewport:viewport];
+    [adapter_encoder setScissorRect:scissor];
+    [adapter_encoder setRenderPipelineState:adapter_pipeline];
+    [adapter_encoder setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+    [adapter_encoder executeCommandsInBuffer:adapter_icb withRange:NSMakeRange(0, 1)];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+
+    uint8_t native_pixels[layers][max_byte_count] = {{0}};
+    uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+    for (NSUInteger layer = 0; layer < layers; ++layer) {
+        [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                     fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                      fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < max_byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: layered ICB base-instance slice %zu mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                    layer, mismatch,
+                    mismatch < max_byte_count ? native_pixels[layer][mismatch] : 0,
+                    mismatch < max_byte_count ? adapter_pixels[layer][mismatch] : 0,
+                    (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+            fail_with_error("native layered ICB base-instance error", native_command_buffer.error);
+            fail_with_error("adapter layered ICB base-instance error", adapter_command_buffer.error);
+            return 229;
+        }
+    }
+    if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels[0], native_pixels[1], max_byte_count) == 0 ||
+        memcmp(native_pixels[1], native_pixels[2], max_byte_count) != 0 ||
+        memcmp(native_pixels[2], native_pixels[3], max_byte_count) != 0) {
+        fprintf(stderr, "metal-pixel: layered ICB base-instance routing failed\n");
+        return 230;
+    }
+    return 0;
+}
+
 static int test_layered_depth_stencil_render_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -6514,6 +6654,10 @@ int main(void) {
             device, adapter_device, layered_vertex_function, layered_fragment_function,
             adapter_layered_vertex_function, adapter_layered_fragment_function);
         if (layered_indexed_base_instance_result != 0) return layered_indexed_base_instance_result;
+        const int layered_icb_base_instance_result = test_layered_icb_base_instance_render_against_native(
+            device, adapter_device, layered_vertex_function, layered_fragment_function,
+            adapter_layered_vertex_function, adapter_layered_fragment_function);
+        if (layered_icb_base_instance_result != 0) return layered_icb_base_instance_result;
         const int layered_depth_stencil_result = test_layered_depth_stencil_render_against_native(
             device, adapter_device, layered_vertex_function, layered_fragment_function,
             adapter_layered_vertex_function, adapter_layered_fragment_function);
