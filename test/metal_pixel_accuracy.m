@@ -24751,6 +24751,8 @@ int main(void) {
             [adapter_device newHeapWithDescriptor:adapter_sparse_texture_wide_heap_descriptor];
         id<MTLTexture> adapter_sparse_texture_wide_mapped =
             [adapter_sparse_texture_wide_heap newTextureWithDescriptor:adapter_sparse_texture_wide_tail_descriptor];
+        id<MTLTexture> adapter_sparse_texture_wide_copy =
+            [adapter_sparse_texture_wide_heap newTextureWithDescriptor:adapter_sparse_texture_wide_tail_descriptor];
         id<MTLTexture> adapter_sparse_texture_tall_tail =
             [adapter_sparse_texture_wide_heap newTextureWithDescriptor:native_sparse_texture_tall_tail_descriptor];
         MTLTextureDescriptor *native_sparse_texture_3d_descriptor = [MTLTextureDescriptor new];
@@ -24894,6 +24896,37 @@ int main(void) {
             adapter_sparse_texture_wide_mapped != nil && sparse_texture_wide_tail_level == 0 &&
             memcmp(sparse_texture_wide_output.bytes, sparse_texture_wide_input.bytes,
                    sparse_texture_wide_input.length) == 0;
+        /* Tail-copy validation follows the SDK's coordinate rule too: X and
+         * Z origins remain meaningful, while only destination Y is fixed at
+         * zero. The packed tail itself is copied as one mapping. */
+        id<MTL4CommandQueue> sparse_texture_wide_copy_queue = [adapter_device newMTL4CommandQueue];
+        MTL4CopySparseTextureMappingOperation sparse_texture_wide_copy_operation = {
+            .sourceRegion = MTLRegionMake2D(1, 0, 1, 1),
+            .sourceLevel = sparse_texture_wide_tail_level,
+            .sourceSlice = 0,
+            .destinationOrigin = MTLOriginMake(1, 0, 0),
+            .destinationLevel = sparse_texture_wide_tail_level,
+            .destinationSlice = 0,
+        };
+        [sparse_texture_wide_copy_queue copyTextureMappingsFromTexture:adapter_sparse_texture_wide_mapped
+                                                               toTexture:adapter_sparse_texture_wide_copy
+                                                             operations:&sparse_texture_wide_copy_operation count:1];
+        NSMutableData *sparse_texture_wide_copy_output =
+            [NSMutableData dataWithLength:sparse_texture_wide_input.length];
+        if (adapter_sparse_texture_wide_copy != nil) {
+            [adapter_sparse_texture_wide_copy getBytes:sparse_texture_wide_copy_output.mutableBytes
+                                           bytesPerRow:1024 * 4
+                                            fromRegion:MTLRegionMake2D(0, 0, 1024, 64)
+                                           mipmapLevel:sparse_texture_wide_tail_level];
+        }
+        BOOL sparse_texture_wide_copy_exact =
+            sparse_texture_wide_copy_queue != nil && adapter_sparse_texture_wide_copy != nil &&
+            memcmp(sparse_texture_wide_copy_output.bytes, sparse_texture_wide_input.bytes,
+                   sparse_texture_wide_input.length) == 0;
+        if (!sparse_texture_wide_copy_exact) {
+            fprintf(stderr, "metal-pixel: nonzero-origin sparse texture tail copy failed\n");
+            return 184;
+        }
         /* The same all-or-nothing contract applies to packed texture tails.
          * The first entry would unmap the complete tail; the second uses an
          * out-of-range tile coordinate. If preflight is missing, the level-0
@@ -25039,7 +25072,9 @@ int main(void) {
             adapter_sparse_texture_3d_tail.tailSizeInBytes == sparse_page_bytes * 3;
         MTL4UpdateSparseTextureMappingOperation adapter_sparse_texture_3d_tail_map = {
             .mode = MTLSparseTextureMappingModeMap,
-            .textureRegion = MTLRegionMake3D(0, 0, 0, 1, 1, 1),
+            /* The SDK contract fixes only the first-tail Y row. A nonzero
+             * Z origin must still map the complete packed tail. */
+            .textureRegion = MTLRegionMake3D(0, 0, 1, 1, 1, 1),
             .heapOffset = 1,
             .textureLevel = 1,
             .textureSlice = 0,
@@ -25171,6 +25206,7 @@ int main(void) {
             adapter_sparse_texture_wide_tail.firstMipmapInTail == native_sparse_texture_wide_tail.firstMipmapInTail &&
             adapter_sparse_texture_wide_tail.tailSizeInBytes == native_sparse_texture_wide_tail.tailSizeInBytes &&
             adapter_sparse_texture_wide_tail.tailSizeInBytes == sparse_page_bytes * 7 &&
+            sparse_texture_wide_copy_exact &&
             sparse_texture_wide_tail_exact && sparse_texture_tall_tail_exact &&
             sparse_texture_3d_exact && sparse_texture_array_tail_exact;
         for (NSUInteger level = sparse_texture_tail_level;

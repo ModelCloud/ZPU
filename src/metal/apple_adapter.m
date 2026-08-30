@@ -3822,15 +3822,21 @@ static BOOL zpu_sparse_texture_tail_level_range(ZPUTexture *texture, NSUInteger 
 static BOOL zpu_sparse_texture_tail_region_valid(ZPUTexture *texture, NSUInteger level,
                                                  NSUInteger slice, MTLRegion region) {
     if (texture == nil || level != texture->_sparseFirstMipmapInTail ||
-        region.origin.y != 0 || region.size.height != 1 || region.origin.z != 0 ||
-        region.size.depth != 1 || !zpu_region_fits(region)) return NO;
+        region.origin.y != 0 || region.size.height != 1 || !zpu_region_fits(region)) return NO;
     NSUInteger tileCountX = 0;
     NSUInteger tileCountY = 0;
     NSUInteger tileCountZ = 0;
-    return zpu_sparse_texture_tail_level_range(texture, level, slice, &(NSUInteger){0}, &(NSUInteger){0}) &&
-        zpu_sparse_texture_tile_grid(texture, level, &tileCountX, &tileCountY, &tileCountZ) &&
-        tileCountZ != 0 && region.size.width != 0 &&
-        region.origin.x <= tileCountX && region.size.width <= tileCountX - region.origin.x;
+    if (!zpu_sparse_texture_tail_level_range(texture, level, slice, &(NSUInteger){0}, &(NSUInteger){0}) ||
+        !zpu_sparse_texture_tile_grid(texture, level, &tileCountX, &tileCountY, &tileCountZ) ||
+        tileCountZ == 0 || region.size.width == 0 ||
+        region.origin.x > tileCountX || region.size.width > tileCountX - region.origin.x ||
+        region.origin.y > tileCountY || region.size.height > tileCountY - region.origin.y ||
+        region.origin.z > tileCountZ || region.size.depth > tileCountZ - region.origin.z) return NO;
+    /* Array and non-array 1D/2D textures have a single Z tile. A 3D tail
+     * may select any Z slice of the first-tail level; Metal's contract only
+     * fixes Y to the first row, it does not reset the Z origin. */
+    return zpu_texture_type_is_3d(texture->_textureType) ||
+        (region.origin.z == 0 && region.size.depth == 1);
 }
 
 static BOOL zpu_sparse_texture_mapping_region_valid(ZPUTexture *texture, NSUInteger level,
@@ -4585,10 +4591,13 @@ static BOOL zpu_sparse_texture_tail_copy_compatible(ZPUTexture *source, ZPUTextu
         source->_sparseTailBytes != destination->_sparseTailBytes ||
         sourceLevel != source->_sparseFirstMipmapInTail ||
         destinationLevel != destination->_sparseFirstMipmapInTail ||
-        destinationOrigin.x != 0 || destinationOrigin.y != 0 || destinationOrigin.z != 0 ||
+        destinationOrigin.y != 0 ||
+        destinationOrigin.x > NSUIntegerMax - sourceRegion.size.width ||
+        destinationOrigin.z > NSUIntegerMax - sourceRegion.size.depth ||
         !zpu_sparse_texture_tail_region_valid(source, sourceLevel, sourceSlice, sourceRegion) ||
         !zpu_sparse_texture_tail_region_valid(destination, destinationLevel, destinationSlice,
-                                               MTLRegionMake2D(0, 0, 1, 1))) return NO;
+            MTLRegionMake3D(destinationOrigin.x, 0, destinationOrigin.z,
+                            sourceRegion.size.width, 1, sourceRegion.size.depth))) return NO;
     for (NSUInteger level = source->_sparseFirstMipmapInTail;
          level < source->_mipmapTextures.count; ++level) {
         NSUInteger sourceOffset = 0;
