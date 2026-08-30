@@ -470,10 +470,7 @@ const MeshCommand = struct {
     threads_per_object_threadgroup: abi.Size,
     threads_per_mesh_threadgroup: abi.Size,
     color_attachment_map: [8]u8,
-    // Metal scissor coordinates are attachment-global and top-left-origin.
-    // Keep this state with the deferred command so later encoder mutations
-    // cannot rebase or widen the mesh coverage at commit time.
-    scissor: abi.ScissorRect,
+    options: raster3d.DrawOptions,
     indirect_buffer: ?*Buffer = null,
     indirect_buffer_offset: usize = 0,
 };
@@ -1630,18 +1627,28 @@ pub const CommandBuffer = struct {
                 var target = output_texture.asTarget();
                 const width = @min(@as(usize, target.width), @as(usize, resolved_mesh.threads_per_grid.width));
                 const height = @min(@as(usize, target.height), @as(usize, resolved_mesh.threads_per_grid.height));
-                const x0 = @min(@as(usize, resolved_mesh.scissor.x), width);
-                const y0 = @min(@as(usize, resolved_mesh.scissor.y), height);
-                const x1 = @min(x0 +| @as(usize, resolved_mesh.scissor.width), width);
-                const y1 = @min(y0 +| @as(usize, resolved_mesh.scissor.height), height);
+                // Metal scissor coordinates are attachment-global and
+                // top-left-origin; the complete options snapshot prevents
+                // later encoder mutations from rebasing this command.
+                const x0 = @min(@as(usize, resolved_mesh.options.scissor.x), width);
+                const y0 = @min(@as(usize, resolved_mesh.options.scissor.y), height);
+                const x1 = @min(x0 +| @as(usize, resolved_mesh.options.scissor.width), width);
+                const y1 = @min(y0 +| @as(usize, resolved_mesh.options.scissor.height), height);
+                var mesh_options = resolved_mesh.options;
+                // The bounded profile has one logical output. Its selected
+                // physical attachment is already the target passed here;
+                // normalize only the helper's local output map while
+                // retaining depth/stencil/blend/write-mask state.
+                mesh_options.write_extra_targets = false;
+                mesh_options.color_attachment_map[0] = 0;
                 for (y0..y1) |y| {
                     for (x0..x1) |x| {
-                        target.storeColor(x, y, .{
+                        _ = raster3d.writePoint(&target, active_depth, active_stencil, x, y, 0.5, .{
                             (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
                             (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
                             0.25,
                             1.0,
-                        });
+                        }, mesh_options);
                     }
                 }
             },
@@ -3397,7 +3404,7 @@ pub const RenderEncoder = struct {
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
-            .scissor = self.scissor,
+            .options = self.options(),
         } });
     }
 
@@ -3449,7 +3456,7 @@ pub const RenderEncoder = struct {
             .threads_per_object_threadgroup = threads_per_object_threadgroup,
             .threads_per_mesh_threadgroup = threads_per_mesh_threadgroup,
             .color_attachment_map = self.color_attachment_map,
-            .scissor = self.scissor,
+            .options = self.options(),
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
         } });
@@ -7677,6 +7684,73 @@ test "CPU mesh scissor keeps the Apple top-left grid origin" {
     }
     try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
     try std.testing.expectEqualSlices(u8, &expected, texture.bytes);
+}
+
+test "CPU mesh dispatch applies depth and stencil tests" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const depth = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.depth32_float));
+    defer destroyTexture(depth);
+    const stencil = try createTexture(device, 2, 2, @intFromEnum(abi.PixelFormat.stencil8));
+    defer destroyTexture(stencil);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{
+        .color = .{ .load_action = .clear, .store_action = .store },
+        .depth = .{ .load_action = .clear, .store_action = .store, .clear_depth = 1 },
+    });
+    try encoder.setDepthTexture(depth);
+    try encoder.setStencilTexture(stencil, @intFromEnum(abi.LoadAction.clear), @intFromEnum(abi.StoreAction.store), 0);
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.less), true);
+    try encoder.setStencilState(
+        true,
+        @intFromEnum(abi.CompareFunction.always),
+        @intFromEnum(abi.StencilOperation.keep),
+        @intFromEnum(abi.StencilOperation.keep),
+        @intFromEnum(abi.StencilOperation.replace),
+        0xff,
+        0xff,
+    );
+    try encoder.setStencilReference(7, 7);
+    try encoder.drawMeshThreads(
+        1,
+        .{ .width = 2, .height = 2, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+    );
+
+    // Reject the second pass by depth and use depth-failure stencil op to
+    // prove that mesh pixels share the ordinary fixed-function path.
+    try encoder.setDepthCompareFunction(@intFromEnum(abi.CompareFunction.never), true);
+    try encoder.setStencilState(
+        true,
+        @intFromEnum(abi.CompareFunction.always),
+        @intFromEnum(abi.StencilOperation.keep),
+        @intFromEnum(abi.StencilOperation.increment_clamp),
+        @intFromEnum(abi.StencilOperation.keep),
+        0xff,
+        0xff,
+    );
+    try encoder.drawMeshThreads(
+        1,
+        .{ .width = 2, .height = 2, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+        .{ .width = 1, .height = 1, .depth = 1 },
+    );
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+    try command_buffer.commit();
+
+    const depth_value: f32 = 0.5;
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&depth_value), depth.bytes[0..@sizeOf(f32)]);
+    try std.testing.expectEqual(@as(u8, 8), stencil.bytes[0]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 32, 32, 64, 255 }, color.bytes[0..4]);
 }
 
 test "CPU triangle patches use factor-one tessellation and preserve raster pixels" {

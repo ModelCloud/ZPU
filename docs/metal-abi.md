@@ -289,7 +289,8 @@ triangle path:
   registered `zpu_cpu_mesh_gradient_rgba8` plus
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
   CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,
-  clips it with the recorded scissor rectangle, and supports contiguous
+  clips it with the recorded scissor rectangle, applies fixed profile depth
+  0.5 through ZPU depth/stencil/color-write state, and supports contiguous
   RGBA8/BGRA8 logical attachments through the opted-in color map; the registered
   `zpu_cpu_tessellated_triangle_vertex` plus
   `zpu_cpu_tessellated_triangle_fragment` profile accepts factor-one triangle

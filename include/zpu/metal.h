@@ -419,7 +419,8 @@ enum {
 /* Mesh kernels are explicit CPU/ZPU operations. They are not MSL and do not
  * invoke Apple's Metal mesh encoder. The bounded profile emits one logical
  * pixel per mesh-grid thread in the upper-left-origin render target, clipped
- * by the recorded attachment-global scissor rectangle. */
+ * by the recorded attachment-global scissor rectangle, at fixed profile
+ * depth 0.5 through the ordinary depth/stencil/color-write path. */
 typedef uint8_t zpu_metal_mesh_kernel;
 enum {
     ZPU_METAL_MESH_FILL_GRADIENT_RGBA8 = 1,

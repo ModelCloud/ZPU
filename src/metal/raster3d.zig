@@ -1540,6 +1540,27 @@ fn writePixel(job: *Job, x: usize, y: usize, z: f32, depth_adjust: f32, color: [
     stats.color_writes += color_writes;
 }
 
+/// Write one CPU-generated fragment through the same fixed-function path as
+/// ordinary rasterized primitives. The mesh profile uses this entry point
+/// when it needs depth, stencil, blending, or write-mask semantics;
+/// coordinates remain attachment-global and are never rebased.
+pub fn writePoint(target: *Target, depth: ?[]f32, stencil: ?[]u8, x: usize, y: usize, z: f32, color: [4]f32, options: DrawOptions) Stats {
+    var job = Job{
+        .target = target,
+        .extra_targets = &.{},
+        .sample_texture = null,
+        .sample_mipmaps = &.{},
+        .depth = depth,
+        .stencil = stencil,
+        .vertices = &.{},
+        .primitive = .point,
+        .options = options,
+    };
+    var stats: Stats = .{};
+    writePixel(&job, x, y, z, depthBias(&job, 0), color, .{ .filter = options.sample_mag_filter }, &stats, true);
+    return stats;
+}
+
 fn blendChannel(channel: usize, source: f32, destination: f32, source_color: [4]f32, destination_color: [4]f32, blend_color: [4]f32, source_factor: abi.BlendFactor, destination_factor: abi.BlendFactor, operation: abi.BlendOperation) f32 {
     const source_factor_value = blendFactor(channel, source_factor, source_color, destination_color, blend_color);
     const destination_factor_value = blendFactor(channel, destination_factor, source_color, destination_color, blend_color);
