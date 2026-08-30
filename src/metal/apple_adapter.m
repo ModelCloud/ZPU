@@ -10220,6 +10220,57 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 #pragma clang diagnostic pop
 @end
 
+static BOOL zpu_source_identifier_character(uint8_t value) {
+    return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
+        (value >= '0' && value <= '9') || value == '_';
+}
+
+static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifier) {
+    const char *sourceBytes = source.UTF8String;
+    const char *identifierBytes = identifier.UTF8String;
+    const NSUInteger identifierLength = identifier.length;
+    if (sourceBytes == NULL || identifierBytes == NULL || identifierLength == 0) return NO;
+    const NSUInteger sourceLength = [source lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    NSUInteger index = 0;
+    while (index < sourceLength) {
+        if (sourceBytes[index] == '/' && index + 1 < sourceLength && sourceBytes[index + 1] == '/') {
+            index += 2;
+            while (index < sourceLength && sourceBytes[index] != '\n') index += 1;
+            continue;
+        }
+        if (sourceBytes[index] == '/' && index + 1 < sourceLength && sourceBytes[index + 1] == '*') {
+            index += 2;
+            while (index + 1 < sourceLength &&
+                   !(sourceBytes[index] == '*' && sourceBytes[index + 1] == '/')) index += 1;
+            index = index + 1 < sourceLength ? index + 2 : sourceLength;
+            continue;
+        }
+        if (sourceBytes[index] == '\"' || sourceBytes[index] == '\'') {
+            const uint8_t quote = (uint8_t)sourceBytes[index++];
+            while (index < sourceLength) {
+                if (sourceBytes[index] == '\\') {
+                    index += index + 1 < sourceLength ? 2 : 1;
+                } else if ((uint8_t)sourceBytes[index++] == quote) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if (!zpu_source_identifier_character((uint8_t)sourceBytes[index])) {
+            index += 1;
+            continue;
+        }
+        const NSUInteger tokenStart = index++;
+        while (index < sourceLength && zpu_source_identifier_character((uint8_t)sourceBytes[index])) {
+            index += 1;
+        }
+        const NSUInteger tokenLength = index - tokenStart;
+        if (tokenLength == identifierLength &&
+            memcmp(sourceBytes + tokenStart, identifierBytes, identifierLength) == 0) return YES;
+    }
+    return NO;
+}
+
 @implementation ZPULibrary
 - (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source {
     return [self initWithOwner:owner source:source type:MTLLibraryTypeExecutable installName:nil];
@@ -10288,7 +10339,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
             zpu_cpu_ml_add_i4_function_name,
             zpu_cpu_ml_add_u4_function_name,
         ]) {
-            if ([source rangeOfString:name].location != NSNotFound) [names addObject:name];
+            if (zpu_source_contains_identifier(source, name)) [names addObject:name];
         }
         _functionNames = [names copy];
     }

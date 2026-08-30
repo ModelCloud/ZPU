@@ -14751,6 +14751,13 @@ int main(void) {
         [adapter_device newLibraryWithSource:adapter_cpu_source options:nil completionHandler:^(id<MTLLibrary> library, NSError *library_error) {
             adapter_library_completion_called = library != nil && library_error == nil;
         }];
+        NSError *adapter_false_positive_error = nil;
+        id<MTLLibrary> adapter_false_positive_library =
+            [adapter_device newLibraryWithSource:
+                @"// zpu_cpu_fill_gradient_rgba8\n"
+                 "/* zpu_cpu_copy_rgba8_buffer_to_texture */\n"
+                 "kernel void zpu_cpu_fill_gradient_rgba8_suffix() {}"
+                                               options:nil error:&adapter_false_positive_error];
         id<MTLLibrary> unsupported_adapter_library =
             [adapter_device newLibraryWithSource:@"kernel void arbitrary_msl() {}" options:nil error:&adapter_library_error];
         if (adapter_library == nil || adapter_library_function == nil ||
@@ -14793,6 +14800,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_test_visible"].functionType != MTLFunctionTypeVisible ||
             [adapter_library newFunctionWithName:@"zpu_test_visible_secondary"].functionType != MTLFunctionTypeVisible ||
             !adapter_library_completion_called ||
+            adapter_false_positive_library != nil || adapter_false_positive_error == nil ||
             unsupported_adapter_library != nil || adapter_library_error == nil) {
             fail_with_error("CPU library/function metadata failed", adapter_library_error);
             return 50;
