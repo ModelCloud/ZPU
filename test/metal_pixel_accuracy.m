@@ -189,6 +189,24 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_ml_mul_f16_oracle(device const half *left [[buffer(0)]], "
     "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_u8_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_i8_oracle(device const char *left [[buffer(0)]], "
+    "device const char *right [[buffer(1)]], device char *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_u16_oracle(device const ushort *left [[buffer(0)]], "
+    "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_i16_oracle(device const short *left [[buffer(0)]], "
+    "device const short *right [[buffer(1)]], device short *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_u32_oracle(device const uint *left [[buffer(0)]], "
+    "device const uint *right [[buffer(1)]], device uint *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_ml_mul_i32_oracle(device const int *left [[buffer(0)]], "
+    "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
     "kernel void zpu_cpu_ml_matmul_f32_oracle(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= 3 || gid.y >= 2) return; "
@@ -10001,6 +10019,161 @@ static int test_adapter_packed_depth_stencil_blit_options(id<MTLDevice> adapter_
             fprintf(stderr, "metal-pixel: packed D24 adapter upload failed for format %lu\n",
                     (unsigned long)formats[format_index].format);
             return 240;
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    const char *name;
+    const char *oracleName;
+    MTLTensorDataType dataType;
+    NSUInteger elementSize;
+} ZPUIntegerMultiplyProfile;
+
+/* Native Metal is used only as the arithmetic oracle here. Every adapter
+ * tensor, argument table, command buffer, and multiply operation remains
+ * CPU/ZPU-owned. The post-dispatch left-tensor write also proves that the
+ * adapter observes resource bytes at commit time rather than executing an
+ * Apple command encoder during recording. */
+static int test_metal4_cpu_integer_multiply_profiles(
+    id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
+    id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
+    id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
+    id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
+    const ZPUIntegerMultiplyProfile profiles[] = {
+        {"zpu_cpu_ml_mul_u8", "zpu_cpu_ml_mul_u8_oracle", MTLTensorDataTypeUInt8, 1},
+        {"zpu_cpu_ml_mul_i8", "zpu_cpu_ml_mul_i8_oracle", MTLTensorDataTypeInt8, 1},
+        {"zpu_cpu_ml_mul_u16", "zpu_cpu_ml_mul_u16_oracle", MTLTensorDataTypeUInt16, 2},
+        {"zpu_cpu_ml_mul_i16", "zpu_cpu_ml_mul_i16_oracle", MTLTensorDataTypeInt16, 2},
+        {"zpu_cpu_ml_mul_u32", "zpu_cpu_ml_mul_u32_oracle", MTLTensorDataTypeUInt32, 4},
+        {"zpu_cpu_ml_mul_i32", "zpu_cpu_ml_mul_i32_oracle", MTLTensorDataTypeInt32, 4},
+    };
+    const uint32_t leftValuesBySize[3][12] = {
+        {3u, 249u, 12u, 245u, 31u, 2u, 7u, 248u, 17u, 32u, 30u, 0u},
+        {3u, 65529u, 1200u, 65525u, 12000u, 2u, 7u, 65528u, 1700u, 16000u, 30u, 0u},
+        {3u, 4294967289u, 120000u, 4294967285u, 120000000u, 2u, 7u,
+         4294967288u, 170000u, 160000000u, 30u, 0u},
+    };
+    const uint32_t rightValuesBySize[3][12] = {
+        {6u, 6u, 2u, 3u, 4u, 9u, 255u, 2u, 3u, 2u, 2u, 4u},
+        {6u, 6u, 2u, 3u, 2u, 9u, 65535u, 2u, 3u, 2u, 2u, 4u},
+        {6u, 6u, 2u, 3u, 2u, 9u, 4294967295u, 2u, 3u, 2u, 2u, 4u},
+    };
+    MTLTensorExtents *dimensions =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){4, 3}];
+    MTLTensorExtents *strides =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 4}];
+    id<MTLCommandQueue> nativeQueue = [nativeDevice newCommandQueue];
+    if (dimensions == nil || strides == nil || nativeQueue == nil || adapterCompiler == nil ||
+        adapterQueue == nil || adapterAllocator == nil || adapterHeap == nil) return 173;
+
+    for (NSUInteger profileIndex = 0;
+         profileIndex < sizeof(profiles) / sizeof(profiles[0]); ++profileIndex) {
+        const ZPUIntegerMultiplyProfile profile = profiles[profileIndex];
+        const NSUInteger sizeIndex = profile.elementSize == 1 ? 0 :
+            (profile.elementSize == 2 ? 1 : 2);
+        const NSUInteger byteCount = 12 * profile.elementSize;
+        uint8_t leftBytes[sizeof(uint32_t) * 12] = {0};
+        uint8_t rightBytes[sizeof(uint32_t) * 12] = {0};
+        uint8_t initialLeftBytes[sizeof(uint32_t) * 12] = {0};
+        uint8_t sentinelBytes[sizeof(uint32_t) * 12] = {0};
+        for (NSUInteger index = 0; index < 12; ++index) {
+            memcpy(leftBytes + index * profile.elementSize,
+                   &leftValuesBySize[sizeIndex][index], profile.elementSize);
+            memcpy(rightBytes + index * profile.elementSize,
+                   &rightValuesBySize[sizeIndex][index], profile.elementSize);
+            initialLeftBytes[index * profile.elementSize] = (uint8_t)(index + 1);
+            memset(sentinelBytes + index * profile.elementSize, 0xa5, profile.elementSize);
+        }
+
+        NSError *adapterError = nil;
+        MTL4LibraryFunctionDescriptor *functionDescriptor = [MTL4LibraryFunctionDescriptor new];
+        functionDescriptor.library = adapterLibrary;
+        functionDescriptor.name = [NSString stringWithUTF8String:profile.name];
+        MTL4MachineLearningPipelineDescriptor *pipelineDescriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        pipelineDescriptor.machineLearningFunctionDescriptor = functionDescriptor;
+        [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:0];
+        [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:1];
+        [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:2];
+        id<MTL4MachineLearningPipelineState> pipeline =
+            [adapterCompiler newMachineLearningPipelineStateWithDescriptor:pipelineDescriptor
+                                                                       error:&adapterError];
+        MTLTensorDescriptor *tensorDescriptor = [MTLTensorDescriptor new];
+        tensorDescriptor.dimensions = dimensions;
+        tensorDescriptor.dataType = profile.dataType;
+        tensorDescriptor.usage = MTLTensorUsageMachineLearning;
+        tensorDescriptor.resourceOptions = MTLResourceStorageModeShared;
+        tensorDescriptor.storageMode = MTLStorageModeShared;
+        id<MTLTensor> left = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+        id<MTLTensor> right = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+        id<MTLTensor> output = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+        if (left != nil) [left replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                      sliceDimensions:dimensions withBytes:initialLeftBytes strides:strides];
+        if (right != nil) [right replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                        sliceDimensions:dimensions withBytes:rightBytes strides:strides];
+        if (output != nil) [output replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                         sliceDimensions:dimensions withBytes:sentinelBytes strides:strides];
+        MTL4ArgumentTableDescriptor *tableDescriptor = [MTL4ArgumentTableDescriptor new];
+        tableDescriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> table = [adapterDevice newArgumentTableWithDescriptor:tableDescriptor
+                                                                                  error:&adapterError];
+        if (table != nil && left != nil && right != nil && output != nil) {
+            [table setResource:left.gpuResourceID atBufferIndex:0];
+            [table setResource:right.gpuResourceID atBufferIndex:1];
+            [table setResource:output.gpuResourceID atBufferIndex:2];
+        }
+        id<MTL4CommandBuffer> commandBuffer = [adapterDevice newCommandBuffer];
+        [commandBuffer beginCommandBufferWithAllocator:adapterAllocator];
+        id<MTL4MachineLearningCommandEncoder> encoder = [commandBuffer machineLearningCommandEncoder];
+        [encoder setPipelineState:pipeline];
+        [encoder setArgumentTable:table];
+        [encoder dispatchNetworkWithIntermediatesHeap:adapterHeap];
+        if (left != nil) [left replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                      sliceDimensions:dimensions withBytes:leftBytes strides:strides];
+        [encoder endEncoding];
+        [commandBuffer endCommandBuffer];
+        id<MTL4CommandBuffer> commandBuffers[] = {commandBuffer};
+        MTL4CommitOptions *commitOptions = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *feedbackError = nil;
+        [commitOptions addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            feedbackError = feedback.error;
+        }];
+        [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+        uint8_t adapterBytes[sizeof(uint32_t) * 12] = {0};
+        if (output != nil) [output getBytes:adapterBytes strides:strides
+                            fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                             sliceDimensions:dimensions];
+
+        NSError *nativeError = nil;
+        id<MTLFunction> nativeFunction =
+            [nativeLibrary newFunctionWithName:[NSString stringWithUTF8String:profile.oracleName]];
+        id<MTLComputePipelineState> nativePipeline =
+            [nativeDevice newComputePipelineStateWithFunction:nativeFunction error:&nativeError];
+        id<MTLBuffer> nativeLeft = [nativeDevice newBufferWithBytes:leftBytes length:byteCount
+                                                              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> nativeRight = [nativeDevice newBufferWithBytes:rightBytes length:byteCount
+                                                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> nativeOutput = [nativeDevice newBufferWithLength:byteCount
+                                                                 options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> nativeCommandBuffer = [nativeQueue commandBuffer];
+        id<MTLComputeCommandEncoder> nativeEncoder = [nativeCommandBuffer computeCommandEncoder];
+        [nativeEncoder setComputePipelineState:nativePipeline];
+        [nativeEncoder setBuffer:nativeLeft offset:0 atIndex:0];
+        [nativeEncoder setBuffer:nativeRight offset:0 atIndex:1];
+        [nativeEncoder setBuffer:nativeOutput offset:0 atIndex:2];
+        [nativeEncoder dispatchThreads:MTLSizeMake(12, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [nativeEncoder endEncoding];
+        [nativeCommandBuffer commit];
+        [nativeCommandBuffer waitUntilCompleted];
+        if (adapterError != nil || pipeline == nil || left == nil || right == nil || output == nil ||
+            table == nil || commandBuffer == nil || encoder == nil || feedbackError != nil ||
+            nativeFunction == nil || nativePipeline == nil || nativeError != nil ||
+            nativeCommandBuffer.status != MTLCommandBufferStatusCompleted || nativeOutput == nil ||
+            memcmp(adapterBytes, nativeOutput.contents, byteCount) != 0) {
+            fail_with_error(profile.name, adapterError ?: feedbackError ?: nativeError);
+            return (int)(174 + profileIndex);
         }
     }
     return 0;
@@ -25328,6 +25501,11 @@ int main(void) {
                 }
             }
         }
+
+        const int metal4_ml_integer_multiply_result = test_metal4_cpu_integer_multiply_profiles(
+            device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
+            metal4_queue, metal4_allocator, adapter_three_d_heap);
+        if (metal4_ml_integer_multiply_result != 0) return metal4_ml_integer_multiply_result;
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
