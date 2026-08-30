@@ -11737,6 +11737,111 @@ int main(void) {
                 return 155;
             }
 
+            /* A legacy instance descriptor is flattened into the same
+             * CPU-owned triangle payload. Compare it with the native direct
+             * triangle oracle after applying the instance transform; native
+             * Metal is still used only for this expected-byte computation. */
+            const float instance_translation_x = 0.35f;
+            const float instance_ray_vertices[] = {
+                ray_vertices[0] + instance_translation_x, ray_vertices[1], ray_vertices[2],
+                ray_vertices[3] + instance_translation_x, ray_vertices[4], ray_vertices[5],
+                ray_vertices[6] + instance_translation_x, ray_vertices[7], ray_vertices[8],
+            };
+            id<MTLBuffer> native_instance_ray_vertices =
+                [device newBufferWithBytes:instance_ray_vertices length:sizeof(instance_ray_vertices)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLTexture> native_instance_ray_texture = [device newTextureWithDescriptor:ray_texture_descriptor];
+            id<MTLCommandBuffer> native_instance_ray_command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> native_instance_ray_encoder =
+                [native_instance_ray_command_buffer computeCommandEncoder];
+            [native_instance_ray_encoder setComputePipelineState:native_ray_pipeline];
+            [native_instance_ray_encoder setBuffer:native_instance_ray_vertices offset:0 atIndex:0];
+            [native_instance_ray_encoder setTexture:native_instance_ray_texture atIndex:0];
+            [native_instance_ray_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                      threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+            [native_instance_ray_encoder endEncoding];
+            [native_instance_ray_command_buffer commit];
+            [native_instance_ray_command_buffer waitUntilCompleted];
+
+            MTLPackedFloat4x3 instance_matrix = {
+                .columns = {
+                    MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
+                    MTLPackedFloat3Make(0.0f, 1.0f, 0.0f),
+                    MTLPackedFloat3Make(0.0f, 0.0f, 1.0f),
+                    MTLPackedFloat3Make(instance_translation_x, 0.0f, 0.0f),
+                },
+            };
+            MTLAccelerationStructureInstanceDescriptor instance_data = {
+                .transformationMatrix = instance_matrix,
+                .options = MTLAccelerationStructureInstanceOptionNone,
+                .mask = UINT32_MAX,
+                .intersectionFunctionTableOffset = 0,
+                .accelerationStructureIndex = 0,
+            };
+            id<MTLBuffer> adapter_instance_ray_buffer =
+                [adapter_device newBufferWithBytes:&instance_data length:sizeof(instance_data)
+                                            options:MTLResourceStorageModeShared];
+            MTLInstanceAccelerationStructureDescriptor *instance_descriptor =
+                [MTLInstanceAccelerationStructureDescriptor descriptor];
+            instance_descriptor.instanceDescriptorBuffer = adapter_instance_ray_buffer;
+            instance_descriptor.instanceDescriptorBufferOffset = 0;
+            instance_descriptor.instanceDescriptorStride = sizeof(instance_data);
+            instance_descriptor.instanceCount = 1;
+            instance_descriptor.instancedAccelerationStructures = @[adapter_ray_acceleration_structure];
+            MTLAccelerationStructureSizes instance_sizes =
+                [adapter_device accelerationStructureSizesWithDescriptor:instance_descriptor];
+            id<MTLAccelerationStructure> adapter_instance_ray_acceleration_structure =
+                [adapter_device newAccelerationStructureWithSize:instance_sizes.accelerationStructureSize];
+            id<MTLBuffer> adapter_instance_ray_scratch =
+                [adapter_device newBufferWithLength:instance_sizes.buildScratchBufferSize == 0 ? 1 :
+                                                           instance_sizes.buildScratchBufferSize
+                                            options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> adapter_instance_ray_build_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_instance_ray_build_encoder =
+                [adapter_instance_ray_build_command_buffer accelerationStructureCommandEncoder];
+            [adapter_instance_ray_build_encoder buildAccelerationStructure:adapter_instance_ray_acceleration_structure
+                                                                   descriptor:instance_descriptor
+                                                                scratchBuffer:adapter_instance_ray_scratch
+                                                          scratchBufferOffset:0];
+            [adapter_instance_ray_build_encoder endEncoding];
+            [adapter_instance_ray_build_command_buffer commit];
+            [adapter_instance_ray_build_command_buffer waitUntilCompleted];
+
+            id<MTLTexture> adapter_instance_ray_texture =
+                [adapter_device newTextureWithDescriptor:ray_texture_descriptor];
+            id<MTLCommandBuffer> adapter_instance_ray_command_buffer = [adapter_queue commandBuffer];
+            id<MTLComputeCommandEncoder> adapter_instance_ray_encoder =
+                [adapter_instance_ray_command_buffer computeCommandEncoder];
+            [adapter_instance_ray_encoder setComputePipelineState:adapter_ray_pipeline];
+            [adapter_instance_ray_encoder setAccelerationStructure:adapter_instance_ray_acceleration_structure
+                                                       atBufferIndex:0];
+            [adapter_instance_ray_encoder setTexture:adapter_instance_ray_texture atIndex:0];
+            [adapter_instance_ray_encoder dispatchThreads:MTLSizeMake(ray_width, ray_height, 1)
+                                         threadsPerThreadgroup:MTLSizeMake(7, 5, 1)];
+            [adapter_instance_ray_encoder endEncoding];
+            [adapter_instance_ray_command_buffer commit];
+            [adapter_instance_ray_command_buffer waitUntilCompleted];
+            uint8_t native_instance_ray_pixels[ray_byte_count];
+            uint8_t adapter_instance_ray_pixels[ray_byte_count];
+            [native_instance_ray_texture getBytes:native_instance_ray_pixels bytesPerRow:ray_width * 4
+                                          fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+            [adapter_instance_ray_texture getBytes:adapter_instance_ray_pixels bytesPerRow:ray_width * 4
+                                           fromRegion:MTLRegionMake2D(0, 0, ray_width, ray_height) mipmapLevel:0];
+            if (native_instance_ray_vertices == nil || native_instance_ray_texture == nil ||
+                native_instance_ray_command_buffer == nil || native_instance_ray_encoder == nil ||
+                native_instance_ray_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_instance_ray_buffer == nil || instance_descriptor == nil ||
+                adapter_instance_ray_acceleration_structure == nil || adapter_instance_ray_scratch == nil ||
+                adapter_instance_ray_build_command_buffer == nil || adapter_instance_ray_build_encoder == nil ||
+                adapter_instance_ray_build_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_instance_ray_texture == nil || adapter_instance_ray_command_buffer == nil ||
+                adapter_instance_ray_encoder == nil ||
+                adapter_instance_ray_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(native_instance_ray_pixels, adapter_instance_ray_pixels, ray_byte_count) != 0) {
+                fail_with_error("CPU instance triangle trace pixel oracle failed", adapter_ray_error);
+                return 157;
+            }
+
             BOOL adapter_metal4_ray_trace_exact = YES;
             if (@available(macOS 26.0, iOS 26.0, *)) {
                 NSError *metal4_ray_error = nil;

@@ -232,9 +232,10 @@ triangle path:
   geometry, including Metal 4 GPU-address ranges, casts one orthographic
   primary ray per output texel, and writes exact RGBA8 hit/miss values on
   Metal's top-left grid; indexed UInt16/UInt32 geometry and explicit vertex
-  strides are supported,
-  while transforms, instances, curves, motion, custom intersection functions,
-  and arbitrary ray tracing remain fail-closed
+  strides are supported; legacy default/UserID instance descriptors flatten
+  already-built CPU triangle children with finite affine transforms, while
+  primitive transforms, indirect/motion instances, curves, custom intersection
+  functions, and arbitrary ray tracing remain fail-closed
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
@@ -595,7 +596,8 @@ through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
 pipeline-data serializer; the registered factor-one triangle-patch profile is
 CPU/ZPU-owned through the legacy render encoder and ICB path. Arbitrary
 tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
-synchronization families, arbitrary ray-tracing execution, opaque native 3D sparse-texture tail
+synchronization families, arbitrary ray-tracing execution beyond the bounded triangle and legacy
+instance profiles, opaque native 3D sparse-texture tail
 backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
 implemented, but it does not imply ray-tracing or arbitrary function-pointer
 execution. A strict completeness claim belongs only after the Apple SDK
