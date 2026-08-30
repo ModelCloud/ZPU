@@ -95,8 +95,10 @@ triangle path:
   `StoreAndMultisampleResolve`; the resolver averages logical sample colors
   before the destination format encode. This bounded profile supports 2D
   multisample depth/stencil attachments by maintaining independent ZPU depth
-  and stencil planes for every sample. It still rejects MRT, parallel render
-  encoders, sparse placement, and direct CPU transfers. 2D multisample texture
+  and stencil planes for every sample. Parallel render encoders support ordered
+  2x/4x CPU child passes with the same top-left sample positions and resolve
+  semantics; MRT, sparse placement, and direct CPU transfers remain rejected.
+  2D multisample texture
   views are CPU-owned aliases of every sample plane, including same-size
   compatible color-format reinterpretations.
   Custom sample positions are accepted for

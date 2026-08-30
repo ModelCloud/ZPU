@@ -1144,6 +1144,161 @@ static int test_multisample_resolve_against_native(
     return 0;
 }
 
+static int test_parallel_multisample_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    enum { width = 9, height = 7, max_byte_count = width * height * 4 };
+    const NSUInteger sample_counts[] = {2, 4};
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {0.89f, 0.21f, 0.71f, 0.79f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.89f, 0.21f, 0.71f, 0.79f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.89f, 0.21f, 0.71f, 0.79f}},
+        {{ 1.0f, -1.0f, 0.5f, 1.0f}, {0.19f, 0.81f, 0.31f, 0.59f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {0.19f, 0.81f, 0.31f, 0.59f}},
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {0.19f, 0.81f, 0.31f, 0.59f}},
+    };
+    for (NSUInteger sample_index = 0; sample_index < sizeof(sample_counts) / sizeof(sample_counts[0]); ++sample_index) {
+        const NSUInteger sample_count = sample_counts[sample_index];
+        MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+        native_pipeline_descriptor.vertexFunction = native_vertex_function;
+        native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+        native_pipeline_descriptor.rasterSampleCount = sample_count;
+        native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
+        adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+        adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLRenderPipelineState> native_pipeline =
+            [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+        id<MTLRenderPipelineState> adapter_pipeline =
+            [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
+        MTLTextureDescriptor *native_msaa_descriptor = [MTLTextureDescriptor new];
+        native_msaa_descriptor.textureType = MTLTextureType2DMultisample;
+        native_msaa_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_msaa_descriptor.width = width;
+        native_msaa_descriptor.height = height;
+        native_msaa_descriptor.mipmapLevelCount = 1;
+        native_msaa_descriptor.sampleCount = sample_count;
+        native_msaa_descriptor.storageMode = MTLStorageModePrivate;
+        native_msaa_descriptor.usage = MTLTextureUsageRenderTarget;
+        MTLTextureDescriptor *native_resolve_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        native_resolve_descriptor.storageMode = MTLStorageModeShared;
+        native_resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_msaa = [native_device newTextureWithDescriptor:native_msaa_descriptor];
+        id<MTLTexture> adapter_msaa = [adapter_device newTextureWithDescriptor:native_msaa_descriptor];
+        id<MTLTexture> native_resolve = [native_device newTextureWithDescriptor:native_resolve_descriptor];
+        id<MTLTexture> adapter_resolve = [adapter_device newTextureWithDescriptor:native_resolve_descriptor];
+        id<MTLBuffer> native_buffer =
+            [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer =
+            [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+        if (native_pipeline == nil || adapter_pipeline == nil || native_msaa == nil || adapter_msaa == nil ||
+            native_resolve == nil || adapter_resolve == nil || native_buffer == nil || adapter_buffer == nil ||
+            [adapter_device supportsTextureSampleCount:sample_count] == NO) {
+            fail_with_error("parallel multisample resource/pipeline allocation", adapter_error ?: native_error);
+            return 159;
+        }
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.colorAttachments[0].texture = native_msaa;
+        native_pass.colorAttachments[0].resolveTexture = native_resolve;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
+        MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+        adapter_pass.colorAttachments[0].texture = adapter_msaa;
+        adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
+        const MTLSamplePosition sample_positions[] = {
+            {0.25f, 0.25f}, {0.75f, 0.75f}, {0.125f, 0.125f}, {0.875f, 0.875f},
+        };
+        [native_pass setSamplePositions:sample_positions count:sample_count];
+        [adapter_pass setSamplePositions:sample_positions count:sample_count];
+        id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+        id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLParallelRenderCommandEncoder> native_encoder =
+            [native_command_buffer parallelRenderCommandEncoderWithDescriptor:native_pass];
+        id<MTLParallelRenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer parallelRenderCommandEncoderWithDescriptor:adapter_pass];
+        if (native_encoder == nil || adapter_encoder == nil) {
+            fprintf(stderr, "metal-pixel: %zux parallel multisample encoder creation failed\n", sample_count);
+            return 160;
+        }
+        [native_encoder setColorStoreAction:MTLStoreActionStoreAndMultisampleResolve atIndex:0];
+        [adapter_encoder setColorStoreAction:MTLStoreActionStoreAndMultisampleResolve atIndex:0];
+        id<MTLRenderCommandEncoder> native_child_one = [native_encoder renderCommandEncoder];
+        id<MTLRenderCommandEncoder> adapter_child_one = [adapter_encoder renderCommandEncoder];
+        if (native_child_one == nil || adapter_child_one == nil) {
+            fprintf(stderr, "metal-pixel: %zux parallel multisample first child failed\n", sample_count);
+            return 161;
+        }
+        [native_child_one setRenderPipelineState:native_pipeline];
+        [native_child_one setVertexBuffer:native_buffer offset:0 atIndex:0];
+        [native_child_one drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [native_child_one endEncoding];
+        [adapter_child_one setRenderPipelineState:adapter_pipeline];
+        [adapter_child_one setVertexBuffer:adapter_buffer offset:0 atIndex:0];
+        [adapter_child_one drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [adapter_child_one endEncoding];
+        id<MTLRenderCommandEncoder> native_child_two = [native_encoder renderCommandEncoder];
+        id<MTLRenderCommandEncoder> adapter_child_two = [adapter_encoder renderCommandEncoder];
+        if (native_child_two == nil || adapter_child_two == nil) {
+            fprintf(stderr, "metal-pixel: %zux parallel multisample second child failed\n", sample_count);
+            return 162;
+        }
+        [native_child_two setRenderPipelineState:native_pipeline];
+        [native_child_two setVertexBuffer:native_buffer offset:sizeof(zpu_metal_vertex) * 3 atIndex:0];
+        [native_child_two drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [native_child_two endEncoding];
+        [adapter_child_two setRenderPipelineState:adapter_pipeline];
+        [adapter_child_two setVertexBuffer:adapter_buffer offset:sizeof(zpu_metal_vertex) * 3 atIndex:0];
+        [adapter_child_two drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [adapter_child_two endEncoding];
+        [native_encoder endEncoding];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+        uint8_t native_pixels[max_byte_count] = {0};
+        uint8_t adapter_pixels[max_byte_count] = {0};
+        [native_resolve getBytes:native_pixels bytesPerRow:width * 4
+                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_resolve getBytes:adapter_pixels bytesPerRow:width * 4
+                          fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_pixels, adapter_pixels, sizeof(native_pixels)) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < sizeof(native_pixels) && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+            if (mismatch == sizeof(native_pixels)) {
+                fprintf(stderr, "metal-pixel: %zux parallel MSAA command status mismatch statuses=%ld/%ld\n",
+                        sample_count, (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+                fail_with_error("native parallel multisample error", native_command_buffer.error);
+                fail_with_error("adapter parallel multisample error", adapter_command_buffer.error);
+                return 163;
+            }
+            const size_t pixel = mismatch / 4;
+            fprintf(stderr, "metal-pixel: %zux parallel MSAA mismatch at byte %zu pixel=(%zu,%zu) native=%u,%u,%u,%u adapter=%u,%u,%u,%u statuses=%ld/%ld\n",
+                    sample_count, mismatch,
+                    pixel % width, pixel / width,
+                    native_pixels[pixel * 4 + 0], native_pixels[pixel * 4 + 1],
+                    native_pixels[pixel * 4 + 2], native_pixels[pixel * 4 + 3],
+                    adapter_pixels[pixel * 4 + 0], adapter_pixels[pixel * 4 + 1],
+                    adapter_pixels[pixel * 4 + 2], adapter_pixels[pixel * 4 + 3],
+                    (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+            fail_with_error("native parallel multisample error", native_command_buffer.error);
+            fail_with_error("adapter parallel multisample error", adapter_command_buffer.error);
+            return 163;
+        }
+    }
+    return 0;
+}
+
 static int test_multisample_depth_stencil_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -4163,6 +4318,10 @@ int main(void) {
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);
         if (multisample_result != 0) return multisample_result;
+        const int parallel_multisample_result = test_parallel_multisample_against_native(
+            device, adapter_device, vertex_function, fragment_function,
+            adapter_vertex_function, adapter_fragment_function);
+        if (parallel_multisample_result != 0) return parallel_multisample_result;
         const int multisample_depth_stencil_result = test_multisample_depth_stencil_against_native(
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);

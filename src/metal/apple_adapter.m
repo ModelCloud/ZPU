@@ -1870,11 +1870,10 @@ static BOOL zpu_configure_multisample_depth_targets(zpu_metal_render_encoder *en
     return zpu_metal_render_encoder_set_multisample_depth_targets(encoder, samples, sampleCount) == ZPU_METAL_OK;
 }
 
-static BOOL zpu_configure_multisample_stencil_targets(zpu_metal_render_encoder *encoder,
-                                                       ZPUTexture *texture,
-                                                       NSUInteger sampleCount,
-                                                       id attachment) {
-    if (encoder == NULL || texture == nil || attachment == nil || texture.sampleCount != sampleCount ||
+static BOOL zpu_configure_multisample_stencil_targets_with_actions(
+    zpu_metal_render_encoder *encoder, ZPUTexture *texture, NSUInteger sampleCount,
+    zpu_metal_load_action loadAction, zpu_metal_store_action storeAction, uint8_t clearValue) {
+    if (encoder == NULL || texture == nil || texture.sampleCount != sampleCount ||
         texture->_textureType != MTLTextureType2DMultisample ||
         (sampleCount != 2 && sampleCount != 4)) return NO;
     zpu_metal_texture *samples[4] = {NULL, NULL, NULL, NULL};
@@ -1883,8 +1882,17 @@ static BOOL zpu_configure_multisample_stencil_targets(zpu_metal_render_encoder *
         if (samples[index] == NULL) return NO;
     }
     return zpu_metal_render_encoder_set_multisample_stencil_targets(
-        encoder, samples, sampleCount, zpu_load_action([attachment loadAction]),
-        zpu_store_action([attachment storeAction]), (uint8_t)[attachment clearStencil]) == ZPU_METAL_OK;
+        encoder, samples, sampleCount, loadAction, storeAction, clearValue) == ZPU_METAL_OK;
+}
+
+static BOOL zpu_configure_multisample_stencil_targets(zpu_metal_render_encoder *encoder,
+                                                       ZPUTexture *texture,
+                                                       NSUInteger sampleCount,
+                                                       id attachment) {
+    if (attachment == nil) return NO;
+    return zpu_configure_multisample_stencil_targets_with_actions(
+        encoder, texture, sampleCount, zpu_load_action([attachment loadAction]),
+        zpu_store_action([attachment storeAction]), (uint8_t)[attachment clearStencil]);
 }
 
 static BOOL zpu_configure_sample_positions(zpu_metal_render_encoder *encoder,
@@ -10735,12 +10743,15 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
                                           depthAttachmentTexture != nil ? descriptor.depthAttachment.slice : descriptor.stencilAttachment.slice);
         if (texture == nil) return nil;
     }
-    if (colorAttachment.texture != nil && !zpu_store_action_supported(colorAttachment.storeAction)) return nil;
     if (![texture isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(texture->_textureType)) return nil;
-    /* The bounded CPU profile resolves MSAA at the ordered render-pass
-     * boundary. Parallel child encoders do not expose a reliable final-child
-     * signal, so keep their multisample behavior fail-closed for now. */
-    if (texture.sampleCount > 1) return nil;
+    const BOOL multisample = texture.sampleCount > 1;
+    if (colorAttachment.texture != nil && !zpu_color_store_action_supported(
+            colorAttachment.storeAction, multisample, colorAttachment.resolveTexture != nil)) return nil;
+    if (multisample) {
+        for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+            if (descriptor.colorAttachments[index].texture != nil) return nil;
+        }
+    }
     zpu_metal_texture *colorTexture = [texture zpuTextureAtLevel:colorAttachment.texture != nil ? colorAttachment.level : 0
                                                             slice:colorAttachment.texture != nil ? colorAttachment.slice : 0];
     if (colorTexture == NULL) return nil;
@@ -10764,6 +10775,9 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         if (![depth isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(depth->_textureType) ||
             !zpu_depth_texture_format_supported(depth->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.depthAttachment.storeAction)) return nil;
+        if (multisample && (depth.sampleCount != texture.sampleCount ||
+                            depth->_textureType != MTLTextureType2DMultisample ||
+                            descriptor.depthAttachment.level != 0 || descriptor.depthAttachment.slice != 0)) return nil;
         depthTexture = [depth zpuTextureAtLevel:descriptor.depthAttachment.level
                                            slice:descriptor.depthAttachment.slice];
         if (depthTexture == NULL) return nil;
@@ -10776,6 +10790,9 @@ static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlo
         if (![stencil isKindOfClass:[ZPUTexture class]] || !zpu_render_texture_type_supported(stencil->_textureType) ||
             !zpu_stencil_texture_format_supported(stencil->_pixelFormat) ||
             !zpu_store_action_supported(descriptor.stencilAttachment.storeAction)) return nil;
+        if (multisample && (stencil.sampleCount != texture.sampleCount ||
+                            stencil->_textureType != MTLTextureType2DMultisample ||
+                            descriptor.stencilAttachment.level != 0 || descriptor.stencilAttachment.slice != 0)) return nil;
         stencilTexture = [stencil zpuTextureAtLevel:descriptor.stencilAttachment.level
                                                slice:descriptor.stencilAttachment.slice];
         if (stencilTexture == NULL || zpu_metal_texture_width(stencilTexture) != zpu_metal_texture_width(colorTexture) ||
@@ -13892,18 +13909,52 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     zpu_metal_command_buffer *commandBuffer = _owner->_zpuCommandBuffer;
     zpu_metal_render_encoder *encoder = zpu_metal_command_buffer_render_encoder(commandBuffer, _renderTexture, &pass);
     if (encoder == NULL) return nil;
+    const BOOL multisample = _texture.sampleCount > 1;
+    const zpu_metal_load_action stencilLoadAction =
+        _childCount != 0 && _stencilLoadAction != ZPU_METAL_LOAD_DONT_CARE ?
+            ZPU_METAL_LOAD_LOAD : _stencilLoadAction;
+    if (multisample && !zpu_configure_multisample_targets(
+            _owner, encoder, _texture, _descriptor.colorAttachments[0])) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
+    if (multisample && !zpu_configure_sample_positions(encoder, _descriptor, _texture.sampleCount)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
+    if (multisample && _descriptor.depthAttachment.texture != nil &&
+        !zpu_configure_multisample_depth_targets(
+            encoder, (ZPUTexture *)_descriptor.depthAttachment.texture, _texture.sampleCount)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
+    if (multisample && _descriptor.stencilAttachment.texture != nil &&
+        !zpu_configure_multisample_stencil_targets_with_actions(
+            encoder, (ZPUTexture *)_descriptor.stencilAttachment.texture, _texture.sampleCount,
+            stencilLoadAction, _stencilStoreAction, _stencilClearValue)) {
+        zpu_metal_render_encoder_destroy(encoder);
+        return nil;
+    }
+    if (_childCount != 0) {
+        for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
+            MTLRenderPassColorAttachmentDescriptor *attachment = _descriptor.colorAttachments[index];
+            if (attachment.texture != nil && attachment.loadAction != MTLLoadActionDontCare) {
+                attachment.loadAction = MTLLoadActionLoad;
+            }
+        }
+    }
     if (!zpu_configure_additional_color_attachments(_owner, encoder, _descriptor)) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
     }
-    if (pass.depth.load_action != ZPU_METAL_LOAD_DONT_CARE) {
+    if (!multisample && pass.depth.load_action != ZPU_METAL_LOAD_DONT_CARE) {
         if (_depthTexture == NULL || zpu_metal_render_encoder_set_depth_texture(encoder, _depthTexture) != ZPU_METAL_OK) {
             zpu_metal_render_encoder_destroy(encoder);
             return nil;
         }
     }
-    if (_stencilTexture != NULL &&
-        zpu_metal_render_encoder_set_stencil_texture(encoder, _stencilTexture, _stencilLoadAction,
+    if (!multisample && _stencilTexture != NULL &&
+        zpu_metal_render_encoder_set_stencil_texture(encoder, _stencilTexture, stencilLoadAction,
             _stencilStoreAction, _stencilClearValue) != ZPU_METAL_OK) {
         zpu_metal_render_encoder_destroy(encoder);
         return nil;
@@ -13921,11 +13972,18 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     return (id<MTLRenderCommandEncoder>)child;
 }
 - (void)setColorStoreAction:(MTLStoreAction)storeAction atIndex:(NSUInteger)colorAttachmentIndex {
-    if (!zpu_store_action_supported(storeAction) || colorAttachmentIndex >= ZPU_METAL_MAX_COLOR_ATTACHMENTS) {
+    if (colorAttachmentIndex >= ZPU_METAL_MAX_COLOR_ATTACHMENTS ||
+        (colorAttachmentIndex == 0
+             ? !zpu_color_store_action_supported(
+                   storeAction, _texture.sampleCount > 1, _descriptor.colorAttachments[0].resolveTexture != nil)
+             : !zpu_store_action_supported(storeAction))) {
         [_owner markError];
         return;
     }
-    if (colorAttachmentIndex == 0) _pass.color.store_action = zpu_store_action(storeAction);
+    if (colorAttachmentIndex == 0) {
+        _pass.color.store_action = zpu_store_action(storeAction);
+        _descriptor.colorAttachments[0].storeAction = storeAction;
+    }
     else if (colorAttachmentIndex < ZPU_METAL_MAX_COLOR_ATTACHMENTS) _descriptor.colorAttachments[colorAttachmentIndex].storeAction = storeAction;
 }
 - (void)setDepthStoreAction:(MTLStoreAction)storeAction {
