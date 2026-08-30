@@ -9023,6 +9023,43 @@ test "CPU line-filled integer triangle patches rasterize their generated grid" {
     try std.testing.expect(has_line_pixel);
 }
 
+test "CPU triangle patches fail closed for unsupported tessellation factors" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const cases = [_]struct { factors: [4]u16, max_factor: usize }{
+        .{ .factors = .{ 0x4100, 0x4100, 0x4100, 0x4100 }, .max_factor = 4 }, // fractional 2.5
+        .{ .factors = .{ 0x4000, 0x4000, 0x4000, 0x4400 }, .max_factor = 4 }, // non-uniform 2/4
+        .{ .factors = .{ 0x4000, 0x4000, 0x4000, 0x4000 }, .max_factor = 1 }, // above pipeline limit
+        .{ .factors = .{ 0x4c40, 0x4c40, 0x4c40, 0x4c40 }, .max_factor = 16 }, // above CPU cap
+    };
+    for (cases) |case| {
+        const texture = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+        defer destroyTexture(texture);
+        const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(case.factors)), @ptrCast(&case.factors));
+        defer destroyBuffer(factor_buffer);
+        var command_buffer = try createCommandBuffer(queue);
+        defer destroyCommandBuffer(command_buffer);
+        var encoder = try beginRender(command_buffer, texture, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+        try encoder.setVertexBuffer(vertex_buffer, 0, 0);
+        try encoder.setPatchMaxTessellationFactor(case.max_factor);
+        try encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf(@TypeOf(case.factors)));
+        try encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+        try encoder.endEncoding();
+        destroyRenderEncoder(encoder);
+        try std.testing.expectError(error.UnsupportedOperation, command_buffer.commit());
+        try std.testing.expectEqual(CommandStatus.failed, command_buffer.status);
+    }
+}
+
 test "CPU compute writes narrow unorm targets at their native stride" {
     const device = try createDevice();
     defer destroyDevice(device);
