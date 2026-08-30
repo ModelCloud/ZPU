@@ -4042,6 +4042,7 @@ static int test_layered_patch_against_native(
     native_pipeline_descriptor.vertexFunction = native_layered_vertex_function;
     native_pipeline_descriptor.fragmentFunction = native_fragment_function;
     native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    native_pipeline_descriptor.supportIndirectCommandBuffers = YES;
     native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
     adapter_pipeline_descriptor.vertexFunction = adapter_patch_vertex_function;
@@ -4053,6 +4054,7 @@ static int test_layered_patch_against_native(
     adapter_pipeline_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
     adapter_pipeline_descriptor.tessellationFactorScaleEnabled = NO;
     adapter_pipeline_descriptor.maxTessellationFactor = 1.0f;
+    adapter_pipeline_descriptor.supportIndirectCommandBuffers = YES;
     adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     NSError *native_error = nil;
     NSError *adapter_error = nil;
@@ -4166,6 +4168,109 @@ static int test_layered_patch_against_native(
             fprintf(stderr, "metal-pixel: layered patch %s base-instance routing failed\n",
                     parallel_index == 0 ? "render" : "parallel");
             return 229;
+        }
+    }
+
+    if (@available(macOS 14.0, iOS 17.0, *)) {
+        MTLIndirectCommandBufferDescriptor *native_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        native_icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw;
+        native_icb_descriptor.inheritPipelineState = YES;
+        native_icb_descriptor.inheritBuffers = YES;
+        id<MTLIndirectCommandBuffer> native_icb =
+            [native_device newIndirectCommandBufferWithDescriptor:native_icb_descriptor
+                                                    maxCommandCount:1 options:0];
+        MTLIndirectCommandBufferDescriptor *adapter_icb_descriptor = [MTLIndirectCommandBufferDescriptor new];
+        adapter_icb_descriptor.commandTypes = (MTLIndirectCommandType)(1u << 2);
+        adapter_icb_descriptor.inheritPipelineState = YES;
+        adapter_icb_descriptor.inheritBuffers = YES;
+        id<MTLIndirectCommandBuffer> adapter_icb =
+            [adapter_device newIndirectCommandBufferWithDescriptor:adapter_icb_descriptor
+                                                     maxCommandCount:1
+                                                             options:MTLResourceStorageModeShared];
+        id<MTLIndirectRenderCommand> native_command = [native_icb indirectRenderCommandAtIndex:0];
+        id<MTLIndirectRenderCommand> adapter_command = [adapter_icb indirectRenderCommandAtIndex:0];
+        [native_command drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                         instanceCount:layers - 1 baseInstance:1];
+        [adapter_command drawPatches:3 patchStart:0 patchCount:1 patchIndexBuffer:nil
+                 patchIndexBufferOffset:0 instanceCount:layers - 1 baseInstance:1
+                 tessellationFactorBuffer:adapter_factor_buffer tessellationFactorBufferOffset:0
+                 tessellationFactorBufferInstanceStride:sizeof(uint16_t) * 4];
+        MTLTextureDescriptor *native_icb_texture_descriptor = [MTLTextureDescriptor new];
+        native_icb_texture_descriptor.textureType = MTLTextureType2DArray;
+        native_icb_texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        native_icb_texture_descriptor.width = width;
+        native_icb_texture_descriptor.height = height;
+        native_icb_texture_descriptor.arrayLength = layers;
+        native_icb_texture_descriptor.mipmapLevelCount = 1;
+        native_icb_texture_descriptor.sampleCount = 1;
+        native_icb_texture_descriptor.storageMode = MTLStorageModeShared;
+        native_icb_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_icb_texture = [native_device newTextureWithDescriptor:native_icb_texture_descriptor];
+        id<MTLTexture> adapter_icb_texture = [adapter_device newTextureWithDescriptor:native_icb_texture_descriptor];
+        MTLRenderPassDescriptor *native_icb_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_icb_pass.renderTargetArrayLength = layers;
+        native_icb_pass.colorAttachments[0].texture = native_icb_texture;
+        native_icb_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_icb_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_icb_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.07, 0.11, 0.19, 1.0);
+        MTLRenderPassDescriptor *adapter_icb_pass = [native_icb_pass copy];
+        adapter_icb_pass.colorAttachments[0].texture = adapter_icb_texture;
+        id<MTLCommandQueue> native_icb_queue = [native_device newCommandQueue];
+        id<MTLCommandQueue> adapter_icb_queue = [adapter_device newCommandQueue];
+        id<MTLCommandBuffer> native_icb_command_buffer = [native_icb_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_icb_command_buffer = [adapter_icb_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_icb_encoder =
+            [native_icb_command_buffer renderCommandEncoderWithDescriptor:native_icb_pass];
+        id<MTLRenderCommandEncoder> adapter_icb_encoder =
+            [adapter_icb_command_buffer renderCommandEncoderWithDescriptor:adapter_icb_pass];
+        if (native_icb == nil || adapter_icb == nil || native_command == nil || adapter_command == nil ||
+            native_icb_texture == nil || adapter_icb_texture == nil || native_icb_encoder == nil ||
+            adapter_icb_encoder == nil) {
+            fprintf(stderr, "metal-pixel: layered patch ICB allocation failed\n");
+            return 230;
+        }
+        const MTLViewport viewport = {1.0, 1.0, width - 2.0, height - 2.0, 0.0, 1.0};
+        const MTLScissorRect scissor = {1, 1, width - 2, height - 2};
+        [native_icb_encoder setViewport:viewport];
+        [native_icb_encoder setScissorRect:scissor];
+        [native_icb_encoder setRenderPipelineState:native_pipeline];
+        [native_icb_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+        [native_icb_encoder executeCommandsInBuffer:native_icb withRange:NSMakeRange(0, 1)];
+        [native_icb_encoder endEncoding];
+        [adapter_icb_encoder setViewport:viewport];
+        [adapter_icb_encoder setScissorRect:scissor];
+        [adapter_icb_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_icb_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_icb_encoder executeCommandsInBuffer:adapter_icb withRange:NSMakeRange(0, 1)];
+        [adapter_icb_encoder endEncoding];
+        [native_icb_command_buffer commit];
+        [adapter_icb_command_buffer commit];
+        [native_icb_command_buffer waitUntilCompleted];
+        [adapter_icb_command_buffer waitUntilCompleted];
+        uint8_t native_icb_pixels[layers][max_byte_count] = {{0}};
+        uint8_t adapter_icb_pixels[layers][max_byte_count] = {{0}};
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            [native_icb_texture getBytes:native_icb_pixels[layer] bytesPerRow:width * 4
+                            bytesPerImage:max_byte_count
+                             fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                             mipmapLevel:0 slice:layer];
+            [adapter_icb_texture getBytes:adapter_icb_pixels[layer] bytesPerRow:width * 4
+                             bytesPerImage:max_byte_count
+                              fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1)
+                              mipmapLevel:0 slice:layer];
+            if (memcmp(native_icb_pixels[layer], adapter_icb_pixels[layer], max_byte_count) != 0) {
+                fprintf(stderr, "metal-pixel: layered patch ICB slice %zu mismatch\n", layer);
+                fail_with_error("native layered patch ICB error", native_icb_command_buffer.error);
+                fail_with_error("adapter layered patch ICB error", adapter_icb_command_buffer.error);
+                return 231;
+            }
+        }
+        if (native_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_icb_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_icb_pixels[0], native_icb_pixels[1], max_byte_count) == 0 ||
+            memcmp(native_icb_pixels[1], native_icb_pixels[2], max_byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: layered patch ICB base-instance routing failed\n");
+            return 232;
         }
     }
     return 0;
