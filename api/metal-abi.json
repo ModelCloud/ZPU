@@ -924,6 +924,7 @@
     "MTL4MachineLearningCommandEncoder arbitrary ML graph execution",
     "MTLAccelerationStructure arbitrary ray-tracing execution",
     "MTLRayTracingPipelineState",
+    "MTLArgumentEncoder nested argument-buffer layout reflection",
     "MTLComputePipelineState unregistered reflection",
     "MTL4Compiler arbitrary ML graph and arbitrary MSL families",
     "MTLLibrary arbitrary stitching and arbitrary MSL compilation",

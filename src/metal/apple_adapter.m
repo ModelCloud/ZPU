@@ -15709,7 +15709,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 - (id<MTLArgumentEncoder>)newArgumentEncoderForBufferAtIndex:(NSUInteger)index API_AVAILABLE(macos(10.13), ios(11.0)) {
     (void)index;
-    return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc] initWithOwner:_owner arguments:@[]];
+    /* The registered CPU descriptor profile has no nested argument-buffer
+     * layout metadata. Do not over-report an empty encoder: Apple's flat
+     * MTLArgumentDescriptor path returns nil for this request as well. */
+    return nil;
 }
 @end
 

@@ -25336,6 +25336,9 @@ int main(void) {
         adapter_argument_descriptor.index = 0;
         id<MTLArgumentEncoder> adapter_argument_encoder =
             [adapter_device newArgumentEncoderWithArguments:@[adapter_argument_descriptor]];
+        MTLArgumentDescriptor *native_argument_descriptor = [adapter_argument_descriptor copy];
+        id<MTLArgumentEncoder> native_argument_encoder =
+            [device newArgumentEncoderWithArguments:@[native_argument_descriptor]];
         id<MTLBuffer> adapter_argument_buffer =
             [adapter_device newBufferWithLength:128 options:MTLResourceStorageModeShared];
         uint32_t argument_constant = 0x5a50555f;
@@ -25372,6 +25375,8 @@ int main(void) {
         [adapter_argument_encoder setIndirectCommandBuffer:adapter_compute_icb atIndex:3];
         id<MTLArgumentEncoder> nested_argument_encoder =
             [adapter_argument_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> native_nested_argument_encoder =
+            [native_argument_encoder newArgumentEncoderForBufferAtIndex:0];
         uint64_t encoded_argument_resource = 0;
         uint64_t encoded_argument_offset = 0;
         uint64_t encoded_argument_icb_resource = 0;
@@ -25387,7 +25392,9 @@ int main(void) {
             memcpy(&encoded_argument_render_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 6 * 16,
                    sizeof(encoded_argument_render_pipeline_resource));
         }
-        if (adapter_argument_encoder == nil || adapter_argument_buffer == nil || nested_argument_encoder == nil ||
+        if (native_argument_encoder == nil ||
+            nested_argument_encoder != native_nested_argument_encoder ||
+            adapter_argument_encoder == nil || adapter_argument_buffer == nil ||
             [adapter_argument_encoder encodedLength] < 16 || [adapter_argument_encoder alignment] != 16 ||
             bound_constant_data == NULL || memcmp(bound_constant_data, &argument_constant, sizeof(argument_constant)) != 0 ||
             encoded_argument_resource != adapter_copy_buffer.gpuAddress || encoded_argument_offset != 0 ||
