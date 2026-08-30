@@ -206,6 +206,54 @@ int main(void) {
     zpu_metal_command_buffer_destroy(compute_buffer);
     zpu_metal_texture_destroy(compute_texture);
 
+    uint8_t ray_payload[512] = {0};
+    const zpu_metal_cpu_acceleration_structure_header ray_header = {
+        ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
+        ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
+        1,
+        1,
+        ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET,
+        {0, 0, 0},
+    };
+    const zpu_metal_cpu_acceleration_triangle ray_triangle = {
+        .positions = {-0.80f, -0.65f, 0.0f, 0.80f, -0.65f, 0.0f, -0.05f, 0.65f, 0.0f},
+    };
+    memcpy(ray_payload, &ray_header, sizeof(ray_header));
+    memcpy(ray_payload + ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET,
+           &ray_triangle, sizeof(ray_triangle));
+    zpu_metal_texture_descriptor ray_descriptor = {
+        .width = 7,
+        .height = 5,
+        .format = ZPU_METAL_RGBA8_UNORM,
+    };
+    zpu_metal_texture *ray_texture = zpu_metal_device_new_texture(device, &ray_descriptor);
+    zpu_metal_buffer *ray_acceleration_structure =
+        zpu_metal_device_new_buffer(device, sizeof(ray_payload), ray_payload);
+    zpu_metal_command_buffer *ray_commands = zpu_metal_command_queue_command_buffer(queue);
+    zpu_metal_compute_encoder *ray_encoder =
+        zpu_metal_command_buffer_compute_encoder(ray_commands);
+    if (ray_texture == NULL || ray_acceleration_structure == NULL || ray_commands == NULL ||
+        ray_encoder == NULL ||
+        zpu_metal_compute_encoder_set_kernel(ray_encoder, ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8) != 0 ||
+        zpu_metal_compute_encoder_set_texture(ray_encoder, ray_texture, 0) != 0 ||
+        zpu_metal_compute_encoder_set_acceleration_structure(ray_encoder, ray_acceleration_structure, 0) != 0 ||
+        zpu_metal_compute_encoder_dispatch_threads(
+            ray_encoder, (zpu_metal_size){7, 5, 1}, (zpu_metal_size){7, 5, 1}) != 0 ||
+        zpu_metal_compute_encoder_end_encoding(ray_encoder) != 0 ||
+        zpu_metal_command_buffer_commit(ray_commands) != 0 ||
+        zpu_metal_command_buffer_get_status(ray_commands) != ZPU_METAL_COMMAND_BUFFER_COMPLETED) return 80;
+    uint8_t ray_pixels[7 * 5 * 4] = {0};
+    if (zpu_metal_texture_get_bytes(ray_texture, ray_pixels, sizeof(ray_pixels), 7 * 4,
+                                    (zpu_metal_region){{0, 0, 0}, {7, 5, 1}}) != 0 ||
+        memcmp(ray_pixels + (0 * 7 + 3) * 4, (const uint8_t[]){0, 0, 0, 255}, 4) != 0 ||
+        memcmp(ray_pixels + (1 * 7 + 3) * 4, (const uint8_t[]){255, 0, 0, 255}, 4) != 0 ||
+        memcmp(ray_pixels + (3 * 7 + 3) * 4, (const uint8_t[]){255, 0, 0, 255}, 4) != 0 ||
+        memcmp(ray_pixels + (4 * 7 + 3) * 4, (const uint8_t[]){0, 0, 0, 255}, 4) != 0) return 81;
+    zpu_metal_compute_encoder_destroy(ray_encoder);
+    zpu_metal_command_buffer_destroy(ray_commands);
+    zpu_metal_buffer_destroy(ray_acceleration_structure);
+    zpu_metal_texture_destroy(ray_texture);
+
     uint8_t compute_copy_source[4 * 4 * 4];
     for (size_t index = 0; index < sizeof(compute_copy_source); ++index) {
         compute_copy_source[index] = (uint8_t)((index * 13u + 9u) & 0xffu);
