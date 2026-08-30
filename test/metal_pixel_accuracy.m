@@ -7293,7 +7293,8 @@ static int test_layered_mesh_msaa_against_native(
 API_AVAILABLE(macos(26.0), ios(26.0))
 static int test_mtl4_layered_mesh_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
-    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library) {
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    NSUInteger sample_count) {
     enum { width = 5, height = 3, layers = 3, byte_count = width * height * 4 };
     id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_cpu_layered_vertex"];
     id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_test_layered_position_gradient"];
@@ -7303,7 +7304,7 @@ static int test_mtl4_layered_mesh_against_native(
     native_descriptor.vertexFunction = native_vertex;
     native_descriptor.fragmentFunction = native_fragment;
     native_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
-    native_descriptor.rasterSampleCount = 1;
+    native_descriptor.rasterSampleCount = sample_count;
     native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     NSError *native_error = nil;
     id<MTLRenderPipelineState> native_pipeline =
@@ -7322,7 +7323,7 @@ static int test_mtl4_layered_mesh_against_native(
     MTL4MeshRenderPipelineDescriptor *mesh_descriptor = [MTL4MeshRenderPipelineDescriptor new];
     mesh_descriptor.meshFunctionDescriptor = mesh_function_descriptor;
     mesh_descriptor.fragmentFunctionDescriptor = fragment_function_descriptor;
-    mesh_descriptor.rasterSampleCount = 1;
+    mesh_descriptor.rasterSampleCount = sample_count;
     mesh_descriptor.maxTotalThreadsPerObjectThreadgroup = 1;
     mesh_descriptor.maxTotalThreadsPerMeshThreadgroup = 1;
     mesh_descriptor.requiredThreadsPerObjectThreadgroup = MTLSizeMake(1, 1, 1);
@@ -7336,19 +7337,30 @@ static int test_mtl4_layered_mesh_against_native(
     MTLTextureDescriptor *texture_descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                             width:width height:height mipmapped:NO];
-    texture_descriptor.textureType = MTLTextureType2DArray;
+    texture_descriptor.textureType = sample_count > 1 ? MTLTextureType2DMultisampleArray : MTLTextureType2DArray;
     texture_descriptor.arrayLength = layers;
+    texture_descriptor.sampleCount = sample_count;
     texture_descriptor.storageMode = MTLStorageModeShared;
     texture_descriptor.usage = MTLTextureUsageRenderTarget;
     id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
     id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    MTLTextureDescriptor *resolve_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    resolve_descriptor.textureType = MTLTextureType2DArray;
+    resolve_descriptor.arrayLength = layers;
+    resolve_descriptor.storageMode = MTLStorageModeShared;
+    resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_resolve = sample_count > 1 ? [native_device newTextureWithDescriptor:resolve_descriptor] : nil;
+    id<MTLTexture> adapter_resolve = sample_count > 1 ? [adapter_device newTextureWithDescriptor:resolve_descriptor] : nil;
     id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
     id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
     MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
     native_pass.renderTargetArrayLength = layers;
     native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].resolveTexture = native_resolve;
     native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].storeAction = sample_count > 1 ? MTLStoreActionMultisampleResolve : MTLStoreActionStore;
     native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
     id<MTLRenderCommandEncoder> native_encoder =
         [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
@@ -7384,8 +7396,9 @@ static int test_mtl4_layered_mesh_against_native(
     MTL4RenderPassDescriptor *adapter_pass = [MTL4RenderPassDescriptor new];
     adapter_pass.renderTargetArrayLength = layers;
     adapter_pass.colorAttachments[0].texture = adapter_texture;
+    adapter_pass.colorAttachments[0].resolveTexture = adapter_resolve;
     adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    adapter_pass.colorAttachments[0].storeAction = sample_count > 1 ? MTLStoreActionMultisampleResolve : MTLStoreActionStore;
     adapter_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
     id<MTL4CommandBuffer> adapter_command_buffer = [adapter_device newCommandBuffer];
     [adapter_command_buffer beginCommandBufferWithAllocator:allocator];
@@ -7414,12 +7427,14 @@ static int test_mtl4_layered_mesh_against_native(
     uint8_t native_pixels[layers][byte_count] = {{0}};
     uint8_t adapter_pixels[layers][byte_count] = {{0}};
     for (NSUInteger layer = 0; layer < layers; ++layer) {
-        if (native_texture != nil) {
-            [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+        id<MTLTexture> native_output = sample_count > 1 ? native_resolve : native_texture;
+        id<MTLTexture> adapter_output = sample_count > 1 ? adapter_resolve : adapter_texture;
+        if (native_output != nil) {
+            [native_output getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
                            fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
         }
-        if (adapter_texture != nil) {
-            [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
+        if (adapter_output != nil) {
+            [adapter_output getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:byte_count
                             fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
         }
         if (memcmp(native_pixels[layer], adapter_pixels[layer], byte_count) != 0) {
@@ -7434,6 +7449,7 @@ static int test_mtl4_layered_mesh_against_native(
         }
     }
     if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        (sample_count > 1 && (native_resolve == nil || adapter_resolve == nil)) ||
         native_buffer == nil || native_command_buffer.status != MTLCommandBufferStatusCompleted ||
         adapter_queue == nil || allocator == nil || adapter_command_buffer == nil || adapter_encoder == nil ||
         adapter_feedback_error != nil) {
@@ -15659,8 +15675,13 @@ int main(void) {
              * through the CPU/ZPU legacy path is checked at the public MTL4
              * boundary as well. */
             const int mtl4_layered_mesh_result = test_mtl4_layered_mesh_against_native(
-                device, adapter_device, library, adapter_default_library);
+                device, adapter_device, library, adapter_default_library, 1);
             if (mtl4_layered_mesh_result != 0) return mtl4_layered_mesh_result;
+            if ([device supportsTextureSampleCount:2] && [adapter_device supportsTextureSampleCount:2]) {
+                const int mtl4_layered_mesh_msaa_result = test_mtl4_layered_mesh_against_native(
+                    device, adapter_device, library, adapter_default_library, 2);
+                if (mtl4_layered_mesh_msaa_result != 0) return mtl4_layered_mesh_msaa_result;
+            }
         }
 
         BOOL adapter_mesh_indirect_exact = YES;
