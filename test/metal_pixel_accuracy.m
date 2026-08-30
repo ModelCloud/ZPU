@@ -110,6 +110,9 @@ static const char *const kShaderSource =
     "struct ZPUCPUArgumentBuffer { device float *data [[id(0)]]; "
     "texture2d<float> tex [[id(1)]]; sampler samp [[id(2)]]; float4 color [[id(3)]]; };\n"
     "kernel void zpu_cpu_argument_buffer(constant ZPUCPUArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
+    "struct ZPUCPUArgumentBufferArray { device float *data[2]; "
+    "texture2d<float> tex[2]; sampler samp[2]; float4 color[2]; };\n"
+    "kernel void zpu_cpu_argument_buffer_array(constant ZPUCPUArgumentBufferArray &args [[buffer(0)]]) { (void)args; }\n"
     "kernel void zpu_cpu_trace_triangles_rgba8(device const float *vertices [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -15115,6 +15118,7 @@ int main(void) {
             "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
             "kernel void zpu_cpu_argument_buffer() {}\n"
+            "kernel void zpu_cpu_argument_buffer_array() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_cpu_vertex() {}\n"
@@ -15677,7 +15681,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 37 ||
+            adapter_library.functionNames.count != 38 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -15686,6 +15690,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
@@ -26335,6 +26340,184 @@ int main(void) {
         } else {
             fprintf(stderr, "metal-pixel: CPU nested argument encoder fixture allocation failed\n");
             return 260;
+        }
+
+        /* A fixed nested profile may also contain resource and constant
+         * arrays. Reflection must expose MTLArrayType rather than flattening
+         * the members, and the CPU encoder must preserve the native argument
+         * index/byte strides for every array element. */
+        id<MTLFunction> native_nested_array_profile =
+            [library newFunctionWithName:@"zpu_cpu_argument_buffer_array"];
+        id<MTLFunction> adapter_nested_array_profile =
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"];
+        id<MTLArgumentEncoder> native_nested_array_encoder =
+            [native_nested_array_profile newArgumentEncoderWithBufferIndex:0];
+        id<MTLArgumentEncoder> adapter_nested_array_encoder =
+            [adapter_nested_array_profile newArgumentEncoderWithBufferIndex:0];
+        id<MTLBuffer> native_nested_array_buffer =
+            [device newBufferWithLength:96 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_nested_array_buffer =
+            [adapter_device newBufferWithLength:96 options:MTLResourceStorageModeShared];
+        MTLSamplerDescriptor *native_nested_array_sampler_descriptor = [MTLSamplerDescriptor new];
+        id<MTLSamplerState> native_nested_array_sampler =
+            [device newSamplerStateWithDescriptor:native_nested_array_sampler_descriptor];
+        BOOL nested_array_profile_reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *native_nested_array_reflection =
+                [library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer_array"];
+            MTLFunctionReflection *adapter_nested_array_reflection =
+                [adapter_library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer_array"];
+            id<MTLBufferBinding> native_nested_array_binding =
+                (id<MTLBufferBinding>)native_nested_array_reflection.bindings.firstObject;
+            id<MTLBufferBinding> adapter_nested_array_binding =
+                (id<MTLBufferBinding>)adapter_nested_array_reflection.bindings.firstObject;
+            MTLStructType *native_nested_array_struct = native_nested_array_binding.bufferStructType;
+            MTLStructType *adapter_nested_array_struct = adapter_nested_array_binding.bufferStructType;
+            NSArray<NSString *> *nested_array_member_names = @[@"data", @"tex", @"samp", @"color"];
+            NSArray<NSNumber *> *nested_array_member_offsets = @[@0, @16, @32, @48];
+            NSArray<NSNumber *> *nested_array_member_indices = @[@0, @2, @4, @6];
+            nested_array_profile_reflection_ok =
+                native_nested_array_reflection != nil && adapter_nested_array_reflection != nil &&
+                native_nested_array_reflection.bindings.count == 1 &&
+                adapter_nested_array_reflection.bindings.count == 1 &&
+                native_nested_array_binding != nil && adapter_nested_array_binding != nil &&
+                native_nested_array_binding.bufferDataType == MTLDataTypeStruct &&
+                adapter_nested_array_binding.bufferDataType == MTLDataTypeStruct &&
+                native_nested_array_binding.bufferDataSize == adapter_nested_array_binding.bufferDataSize &&
+                native_nested_array_binding.bufferDataSize == 80 &&
+                native_nested_array_binding.bufferAlignment == adapter_nested_array_binding.bufferAlignment &&
+                native_nested_array_binding.bufferAlignment == 16 &&
+                native_nested_array_struct != nil && adapter_nested_array_struct != nil &&
+                native_nested_array_struct.members.count == 4 &&
+                adapter_nested_array_struct.members.count == 4;
+            for (NSUInteger member_index = 0; nested_array_profile_reflection_ok && member_index < 4; ++member_index) {
+                MTLStructMember *native_member = native_nested_array_struct.members[member_index];
+                MTLStructMember *adapter_member = adapter_nested_array_struct.members[member_index];
+                MTLArrayType *native_array = native_member.arrayType;
+                MTLArrayType *adapter_array = adapter_member.arrayType;
+                nested_array_profile_reflection_ok =
+                    [native_member.name isEqualToString:nested_array_member_names[member_index]] &&
+                    [adapter_member.name isEqualToString:nested_array_member_names[member_index]] &&
+                    native_member.dataType == adapter_member.dataType &&
+                    native_member.dataType == MTLDataTypeArray &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.offset == nested_array_member_offsets[member_index].unsignedIntegerValue &&
+                    native_member.argumentIndex == adapter_member.argumentIndex &&
+                    native_member.argumentIndex == nested_array_member_indices[member_index].unsignedIntegerValue &&
+                    native_array != nil && adapter_array != nil &&
+                    native_array.dataType == adapter_array.dataType &&
+                    native_array.elementType == adapter_array.elementType &&
+                    native_array.arrayLength == adapter_array.arrayLength &&
+                    native_array.arrayLength == 2 &&
+                    native_array.stride == adapter_array.stride &&
+                    native_array.argumentIndexStride == adapter_array.argumentIndexStride &&
+                    native_array.argumentIndexStride == 1;
+            }
+            MTLArrayType *native_data_array = native_nested_array_struct.members.count < 1 ? nil :
+                native_nested_array_struct.members[0].arrayType;
+            MTLArrayType *adapter_data_array = adapter_nested_array_struct.members.count < 1 ? nil :
+                adapter_nested_array_struct.members[0].arrayType;
+            MTLArrayType *native_texture_array = native_nested_array_struct.members.count < 2 ? nil :
+                native_nested_array_struct.members[1].arrayType;
+            MTLArrayType *adapter_texture_array = adapter_nested_array_struct.members.count < 2 ? nil :
+                adapter_nested_array_struct.members[1].arrayType;
+            MTLPointerType *native_array_pointer = native_data_array.elementPointerType;
+            MTLPointerType *adapter_array_pointer = adapter_data_array.elementPointerType;
+            MTLTextureReferenceType *native_array_texture = native_texture_array.elementTextureReferenceType;
+            MTLTextureReferenceType *adapter_array_texture = adapter_texture_array.elementTextureReferenceType;
+            nested_array_profile_reflection_ok = nested_array_profile_reflection_ok &&
+                native_array_pointer != nil && adapter_array_pointer != nil &&
+                native_array_pointer.elementType == adapter_array_pointer.elementType &&
+                native_array_pointer.elementType == MTLDataTypeFloat &&
+                native_array_pointer.access == adapter_array_pointer.access &&
+                native_array_pointer.access == MTLBindingAccessReadWrite &&
+                native_array_pointer.alignment == adapter_array_pointer.alignment &&
+                native_array_pointer.alignment == sizeof(float) &&
+                native_array_pointer.dataSize == adapter_array_pointer.dataSize &&
+                native_array_pointer.dataSize == sizeof(float) &&
+                native_array_texture != nil && adapter_array_texture != nil &&
+                native_array_texture.textureType == adapter_array_texture.textureType &&
+                native_array_texture.textureType == MTLTextureType2D &&
+                native_array_texture.textureDataType == adapter_array_texture.textureDataType &&
+                native_array_texture.textureDataType == MTLDataTypeFloat &&
+                native_array_texture.access == adapter_array_texture.access &&
+                native_array_texture.access == MTLBindingAccessReadOnly &&
+                !native_array_texture.isDepthTexture && !adapter_array_texture.isDepthTexture;
+        }
+        if (native_nested_array_encoder != nil && adapter_nested_array_encoder != nil &&
+            native_nested_array_buffer != nil && adapter_nested_array_buffer != nil) {
+            [native_nested_array_encoder setArgumentBuffer:native_nested_array_buffer offset:0];
+            [adapter_nested_array_encoder setArgumentBuffer:adapter_nested_array_buffer offset:0];
+            const id<MTLBuffer> native_nested_array_buffers[] = {native_copy_buffer, native_copy_buffer};
+            const id<MTLBuffer> adapter_nested_array_buffers[] = {adapter_copy_buffer, adapter_copy_buffer};
+            const NSUInteger nested_array_offsets[] = {8, 16};
+            const id<MTLTexture> native_nested_array_textures[] = {
+                native_compute_texture, native_compute_texture,
+            };
+            const id<MTLTexture> adapter_nested_array_textures[] = {
+                adapter_compute_icb_texture, adapter_compute_icb_texture,
+            };
+            const id<MTLSamplerState> native_nested_array_samplers[] = {
+                native_nested_array_sampler, native_nested_array_sampler,
+            };
+            const id<MTLSamplerState> adapter_nested_array_samplers[] = {
+                adapter_sampler, adapter_sampler,
+            };
+            [native_nested_array_encoder setBuffers:native_nested_array_buffers offsets:nested_array_offsets
+                                           withRange:NSMakeRange(0, 2)];
+            [adapter_nested_array_encoder setBuffers:adapter_nested_array_buffers offsets:nested_array_offsets
+                                             withRange:NSMakeRange(0, 2)];
+            [native_nested_array_encoder setTextures:native_nested_array_textures withRange:NSMakeRange(2, 2)];
+            [adapter_nested_array_encoder setTextures:adapter_nested_array_textures withRange:NSMakeRange(2, 2)];
+            [native_nested_array_encoder setSamplerStates:native_nested_array_samplers withRange:NSMakeRange(4, 2)];
+            [adapter_nested_array_encoder setSamplerStates:adapter_nested_array_samplers withRange:NSMakeRange(4, 2)];
+            const float nested_array_constant[] = {1.0f, 2.0f, 3.0f, 4.0f};
+            memcpy([native_nested_array_encoder constantDataAtIndex:6], nested_array_constant, sizeof(float) * 2);
+            memcpy([adapter_nested_array_encoder constantDataAtIndex:6], nested_array_constant, sizeof(float) * 2);
+            memcpy([native_nested_array_encoder constantDataAtIndex:7], nested_array_constant + 2, sizeof(float) * 2);
+            memcpy([adapter_nested_array_encoder constantDataAtIndex:7], nested_array_constant + 2, sizeof(float) * 2);
+            uint64_t adapter_nested_array_resource[6] = {0};
+            memcpy(adapter_nested_array_resource, adapter_nested_array_buffer.contents,
+                   sizeof(adapter_nested_array_resource));
+            float adapter_nested_array_color[4] = {0};
+            memcpy(adapter_nested_array_color, (uint8_t *)adapter_nested_array_buffer.contents + 48,
+                   sizeof(float) * 2);
+            memcpy(adapter_nested_array_color + 2, (uint8_t *)adapter_nested_array_buffer.contents + 64,
+                   sizeof(float) * 2);
+            const NSUInteger native_nested_array_color_0_offset =
+                (NSUInteger)((uint8_t *)[native_nested_array_encoder constantDataAtIndex:6] -
+                             (uint8_t *)native_nested_array_buffer.contents);
+            const NSUInteger adapter_nested_array_color_0_offset =
+                (NSUInteger)((uint8_t *)[adapter_nested_array_encoder constantDataAtIndex:6] -
+                             (uint8_t *)adapter_nested_array_buffer.contents);
+            const NSUInteger native_nested_array_color_1_offset =
+                (NSUInteger)((uint8_t *)[native_nested_array_encoder constantDataAtIndex:7] -
+                             (uint8_t *)native_nested_array_buffer.contents);
+            const NSUInteger adapter_nested_array_color_1_offset =
+                (NSUInteger)((uint8_t *)[adapter_nested_array_encoder constantDataAtIndex:7] -
+                             (uint8_t *)adapter_nested_array_buffer.contents);
+            if ([native_nested_array_encoder encodedLength] != [adapter_nested_array_encoder encodedLength] ||
+                [native_nested_array_encoder alignment] != [adapter_nested_array_encoder alignment] ||
+                [native_nested_array_encoder encodedLength] != 80 ||
+                [native_nested_array_encoder alignment] != 16 ||
+                native_nested_array_color_0_offset != adapter_nested_array_color_0_offset ||
+                native_nested_array_color_0_offset != 48 ||
+                native_nested_array_color_1_offset != adapter_nested_array_color_1_offset ||
+                native_nested_array_color_1_offset != 64 ||
+                adapter_nested_array_resource[0] != adapter_copy_buffer.gpuAddress + 8 ||
+                adapter_nested_array_resource[1] != adapter_copy_buffer.gpuAddress + 16 ||
+                adapter_nested_array_resource[2] != adapter_compute_icb_texture.gpuResourceID._impl ||
+                adapter_nested_array_resource[3] != adapter_compute_icb_texture.gpuResourceID._impl ||
+                adapter_nested_array_resource[4] != adapter_sampler.gpuResourceID._impl ||
+                adapter_nested_array_resource[5] != adapter_sampler.gpuResourceID._impl ||
+                memcmp(adapter_nested_array_color, nested_array_constant, sizeof(nested_array_constant)) != 0 ||
+                !nested_array_profile_reflection_ok) {
+                fprintf(stderr, "metal-pixel: CPU nested argument array layout/reflection mismatch\n");
+                return 261;
+            }
+        } else {
+            fprintf(stderr, "metal-pixel: CPU nested argument array fixture allocation failed\n");
+            return 261;
         }
 
         /* A count-based NSArray-style range must not wrap its final binding

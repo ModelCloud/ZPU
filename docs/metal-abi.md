@@ -492,8 +492,11 @@ triangle path:
   scalar/vector/matrix constants use their native Metal size/alignment and
   array stride. Rebinding captures direct constant writes. The explicit
   `zpu_cpu_argument_buffer` profile also reflects and encodes one fixed nested
-  pointer/texture/sampler/constant layout; arbitrary shader-specific struct
-  layouts remain unsupported rather than being guessed
+  pointer/texture/sampler/constant layout, while
+  `zpu_cpu_argument_buffer_array` additionally reflects and encodes fixed
+  two-element pointer/texture/sampler/constant arrays with native byte and
+  argument-index strides; arbitrary shader-specific struct layouts remain
+  unsupported rather than being guessed
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports

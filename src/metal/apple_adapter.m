@@ -68,6 +68,10 @@ static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
 /* Metadata-only profile used to exercise CPU nested argument-buffer
  * encoding. It is intentionally not an executable arbitrary-MSL kernel. */
 static NSString *const zpu_cpu_argument_buffer_function_name = @"zpu_cpu_argument_buffer";
+/* Metadata-only profile used to exercise fixed nested argument-buffer arrays.
+ * Its storage and encoding remain CPU-owned; native Metal is only an oracle
+ * for the public reflection/layout contract in the test suite. */
+static NSString *const zpu_cpu_argument_buffer_array_function_name = @"zpu_cpu_argument_buffer_array";
 
 static BOOL zpu_cpu_ml_add_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_add_u8_function_name] ||
@@ -607,13 +611,18 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSUInteger _offset;
     MTLDataType _dataType;
     NSUInteger _argumentIndex;
+    MTLStructType *_structType;
+    MTLArrayType *_arrayType;
     MTLPointerType *_pointerType;
     MTLTextureReferenceType *_textureReferenceType;
+    MTLTensorReferenceType *_tensorReferenceType;
 }
 - (instancetype)initWithName:(NSString *)name offset:(NSUInteger)offset
                      dataType:(MTLDataType)dataType argumentIndex:(NSUInteger)argumentIndex;
 - (void)setPointerType:(MTLPointerType *)pointerType
  textureReferenceType:(MTLTextureReferenceType *)textureReferenceType;
+- (void)setStructType:(MTLStructType *)structType arrayType:(MTLArrayType *)arrayType
+         tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType;
 @end
 
 @interface ZPUStructType : MTLStructType {
@@ -622,6 +631,31 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSArray *_members;
 }
 - (instancetype)initWithMembers:(NSArray *)members;
+@end
+
+API_AVAILABLE(macos(10.11), ios(8.0))
+@interface ZPUArrayType : MTLArrayType {
+@public
+    MTLDataType _dataType;
+    MTLDataType _elementType;
+    NSUInteger _arrayLength;
+    NSUInteger _stride;
+    NSUInteger _argumentIndexStride;
+    MTLStructType *_elementStructType;
+    MTLArrayType *_elementArrayType;
+    MTLTextureReferenceType *_elementTextureReferenceType;
+    MTLPointerType *_elementPointerType;
+    MTLTensorReferenceType *_elementTensorReferenceType;
+}
+- (instancetype)initWithElementType:(MTLDataType)elementType
+                         arrayLength:(NSUInteger)arrayLength
+                              stride:(NSUInteger)stride
+                argumentIndexStride:(NSUInteger)argumentIndexStride
+                        structType:(MTLStructType *)structType
+                         arrayType:(MTLArrayType *)arrayType
+                  textureReferenceType:(MTLTextureReferenceType *)textureReferenceType
+                         pointerType:(MTLPointerType *)pointerType
+                  tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType;
 @end
 
 API_AVAILABLE(macos(10.13), ios(11.0))
@@ -7381,26 +7415,37 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
         _offset = offset;
         _dataType = dataType;
         _argumentIndex = argumentIndex;
+        _structType = nil;
+        _arrayType = nil;
         _pointerType = nil;
         _textureReferenceType = nil;
+        _tensorReferenceType = nil;
     }
     return self;
 }
 - (NSString *)name { return _name; }
 - (NSUInteger)offset { return _offset; }
 - (MTLDataType)dataType { return _dataType; }
-- (MTLStructType *)structType { return nil; }
-- (MTLArrayType *)arrayType { return nil; }
+- (MTLStructType *)structType { return _structType; }
+- (MTLArrayType *)arrayType { return _arrayType; }
 - (MTLTextureReferenceType *)textureReferenceType API_AVAILABLE(macos(10.13), ios(11.0)) {
     return _textureReferenceType;
 }
 - (MTLPointerType *)pointerType API_AVAILABLE(macos(10.13), ios(11.0)) { return _pointerType; }
-- (MTLTensorReferenceType *)tensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0)) { return nil; }
+- (MTLTensorReferenceType *)tensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return _tensorReferenceType;
+}
 - (NSUInteger)argumentIndex API_AVAILABLE(macos(10.13), ios(11.0)) { return _argumentIndex; }
 - (void)setPointerType:(MTLPointerType *)pointerType
  textureReferenceType:(MTLTextureReferenceType *)textureReferenceType {
     _pointerType = pointerType;
     _textureReferenceType = textureReferenceType;
+}
+- (void)setStructType:(MTLStructType *)structType arrayType:(MTLArrayType *)arrayType
+         tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType {
+    _structType = structType;
+    _arrayType = arrayType;
+    _tensorReferenceType = tensorReferenceType;
 }
 @end
 
@@ -7419,6 +7464,51 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
         if ([member.name isEqualToString:name]) return member;
     }
     return nil;
+}
+@end
+
+API_AVAILABLE(macos(10.11), ios(8.0))
+@implementation ZPUArrayType
+- (instancetype)initWithElementType:(MTLDataType)elementType
+                         arrayLength:(NSUInteger)arrayLength
+                              stride:(NSUInteger)stride
+                argumentIndexStride:(NSUInteger)argumentIndexStride
+                        structType:(MTLStructType *)structType
+                         arrayType:(MTLArrayType *)arrayType
+                  textureReferenceType:(MTLTextureReferenceType *)textureReferenceType
+                         pointerType:(MTLPointerType *)pointerType
+                  tensorReferenceType:(MTLTensorReferenceType *)tensorReferenceType {
+    if ((self = [super init])) {
+        _dataType = MTLDataTypeArray;
+        _elementType = elementType;
+        _arrayLength = arrayLength;
+        _stride = stride;
+        _argumentIndexStride = argumentIndexStride;
+        _elementStructType = structType;
+        _elementArrayType = arrayType;
+        _elementTextureReferenceType = textureReferenceType;
+        _elementPointerType = pointerType;
+        _elementTensorReferenceType = tensorReferenceType;
+    }
+    return self;
+}
+- (MTLDataType)dataType { return _dataType; }
+- (MTLDataType)elementType { return _elementType; }
+- (NSUInteger)arrayLength { return _arrayLength; }
+- (NSUInteger)stride { return _stride; }
+- (NSUInteger)argumentIndexStride API_AVAILABLE(macos(10.13), ios(11.0)) {
+    return _argumentIndexStride;
+}
+- (MTLStructType *)elementStructType { return _elementStructType; }
+- (MTLArrayType *)elementArrayType { return _elementArrayType; }
+- (MTLTextureReferenceType *)elementTextureReferenceType API_AVAILABLE(macos(10.13), ios(11.0)) {
+    return _elementTextureReferenceType;
+}
+- (MTLPointerType *)elementPointerType API_AVAILABLE(macos(10.13), ios(11.0)) {
+    return _elementPointerType;
+}
+- (MTLTensorReferenceType *)elementTensorReferenceType API_AVAILABLE(macos(26.0), ios(26.0)) {
+    return _elementTensorReferenceType;
 }
 @end
 
@@ -7863,6 +7953,53 @@ static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_argument_buffer_function_reflection(NSString *name) {
+    if ([name isEqualToString:zpu_cpu_argument_buffer_array_function_name]) {
+        ZPUPointerType *dataPointer = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeFloat access:MTLBindingAccessReadWrite
+                      alignment:sizeof(float) dataSize:sizeof(float) structType:nil];
+        ZPUTextureReferenceType *textureReference = [[ZPUTextureReferenceType alloc]
+            initWithTextureType:MTLTextureType2D dataType:MTLDataTypeFloat
+                          access:MTLBindingAccessReadOnly];
+        ZPUArrayType *dataArray = [[ZPUArrayType alloc]
+            initWithElementType:MTLDataTypePointer arrayLength:2 stride:8
+              argumentIndexStride:1 structType:nil arrayType:nil
+              textureReferenceType:nil pointerType:dataPointer tensorReferenceType:nil];
+        ZPUArrayType *textureArray = [[ZPUArrayType alloc]
+            initWithElementType:MTLDataTypeTexture arrayLength:2 stride:8
+              argumentIndexStride:1 structType:nil arrayType:nil
+              textureReferenceType:textureReference pointerType:nil tensorReferenceType:nil];
+        ZPUArrayType *samplerArray = [[ZPUArrayType alloc]
+            initWithElementType:MTLDataTypeSampler arrayLength:2 stride:8
+              argumentIndexStride:1 structType:nil arrayType:nil
+              textureReferenceType:nil pointerType:nil tensorReferenceType:nil];
+        ZPUArrayType *colorArray = [[ZPUArrayType alloc]
+            initWithElementType:MTLDataTypeFloat4 arrayLength:2 stride:16
+              argumentIndexStride:1 structType:nil arrayType:nil
+              textureReferenceType:nil pointerType:nil tensorReferenceType:nil];
+        ZPUStructMember *data = [[ZPUStructMember alloc] initWithName:@"data" offset:0
+            dataType:MTLDataTypeArray argumentIndex:0];
+        [data setStructType:nil arrayType:dataArray tensorReferenceType:nil];
+        ZPUStructMember *texture = [[ZPUStructMember alloc] initWithName:@"tex" offset:16
+            dataType:MTLDataTypeArray argumentIndex:2];
+        [texture setStructType:nil arrayType:textureArray tensorReferenceType:nil];
+        ZPUStructMember *sampler = [[ZPUStructMember alloc] initWithName:@"samp" offset:32
+            dataType:MTLDataTypeArray argumentIndex:4];
+        [sampler setStructType:nil arrayType:samplerArray tensorReferenceType:nil];
+        ZPUStructMember *color = [[ZPUStructMember alloc] initWithName:@"color" offset:48
+            dataType:MTLDataTypeArray argumentIndex:6];
+        [color setStructType:nil arrayType:colorArray tensorReferenceType:nil];
+        MTLStructType *structType = [[ZPUStructType alloc]
+            initWithMembers:@[data, texture, sampler, color]];
+        ZPUBinding *binding = zpu_reflection_binding(@"args", MTLBindingTypeBuffer,
+                                                      MTLBindingAccessReadOnly, 0);
+        [binding setBufferDataSize:80 dataType:MTLDataTypeStruct];
+        binding->_bufferStructType = structType;
+        binding->_bufferPointerType = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                      alignment:16 dataSize:80 structType:structType];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[binding] userAnnotation:nil];
+    }
     if (![name isEqualToString:zpu_cpu_argument_buffer_function_name]) return nil;
 
     ZPUPointerType *dataPointer = [[ZPUPointerType alloc]
@@ -10427,7 +10564,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (NSDictionary *)functionConstantsDictionary API_AVAILABLE(macos(10.12), ios(10.0)) { return @{}; }
 - (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return _optionsOverride; }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(10.13), ios(11.0)) {
-    if (bufferIndex != 0 || ![_implementationName isEqualToString:zpu_cpu_argument_buffer_function_name]) {
+    const BOOL fixed_argument_buffer = [_implementationName isEqualToString:zpu_cpu_argument_buffer_function_name];
+    const BOOL fixed_argument_buffer_array = [_implementationName isEqualToString:zpu_cpu_argument_buffer_array_function_name];
+    if (bufferIndex != 0 || (!fixed_argument_buffer && !fixed_argument_buffer_array)) {
         /* The other registered CPU profiles expose ordinary
          * buffer/texture/sampler arguments, not an MSL argument-buffer
          * parameter. Metal returns nil for this selector in that case; an
@@ -10438,15 +10577,19 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     MTLArgumentDescriptor *data = [MTLArgumentDescriptor argumentDescriptor];
     data.dataType = MTLDataTypePointer;
     data.index = 0;
+    data.arrayLength = fixed_argument_buffer_array ? 2 : 1;
     MTLArgumentDescriptor *texture = [MTLArgumentDescriptor argumentDescriptor];
     texture.dataType = MTLDataTypeTexture;
-    texture.index = 1;
+    texture.index = fixed_argument_buffer_array ? 2 : 1;
+    texture.arrayLength = fixed_argument_buffer_array ? 2 : 1;
     MTLArgumentDescriptor *sampler = [MTLArgumentDescriptor argumentDescriptor];
     sampler.dataType = MTLDataTypeSampler;
-    sampler.index = 2;
+    sampler.index = fixed_argument_buffer_array ? 4 : 2;
+    sampler.arrayLength = fixed_argument_buffer_array ? 2 : 1;
     MTLArgumentDescriptor *color = [MTLArgumentDescriptor argumentDescriptor];
     color.dataType = MTLDataTypeFloat4;
-    color.index = 3;
+    color.index = fixed_argument_buffer_array ? 6 : 3;
+    color.arrayLength = fixed_argument_buffer_array ? 2 : 1;
     return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc]
         initWithOwner:_owner arguments:@[data, texture, sampler, color]];
 }
@@ -10585,6 +10728,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_ml_add_u4_function_name,
             zpu_cpu_ml_mul_f32_function_name,
             zpu_cpu_argument_buffer_function_name,
+            zpu_cpu_argument_buffer_array_function_name,
         ]) {
             if (zpu_source_contains_identifier(source, name)) [names addObject:name];
         }
