@@ -63,6 +63,7 @@ static NSString *const zpu_cpu_ml_add_bf16_function_name = @"zpu_cpu_ml_add_bf16
 static NSString *const zpu_cpu_ml_add_i4_function_name = @"zpu_cpu_ml_add_i4";
 static NSString *const zpu_cpu_ml_add_u4_function_name = @"zpu_cpu_ml_add_u4";
 static NSString *const zpu_cpu_add_f32_function_name = @"zpu_cpu_add_f32";
+static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
 
 static BOOL zpu_cpu_ml_add_function_name_supported(NSString *name) {
     return [name isEqualToString:zpu_cpu_ml_add_u8_function_name] ||
@@ -3088,7 +3089,8 @@ static void zpu_metal4_clear_compute_argument_table(ZPUComputeEncoder *legacy,
                                                       ZPUMTL4ArgumentTable *table) {
     if (legacy == nil || table == nil) return;
     for (NSUInteger index = 0; index < table->_maxBufferBindCount; ++index) {
-        if (index == 0 || (legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 && index <= 2)) {
+        if (index == 0 || ((legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 ||
+                            legacy->_kernel == ZPU_METAL_COMPUTE_MUL_F32) && index <= 2)) {
             [(id<MTLComputeCommandEncoder>)legacy setBuffer:nil offset:0 atIndex:index];
         }
         [(id<MTLComputeCommandEncoder>)legacy setAccelerationStructure:nil atBufferIndex:index];
@@ -7572,7 +7574,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_compute_kernel kernel) {
     NSMutableArray *arguments = [NSMutableArray array];
     NSMutableArray *bindings = [NSMutableArray array];
-    if (kernel == ZPU_METAL_COMPUTE_ADD_F32) {
+    if (kernel == ZPU_METAL_COMPUTE_ADD_F32 || kernel == ZPU_METAL_COMPUTE_MUL_F32) {
         ZPUArgument *left = zpu_reflection_argument(@"left", MTLArgumentTypeBuffer,
                                                      MTLBindingAccessReadOnly, 0);
         [left setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
@@ -7822,6 +7824,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba16_float"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT;
         else if ([name isEqualToString:zpu_cpu_trace_triangles_function_name]) kernel = ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8;
         else if ([name isEqualToString:zpu_cpu_add_f32_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32;
+        else if ([name isEqualToString:zpu_cpu_mul_f32_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32;
         if (kernel != 0) {
             MTLComputePipelineReflection *reflection = zpu_compute_pipeline_reflection(kernel);
             return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
@@ -7915,6 +7918,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         @"zpu_cpu_fill_gradient_r32_float",
         @"zpu_cpu_fill_gradient_rgba16_float",
         zpu_cpu_add_f32_function_name,
+        zpu_cpu_mul_f32_function_name,
         zpu_cpu_trace_triangles_function_name,
         zpu_cpu_tile_gradient_function_name,
         zpu_cpu_mesh_gradient_function_name,
@@ -9593,7 +9597,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_rg32_sint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -10351,6 +10355,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             @"zpu_cpu_fill_gradient_r32_float",
             @"zpu_cpu_fill_gradient_rgba16_float",
             zpu_cpu_add_f32_function_name,
+            zpu_cpu_mul_f32_function_name,
             zpu_cpu_trace_triangles_function_name,
             zpu_cpu_tile_gradient_function_name,
             zpu_cpu_mesh_gradient_function_name,
@@ -13796,7 +13801,8 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
     if (_argumentTable->_invalid) { [_owner markError]; return; }
     for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
         if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
-            if (_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 && index <= 2) {
+            if ((_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 ||
+                 _legacy->_kernel == ZPU_METAL_COMPUTE_MUL_F32) && index <= 2) {
                 [(id<MTLComputeCommandEncoder>)_legacy setBuffer:nil offset:0 atIndex:index];
             }
             [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
@@ -13822,8 +13828,10 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
             [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:
                 (id<MTLIntersectionFunctionTable>)resource atBufferIndex:index];
         } else if (index == 0 ||
-                   (index <= 2 && _legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32)) {
-            if (_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 && buffer == nil) {
+                   (index <= 2 && (_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 ||
+                                   _legacy->_kernel == ZPU_METAL_COMPUTE_MUL_F32))) {
+            if ((_legacy->_kernel == ZPU_METAL_COMPUTE_ADD_F32 ||
+                 _legacy->_kernel == ZPU_METAL_COMPUTE_MUL_F32) && buffer == nil) {
                 [_owner markError];
                 return;
             }
@@ -14419,6 +14427,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT: return @"zpu_cpu_fill_gradient_rgba16_float";
         case ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8: return zpu_cpu_trace_triangles_function_name;
         case ZPU_METAL_COMPUTE_ADD_F32: return zpu_cpu_add_f32_function_name;
+        case ZPU_METAL_COMPUTE_MUL_F32: return zpu_cpu_mul_f32_function_name;
         default: return nil;
     }
 }
@@ -14469,6 +14478,8 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_F32;
         } else {
             zpu_set_error(error, @"ZPU CPU Metal has no registered CPU implementation for this compute function");
             return nil;

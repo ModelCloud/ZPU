@@ -104,6 +104,9 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_add_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
+    "kernel void zpu_cpu_mul_f32(device const float *left [[buffer(0)]], "
+    "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 10) return; output[gid] = left[gid] * right[gid]; }\n"
     "kernel void zpu_cpu_trace_triangles_rgba8(device const float *vertices [[buffer(0)]], "
     "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
     "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
@@ -14496,6 +14499,7 @@ int main(void) {
             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
+            "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_cpu_vertex() {}\n"
@@ -15058,12 +15062,13 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 34 ||
+            adapter_library.functionNames.count != 35 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_3d"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tile_gradient_rgba8"] == nil ||
@@ -15639,6 +15644,94 @@ int main(void) {
             fail_with_error("CPU buffer add compute exactness failed",
                             adapter_buffer_add_error ?: native_buffer_add_error);
             return 186;
+        }
+
+        /* The matching multiply profile uses the same three ordinary buffer
+         * slots, but exercises a distinct CPU/ZPU opcode. Compare raw bytes
+         * with native Metal so no tolerance can hide a binding or arithmetic
+         * mismatch. */
+        enum { buffer_mul_count = 10 };
+        const float buffer_mul_left_values[buffer_mul_count] = {
+            -3.5f, -2.0f, -0.5f, 0.0f, 1.25f,
+            2.0f, 3.5f, 4.0f, 8.0f, -16.0f,
+        };
+        const float buffer_mul_right_values[buffer_mul_count] = {
+            2.0f, -0.5f, 4.0f, 9.0f, 2.0f,
+            -1.0f, -3.0f, 0.25f, -8.0f, -2.0f,
+        };
+        id<MTLFunction> native_buffer_mul_function = [library newFunctionWithName:@"zpu_cpu_mul_f32"];
+        NSError *native_buffer_mul_error = nil;
+        id<MTLComputePipelineState> native_buffer_mul_pipeline =
+            [device newComputePipelineStateWithFunction:native_buffer_mul_function error:&native_buffer_mul_error];
+        id<MTLBuffer> native_buffer_mul_left =
+            [device newBufferWithBytes:buffer_mul_left_values length:sizeof(buffer_mul_left_values)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_buffer_mul_right =
+            [device newBufferWithBytes:buffer_mul_right_values length:sizeof(buffer_mul_right_values)
+                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_buffer_mul_output =
+            [device newBufferWithLength:sizeof(buffer_mul_left_values) options:MTLResourceStorageModeShared];
+        if (native_buffer_mul_output != nil) memset(native_buffer_mul_output.contents, 0xa5, native_buffer_mul_output.length);
+        id<MTLCommandBuffer> native_buffer_mul_command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_buffer_mul_encoder =
+            [native_buffer_mul_command_buffer computeCommandEncoder];
+        if (native_buffer_mul_pipeline != nil && native_buffer_mul_left != nil &&
+            native_buffer_mul_right != nil && native_buffer_mul_output != nil) {
+            [native_buffer_mul_encoder setComputePipelineState:native_buffer_mul_pipeline];
+            [native_buffer_mul_encoder setBuffer:native_buffer_mul_left offset:0 atIndex:0];
+            [native_buffer_mul_encoder setBuffer:native_buffer_mul_right offset:0 atIndex:1];
+            [native_buffer_mul_encoder setBuffer:native_buffer_mul_output offset:0 atIndex:2];
+            [native_buffer_mul_encoder dispatchThreads:MTLSizeMake(buffer_mul_count, 1, 1)
+                                  threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [native_buffer_mul_encoder endEncoding];
+            [native_buffer_mul_command_buffer commit];
+            [native_buffer_mul_command_buffer waitUntilCompleted];
+        }
+        id<MTLFunction> adapter_buffer_mul_function =
+            [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"];
+        NSError *adapter_buffer_mul_error = nil;
+        id<MTLComputePipelineState> adapter_buffer_mul_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_buffer_mul_function
+                                                           error:&adapter_buffer_mul_error];
+        id<MTLBuffer> adapter_buffer_mul_left =
+            [adapter_device newBufferWithBytes:buffer_mul_left_values length:sizeof(buffer_mul_left_values)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer_mul_right =
+            [adapter_device newBufferWithBytes:buffer_mul_right_values length:sizeof(buffer_mul_right_values)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_buffer_mul_output =
+            [adapter_device newBufferWithLength:sizeof(buffer_mul_left_values) options:MTLResourceStorageModeShared];
+        if (adapter_buffer_mul_output != nil) memset(adapter_buffer_mul_output.contents, 0xa5, adapter_buffer_mul_output.length);
+        id<MTLCommandBuffer> adapter_buffer_mul_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_buffer_mul_encoder =
+            [adapter_buffer_mul_command_buffer computeCommandEncoder];
+        if (adapter_buffer_mul_pipeline != nil && adapter_buffer_mul_left != nil &&
+            adapter_buffer_mul_right != nil && adapter_buffer_mul_output != nil) {
+            [adapter_buffer_mul_encoder setComputePipelineState:adapter_buffer_mul_pipeline];
+            [adapter_buffer_mul_encoder setBuffer:adapter_buffer_mul_left offset:0 atIndex:0];
+            [adapter_buffer_mul_encoder setBuffer:adapter_buffer_mul_right offset:0 atIndex:1];
+            [adapter_buffer_mul_encoder setBuffer:adapter_buffer_mul_output offset:0 atIndex:2];
+            [adapter_buffer_mul_encoder dispatchThreads:MTLSizeMake(buffer_mul_count, 1, 1)
+                                   threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [adapter_buffer_mul_encoder endEncoding];
+            [adapter_buffer_mul_command_buffer commit];
+            [adapter_buffer_mul_command_buffer waitUntilCompleted];
+        }
+        const BOOL buffer_mul_exact =
+            native_buffer_mul_function != nil && native_buffer_mul_error == nil &&
+            native_buffer_mul_pipeline != nil && native_buffer_mul_left != nil &&
+            native_buffer_mul_right != nil && native_buffer_mul_output != nil &&
+            native_buffer_mul_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_buffer_mul_function != nil && adapter_buffer_mul_error == nil &&
+            adapter_buffer_mul_pipeline != nil && adapter_buffer_mul_left != nil &&
+            adapter_buffer_mul_right != nil && adapter_buffer_mul_output != nil &&
+            adapter_buffer_mul_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_buffer_mul_output.contents, adapter_buffer_mul_output.contents,
+                   sizeof(buffer_mul_left_values)) == 0;
+        if (!buffer_mul_exact) {
+            fail_with_error("CPU buffer multiply compute exactness failed",
+                            adapter_buffer_mul_error ?: native_buffer_mul_error);
+            return 187;
         }
 
   /* The registered gradient profile writes a logical float4. The CPU

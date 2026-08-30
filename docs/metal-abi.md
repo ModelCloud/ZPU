@@ -283,6 +283,9 @@ triangle path:
   bindings 0/1/2 and performs deferred elementwise addition on the CPU for
   direct and indirect one-dimensional dispatches; Metal 4 argument tables can
   provide the same three buffer bindings without changing CPU ownership.
+  The matching `zpu_cpu_mul_f32` profile performs deferred elementwise Float32
+  multiplication through the same three ZPU-owned buffer slots and direct,
+  indirect, and Metal 4 argument-table dispatch paths.
   3D dispatches expand z into plane commands while preserving the z coordinate
   in the CPU kernel; indirect array/3D dispatches resolve the deferred z
   extent at commit and skip slices outside that extent. The triangle trace

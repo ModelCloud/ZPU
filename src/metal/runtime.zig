@@ -4876,12 +4876,12 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6 and kernel != 7 and kernel != 8) return error.UnsupportedOperation;
+        if (kernel != 1 and kernel != 2 and kernel != 3 and kernel != 4 and kernel != 5 and kernel != 6 and kernel != 7 and kernel != 8 and kernel != 9) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
     fn isBufferAddKernel(self: *const ComputeEncoder) bool {
-        return self.kernel == 8;
+        return self.kernel == 8 or self.kernel == 9;
     }
 
     fn appendBufferAdd(
@@ -5520,7 +5520,7 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
 }
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
-    if (command.kernel != 8 or !validBuffer(command.left) or !validBuffer(command.right) or
+    if ((command.kernel != 8 and command.kernel != 9) or !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
         command.threads_per_grid.depth != 1 or command.threads_per_threadgroup.width == 0 or
@@ -5536,7 +5536,7 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
         const output_offset = command.output_offset + index * @sizeOf(f32);
         const left = readF32Little(command.left.bytes, left_offset);
         const right = readF32Little(command.right.bytes, right_offset);
-        const result = left + right;
+        const result = if (command.kernel == 8) left + right else left * right;
         std.mem.writeInt(u32, command.output.bytes[output_offset..][0..@sizeOf(f32)], @bitCast(result), .little);
     }
 }
@@ -8555,6 +8555,43 @@ test "CPU buffer add compute is deferred and slot-accurate" {
     for (expected, 0..) |value, index| {
         try std.testing.expectEqual(value, readF32Little(output.bytes, (index + 2) * @sizeOf(f32)));
     }
+}
+
+test "CPU buffer multiply compute is deferred and slot-accurate" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+
+    const left_values = [_]f32{ 99.0, -3.5, -2.0, -0.5, 0.0, 1.25, 2.0 };
+    const right_values = [_]f32{ 77.0, 2.0, -0.5, 4.0, 9.0, 2.0, -1.0 };
+    var output_values = [_]f32{ 123.0, 456.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    const left = try createBuffer(device, @sizeOf(@TypeOf(left_values)), @ptrCast(&left_values));
+    defer destroyBuffer(left);
+    const right = try createBuffer(device, @sizeOf(@TypeOf(right_values)), @ptrCast(&right_values));
+    defer destroyBuffer(right);
+    const output = try createBuffer(device, @sizeOf(@TypeOf(output_values)), @ptrCast(&output_values));
+    defer destroyBuffer(output);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(9);
+    try encoder.setBuffer(left, @sizeOf(f32), 0);
+    try encoder.setBuffer(right, @sizeOf(f32), 1);
+    try encoder.setBuffer(output, 2 * @sizeOf(f32), 2);
+    try encoder.dispatchThreads(.{ .width = 6, .height = 1, .depth = 1 }, .{ .width = 2, .height = 1, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try std.testing.expectEqual(@as(f32, 0.0), readF32Little(output.bytes, 2 * @sizeOf(f32)));
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    const expected = [_]f32{ -7.0, 1.0, -2.0, 0.0, 2.5, -2.0 };
+    for (expected, 0..) |value, index| {
+        try std.testing.expectEqual(value, readF32Little(output.bytes, (index + 2) * @sizeOf(f32)));
+    }
+    try std.testing.expectEqual(@as(f32, 123.0), readF32Little(output.bytes, 0));
+    try std.testing.expectEqual(@as(f32, 456.0), readF32Little(output.bytes, @sizeOf(f32)));
 }
 
 test "CPU triangle trace uses the Metal top-left pixel grid" {

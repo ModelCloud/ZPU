@@ -389,6 +389,7 @@ enum {
     /* Fixed CPU buffer arithmetic profile. Bind left/right/output buffers at
      * indices 0/1/2 and dispatch one thread per Float32 element. */
     ZPU_METAL_COMPUTE_ADD_F32 = 8,
+    ZPU_METAL_COMPUTE_MUL_F32 = 9,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u
