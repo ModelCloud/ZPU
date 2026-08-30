@@ -1566,6 +1566,12 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     NSMutableArray *_retainedResources;
     NSMutableDictionary *_bindings;
     NSMutableDictionary *_bindingOffsets;
+    /* Argument-buffer byte offsets are determined by descriptor order and
+     * the natural Metal data-type layout.  They are not index * 16: binding
+     * indices are shader slots, while the descriptor array describes the
+     * packed CPU argument-buffer layout. */
+    NSMutableDictionary *_argumentOffsets;
+    NSMutableDictionary *_constantSizes;
     NSMutableDictionary *_constants;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner arguments:(NSArray<MTLArgumentDescriptor *> *)arguments;
@@ -15453,6 +15459,165 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 }
 @end
 
+/* MTLArgumentEncoder packs the descriptors in declaration order.  The
+ * descriptor's index is the shader binding index, not a byte-slot number.
+ * Resource values occupy an 8-byte GPU-address slot; constant values use the
+ * natural Metal scalar/vector/matrix size and alignment.  Keep this layout
+ * entirely CPU-side so the adapter never needs a native argument encoder. */
+static BOOL zpu_argument_align_up(NSUInteger value, NSUInteger alignment, NSUInteger *result) {
+    if (result == NULL || alignment == 0) return NO;
+    const NSUInteger remainder = value % alignment;
+    const NSUInteger padding = remainder == 0 ? 0 : alignment - remainder;
+    if (value > NSUIntegerMax - padding) return NO;
+    *result = value + padding;
+    return YES;
+}
+
+static BOOL zpu_argument_type_is_resource(MTLDataType dataType) {
+    switch ((NSUInteger)dataType) {
+        case 58:  /* texture */
+        case 59:  /* sampler */
+        case 60:  /* pointer */
+        case 78:  /* render pipeline */
+        case 79:  /* compute pipeline */
+        case 80:  /* indirect command buffer */
+        case 115: /* visible function table */
+        case 116: /* intersection function table */
+        case 117: /* primitive acceleration structure */
+        case 118: /* instance acceleration structure */
+        case 139: /* depth/stencil state */
+        case 140: /* tensor */
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static BOOL zpu_argument_type_size_align(MTLDataType dataType, NSUInteger *size, NSUInteger *alignment) {
+    if (size == NULL || alignment == NULL) return NO;
+    const NSUInteger raw = (NSUInteger)dataType;
+    NSUInteger scalarBytes = 0;
+    NSUInteger scalarBase = 0;
+    NSUInteger vectorCount = 0;
+    if (raw >= 3 && raw <= 6) {
+        scalarBase = 3;
+        scalarBytes = 4;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 16 && raw <= 19) {
+        scalarBase = 16;
+        scalarBytes = 2;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 29 && raw <= 32) {
+        scalarBase = 29;
+        scalarBytes = 4;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 33 && raw <= 36) {
+        scalarBase = 33;
+        scalarBytes = 4;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 37 && raw <= 40) {
+        scalarBase = 37;
+        scalarBytes = 2;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 41 && raw <= 44) {
+        scalarBase = 41;
+        scalarBytes = 2;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 45 && raw <= 48) {
+        scalarBase = 45;
+        scalarBytes = 1;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 49 && raw <= 52) {
+        scalarBase = 49;
+        scalarBytes = 1;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 53 && raw <= 56) {
+        scalarBase = 53;
+        scalarBytes = 1;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 81 && raw <= 84) {
+        scalarBase = 81;
+        scalarBytes = 8;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 85 && raw <= 88) {
+        scalarBase = 85;
+        scalarBytes = 8;
+        vectorCount = raw - scalarBase + 1;
+    } else if (raw >= 121 && raw <= 124) {
+        scalarBase = 121;
+        scalarBytes = 2;
+        vectorCount = raw - scalarBase + 1;
+    }
+    (void)scalarBase;
+    if (vectorCount != 0) {
+        NSUInteger vectorAlignment = scalarBytes;
+        if (vectorCount > 1) {
+            if (scalarBytes > NSUIntegerMax / (vectorCount >= 3 ? 4 : 2)) return NO;
+            vectorAlignment = scalarBytes * (vectorCount >= 3 ? 4 : 2);
+        }
+        if (vectorAlignment == 0 || vectorCount > NSUIntegerMax / scalarBytes) return NO;
+        const NSUInteger rawSize = vectorCount * scalarBytes;
+        if (!zpu_argument_align_up(rawSize, vectorAlignment, size)) return NO;
+        *alignment = vectorAlignment;
+        return YES;
+    }
+    /* Matrix enum values are three row counts for each of the 2/3/4 column
+     * variants.  Each column has the corresponding vector's natural stride. */
+    NSUInteger matrixBase = 0;
+    NSUInteger matrixScalarBytes = 0;
+    if (raw >= 7 && raw <= 15) {
+        matrixBase = 7;
+        matrixScalarBytes = 4;
+    } else if (raw >= 20 && raw <= 28) {
+        matrixBase = 20;
+        matrixScalarBytes = 2;
+    }
+    if (matrixBase != 0) {
+        const NSUInteger matrixOffset = raw - matrixBase;
+        const NSUInteger columns = 2 + matrixOffset / 3;
+        const NSUInteger rows = 2 + matrixOffset % 3;
+        NSUInteger columnSize = 0;
+        NSUInteger columnAlignment = 0;
+        if (!zpu_argument_type_size_align((MTLDataType)(
+                (matrixScalarBytes == 4 ? 3 : 16) + rows - 1),
+                &columnSize, &columnAlignment) ||
+            columns > NSUIntegerMax / columnSize) return NO;
+        *size = columns * columnSize;
+        *alignment = columnAlignment;
+        return YES;
+    }
+    /* These descriptor kinds are all encoded as a single GPU address.  The
+     * numeric cases include the Metal 4 resource kinds while keeping this
+     * helper source-compatible with older SDK deployment targets. */
+    switch (raw) {
+        case 58:  /* texture */
+        case 59:  /* sampler */
+        case 60:  /* pointer */
+        case 78:  /* render pipeline */
+        case 79:  /* compute pipeline */
+        case 80:  /* indirect command buffer */
+        case 115: /* visible function table */
+        case 116: /* intersection function table */
+        case 117: /* primitive acceleration structure */
+        case 118: /* instance acceleration structure */
+        case 139: /* depth/stencil state */
+        case 140: /* tensor */
+            *size = sizeof(uint64_t);
+            *alignment = sizeof(uint64_t);
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
+                                                   NSUInteger index, NSUInteger *offset) {
+    NSNumber *value = encoder->_argumentOffsets[@(index)];
+    if (value == nil || offset == NULL) return NO;
+    *offset = value.unsignedIntegerValue;
+    return YES;
+}
+
 @implementation ZPUArgumentEncoder
 - (instancetype)initWithOwner:(ZPUDevice *)owner arguments:(NSArray<MTLArgumentDescriptor *> *)arguments {
     if ((self = [super init])) {
@@ -15463,22 +15628,43 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _retainedResources = [NSMutableArray array];
         _bindings = [NSMutableDictionary dictionary];
         _bindingOffsets = [NSMutableDictionary dictionary];
+        _argumentOffsets = [NSMutableDictionary dictionary];
+        _constantSizes = [NSMutableDictionary dictionary];
         _constants = [NSMutableDictionary dictionary];
+        NSUInteger cursor = 0;
+        NSUInteger maximumAlignment = 1;
         for (MTLArgumentDescriptor *descriptor in arguments) {
-            if (![descriptor isKindOfClass:[MTLArgumentDescriptor class]]) continue;
+            if (![descriptor isKindOfClass:[MTLArgumentDescriptor class]]) return nil;
+            NSUInteger elementSize = 0;
+            NSUInteger elementAlignment = 0;
+            if (!zpu_argument_type_size_align(descriptor.dataType, &elementSize, &elementAlignment)) return nil;
             NSUInteger elements = descriptor.arrayLength == 0 ? 1 : descriptor.arrayLength;
-            if (descriptor.index > NSUIntegerMax - elements) {
-                _encodedLength = 0;
-                break;
+            NSUInteger stride = 0;
+            if (!zpu_argument_align_up(elementSize, elementAlignment, &stride) ||
+                (elements != 0 && stride > NSUIntegerMax / elements)) return nil;
+            NSUInteger blockAlignment = elementAlignment;
+            if (!zpu_argument_type_is_resource(descriptor.dataType) &&
+                descriptor.constantBlockAlignment > blockAlignment) {
+                blockAlignment = descriptor.constantBlockAlignment;
             }
-            NSUInteger slots = descriptor.index + elements;
-            if (slots > NSUIntegerMax / 16) {
-                _encodedLength = 0;
-                break;
+            if (!zpu_argument_align_up(cursor, blockAlignment, &cursor)) return nil;
+            if (blockAlignment > maximumAlignment) maximumAlignment = blockAlignment;
+            for (NSUInteger element = 0; element < elements; ++element) {
+                if (descriptor.index > NSUIntegerMax - element ||
+                    cursor > NSUIntegerMax - element * stride) return nil;
+                const NSUInteger index = descriptor.index + element;
+                const NSUInteger offset = cursor + element * stride;
+                _argumentOffsets[@(index)] = @(offset);
+                if (!zpu_argument_type_is_resource(descriptor.dataType)) {
+                    _constantSizes[@(index)] = @(elementSize);
+                }
             }
-            NSUInteger length = slots * 16;
-            if (length > _encodedLength) _encodedLength = length;
+            const NSUInteger blockSize = stride * elements;
+            if (cursor > NSUIntegerMax - blockSize) return nil;
+            cursor += blockSize;
         }
+        if (!zpu_argument_align_up(cursor, maximumAlignment, &_encodedLength)) return nil;
+        _alignment = maximumAlignment;
     }
     return self;
 }
@@ -15496,6 +15682,8 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _retainedResources = [NSMutableArray array];
         _bindings = [NSMutableDictionary dictionary];
         _bindingOffsets = [NSMutableDictionary dictionary];
+        _argumentOffsets = [NSMutableDictionary dictionary];
+        _constantSizes = [NSMutableDictionary dictionary];
         _constants = [NSMutableDictionary dictionary];
     }
     return self;
@@ -15508,15 +15696,17 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
 - (BOOL)argumentBufferOffsetIsValid:(ZPUBuffer *)buffer offset:(NSUInteger)offset {
     if (buffer == nil) return YES;
     if (_alignment != 0 && offset % _alignment != 0) return NO;
+    if (offset > buffer.length) return NO;
     if (_encodedLength > buffer.length - offset) return NO;
     return _encodedLength == 0 || buffer.contents != nil;
 }
 - (void)captureConstantsFromArgumentBuffer {
     if (_argumentBuffer == nil || _argumentBuffer.contents == nil) return;
     for (NSNumber *key in _constants) {
-        const NSUInteger index = key.unsignedIntegerValue;
-        if (index > (NSUIntegerMax - _argumentOffset) / 16) continue;
-        const NSUInteger sourceOffset = _argumentOffset + index * 16;
+        NSUInteger relativeOffset = 0;
+        if (!zpu_argument_encoder_offset_for_index(self, key.unsignedIntegerValue, &relativeOffset) ||
+            relativeOffset > NSUIntegerMax - _argumentOffset) continue;
+        const NSUInteger sourceOffset = _argumentOffset + relativeOffset;
         NSMutableData *data = _constants[key];
         if (sourceOffset <= _argumentBuffer.length && _argumentBuffer.length - sourceOffset >= data.length) {
             memcpy(data.mutableBytes, (uint8_t *)_argumentBuffer.contents + sourceOffset, data.length);
@@ -15534,9 +15724,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     if (buffer != nil) {
         [_constants enumerateKeysAndObjectsUsingBlock:^(NSNumber *key, NSMutableData *data, BOOL *stop) {
             (void)stop;
-            NSUInteger index = key.unsignedIntegerValue;
-            if (index > (NSUIntegerMax - offset) / 16) return;
-            NSUInteger destinationOffset = offset + index * 16;
+            NSUInteger relativeOffset = 0;
+            if (!zpu_argument_encoder_offset_for_index(self, key.unsignedIntegerValue, &relativeOffset) ||
+                relativeOffset > NSUIntegerMax - offset) return;
+            NSUInteger destinationOffset = offset + relativeOffset;
             if (destinationOffset <= buffer.length && buffer.length - destinationOffset >= data.length) {
                 memcpy((uint8_t *)buffer.contents + destinationOffset, data.bytes, data.length);
             }
@@ -15572,17 +15763,18 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         return;
     }
     for (NSNumber *key in _bindings) {
-        const NSUInteger index = key.unsignedIntegerValue;
-        if (index > (NSUIntegerMax - _argumentOffset) / 16) continue;
-        const NSUInteger destinationOffset = _argumentOffset + index * 16;
-        if (destinationOffset > _argumentBuffer.length || _argumentBuffer.length - destinationOffset < 16) continue;
+        NSUInteger relativeOffset = 0;
+        if (!zpu_argument_encoder_offset_for_index(self, key.unsignedIntegerValue, &relativeOffset) ||
+            relativeOffset > NSUIntegerMax - _argumentOffset) continue;
+        const NSUInteger destinationOffset = _argumentOffset + relativeOffset;
+        if (destinationOffset > _argumentBuffer.length || _argumentBuffer.length - destinationOffset < sizeof(uint64_t)) continue;
         id object = _bindings[key];
         uint64_t resourceID = 0;
-        uint64_t auxiliary = 0;
         if ([object isKindOfClass:[ZPUBuffer class]]) {
             ZPUBuffer *buffer = (ZPUBuffer *)object;
-            resourceID = buffer->_resourceID;
-            auxiliary = [_bindingOffsets[key] unsignedLongLongValue];
+            const uint64_t bindingOffset = [_bindingOffsets[key] unsignedLongLongValue];
+            if (bindingOffset > UINT64_MAX - buffer->_resourceID) continue;
+            resourceID = buffer->_resourceID + bindingOffset;
         } else if ([object isKindOfClass:[ZPUTexture class]]) {
             resourceID = ((ZPUTexture *)object)->_resourceID;
         } else if ([object isKindOfClass:[ZPUSamplerState class]]) {
@@ -15603,7 +15795,6 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
             resourceID = ((ZPUComputePipelineState *)object)->_resourceID;
         }
         memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset, &resourceID, sizeof(resourceID));
-        memcpy((uint8_t *)_argumentBuffer.contents + destinationOffset + sizeof(resourceID), &auxiliary, sizeof(auxiliary));
     }
 }
 - (void)remember:(id)object atIndex:(NSUInteger)index offset:(NSUInteger)offset {
@@ -15652,12 +15843,18 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     NSNumber *key = @(index);
     NSMutableData *data = _constants[key];
     if (data == nil) {
-        data = [NSMutableData dataWithLength:16];
+        const NSUInteger size = [_constantSizes[key] unsignedIntegerValue];
+        data = [NSMutableData dataWithLength:size == 0 ? 16 : size];
         _constants[key] = data;
     }
-    if (_argumentBuffer != nil && _argumentBuffer.contents != nil && index <= (NSUIntegerMax - _argumentOffset) / 16) {
-        NSUInteger offset = _argumentOffset + index * 16;
-        if (offset <= _argumentBuffer.length && _argumentBuffer.length - offset >= 16) {
+    NSUInteger relativeOffset = 0;
+    const NSUInteger dataSize = data.length;
+    if (_argumentBuffer != nil && _argumentBuffer.contents != nil &&
+        [_constantSizes[key] unsignedIntegerValue] != 0 &&
+        zpu_argument_encoder_offset_for_index(self, index, &relativeOffset) &&
+        relativeOffset <= NSUIntegerMax - _argumentOffset) {
+        NSUInteger offset = _argumentOffset + relativeOffset;
+        if (offset <= _argumentBuffer.length && _argumentBuffer.length - offset >= dataSize) {
             return (uint8_t *)_argumentBuffer.contents + offset;
         }
     }

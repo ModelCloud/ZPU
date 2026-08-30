@@ -483,11 +483,13 @@ triangle path:
   barriers are accepted on the CPU encoder; barriers are ordered no-ops because
   the current ZPU command buffer executes serially, and registered kernels do
   not sample or consume stage-in/threadgroup metadata
-- argument encoders retain ZPU resources, provide aligned CPU constant storage,
-  and serialize supported buffer/texture/sampler/depth-stencil bindings into
-  deterministic CPU-side 16-byte slots containing synthetic resource IDs and
-  buffer offsets; rebinding captures direct constant writes, while arbitrary
-  shader-specific Metal layouts are still not synthesized
+- argument encoders retain ZPU resources, provide Metal-layout-compatible CPU
+  constant storage, and serialize supported buffer/texture/sampler/depth-
+  stencil bindings into declaration-order slots: resources use 8-byte
+  synthetic GPU addresses (with buffer offsets folded into the address), while
+  scalar/vector/matrix constants use their native Metal size/alignment and
+  array stride. Rebinding captures direct constant writes; arbitrary
+  shader-specific struct layouts remain unsupported rather than being guessed
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports

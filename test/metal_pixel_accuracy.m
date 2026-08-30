@@ -13075,7 +13075,7 @@ int main(void) {
             [as_argument_encoder setAccelerationStructure:adapter_as atIndex:1];
             uint64_t encoded_as_resource = 0;
             if (as_argument_buffer != nil) {
-                memcpy(&encoded_as_resource, (uint8_t *)as_argument_buffer.contents + 16,
+                memcpy(&encoded_as_resource, as_argument_buffer.contents,
                        sizeof(encoded_as_resource));
             }
             MTLHeapDescriptor *as_heap_descriptor = [MTLHeapDescriptor new];
@@ -25764,16 +25764,34 @@ int main(void) {
             }
         }
 
-        MTLArgumentDescriptor *adapter_argument_descriptor = [MTLArgumentDescriptor argumentDescriptor];
-        adapter_argument_descriptor.dataType = MTLDataTypePointer;
-        adapter_argument_descriptor.index = 0;
+        /* Descriptor indices are shader binding points; Metal packs the
+         * descriptor array itself in declaration order. Include constants and
+         * resource kinds here so the CPU encoder is checked against the
+         * native 8-byte resource / naturally aligned constant layout. */
+        MTLArgumentDescriptor *adapter_argument_descriptors[7];
+        MTLDataType adapter_argument_types[7] = {
+            MTLDataTypePointer, MTLDataTypeTexture, MTLDataTypeComputePipeline,
+            MTLDataTypeIndirectCommandBuffer, MTLDataTypeSampler, MTLDataTypeFloat4,
+            MTLDataTypeRenderPipeline,
+        };
+        NSUInteger adapter_argument_indices[7] = {0, 1, 2, 3, 4, 5, 6};
+        for (NSUInteger index = 0; index < 7; ++index) {
+            adapter_argument_descriptors[index] = [MTLArgumentDescriptor argumentDescriptor];
+            adapter_argument_descriptors[index].dataType = adapter_argument_types[index];
+            adapter_argument_descriptors[index].index = adapter_argument_indices[index];
+        }
+        NSArray<MTLArgumentDescriptor *> *adapter_argument_descriptor_array =
+            [NSArray arrayWithObjects:adapter_argument_descriptors count:7];
         id<MTLArgumentEncoder> adapter_argument_encoder =
-            [adapter_device newArgumentEncoderWithArguments:@[adapter_argument_descriptor]];
-        MTLArgumentDescriptor *native_argument_descriptor = [adapter_argument_descriptor copy];
+            [adapter_device newArgumentEncoderWithArguments:adapter_argument_descriptor_array];
+        NSArray<MTLArgumentDescriptor *> *native_argument_descriptor_array =
+            [[NSArray alloc] initWithArray:adapter_argument_descriptor_array copyItems:YES];
         id<MTLArgumentEncoder> native_argument_encoder =
-            [device newArgumentEncoderWithArguments:@[native_argument_descriptor]];
+            [device newArgumentEncoderWithArguments:native_argument_descriptor_array];
         id<MTLBuffer> adapter_argument_buffer =
             [adapter_device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_argument_buffer =
+            [device newBufferWithLength:128 options:MTLResourceStorageModeShared];
         uint32_t argument_constant = 0x5a50555f;
         void *constant_data = [adapter_argument_encoder constantDataAtIndex:5];
         if (constant_data == NULL) {
@@ -25783,6 +25801,8 @@ int main(void) {
         memcpy(constant_data, &argument_constant, sizeof(argument_constant));
         [adapter_argument_encoder setArgumentBuffer:adapter_argument_buffer offset:0];
         void *bound_constant_data = [adapter_argument_encoder constantDataAtIndex:5];
+        [native_argument_encoder setArgumentBuffer:native_argument_buffer offset:0];
+        void *native_bound_constant_data = [native_argument_encoder constantDataAtIndex:5];
         const id<MTLBuffer> *empty_argument_buffers = NULL;
         const NSUInteger *empty_argument_offsets = NULL;
         const id<MTLTexture> *empty_argument_textures = NULL;
@@ -25811,31 +25831,107 @@ int main(void) {
         id<MTLArgumentEncoder> native_nested_argument_encoder =
             [native_argument_encoder newArgumentEncoderForBufferAtIndex:0];
         uint64_t encoded_argument_resource = 0;
-        uint64_t encoded_argument_offset = 0;
         uint64_t encoded_argument_icb_resource = 0;
         uint64_t encoded_argument_compute_pipeline_resource = 0;
         uint64_t encoded_argument_render_pipeline_resource = 0;
         if (adapter_argument_buffer != nil) {
             memcpy(&encoded_argument_resource, adapter_argument_buffer.contents, sizeof(encoded_argument_resource));
-            memcpy(&encoded_argument_offset, (uint8_t *)adapter_argument_buffer.contents + sizeof(encoded_argument_resource), sizeof(encoded_argument_offset));
-            memcpy(&encoded_argument_compute_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 2 * 16,
+            memcpy(&encoded_argument_compute_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 2 * sizeof(uint64_t),
                    sizeof(encoded_argument_compute_pipeline_resource));
-            memcpy(&encoded_argument_icb_resource, (uint8_t *)adapter_argument_buffer.contents + 3 * 16,
+            memcpy(&encoded_argument_icb_resource, (uint8_t *)adapter_argument_buffer.contents + 3 * sizeof(uint64_t),
                    sizeof(encoded_argument_icb_resource));
-            memcpy(&encoded_argument_render_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 6 * 16,
+            memcpy(&encoded_argument_render_pipeline_resource, (uint8_t *)adapter_argument_buffer.contents + 8 * sizeof(uint64_t),
                    sizeof(encoded_argument_render_pipeline_resource));
         }
+        const NSUInteger adapter_constant_offset =
+            adapter_argument_buffer == nil || bound_constant_data == NULL ? NSUIntegerMax :
+            (NSUInteger)((uint8_t *)bound_constant_data - (uint8_t *)adapter_argument_buffer.contents);
+        const NSUInteger native_constant_offset =
+            native_argument_buffer == nil || native_bound_constant_data == NULL ? NSUIntegerMax :
+            (NSUInteger)((uint8_t *)native_bound_constant_data - (uint8_t *)native_argument_buffer.contents);
         if (native_argument_encoder == nil ||
             nested_argument_encoder != native_nested_argument_encoder ||
-            adapter_argument_encoder == nil || adapter_argument_buffer == nil ||
-            [adapter_argument_encoder encodedLength] < 16 || [adapter_argument_encoder alignment] != 16 ||
+            adapter_argument_encoder == nil || adapter_argument_buffer == nil || native_argument_buffer == nil ||
+            [adapter_argument_encoder encodedLength] != [native_argument_encoder encodedLength] ||
+            [adapter_argument_encoder alignment] != [native_argument_encoder alignment] ||
+            [adapter_argument_encoder encodedLength] != 80 || [adapter_argument_encoder alignment] != 16 ||
+            adapter_constant_offset != native_constant_offset || adapter_constant_offset != 48 ||
             bound_constant_data == NULL || memcmp(bound_constant_data, &argument_constant, sizeof(argument_constant)) != 0 ||
-            encoded_argument_resource != adapter_copy_buffer.gpuAddress || encoded_argument_offset != 0 ||
+            encoded_argument_resource != adapter_copy_buffer.gpuAddress ||
             encoded_argument_compute_pipeline_resource != adapter_icb_compute_pipeline.gpuResourceID._impl ||
             encoded_argument_icb_resource != adapter_compute_icb.gpuResourceID._impl ||
             encoded_argument_render_pipeline_resource != adapter_pipeline.gpuResourceID._impl) {
             fprintf(stderr, "metal-pixel: CPU argument encoder allocation failed\n");
             return 49;
+        }
+
+        MTLArgumentDescriptor *layout_descriptors[5];
+        MTLDataType layout_types[5] = {
+            MTLDataTypeFloat2, MTLDataTypePointer, MTLDataTypeFloat3,
+            MTLDataTypeFloat4x4, MTLDataTypeSampler,
+        };
+        NSUInteger layout_indices[5] = {10, 2, 7, 11, 4};
+        for (NSUInteger index = 0; index < 5; ++index) {
+            layout_descriptors[index] = [MTLArgumentDescriptor argumentDescriptor];
+            layout_descriptors[index].dataType = layout_types[index];
+            layout_descriptors[index].index = layout_indices[index];
+        }
+        NSArray<MTLArgumentDescriptor *> *layout_descriptor_array =
+            [NSArray arrayWithObjects:layout_descriptors count:5];
+        id<MTLArgumentEncoder> adapter_layout_encoder =
+            [adapter_device newArgumentEncoderWithArguments:layout_descriptor_array];
+        NSArray<MTLArgumentDescriptor *> *native_layout_descriptor_array =
+            [[NSArray alloc] initWithArray:layout_descriptor_array copyItems:YES];
+        id<MTLArgumentEncoder> native_layout_encoder =
+            [device newArgumentEncoderWithArguments:native_layout_descriptor_array];
+        id<MTLBuffer> adapter_layout_buffer =
+            [adapter_device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_layout_buffer =
+            [device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        if (adapter_layout_encoder != nil && native_layout_encoder != nil &&
+            adapter_layout_buffer != nil && native_layout_buffer != nil) {
+            [adapter_layout_encoder setArgumentBuffer:adapter_layout_buffer offset:0];
+            [native_layout_encoder setArgumentBuffer:native_layout_buffer offset:0];
+            void *adapter_layout_float2 = [adapter_layout_encoder constantDataAtIndex:10];
+            void *adapter_layout_float3 = [adapter_layout_encoder constantDataAtIndex:7];
+            void *adapter_layout_matrix = [adapter_layout_encoder constantDataAtIndex:11];
+            void *native_layout_float2 = [native_layout_encoder constantDataAtIndex:10];
+            void *native_layout_float3 = [native_layout_encoder constantDataAtIndex:7];
+            void *native_layout_matrix = [native_layout_encoder constantDataAtIndex:11];
+            [adapter_layout_encoder setBuffer:adapter_copy_buffer offset:24 atIndex:2];
+            [adapter_layout_encoder setSamplerState:adapter_sampler atIndex:4];
+            uint64_t adapter_layout_buffer_address = 0;
+            uint64_t adapter_layout_sampler_id = 0;
+            memcpy(&adapter_layout_buffer_address, (uint8_t *)adapter_layout_buffer.contents + 8,
+                   sizeof(adapter_layout_buffer_address));
+            memcpy(&adapter_layout_sampler_id, (uint8_t *)adapter_layout_buffer.contents + 96,
+                   sizeof(adapter_layout_sampler_id));
+            const NSUInteger adapter_layout_float2_offset = adapter_layout_float2 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_layout_float2 - (uint8_t *)adapter_layout_buffer.contents);
+            const NSUInteger adapter_layout_float3_offset = adapter_layout_float3 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_layout_float3 - (uint8_t *)adapter_layout_buffer.contents);
+            const NSUInteger adapter_layout_matrix_offset = adapter_layout_matrix == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)adapter_layout_matrix - (uint8_t *)adapter_layout_buffer.contents);
+            const NSUInteger native_layout_float2_offset = native_layout_float2 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_layout_float2 - (uint8_t *)native_layout_buffer.contents);
+            const NSUInteger native_layout_float3_offset = native_layout_float3 == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_layout_float3 - (uint8_t *)native_layout_buffer.contents);
+            const NSUInteger native_layout_matrix_offset = native_layout_matrix == NULL ? NSUIntegerMax :
+                (NSUInteger)((uint8_t *)native_layout_matrix - (uint8_t *)native_layout_buffer.contents);
+            if ([adapter_layout_encoder encodedLength] != [native_layout_encoder encodedLength] ||
+                [adapter_layout_encoder alignment] != [native_layout_encoder alignment] ||
+                [adapter_layout_encoder encodedLength] != 112 || [adapter_layout_encoder alignment] != 16 ||
+                adapter_layout_float2_offset != native_layout_float2_offset || adapter_layout_float2_offset != 0 ||
+                adapter_layout_float3_offset != native_layout_float3_offset || adapter_layout_float3_offset != 16 ||
+                adapter_layout_matrix_offset != native_layout_matrix_offset || adapter_layout_matrix_offset != 32 ||
+                adapter_layout_buffer_address != adapter_copy_buffer.gpuAddress + 24 ||
+                adapter_layout_sampler_id != adapter_sampler.gpuResourceID._impl) {
+                fprintf(stderr, "metal-pixel: CPU argument descriptor-order layout mismatch\n");
+                return 52;
+            }
+        } else {
+            fprintf(stderr, "metal-pixel: CPU argument descriptor-order fixture allocation failed\n");
+            return 52;
         }
 
         /* A count-based NSArray-style range must not wrap its final binding
