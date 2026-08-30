@@ -909,6 +909,82 @@ static int test_default_sample_positions_against_native(id<MTLDevice> native_dev
     return 0;
 }
 
+static int test_custom_sample_positions_cpu(
+    id<MTLDevice> adapter_device, id<MTLFunction> adapter_vertex_function,
+    id<MTLFunction> adapter_fragment_function) {
+    const zpu_metal_vertex vertices[] = {
+        {{-1.0f,  1.0f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 1.0f,  1.0f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{-1.0f, -1.0f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+    };
+    MTLRenderPipelineDescriptor *pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+    pipeline_descriptor.vertexFunction = adapter_vertex_function;
+    pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+    pipeline_descriptor.rasterSampleCount = 2;
+    pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *pipeline_error = nil;
+    id<MTLRenderPipelineState> pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:pipeline_descriptor error:&pipeline_error];
+    MTLTextureDescriptor *msaa_descriptor = [MTLTextureDescriptor new];
+    msaa_descriptor.textureType = MTLTextureType2DMultisample;
+    msaa_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    msaa_descriptor.width = 1;
+    msaa_descriptor.height = 1;
+    msaa_descriptor.mipmapLevelCount = 1;
+    msaa_descriptor.sampleCount = 2;
+    msaa_descriptor.storageMode = MTLStorageModePrivate;
+    msaa_descriptor.usage = MTLTextureUsageRenderTarget;
+    MTLTextureDescriptor *resolve_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:1 height:1 mipmapped:NO];
+    resolve_descriptor.storageMode = MTLStorageModeShared;
+    resolve_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> msaa = [adapter_device newTextureWithDescriptor:msaa_descriptor];
+    id<MTLTexture> resolve = [adapter_device newTextureWithDescriptor:resolve_descriptor];
+    id<MTLBuffer> buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    if (pipeline == nil || msaa == nil || resolve == nil || buffer == nil) {
+        fail_with_error("custom sample position allocation", pipeline_error);
+        return 152;
+    }
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = msaa;
+    pass.colorAttachments[0].resolveTexture = resolve;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0.05, 0.1, 0.15, 0.2);
+    const MTLSamplePosition custom_positions[] = {{0.75f, 0.75f}, {0.9f, 0.9f}};
+    [pass setSamplePositions:custom_positions count:2];
+    MTLSamplePosition round_trip[2] = {0};
+    if ([pass getSamplePositions:round_trip count:2] != 2 ||
+        memcmp(round_trip, custom_positions, sizeof(custom_positions)) != 0) {
+        fprintf(stderr, "metal-pixel: custom sample positions did not round-trip\n");
+        return 153;
+    }
+    id<MTLCommandQueue> queue = [adapter_device newCommandQueue];
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLRenderCommandEncoder> encoder = [command_buffer renderCommandEncoderWithDescriptor:pass];
+    if (encoder == nil) {
+        fprintf(stderr, "metal-pixel: custom sample position encoder creation failed\n");
+        return 154;
+    }
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    uint8_t pixels[4] = {0};
+    [resolve getBytes:pixels bytesPerRow:4 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+    const uint8_t expected_clear[4] = {13, 26, 38, 51};
+    if (command_buffer.status != MTLCommandBufferStatusCompleted || memcmp(pixels, expected_clear, sizeof(pixels)) != 0) {
+        fprintf(stderr, "metal-pixel: custom sample position coverage mismatch bytes=%u,%u,%u,%u status=%ld\n",
+                pixels[0], pixels[1], pixels[2], pixels[3], (long)command_buffer.status);
+        return 155;
+    }
+    return 0;
+}
+
 static int test_multisample_resolve_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -3687,6 +3763,9 @@ int main(void) {
 
         const int default_sample_position_result = test_default_sample_positions_against_native(device, adapter_device);
         if (default_sample_position_result != 0) return default_sample_position_result;
+        const int custom_sample_position_result = test_custom_sample_positions_cpu(
+            adapter_device, adapter_vertex_function, adapter_fragment_function);
+        if (custom_sample_position_result != 0) return custom_sample_position_result;
         const int multisample_result = test_multisample_resolve_against_native(
             device, adapter_device, vertex_function, fragment_function,
             adapter_vertex_function, adapter_fragment_function);
