@@ -8692,11 +8692,24 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal mesh gradients require an RGBA8 or BGRA8 color attachment");
         return nil;
     }
+    NSUInteger color_attachment_count = 1;
     for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
-        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
-            zpu_set_error(error, @"ZPU CPU Metal mesh gradients support only one color attachment");
+        MTLRenderPipelineColorAttachmentDescriptor *additional = descriptor.colorAttachments[index];
+        if (additional.pixelFormat == MTLPixelFormatInvalid) {
+            for (NSUInteger later = index + 1; later < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++later) {
+                if (descriptor.colorAttachments[later].pixelFormat != MTLPixelFormatInvalid) {
+                    zpu_set_error(error, @"ZPU CPU Metal mesh attachments must be contiguous");
+                    return nil;
+                }
+            }
+            break;
+        }
+        if (additional.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+            additional.pixelFormat != MTLPixelFormatBGRA8Unorm) {
+            zpu_set_error(error, @"ZPU CPU Metal supports only RGBA8 or BGRA8 CPU mesh attachments");
             return nil;
         }
+        color_attachment_count = index + 1;
     }
     NSUInteger object_max = descriptor.maxTotalThreadsPerObjectThreadgroup;
     if (object_max == 0) object_max = 1;
@@ -8720,6 +8733,13 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     if (@available(macOS 14.0, iOS 17.0, *)) {
         pipeline->_supportsIndirectCommandBuffers = descriptor.supportIndirectCommandBuffers;
     }
+    for (NSUInteger index = 0; index < color_attachment_count; ++index) {
+        pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
+    }
+    pipeline->_colorAttachmentCount = color_attachment_count;
+    /* Legacy mesh descriptors do not expose a pipeline mapping-state
+     * property; the macOS 26/iOS 26 render-pass opt-in controls the map. */
+    pipeline->_colorAttachmentMappingInherited = YES;
     return (id<MTLRenderPipelineState>)pipeline;
 }
 - (void)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(MTLNewRenderPipelineStateWithReflectionCompletionHandler)completionHandler API_AVAILABLE(macos(13.0), ios(16.0)) {
@@ -9925,11 +9945,29 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered RGBA8 mesh gradient profile");
         return nil;
     }
+    NSUInteger color_attachment_count = 1;
     for (NSUInteger index = 1; index < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++index) {
-        if (descriptor.colorAttachments[index].pixelFormat != MTLPixelFormatInvalid) {
-            zpu_set_error(error, @"ZPU CPU Metal 4 mesh gradients support only one color attachment");
+        MTL4RenderPipelineColorAttachmentDescriptor *additional = descriptor.colorAttachments[index];
+        if (additional.pixelFormat == MTLPixelFormatInvalid) {
+            for (NSUInteger later = index + 1; later < ZPU_METAL_MAX_COLOR_ATTACHMENTS; ++later) {
+                if (descriptor.colorAttachments[later].pixelFormat != MTLPixelFormatInvalid) {
+                    zpu_set_error(error, @"ZPU CPU Metal 4 mesh attachments must be contiguous");
+                    return nil;
+                }
+            }
+            break;
+        }
+        if (additional.pixelFormat != MTLPixelFormatRGBA8Unorm &&
+            additional.pixelFormat != MTLPixelFormatBGRA8Unorm) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 supports only RGBA8 or BGRA8 CPU mesh attachments");
             return nil;
         }
+        if (additional.blendingState != MTL4BlendStateDisabled ||
+            additional.writeMask != MTLColorWriteMaskAll) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 mesh attachments require disabled blending");
+            return nil;
+        }
+        color_attachment_count = index + 1;
     }
     NSUInteger object_max = descriptor.maxTotalThreadsPerObjectThreadgroup;
     if (object_max == 0) object_max = 1;
@@ -9960,6 +9998,10 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         requiredThreadsPerObjectThreadgroup:required_object requiredThreadsPerMeshThreadgroup:required_mesh];
     pipeline->_supportsIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
+    for (NSUInteger index = 0; index < color_attachment_count; ++index) {
+        pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
+    }
+    pipeline->_colorAttachmentCount = color_attachment_count;
     pipeline->_colorAttachmentMappingInherited =
         descriptor.colorAttachmentMappingState == MTL4LogicalToPhysicalColorAttachmentMappingStateInherited;
     pipeline->_specializationDescriptor = [descriptor copy];

@@ -564,10 +564,12 @@ int zpu_metal_render_encoder_set_multisample_targets(zpu_metal_render_encoder *e
  * by expanded instance index. The bounded CPU profile supports up to eight
  * layers; the registered tile profile broadcasts to each slice, supports a
  * contiguous RGBA8/BGRA8 attachment signature, and routes its logical output
- * through an opted-in color attachment map. Factor-one triangle patches honor
- * baseInstance, while layered mesh draws and layered multisample passes remain
- * rejected. Direct and indirect primitive/indexed draws honor baseInstance and
- * select the corresponding slices. */
+ * through an opted-in color attachment map. The registered mesh profile
+ * accepts the same contiguous RGBA8/BGRA8 attachment signature and routes its
+ * logical outputs through an opted-in map. Factor-one triangle patches honor
+ * baseInstance, while layered mesh draws and layered multisample passes
+ * remain rejected. Direct and indirect primitive/indexed draws honor
+ * baseInstance and select the corresponding slices. */
 int zpu_metal_render_encoder_set_render_target_array(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count);
 int zpu_metal_render_encoder_set_color_attachment_array_targets(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count, const zpu_metal_render_pass_color_attachment_descriptor *attachment, uint32_t index);
 int zpu_metal_render_encoder_set_depth_texture_array(zpu_metal_render_encoder *encoder, zpu_metal_texture *const *textures, size_t count);

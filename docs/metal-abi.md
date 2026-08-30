@@ -192,9 +192,11 @@ triangle path:
   honor `baseInstance` and resolve it at commit time where indirect arguments
   are used. Layered depth/stencil array planes
   select and update matching per-layer CPU state; the registered tile profile
-  broadcasts to each layer, factor-one triangle patches select layers by
-  `baseInstance`, and layered mesh draws and layered multisample passes remain
-  explicitly rejected
+  broadcasts to each layer, and both the tile and registered mesh profiles
+  support contiguous RGBA8/BGRA8 attachments with an opted-in
+  logical-to-physical map. Factor-one triangle patches select layers by
+  `baseInstance`, while layered mesh draws and layered multisample passes
+  remain explicitly rejected
 - buffer-backed texture views that alias storage with checked row strides and
   preserve the backing resource lifetime
 - compatible pixel-format views for all supported color and integer formats
@@ -286,7 +288,8 @@ triangle path:
   exact upper-left `(0,0)` coordinates and RGBA8/BGRA8 storage ordering; the
   registered `zpu_cpu_mesh_gradient_rgba8` plus
   `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
-  CPU/ZPU pixel per mesh-grid thread; the registered
+  CPU/ZPU pixel per mesh-grid thread and supports contiguous RGBA8/BGRA8
+  logical attachments through the opted-in color map; the registered
   `zpu_cpu_tessellated_triangle_vertex` plus
   `zpu_cpu_tessellated_triangle_fragment` profile accepts factor-one triangle
   patches and rasterizes their three control points through the ordinary
