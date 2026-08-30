@@ -604,10 +604,11 @@ triangle path:
   tessellation shader execution fail closed at replay
 - CPU indirect render commands preserve the same one-slot executable constraint
   as the CPU raster ABI for vertex and fragment buffers; descriptor capacity
-  beyond slot zero is accepted as metadata, but recording a non-zero indirect
-  binding fails closed instead of silently rebinding it at slot zero. This
-  intentional distinction keeps direct Metal setter compatibility broad while
-  keeping indirect command replay bounded and explicit.
+  beyond slot zero is accepted, retained as CPU-owned last-write-wins state,
+  and replayed through the direct encoder's metadata path without rebasing it
+  onto slot zero. Copy/reset and non-inherited-buffer replay preserve the
+  additional slots, while arbitrary shader resource execution remains outside
+  the registered CPU profile.
 - Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
   and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
   CPU-owned tensors also provide contiguous and strided byte-addressable slice

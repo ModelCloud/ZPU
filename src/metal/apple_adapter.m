@@ -418,6 +418,15 @@ API_AVAILABLE(macos(15.0), ios(18.0))
     BOOL _hasFrontFacingWinding;
     BOOL _hasTriangleFillMode;
     BOOL _hasVertexBuffer;
+    /* The fixed CPU raster ABI executes vertex slot zero and fragment slot
+     * zero. Keep additional ICB buffer bindings as ordinary last-write-wins
+     * state, then replay them through the direct encoder's ZPU-owned stage
+     * metadata path. This matches direct render encoding without pretending
+     * that the CPU profile executes arbitrary MSL resources. */
+    NSMutableDictionary *_vertexBuffers;
+    NSMutableDictionary *_vertexBufferOffsets;
+    NSMutableDictionary *_fragmentBuffers;
+    NSMutableDictionary *_fragmentBufferOffsets;
     BOOL _hasPatches;
     NSUInteger _patchControlPoints;
     NSUInteger _patchStart;
@@ -449,6 +458,10 @@ API_AVAILABLE(macos(15.0), ios(18.0))
 - (void)reset;
 - (void)executeWithEncoder:(ZPURenderEncoder *)encoder;
 @end
+
+static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *command,
+                                                      ZPURenderEncoder *encoder,
+                                                      BOOL clearUninherited);
 
 @interface ZPUIndirectComputeCommand : NSObject <MTLIndirectComputeCommand> {
 @public
@@ -18946,6 +18959,16 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
             copy->_hasFrontFacingWinding = renderCommand->_hasFrontFacingWinding;
             copy->_hasTriangleFillMode = renderCommand->_hasTriangleFillMode;
             copy->_hasVertexBuffer = renderCommand->_hasVertexBuffer;
+            for (NSNumber *bindingIndex in renderCommand->_vertexBuffers) {
+                if (bindingIndex.unsignedIntegerValue >= _maxVertexBufferBindCount) return NO;
+            }
+            for (NSNumber *bindingIndex in renderCommand->_fragmentBuffers) {
+                if (bindingIndex.unsignedIntegerValue >= _maxFragmentBufferBindCount) return NO;
+            }
+            copy->_vertexBuffers = [renderCommand->_vertexBuffers mutableCopy];
+            copy->_vertexBufferOffsets = [renderCommand->_vertexBufferOffsets mutableCopy];
+            copy->_fragmentBuffers = [renderCommand->_fragmentBuffers mutableCopy];
+            copy->_fragmentBufferOffsets = [renderCommand->_fragmentBufferOffsets mutableCopy];
             copy->_hasPatches = renderCommand->_hasPatches;
             copy->_patchControlPoints = renderCommand->_patchControlPoints;
             copy->_patchStart = renderCommand->_patchStart;
@@ -19044,6 +19067,34 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
 }
 @end
 
+static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *command,
+                                                      ZPURenderEncoder *encoder,
+                                                      BOOL clearUninherited) {
+    if (command == nil || encoder == nil) return;
+    if (clearUninherited) {
+        const NSUInteger vertexLimit = MIN((NSUInteger)31, command->_owner->_maxVertexBufferBindCount);
+        const NSUInteger fragmentLimit = MIN((NSUInteger)31, command->_owner->_maxFragmentBufferBindCount);
+        for (NSUInteger index = 1; index < vertexLimit; ++index) {
+            [encoder setVertexBuffer:nil offset:0 atIndex:index];
+        }
+        for (NSUInteger index = 1; index < fragmentLimit; ++index) {
+            [encoder setFragmentBuffer:nil offset:0 atIndex:index];
+        }
+    }
+    for (NSNumber *bindingIndex in command->_vertexBuffers) {
+        id buffer = command->_vertexBuffers[bindingIndex];
+        const NSUInteger offset = [command->_vertexBufferOffsets[bindingIndex] unsignedIntegerValue];
+        [encoder setVertexBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
+                           offset:offset atIndex:bindingIndex.unsignedIntegerValue];
+    }
+    for (NSNumber *bindingIndex in command->_fragmentBuffers) {
+        id buffer = command->_fragmentBuffers[bindingIndex];
+        const NSUInteger offset = [command->_fragmentBufferOffsets[bindingIndex] unsignedIntegerValue];
+        [encoder setFragmentBuffer:buffer == [NSNull null] ? nil : (id<MTLBuffer>)buffer
+                             offset:offset atIndex:bindingIndex.unsignedIntegerValue];
+    }
+}
+
 @implementation ZPUIndirectRenderCommand
 - (instancetype)initWithOwner:(ZPUIndirectCommandBuffer *)owner {
     if ((self = [super init])) {
@@ -19053,6 +19104,10 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         _meshBuffers = [NSMutableDictionary dictionary];
         _meshBufferOffsets = [NSMutableDictionary dictionary];
         _objectThreadgroupMemoryLengths = [NSMutableDictionary dictionary];
+        _vertexBuffers = [NSMutableDictionary dictionary];
+        _vertexBufferOffsets = [NSMutableDictionary dictionary];
+        _fragmentBuffers = [NSMutableDictionary dictionary];
+        _fragmentBufferOffsets = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -19115,6 +19170,10 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     [_meshBuffers removeAllObjects];
     [_meshBufferOffsets removeAllObjects];
     [_objectThreadgroupMemoryLengths removeAllObjects];
+    [_vertexBuffers removeAllObjects];
+    [_vertexBufferOffsets removeAllObjects];
+    [_fragmentBuffers removeAllObjects];
+    [_fragmentBufferOffsets removeAllObjects];
     _unsupportedCommand = NO;
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
@@ -19128,10 +19187,15 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index != 0 || index >= _owner->_maxVertexBufferBindCount ||
+    if (index >= _owner->_maxVertexBufferBindCount ||
         (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                             zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
+        return;
+    }
+    if (index != 0) {
+        _vertexBuffers[@(index)] = buffer == nil ? [NSNull null] : zpuBuffer;
+        _vertexBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
         return;
     }
     _vertexBuffer = zpuBuffer;
@@ -19140,9 +19204,14 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
 }
 - (void)setFragmentBuffer:(id<MTLBuffer>)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
-    if (index != 0 || index >= _owner->_maxFragmentBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
+    if (index >= _owner->_maxFragmentBufferBindCount || (buffer != nil && (![zpuBuffer isKindOfClass:[ZPUBuffer class]] ||
                                          zpuBuffer->_owner != _owner->_owner || offset > zpuBuffer.length))) {
         _unsupportedCommand = YES;
+        return;
+    }
+    if (index != 0) {
+        _fragmentBuffers[@(index)] = buffer == nil ? [NSNull null] : zpuBuffer;
+        _fragmentBufferOffsets[@(index)] = @(buffer == nil ? 0 : offset);
         return;
     }
     _fragmentBuffer = zpuBuffer;
@@ -19156,6 +19225,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     }
     [self setVertexBuffer:buffer offset:offset atIndex:index];
     if (_unsupportedCommand) return;
+    if (index != 0) return;
     _vertexStride = stride;
     _hasVertexStride = YES;
 }
@@ -19396,6 +19466,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         }
         if (@available(macOS 13.0, iOS 16.0, *)) {
             if (state != nil) [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)state];
+            zpu_replay_indirect_render_extra_buffers(self, encoder, !_owner->_inheritBuffers);
             for (NSNumber *bindingIndex in _objectBuffers) {
                 id buffer = _objectBuffers[bindingIndex];
                 NSUInteger offset = [_objectBufferOffsets[bindingIndex] unsignedIntegerValue];
@@ -19465,6 +19536,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         } else if (!_owner->_inheritBuffers) {
             [encoder setVertexBuffer:nil offset:0 atIndex:0];
         }
+        zpu_replay_indirect_render_extra_buffers(self, encoder, !_owner->_inheritBuffers);
         if (_hasDepthStencilState) {
             [encoder setDepthStencilState:(id<MTLDepthStencilState>)_depthStencilState];
         }
@@ -19534,6 +19606,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     } else if (!_owner->_inheritBuffers) {
         [encoder setFragmentBuffer:nil offset:0 atIndex:0];
     }
+    zpu_replay_indirect_render_extra_buffers(self, encoder, !_owner->_inheritBuffers);
     /* MTLIndirectRenderCommand accepts a nullable depth-stencil state. Replay
      * the explicit nil through the CPU encoder so it clears a previously
      * inherited state instead of accidentally retaining it. */

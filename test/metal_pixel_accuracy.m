@@ -5557,7 +5557,11 @@ static int test_layered_icb_base_instance_render_against_native(
     icb_descriptor.commandTypes = MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
     icb_descriptor.inheritPipelineState = YES;
     icb_descriptor.inheritBuffers = YES;
-    icb_descriptor.maxVertexBufferBindCount = 1;
+    /* The fixed CPU raster ABI consumes vertex/fragment slot zero, but an
+     * ICB must still preserve valid extra buffer bindings instead of turning
+     * them into a command error. */
+    icb_descriptor.maxVertexBufferBindCount = 2;
+    icb_descriptor.maxFragmentBufferBindCount = 2;
     id<MTLIndirectCommandBuffer> native_icb =
         [native_device newIndirectCommandBufferWithDescriptor:icb_descriptor maxCommandCount:2 options:0];
     id<MTLIndirectCommandBuffer> adapter_icb =
@@ -5572,6 +5576,10 @@ static int test_layered_icb_base_instance_render_against_native(
         fprintf(stderr, "metal-pixel: layered ICB base-instance allocation failed\n");
         return 227;
     }
+    [native_command setVertexBuffer:native_buffer offset:sizeof(zpu_metal_vertex) atIndex:1];
+    [native_command setFragmentBuffer:native_buffer offset:sizeof(zpu_metal_vertex) atIndex:1];
+    [adapter_command setVertexBuffer:adapter_buffer offset:sizeof(zpu_metal_vertex) atIndex:1];
+    [adapter_command setFragmentBuffer:adapter_buffer offset:sizeof(zpu_metal_vertex) atIndex:1];
     [native_command drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
                      instanceCount:layers - 1 baseInstance:1];
     [adapter_command drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
