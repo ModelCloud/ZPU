@@ -99,44 +99,52 @@ static NSString *const zpu_cpu_ml_matmul_i32_function_name = @"zpu_cpu_ml_matmul
 static NSString *const zpu_cpu_add_f32_function_name = @"zpu_cpu_add_f32";
 static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
 static NSString *const zpu_cpu_sub_f32_function_name = @"zpu_cpu_sub_f32";
+static NSString *const zpu_cpu_div_f32_function_name = @"zpu_cpu_div_f32";
 static NSString *const zpu_cpu_add_f32x4_function_name = @"zpu_cpu_add_f32x4";
 static NSString *const zpu_cpu_mul_f32x4_function_name = @"zpu_cpu_mul_f32x4";
 static NSString *const zpu_cpu_sub_f32x4_function_name = @"zpu_cpu_sub_f32x4";
+static NSString *const zpu_cpu_div_f32x4_function_name = @"zpu_cpu_div_f32x4";
 static NSString *const zpu_cpu_add_f32x2_function_name = @"zpu_cpu_add_f32x2";
 static NSString *const zpu_cpu_mul_f32x2_function_name = @"zpu_cpu_mul_f32x2";
 static NSString *const zpu_cpu_sub_f32x2_function_name = @"zpu_cpu_sub_f32x2";
+static NSString *const zpu_cpu_div_f32x2_function_name = @"zpu_cpu_div_f32x2";
 static NSString *const zpu_cpu_add_f32x3_function_name = @"zpu_cpu_add_f32x3";
 static NSString *const zpu_cpu_mul_f32x3_function_name = @"zpu_cpu_mul_f32x3";
 static NSString *const zpu_cpu_sub_f32x3_function_name = @"zpu_cpu_sub_f32x3";
+static NSString *const zpu_cpu_div_f32x3_function_name = @"zpu_cpu_div_f32x3";
 static NSString *const zpu_cpu_copy_rgba8_texture_to_texture_function_name = @"zpu_cpu_copy_rgba8_texture_to_texture";
 static NSString *const zpu_cpu_intersection_triangle_function_name = @"zpu_cpu_intersection_triangle";
 static NSString *const zpu_cpu_intersection_triangle_accept_function_name = @"zpu_cpu_intersection_triangle_accept";
 
 static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32 || kernel == ZPU_METAL_COMPUTE_MUL_F32 ||
-        kernel == ZPU_METAL_COMPUTE_SUB_F32 || kernel == ZPU_METAL_COMPUTE_ADD_F32X4 ||
+        kernel == ZPU_METAL_COMPUTE_SUB_F32 || kernel == ZPU_METAL_COMPUTE_DIV_F32 ||
+        kernel == ZPU_METAL_COMPUTE_ADD_F32X4 ||
         kernel == ZPU_METAL_COMPUTE_MUL_F32X4 || kernel == ZPU_METAL_COMPUTE_SUB_F32X4 ||
+        kernel == ZPU_METAL_COMPUTE_DIV_F32X4 ||
         kernel == ZPU_METAL_COMPUTE_ADD_F32X2 || kernel == ZPU_METAL_COMPUTE_MUL_F32X2 ||
-        kernel == ZPU_METAL_COMPUTE_SUB_F32X2 || kernel == ZPU_METAL_COMPUTE_ADD_F32X3 ||
-        kernel == ZPU_METAL_COMPUTE_MUL_F32X3 || kernel == ZPU_METAL_COMPUTE_SUB_F32X3;
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X2 || kernel == ZPU_METAL_COMPUTE_DIV_F32X2 ||
+        kernel == ZPU_METAL_COMPUTE_ADD_F32X3 || kernel == ZPU_METAL_COMPUTE_MUL_F32X3 ||
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X3 || kernel == ZPU_METAL_COMPUTE_DIV_F32X3;
 }
 
 static BOOL zpu_compute_buffer_vector_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32X4 || kernel == ZPU_METAL_COMPUTE_MUL_F32X4 ||
-        kernel == ZPU_METAL_COMPUTE_SUB_F32X4 || kernel == ZPU_METAL_COMPUTE_ADD_F32X2 ||
-        kernel == ZPU_METAL_COMPUTE_MUL_F32X2 || kernel == ZPU_METAL_COMPUTE_SUB_F32X2 ||
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X4 || kernel == ZPU_METAL_COMPUTE_DIV_F32X4 ||
+        kernel == ZPU_METAL_COMPUTE_ADD_F32X2 || kernel == ZPU_METAL_COMPUTE_MUL_F32X2 ||
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X2 || kernel == ZPU_METAL_COMPUTE_DIV_F32X2 ||
         kernel == ZPU_METAL_COMPUTE_ADD_F32X3 || kernel == ZPU_METAL_COMPUTE_MUL_F32X3 ||
-        kernel == ZPU_METAL_COMPUTE_SUB_F32X3;
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X3 || kernel == ZPU_METAL_COMPUTE_DIV_F32X3;
 }
 
 static BOOL zpu_compute_buffer_float4_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32X4 || kernel == ZPU_METAL_COMPUTE_MUL_F32X4 ||
-        kernel == ZPU_METAL_COMPUTE_SUB_F32X4;
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X4 || kernel == ZPU_METAL_COMPUTE_DIV_F32X4;
 }
 
 static BOOL zpu_compute_buffer_float3_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32X3 || kernel == ZPU_METAL_COMPUTE_MUL_F32X3 ||
-        kernel == ZPU_METAL_COMPUTE_SUB_F32X3;
+        kernel == ZPU_METAL_COMPUTE_SUB_F32X3 || kernel == ZPU_METAL_COMPUTE_DIV_F32X3;
 }
 /* Metadata-only profile used to exercise CPU nested argument-buffer
  * encoding. It is intentionally not an executable arbitrary-MSL kernel. */
@@ -9216,15 +9224,19 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         else if ([name isEqualToString:zpu_cpu_add_f32_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32;
         else if ([name isEqualToString:zpu_cpu_mul_f32_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32;
         else if ([name isEqualToString:zpu_cpu_sub_f32_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32;
+        else if ([name isEqualToString:zpu_cpu_div_f32_function_name]) kernel = ZPU_METAL_COMPUTE_DIV_F32;
         else if ([name isEqualToString:zpu_cpu_add_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32X4;
         else if ([name isEqualToString:zpu_cpu_mul_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32X4;
         else if ([name isEqualToString:zpu_cpu_sub_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32X4;
+        else if ([name isEqualToString:zpu_cpu_div_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_DIV_F32X4;
         else if ([name isEqualToString:zpu_cpu_add_f32x2_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32X2;
         else if ([name isEqualToString:zpu_cpu_mul_f32x2_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32X2;
         else if ([name isEqualToString:zpu_cpu_sub_f32x2_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32X2;
+        else if ([name isEqualToString:zpu_cpu_div_f32x2_function_name]) kernel = ZPU_METAL_COMPUTE_DIV_F32X2;
         else if ([name isEqualToString:zpu_cpu_add_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32X3;
         else if ([name isEqualToString:zpu_cpu_mul_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32X3;
         else if ([name isEqualToString:zpu_cpu_sub_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32X3;
+        else if ([name isEqualToString:zpu_cpu_div_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_DIV_F32X3;
         if (kernel != 0) {
             MTLComputePipelineReflection *reflection = zpu_compute_pipeline_reflection(kernel);
             return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
@@ -9340,15 +9352,19 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_add_f32_function_name,
         zpu_cpu_mul_f32_function_name,
         zpu_cpu_sub_f32_function_name,
+        zpu_cpu_div_f32_function_name,
         zpu_cpu_add_f32x4_function_name,
         zpu_cpu_mul_f32x4_function_name,
         zpu_cpu_sub_f32x4_function_name,
+        zpu_cpu_div_f32x4_function_name,
         zpu_cpu_add_f32x2_function_name,
         zpu_cpu_mul_f32x2_function_name,
         zpu_cpu_sub_f32x2_function_name,
+        zpu_cpu_div_f32x2_function_name,
         zpu_cpu_add_f32x3_function_name,
         zpu_cpu_mul_f32x3_function_name,
         zpu_cpu_sub_f32x3_function_name,
+        zpu_cpu_div_f32x3_function_name,
         zpu_cpu_trace_triangles_function_name,
         zpu_cpu_intersection_triangle_function_name,
         zpu_cpu_intersection_triangle_accept_function_name,
@@ -11205,7 +11221,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_copy_rgba8_texture_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_fill_gradient_rgba32_uint zpu_cpu_fill_gradient_rgba32_sint zpu_cpu_fill_gradient_r32_uint zpu_cpu_fill_gradient_r32_sint zpu_cpu_fill_gradient_rg32_uint zpu_cpu_fill_gradient_rg32_sint zpu_cpu_fill_gradient_r8_uint zpu_cpu_fill_gradient_r8_sint zpu_cpu_fill_gradient_rg8_uint zpu_cpu_fill_gradient_rg8_sint zpu_cpu_fill_gradient_rgba8_uint zpu_cpu_fill_gradient_rgba8_sint zpu_cpu_fill_gradient_r16_uint zpu_cpu_fill_gradient_r16_sint zpu_cpu_fill_gradient_rg16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgba16_uint zpu_cpu_fill_gradient_rgba16_sint zpu_cpu_fill_gradient_rgb10a2_uint zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_sub_f32 zpu_cpu_add_f32x4 zpu_cpu_mul_f32x4 zpu_cpu_sub_f32x4 zpu_cpu_add_f32x2 zpu_cpu_mul_f32x2 zpu_cpu_sub_f32x2 zpu_cpu_add_f32x3 zpu_cpu_mul_f32x3 zpu_cpu_sub_f32x3 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rgba32_uint_fragment zpu_cpu_rgba32_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_sub_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_u8 zpu_cpu_ml_mul_i8 zpu_cpu_ml_mul_u16 zpu_cpu_ml_mul_i16 zpu_cpu_ml_mul_u32 zpu_cpu_ml_mul_i32 zpu_cpu_ml_mul_i4 zpu_cpu_ml_mul_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_ml_matmul_u8 zpu_cpu_ml_matmul_i8 zpu_cpu_ml_matmul_u16 zpu_cpu_ml_matmul_i16 zpu_cpu_ml_matmul_u32 zpu_cpu_ml_matmul_i32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_copy_rgba8_texture_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_fill_gradient_rgba32_uint zpu_cpu_fill_gradient_rgba32_sint zpu_cpu_fill_gradient_r32_uint zpu_cpu_fill_gradient_r32_sint zpu_cpu_fill_gradient_rg32_uint zpu_cpu_fill_gradient_rg32_sint zpu_cpu_fill_gradient_r8_uint zpu_cpu_fill_gradient_r8_sint zpu_cpu_fill_gradient_rg8_uint zpu_cpu_fill_gradient_rg8_sint zpu_cpu_fill_gradient_rgba8_uint zpu_cpu_fill_gradient_rgba8_sint zpu_cpu_fill_gradient_r16_uint zpu_cpu_fill_gradient_r16_sint zpu_cpu_fill_gradient_rg16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgba16_uint zpu_cpu_fill_gradient_rgba16_sint zpu_cpu_fill_gradient_rgb10a2_uint zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_sub_f32 zpu_cpu_div_f32 zpu_cpu_add_f32x4 zpu_cpu_mul_f32x4 zpu_cpu_sub_f32x4 zpu_cpu_div_f32x4 zpu_cpu_add_f32x2 zpu_cpu_mul_f32x2 zpu_cpu_sub_f32x2 zpu_cpu_div_f32x2 zpu_cpu_add_f32x3 zpu_cpu_mul_f32x3 zpu_cpu_sub_f32x3 zpu_cpu_div_f32x3 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rgba32_uint_fragment zpu_cpu_rgba32_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_sub_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_u8 zpu_cpu_ml_mul_i8 zpu_cpu_ml_mul_u16 zpu_cpu_ml_mul_i16 zpu_cpu_ml_mul_u32 zpu_cpu_ml_mul_i32 zpu_cpu_ml_mul_i4 zpu_cpu_ml_mul_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_ml_matmul_u8 zpu_cpu_ml_matmul_i8 zpu_cpu_ml_matmul_u16 zpu_cpu_ml_matmul_i16 zpu_cpu_ml_matmul_u32 zpu_cpu_ml_matmul_i32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -12305,34 +12321,42 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             @"output[%@]=left[%@]MINUSright[%@];", indexName, indexName, indexName];
         NSString *multiplication = [NSString stringWithFormat:
             @"output[%@]=left[%@]MULright[%@];", indexName, indexName, indexName];
+        NSString *division = [NSString stringWithFormat:
+            @"output[%@]=left[%@]DIVright[%@];", indexName, indexName, indexName];
         NSString *addAssignment = [assignment stringByReplacingOccurrencesOfString:@"PLUS" withString:@"+"];
         NSString *subAssignment = [subtraction stringByReplacingOccurrencesOfString:@"MINUS" withString:@"-"];
         NSString *mulAssignment = [multiplication stringByReplacingOccurrencesOfString:@"MUL" withString:@"*"];
+        NSString *divAssignment = [division stringByReplacingOccurrencesOfString:@"DIV" withString:@"/"];
         BOOL isAdd = [compactBody hasSuffix:addAssignment];
         BOOL isSubtract = [compactBody hasSuffix:subAssignment];
         BOOL isMultiply = [compactBody hasSuffix:mulAssignment];
-        if (!isAdd && !isSubtract && !isMultiply) return;
+        BOOL isDivide = [compactBody hasSuffix:divAssignment];
+        if (!isAdd && !isSubtract && !isMultiply && !isDivide) return;
 
         NSUInteger assignmentLength = isAdd ? addAssignment.length :
-            (isSubtract ? subAssignment.length : mulAssignment.length);
+            (isSubtract ? subAssignment.length : (isMultiply ? mulAssignment.length : divAssignment.length));
         NSString *prefix = [compactBody substringToIndex:compactBody.length - assignmentLength];
         NSString *expectedPrefix = (vector || vector2 || vector3) ?
             [NSString stringWithFormat:@"if(%@>=5)return;", indexName] :
-            (isAdd || isSubtract ?
+            (isAdd || isSubtract || isDivide ?
                 [NSString stringWithFormat:@"if(%@>=12)return;", indexName] :
                 [NSString stringWithFormat:@"if(%@>=10)return;", indexName]);
         if (prefix.length != 0 && ![prefix isEqualToString:expectedPrefix]) return;
         implementations[functionName] = vector ?
             (isAdd ? zpu_cpu_add_f32x4_function_name :
-                (isSubtract ? zpu_cpu_sub_f32x4_function_name : zpu_cpu_mul_f32x4_function_name)) :
+                (isSubtract ? zpu_cpu_sub_f32x4_function_name :
+                    (isMultiply ? zpu_cpu_mul_f32x4_function_name : zpu_cpu_div_f32x4_function_name))) :
             (vector2 ?
                 (isAdd ? zpu_cpu_add_f32x2_function_name :
-                    (isSubtract ? zpu_cpu_sub_f32x2_function_name : zpu_cpu_mul_f32x2_function_name)) :
+                    (isSubtract ? zpu_cpu_sub_f32x2_function_name :
+                        (isMultiply ? zpu_cpu_mul_f32x2_function_name : zpu_cpu_div_f32x2_function_name))) :
             (vector3 ?
                 (isAdd ? zpu_cpu_add_f32x3_function_name :
-                    (isSubtract ? zpu_cpu_sub_f32x3_function_name : zpu_cpu_mul_f32x3_function_name)) :
+                    (isSubtract ? zpu_cpu_sub_f32x3_function_name :
+                        (isMultiply ? zpu_cpu_mul_f32x3_function_name : zpu_cpu_div_f32x3_function_name))) :
             (isAdd ? zpu_cpu_add_f32_function_name :
-                (isSubtract ? zpu_cpu_sub_f32_function_name : zpu_cpu_mul_f32_function_name))));
+                (isSubtract ? zpu_cpu_sub_f32_function_name :
+                    (isMultiply ? zpu_cpu_mul_f32_function_name : zpu_cpu_div_f32_function_name)))));
     }];
     return [implementations copy];
 }
@@ -13992,15 +14016,19 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             zpu_cpu_add_f32_function_name,
             zpu_cpu_mul_f32_function_name,
             zpu_cpu_sub_f32_function_name,
+            zpu_cpu_div_f32_function_name,
             zpu_cpu_add_f32x4_function_name,
             zpu_cpu_mul_f32x4_function_name,
             zpu_cpu_sub_f32x4_function_name,
+            zpu_cpu_div_f32x4_function_name,
             zpu_cpu_add_f32x2_function_name,
             zpu_cpu_mul_f32x2_function_name,
             zpu_cpu_sub_f32x2_function_name,
+            zpu_cpu_div_f32x2_function_name,
             zpu_cpu_add_f32x3_function_name,
             zpu_cpu_mul_f32x3_function_name,
             zpu_cpu_sub_f32x3_function_name,
+            zpu_cpu_div_f32x3_function_name,
             zpu_cpu_trace_triangles_function_name,
             zpu_cpu_intersection_triangle_function_name,
             zpu_cpu_intersection_triangle_accept_function_name,
@@ -18772,15 +18800,19 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_ADD_F32: return zpu_cpu_add_f32_function_name;
         case ZPU_METAL_COMPUTE_MUL_F32: return zpu_cpu_mul_f32_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32: return zpu_cpu_sub_f32_function_name;
+        case ZPU_METAL_COMPUTE_DIV_F32: return zpu_cpu_div_f32_function_name;
         case ZPU_METAL_COMPUTE_ADD_F32X4: return zpu_cpu_add_f32x4_function_name;
         case ZPU_METAL_COMPUTE_MUL_F32X4: return zpu_cpu_mul_f32x4_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32X4: return zpu_cpu_sub_f32x4_function_name;
+        case ZPU_METAL_COMPUTE_DIV_F32X4: return zpu_cpu_div_f32x4_function_name;
         case ZPU_METAL_COMPUTE_ADD_F32X2: return zpu_cpu_add_f32x2_function_name;
         case ZPU_METAL_COMPUTE_MUL_F32X2: return zpu_cpu_mul_f32x2_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32X2: return zpu_cpu_sub_f32x2_function_name;
+        case ZPU_METAL_COMPUTE_DIV_F32X2: return zpu_cpu_div_f32x2_function_name;
         case ZPU_METAL_COMPUTE_ADD_F32X3: return zpu_cpu_add_f32x3_function_name;
         case ZPU_METAL_COMPUTE_MUL_F32X3: return zpu_cpu_mul_f32x3_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32X3: return zpu_cpu_sub_f32x3_function_name;
+        case ZPU_METAL_COMPUTE_DIV_F32X3: return zpu_cpu_div_f32x3_function_name;
         case ZPU_METAL_COMPUTE_SOURCE_NOOP: return zpu_cpu_source_metadata_function_name;
         default: return nil;
     }
@@ -18908,24 +18940,32 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_MUL_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SUB_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_div_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_DIV_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f32x4_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32X4;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32x4_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_MUL_F32X4;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_f32x4_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SUB_F32X4;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_div_f32x4_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_DIV_F32X4;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f32x2_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32X2;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32x2_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_MUL_F32X2;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_f32x2_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SUB_F32X2;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_div_f32x2_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_DIV_F32X2;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f32x3_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32X3;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32x3_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_MUL_F32X3;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_f32x3_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SUB_F32X3;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_div_f32x3_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_DIV_F32X3;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_source_argument_buffer_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SOURCE_NOOP;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_source_metadata_function_name]) {

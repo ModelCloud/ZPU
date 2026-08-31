@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 39u
+#define ZPU_METAL_ABI_VERSION 40u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -441,6 +441,12 @@ enum {
     ZPU_METAL_COMPUTE_ADD_F32X3 = 38,
     ZPU_METAL_COMPUTE_MUL_F32X3 = 39,
     ZPU_METAL_COMPUTE_SUB_F32X3 = 40,
+    /* Fixed CPU Float32 division profiles. These use the same resource and
+     * dispatch contract as the add/multiply/subtract profiles. */
+    ZPU_METAL_COMPUTE_DIV_F32 = 41,
+    ZPU_METAL_COMPUTE_DIV_F32X4 = 42,
+    ZPU_METAL_COMPUTE_DIV_F32X2 = 43,
+    ZPU_METAL_COMPUTE_DIV_F32X3 = 44,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

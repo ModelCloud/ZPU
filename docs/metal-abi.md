@@ -313,6 +313,11 @@ triangle path:
   deferred CPU/ZPU execution path for elementwise Float32 subtraction; its
   source lowering admits only the exact subtraction body and fixed bound, so
   arbitrary MSL remains rejected.
+  The bounded `zpu_cpu_div_f32` profile and its float2/float3/float4 variants
+  use the same three ZPU-owned buffer bindings and deferred elementwise
+  division. Their source lowering admits only the exact division body and
+  fixed dispatch bound; divide-by-zero and other arbitrary numerical shader
+  behavior remain outside this registered profile.
   The bounded `zpu_cpu_copy_rgba8_texture_to_texture` profile reads a
   ZPU-owned RGBA8 texture at binding 0 and writes a same-sized ZPU-owned
   RGBA8 texture at binding 1. Its CPU loop clips the dispatch to the output
@@ -619,10 +624,10 @@ triangle path:
 - CPU library metadata can discover the registered CPU kernel names and fixed
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query. Source text also supports a strict CPU-lowered profile
-  for source-named F32 buffer add/multiply kernels with the standard three
+  for source-named F32 buffer add/multiply/subtract/divide kernels with the standard three
   buffer slots and `thread_position_in_grid`, plus source-named `float2`,
   `float3`, and `float4` variants and registered scalar/vector
-  add/multiply/subtract profiles whose vector dispatch consumes one element per
+  add/multiply/subtract/divide profiles whose vector dispatch consumes one element per
   `gid.x` while preserving exact lane order. `float3` retains Metal's 16-byte
   element stride and padding lane in CPU-owned buffers, plus the source-named RGBA8
   texture gradient profile with a `texture2d<float, access::write>` slot and

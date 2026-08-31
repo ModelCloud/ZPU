@@ -5197,15 +5197,16 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 40) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 44) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
     fn isBufferAddKernel(self: *const ComputeEncoder) bool {
-        return self.kernel == 8 or self.kernel == 9 or self.kernel == 30 or
+        return self.kernel == 8 or self.kernel == 9 or self.kernel == 30 or self.kernel == 41 or
             self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or
             self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or
-            self.kernel == 38 or self.kernel == 39 or self.kernel == 40;
+            self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or
+            self.kernel == 42 or self.kernel == 43 or self.kernel == 44;
     }
 
     fn appendBufferAdd(
@@ -5227,12 +5228,12 @@ pub const ComputeEncoder = struct {
             output.device != left.device) return error.InvalidResource;
         _ = try self.command_buffer.append(.{ .compute_buffer_add = .{
             .kernel = self.kernel,
-            .elements_per_thread = if (self.kernel >= 32 and self.kernel <= 34) 4 else
-                (if (self.kernel >= 35 and self.kernel <= 37) 2 else
-                    (if (self.kernel >= 38 and self.kernel <= 40) 3 else 1)),
-            .element_stride = if (self.kernel >= 32 and self.kernel <= 34) 4 else
-                (if (self.kernel >= 35 and self.kernel <= 37) 2 else
-                    (if (self.kernel >= 38 and self.kernel <= 40) 4 else 1)),
+            .elements_per_thread = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else
+                (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else
+                    (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 3 else 1)),
+            .element_stride = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else
+                (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else
+                    (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 4 else 1)),
             .left = left,
             .left_offset = self.buffer_offsets[0],
             .right = right,
@@ -5958,10 +5959,11 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
 }
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
-    if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and
+    if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and command.kernel != 41 and
         command.kernel != 32 and command.kernel != 33 and command.kernel != 34 and
         command.kernel != 35 and command.kernel != 36 and command.kernel != 37 and
-        command.kernel != 38 and command.kernel != 39 and command.kernel != 40) or
+        command.kernel != 38 and command.kernel != 39 and command.kernel != 40 and
+        command.kernel != 42 and command.kernel != 43 and command.kernel != 44) or
         (command.elements_per_thread != 1 and command.elements_per_thread != 2 and
          command.elements_per_thread != 3 and command.elements_per_thread != 4) or
         (command.element_stride != 1 and command.element_stride != 2 and
@@ -5990,6 +5992,7 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
                 8, 32, 35, 38 => left + right,
                 9, 33, 36, 39 => left * right,
                 30, 34, 37, 40 => left - right,
+                41, 42, 43, 44 => left / right,
                 else => unreachable,
             };
             std.mem.writeInt(u32, command.output.bytes[output_offset..][0..@sizeOf(f32)], @bitCast(result), .little);
