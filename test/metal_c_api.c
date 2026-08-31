@@ -95,8 +95,18 @@ int main(void) {
     zpu_metal_render_encoder *render_encoder =
         zpu_metal_command_buffer_render_encoder(render_buffer, texture, &render_pass);
     if (render_encoder == NULL) return 9;
+    const zpu_metal_viewport render_viewports[] = {
+        {0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f},
+        {0.5f, 0.5f, 3.0f, 3.0f, 0.0f, 1.0f},
+    };
+    const zpu_metal_scissor_rect render_scissors[] = {
+        {0, 0, 4, 4},
+        {1, 1, 3, 3},
+    };
     zpu_metal_texture *texture_levels[] = {texture};
-    if (zpu_metal_render_encoder_set_vertex_buffer(render_encoder, vertex_buffer, 0, 0) != 0 ||
+    if (zpu_metal_render_encoder_set_viewports(render_encoder, render_viewports, 2) != 0 ||
+        zpu_metal_render_encoder_set_scissor_rects(render_encoder, render_scissors, 2) != 0 ||
+        zpu_metal_render_encoder_set_vertex_buffer(render_encoder, vertex_buffer, 0, 0) != 0 ||
         zpu_metal_render_encoder_set_fragment_texture_levels(render_encoder, texture_levels, 1, 0) != 0 ||
         zpu_metal_render_encoder_set_fragment_sampler_with_filters(
             render_encoder, ZPU_METAL_SAMPLER_LINEAR, ZPU_METAL_SAMPLER_NEAREST,
