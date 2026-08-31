@@ -754,10 +754,10 @@ pub fn namedOperationV2(arguments: *const NamedOperationArgumentsV2) Status {
     return namedOperationWithViews(name, arguments.function_name_length, arguments.input_count, arguments.element_type, inputs, &arguments.destination, permutation, max_named_inputs);
 }
 
-/// Stage a Metal/ZPU view into dense CPU memory for the optional provider.
+/// Stage a strided ZPU view into dense CPU memory for the optional provider.
 ///
-/// ZML's CPU buffer import contract is intentionally narrower than Metal's
-/// tensor view contract: the provider sees offset-zero, axis-0-fast, dense
+/// ZML's CPU buffer import contract is intentionally narrower than the public
+/// tensor-view contract: the provider sees offset-zero, axis-0-fast, dense
 /// buffers only. A provider decline leaves the original destination untouched
 /// and falls through to the exact strided ZPU reference path.
 fn tryProvider(arguments: *const TransposeArguments, source_info: ViewInfo, destination_info: ViewInfo) ?Status {

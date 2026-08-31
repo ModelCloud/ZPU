@@ -34,8 +34,12 @@ build_target() {
     echo "cpu-ml-portability: compiling public C header for $target"
     zig cc -target "$target" -std=c11 -Wall -Wextra -Werror \
         -I include -c test/cpu_ml_header.c -o "$prefix/cpu_ml_header.o"
-    if nm -u "$prefix/lib/libzpu_cpu_ml.a" 2>/dev/null | rg -n -i '(Metal|Foundation|PJRT)' ; then
-        echo "cpu-ml-portability FAILED: standalone archive has an Apple/PJRT dependency for $target" >&2
+    # A target libc may legitimately expose Darwin-suffixed symbols when this
+    # generic artifact is cross-compiled for macOS. Reject framework,
+    # Objective-C, and PJRT dependencies, but do not mistake normal libc for
+    # an Apple backend binding.
+    if nm -u "$prefix/lib/libzpu_cpu_ml.a" 2>/dev/null | rg -n -i '(Metal|Foundation|PJRT|Objective-C|objc|UIKit|AppKit|CoreFoundation)' ; then
+        echo "cpu-ml-portability FAILED: standalone archive has an Apple framework/Objective-C/PJRT dependency for $target" >&2
         exit 1
     fi
 }

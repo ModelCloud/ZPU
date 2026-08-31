@@ -10,9 +10,10 @@
  * This header intentionally includes no Metal, Foundation, PJRT, or platform
  * headers. A provider such as a ZML CPU bridge may register here, but it must
  * consume ordinary CPU memory and may use whatever CPU ISA is appropriate for
- * the host (for example AdvSIMD on arm64 or AVX on x86_64). The adapter stages
- * non-dense ZPU tensor layouts before invoking the provider, so a provider is
- * never given an Apple Metal resource or an Apple-specific layout assumption.
+ * the host (for example AdvSIMD on arm64 or AVX on x86_64). An integration
+ * bridge stages non-dense ZPU tensor layouts before invoking the provider, so
+ * a provider is never given a platform resource or a platform-specific layout
+ * assumption.
  */
 
 #include <stddef.h>
