@@ -6294,6 +6294,182 @@ static int test_layered_color_render_against_native(
     return 0;
 }
 
+static int test_vertex_amplification_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTLFunction> adapter_vertex_function, id<MTLFunction> adapter_fragment_function) {
+    if (!@available(macOS 10.15.4, iOS 13.0, *)) return 0;
+    if (![native_device supportsVertexAmplificationCount:2]) {
+        fprintf(stderr, "metal-pixel: native device does not support the required two-view amplification oracle\n");
+        return 240;
+    }
+    if (![adapter_device supportsVertexAmplificationCount:2]) {
+        fprintf(stderr, "metal-pixel: CPU adapter does not advertise two-view amplification\n");
+        return 241;
+    }
+
+    enum { width = 9, height = 7, layers = 2, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.82f, -0.70f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.76f, -0.38f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.18f,  0.83f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+    };
+    const uint16_t indices[] = {0, 1, 2};
+    const MTLVertexAmplificationViewMapping mappings[] = {
+        {0, 0},
+        {0, 1},
+    };
+
+    MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+    native_pipeline_descriptor.vertexFunction = native_vertex_function;
+    native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+    native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_pipeline_descriptor.maxVertexAmplificationCount = 2;
+    MTLRenderPipelineDescriptor *adapter_pipeline_descriptor = [native_pipeline_descriptor copy];
+    adapter_pipeline_descriptor.vertexFunction = adapter_vertex_function;
+    adapter_pipeline_descriptor.fragmentFunction = adapter_fragment_function;
+
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor error:&adapter_error];
+    id<MTLBuffer> native_vertex_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_vertex_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native_index_buffer =
+        [native_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_index_buffer =
+        [adapter_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
+    MTLDrawPrimitivesIndirectArguments indirect_arguments = {3, 1, 0, 0};
+    id<MTLBuffer> native_indirect_buffer =
+        [native_device newBufferWithBytes:&indirect_arguments length:sizeof(indirect_arguments)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_indirect_buffer =
+        [adapter_device newBufferWithBytes:&indirect_arguments length:sizeof(indirect_arguments)
+                                   options:MTLResourceStorageModeShared];
+    if (native_pipeline == nil || adapter_pipeline == nil || native_vertex_buffer == nil ||
+        adapter_vertex_buffer == nil || native_index_buffer == nil || adapter_index_buffer == nil ||
+        native_indirect_buffer == nil || adapter_indirect_buffer == nil) {
+        fail_with_error("vertex amplification resource/pipeline allocation", adapter_error ?: native_error);
+        return 242;
+    }
+
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
+    if (native_queue == nil || adapter_queue == nil) {
+        fprintf(stderr, "metal-pixel: vertex amplification command queue allocation failed\n");
+        return 243;
+    }
+    const MTLViewport viewport = {1.25, 0.75, 6.0, 5.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {1, 0, 7, 6};
+    for (NSUInteger draw_kind = 0; draw_kind < 3; ++draw_kind) {
+        MTLTextureDescriptor *texture_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:width height:height mipmapped:NO];
+        texture_descriptor.textureType = MTLTextureType2DArray;
+        texture_descriptor.arrayLength = layers;
+        texture_descriptor.storageMode = MTLStorageModeShared;
+        texture_descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        native_pass.renderTargetArrayLength = layers;
+        native_pass.colorAttachments[0].texture = native_texture;
+        native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.13, 0.21, 0.31, 1.0);
+        MTLRenderPassDescriptor *adapter_pass = [native_pass copy];
+        adapter_pass.colorAttachments[0].texture = adapter_texture;
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLRenderCommandEncoder> native_encoder =
+            [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+        id<MTLRenderCommandEncoder> adapter_encoder =
+            [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+        if (native_texture == nil || adapter_texture == nil || native_command_buffer == nil ||
+            adapter_command_buffer == nil || native_encoder == nil || adapter_encoder == nil) {
+            fprintf(stderr, "metal-pixel: vertex amplification encoder/texture creation failed for draw kind %lu\n",
+                    (unsigned long)draw_kind);
+            return 244;
+        }
+        [native_encoder setViewport:viewport];
+        [native_encoder setScissorRect:scissor];
+        [native_encoder setRenderPipelineState:native_pipeline];
+        [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
+        [native_encoder setVertexAmplificationCount:2 viewMappings:mappings];
+        [adapter_encoder setViewport:viewport];
+        [adapter_encoder setScissorRect:scissor];
+        [adapter_encoder setRenderPipelineState:adapter_pipeline];
+        [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
+        [adapter_encoder setVertexAmplificationCount:2 viewMappings:mappings];
+        switch (draw_kind) {
+            case 0:
+                [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                                  instanceCount:1 baseInstance:0];
+                [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3
+                                   instanceCount:1 baseInstance:0];
+                break;
+            case 1:
+                [native_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt16
+                                         indexBuffer:native_index_buffer indexBufferOffset:0 instanceCount:1
+                                         baseVertex:0 baseInstance:0];
+                [adapter_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt16
+                                          indexBuffer:adapter_index_buffer indexBufferOffset:0 instanceCount:1
+                                          baseVertex:0 baseInstance:0];
+                break;
+            default:
+                [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:native_indirect_buffer
+                            indirectBufferOffset:0];
+                [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:adapter_indirect_buffer
+                             indirectBufferOffset:0];
+                break;
+        }
+        [native_encoder endEncoding];
+        [adapter_encoder endEncoding];
+        [native_command_buffer commit];
+        [adapter_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_command_buffer waitUntilCompleted];
+
+        uint8_t native_pixels[layers][max_byte_count] = {{0}};
+        uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+        for (NSUInteger layer = 0; layer < layers; ++layer) {
+            [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                           fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+            [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                            fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+            if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+                size_t mismatch = 0;
+                while (mismatch < max_byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) {
+                    mismatch += 1;
+                }
+                fprintf(stderr, "metal-pixel: vertex amplification draw kind %lu slice %zu mismatch at byte %zu native=%u adapter=%u statuses=%ld/%ld\n",
+                        (unsigned long)draw_kind, (size_t)layer, mismatch,
+                        mismatch < max_byte_count ? native_pixels[layer][mismatch] : 0,
+                        mismatch < max_byte_count ? adapter_pixels[layer][mismatch] : 0,
+                        (long)native_command_buffer.status, (long)adapter_command_buffer.status);
+                fail_with_error("native vertex amplification error", native_command_buffer.error);
+                fail_with_error("adapter vertex amplification error", adapter_command_buffer.error);
+                return 245;
+            }
+        }
+        if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            memcmp(native_pixels[0], native_pixels[1], max_byte_count) != 0) {
+            fprintf(stderr, "metal-pixel: vertex amplification draw kind %lu did not route both views identically\n",
+                    (unsigned long)draw_kind);
+            fail_with_error("native vertex amplification completion error", native_command_buffer.error);
+            fail_with_error("adapter vertex amplification completion error", adapter_command_buffer.error);
+            return 246;
+        }
+    }
+    return 0;
+}
+
 static int test_layered_indexed_base_instance_render_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
@@ -8037,6 +8213,154 @@ static int test_metal4_layered_color_render_against_native(
             fprintf(stderr, "metal-pixel: Metal 4 layered direct primitive base-instance routing failed\n");
             return 221;
         }
+    }
+    return 0;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static int test_metal4_vertex_amplification_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLFunction> native_vertex_function, id<MTLFunction> native_fragment_function,
+    id<MTL4Compiler> adapter_compiler, MTL4RenderPipelineDescriptor *adapter_base_pipeline_descriptor,
+    id<MTL4CommandAllocator> adapter_allocator, id<MTL4CommandQueue> adapter_queue) {
+    enum { width = 9, height = 7, layers = 2, max_byte_count = width * height * 4 };
+    const zpu_metal_vertex vertices[] = {
+        {{-0.82f, -0.70f, 0.5f, 1.0f}, {0.91f, 0.17f, 0.63f, 0.81f}},
+        {{ 0.76f, -0.38f, 0.5f, 1.0f}, {0.23f, 0.87f, 0.31f, 0.59f}},
+        {{-0.18f,  0.83f, 0.5f, 1.0f}, {0.19f, 0.41f, 0.97f, 0.73f}},
+    };
+    const MTLVertexAmplificationViewMapping mappings[] = {
+        {0, 0},
+        {0, 1},
+    };
+    if (adapter_compiler == nil || adapter_base_pipeline_descriptor == nil ||
+        adapter_allocator == nil || adapter_queue == nil || ![native_device supportsVertexAmplificationCount:2] ||
+        ![adapter_device supportsVertexAmplificationCount:2]) return 247;
+
+    MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
+    native_pipeline_descriptor.vertexFunction = native_vertex_function;
+    native_pipeline_descriptor.fragmentFunction = native_fragment_function;
+    native_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    native_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    native_pipeline_descriptor.maxVertexAmplificationCount = 2;
+    MTL4RenderPipelineDescriptor *adapter_pipeline_descriptor = [adapter_base_pipeline_descriptor copy];
+    MTL4LibraryFunctionDescriptor *adapter_vertex_descriptor =
+        [adapter_base_pipeline_descriptor.vertexFunctionDescriptor copy];
+    MTL4LibraryFunctionDescriptor *adapter_fragment_descriptor =
+        [adapter_base_pipeline_descriptor.fragmentFunctionDescriptor copy];
+    adapter_vertex_descriptor.name = @"zpu_cpu_layered_vertex";
+    adapter_fragment_descriptor.name = @"zpu_cpu_layered_fragment";
+    adapter_pipeline_descriptor.vertexFunctionDescriptor = adapter_vertex_descriptor;
+    adapter_pipeline_descriptor.fragmentFunctionDescriptor = adapter_fragment_descriptor;
+    adapter_pipeline_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    adapter_pipeline_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    adapter_pipeline_descriptor.maxVertexAmplificationCount = 2;
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLRenderPipelineState> native_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_pipeline_descriptor error:&native_error];
+    id<MTLRenderPipelineState> adapter_pipeline =
+        [adapter_compiler newRenderPipelineStateWithDescriptor:adapter_pipeline_descriptor
+                                               compilerTaskOptions:nil error:&adapter_error];
+    MTLTextureDescriptor *texture_descriptor = [MTLTextureDescriptor new];
+    texture_descriptor.textureType = MTLTextureType2DArray;
+    texture_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    texture_descriptor.width = width;
+    texture_descriptor.height = height;
+    texture_descriptor.arrayLength = layers;
+    texture_descriptor.mipmapLevelCount = 1;
+    texture_descriptor.sampleCount = 1;
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLBuffer> native_buffer =
+        [native_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    if (native_pipeline == nil || adapter_pipeline == nil || native_texture == nil || adapter_texture == nil ||
+        native_buffer == nil || adapter_buffer == nil) {
+        fail_with_error("Metal 4 vertex amplification resource/pipeline allocation", adapter_error ?: native_error);
+        return 248;
+    }
+    MTLRenderPassDescriptor *native_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_pass.renderTargetArrayLength = layers;
+    native_pass.colorAttachments[0].texture = native_texture;
+    native_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.13, 0.21, 0.31, 1.0);
+    MTL4RenderPassDescriptor *adapter_pass = [MTL4RenderPassDescriptor new];
+    adapter_pass.renderTargetArrayLength = layers;
+    adapter_pass.colorAttachments[0].texture = adapter_texture;
+    adapter_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    adapter_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    adapter_pass.colorAttachments[0].clearColor = native_pass.colorAttachments[0].clearColor;
+    id<MTLCommandQueue> native_queue = [native_device newCommandQueue];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLRenderCommandEncoder> native_encoder =
+        [native_command_buffer renderCommandEncoderWithDescriptor:native_pass];
+    id<MTL4CommandBuffer> adapter_command_buffer = [adapter_device newCommandBuffer];
+    [adapter_command_buffer beginCommandBufferWithAllocator:adapter_allocator];
+    id<MTL4RenderCommandEncoder> adapter_encoder =
+        [adapter_command_buffer renderCommandEncoderWithDescriptor:adapter_pass];
+    MTL4ArgumentTableDescriptor *table_descriptor = [MTL4ArgumentTableDescriptor new];
+    table_descriptor.maxBufferBindCount = 1;
+    NSError *table_error = nil;
+    id<MTL4ArgumentTable> table =
+        [adapter_device newArgumentTableWithDescriptor:table_descriptor error:&table_error];
+    [table setAddress:adapter_buffer.gpuAddress atIndex:0];
+    if (native_command_buffer == nil || native_encoder == nil || adapter_command_buffer == nil ||
+        adapter_encoder == nil || table == nil) {
+        fail_with_error("Metal 4 vertex amplification encoder allocation", table_error ?: native_error);
+        return 249;
+    }
+    const MTLViewport viewport = {1.25, 0.75, 6.0, 5.0, 0.0, 1.0};
+    const MTLScissorRect scissor = {1, 0, 7, 6};
+    [native_encoder setViewport:viewport];
+    [native_encoder setScissorRect:scissor];
+    [native_encoder setRenderPipelineState:native_pipeline];
+    [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
+    [native_encoder setVertexAmplificationCount:2 viewMappings:mappings];
+    [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 instanceCount:1 baseInstance:0];
+    [native_encoder endEncoding];
+    [adapter_encoder setViewport:viewport];
+    [adapter_encoder setScissorRect:scissor];
+    [adapter_encoder setRenderPipelineState:adapter_pipeline];
+    [adapter_encoder setArgumentTable:table atStages:MTLRenderStageVertex];
+    [adapter_encoder setVertexAmplificationCount:2 viewMappings:mappings];
+    [adapter_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 instanceCount:1 baseInstance:0];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer endCommandBuffer];
+    id<MTL4CommandBuffer> adapter_command_buffers[] = {adapter_command_buffer};
+    [adapter_queue commit:adapter_command_buffers count:1];
+    uint8_t native_pixels[layers][max_byte_count] = {{0}};
+    uint8_t adapter_pixels[layers][max_byte_count] = {{0}};
+    for (NSUInteger layer = 0; layer < layers; ++layer) {
+        [native_texture getBytes:native_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                       fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        [adapter_texture getBytes:adapter_pixels[layer] bytesPerRow:width * 4 bytesPerImage:max_byte_count
+                        fromRegion:MTLRegionMake3D(0, 0, 0, width, height, 1) mipmapLevel:0 slice:layer];
+        if (memcmp(native_pixels[layer], adapter_pixels[layer], max_byte_count) != 0) {
+            size_t mismatch = 0;
+            while (mismatch < max_byte_count && native_pixels[layer][mismatch] == adapter_pixels[layer][mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: Metal 4 vertex amplification slice %zu mismatch at byte %zu native=%u adapter=%u native_status=%ld\n",
+                    (size_t)layer, mismatch,
+                    mismatch < max_byte_count ? native_pixels[layer][mismatch] : 0,
+                    mismatch < max_byte_count ? adapter_pixels[layer][mismatch] : 0,
+                    (long)native_command_buffer.status);
+            fail_with_error("native Metal 4 vertex amplification error", native_command_buffer.error);
+            fail_with_error("adapter Metal 4 vertex amplification error", table_error);
+            return 250;
+        }
+    }
+    if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(native_pixels[0], native_pixels[1], max_byte_count) != 0) {
+        fprintf(stderr, "metal-pixel: Metal 4 vertex amplification did not route both views identically\n");
+        fail_with_error("native Metal 4 vertex amplification completion error", native_command_buffer.error);
+        fail_with_error("adapter Metal 4 vertex amplification completion error", table_error);
+        return 251;
     }
     return 0;
 }
@@ -11762,6 +12086,10 @@ int main(void) {
             device, adapter_device, layered_vertex_function, layered_fragment_function,
             adapter_layered_vertex_function, adapter_layered_fragment_function);
         if (layered_color_result != 0) return layered_color_result;
+        const int vertex_amplification_result = test_vertex_amplification_against_native(
+            device, adapter_device, layered_vertex_function, layered_fragment_function,
+            adapter_layered_vertex_function, adapter_layered_fragment_function);
+        if (vertex_amplification_result != 0) return vertex_amplification_result;
         const int layered_indexed_base_instance_result = test_layered_indexed_base_instance_render_against_native(
             device, adapter_device, layered_vertex_function, layered_fragment_function,
             adapter_layered_vertex_function, adapter_layered_fragment_function);
@@ -22663,6 +22991,10 @@ int main(void) {
             device, adapter_device, layered_vertex_function, layered_fragment_function, adapter_mtl4_compiler,
             adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
         if (metal4_layered_color_result != 0) return metal4_layered_color_result;
+        const int metal4_vertex_amplification_result = test_metal4_vertex_amplification_against_native(
+            device, adapter_device, layered_vertex_function, layered_fragment_function, adapter_mtl4_compiler,
+            adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);
+        if (metal4_vertex_amplification_result != 0) return metal4_vertex_amplification_result;
         const int metal4_layered_depth_stencil_result = test_metal4_layered_depth_stencil_render_against_native(
             device, adapter_device, layered_vertex_function, layered_fragment_function, adapter_mtl4_compiler,
             adapter_mtl4_render_descriptor, metal4_allocator, metal4_queue);

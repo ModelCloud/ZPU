@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 36u
+#define ZPU_METAL_ABI_VERSION 37u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -259,6 +259,10 @@ typedef struct zpu_metal_color { float red, green, blue, alpha; } zpu_metal_colo
  * MTLSamplePosition convention: (0, 0) is the upper-left pixel corner and
  * both coordinates are in the half-open [0, 1) range. */
 typedef struct zpu_metal_sample_position { float x, y; } zpu_metal_sample_position;
+typedef struct zpu_metal_vertex_amplification_view_mapping {
+    uint32_t viewport_array_index_offset;
+    uint32_t render_target_array_index_offset;
+} zpu_metal_vertex_amplification_view_mapping;
 typedef struct zpu_metal_origin { uint32_t x, y, z; } zpu_metal_origin;
 typedef struct zpu_metal_size { uint32_t width, height, depth; } zpu_metal_size;
 typedef struct zpu_metal_region { zpu_metal_origin origin; zpu_metal_size size; } zpu_metal_region;
@@ -589,6 +593,11 @@ int zpu_metal_render_encoder_set_raster_sample_count(zpu_metal_render_encoder *e
 /* count 0 restores Apple's default sample table; otherwise count must match
  * the active 1x/2x/4x raster sample count. */
 int zpu_metal_render_encoder_set_sample_positions(zpu_metal_render_encoder *encoder, const zpu_metal_sample_position *positions, size_t count);
+/* Vertex amplification is CPU-expanded into ordered per-view draws. The
+ * bounded profile supports Apple's two-view maximum and preserves the
+ * top-left viewport grid; non-zero viewport-array offsets are rejected until
+ * the portable ABI exposes multiple viewport state. */
+int zpu_metal_render_encoder_set_vertex_amplification_count(zpu_metal_render_encoder *encoder, size_t count, const zpu_metal_vertex_amplification_view_mapping *view_mappings);
 /* Installs CPU-owned sample planes for a 2x/4x render target. The first
  * sample must be the color attachment passed to the render-encoder factory;
  * resolve_texture may be NULL when the multisample surface is intentionally

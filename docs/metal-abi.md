@@ -102,6 +102,12 @@ triangle path:
   slice, preserving Apple's top-left X/Y pixel grid while keeping execution
   entirely on the CPU. Deferred primitive and indexed draws also resolve
   `baseInstance` (for direct and indirect draws) and select successive slices. Layered
+  legacy vertex amplification is CPU-expanded into up to two ordered view
+  draws; each view preserves the recorded viewport/scissor origin and applies
+  its `renderTargetArrayIndexOffset` to the ZPU-owned array slice. Non-zero
+  `viewportArrayIndexOffset` is rejected because this bounded ABI exposes one
+  portable viewport, rather than silently changing the pixel grid. The native
+  oracle covers direct, indexed, and indirect amplified draws byte-for-byte.
   Depth/stencil array planes are also staged as independent CPU arrays and
   participate in per-layer clears, load/store, depth tests, and stencil
   operations. The registered tile profile broadcasts its deterministic
@@ -224,7 +230,10 @@ triangle path:
   rasterization; direct layered color passes select up to eight 2D-array
   slices by direct instance index, while primitive/indexed indirect draws
   honor `baseInstance` and resolve it at commit time where indirect arguments
-  are used. Layered depth/stencil array planes
+  are used. Vertex amplification count is limited to two, expands into
+  ordered CPU/ZPU draws, and applies each render-target-array offset without
+  rebasing the top-left viewport/scissor grid; viewport-array offsets fail
+  closed until multiple portable viewport states exist. Layered depth/stencil array planes
   select and update matching per-layer CPU state; the registered tile profile
   broadcasts to each layer, and both the tile and registered mesh profiles
   support contiguous RGBA8/BGRA8 attachments with an opted-in

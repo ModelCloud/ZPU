@@ -949,6 +949,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLSize _meshRequiredThreadsPerMeshThreadgroup;
     BOOL _isPatchPipeline;
     NSUInteger _rasterSampleCount;
+    NSUInteger _maxVertexAmplificationCount;
     MTLPatchType _patchType;
     NSInteger _patchControlPointCount;
     MTLTessellationControlPointIndexType _tessellationControlPointIndexType;
@@ -1759,6 +1760,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     ZPUCommandBuffer *_owner;
     NSString *_label;
     ZPUBuffer *_vertexBuffer;
+    NSUInteger _vertexAmplificationCount;
     NSUInteger _vertexStride;
     BOOL _vertexStrideExplicit;
     BOOL _vertexStrideStaticToken;
@@ -9160,6 +9162,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _depthPixelFormat = descriptor.depthAttachmentPixelFormat;
         _stencilPixelFormat = descriptor.stencilAttachmentPixelFormat;
         _rasterSampleCount = descriptor.rasterSampleCount;
+        _maxVertexAmplificationCount = 1;
+        if (@available(macOS 10.15.4, iOS 13.0, *)) {
+            _maxVertexAmplificationCount = descriptor.maxVertexAmplificationCount == 0 ? 1 : descriptor.maxVertexAmplificationCount;
+        }
         _isPatchPipeline = [_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name];
         _patchType = _isPatchPipeline ? MTLPatchTypeTriangle : MTLPatchTypeNone;
         _patchControlPointCount = _isPatchPipeline ? 3 : -1;
@@ -9219,6 +9225,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _colorAttachmentCount = 1;
         _rasterizationEnabled = NO;
         _rasterSampleCount = 1;
+        _maxVertexAmplificationCount = 1;
         _supportsIndirectCommandBuffers = NO;
         _blendingEnabled = NO;
         _sourceRGBBlendFactor = MTLBlendFactorOne;
@@ -9264,6 +9271,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _colorAttachmentCount = 1;
         _rasterizationEnabled = YES;
         _rasterSampleCount = 1;
+        _maxVertexAmplificationCount = 1;
         _supportsIndirectCommandBuffers = NO;
         _blendingEnabled = NO;
         _sourceRGBBlendFactor = MTLBlendFactorOne;
@@ -9301,6 +9309,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _depthPixelFormat = pipeline->_depthPixelFormat;
         _stencilPixelFormat = pipeline->_stencilPixelFormat;
         _rasterSampleCount = pipeline->_rasterSampleCount;
+        _maxVertexAmplificationCount = pipeline->_maxVertexAmplificationCount;
         _sampleTexture = pipeline->_sampleTexture;
         _supportsAddingVertexBinaryFunctions = pipeline->_supportsAddingVertexBinaryFunctions;
         _supportsAddingFragmentBinaryFunctions = pipeline->_supportsAddingFragmentBinaryFunctions;
@@ -10446,7 +10455,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
      * because they would require a different physical pixel grid. */
     return layerCount != 0;
 }
-- (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count <= 1; }
+- (BOOL)supportsVertexAmplificationCount:(NSUInteger)count { return count >= 1 && count <= 2; }
 - (BOOL)supportsDynamicLibraries { return YES; }
 - (BOOL)supportsRenderDynamicLibraries { return YES; }
 - (BOOL)supportsRaytracing { return NO; }
@@ -10652,8 +10661,14 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
     NSUInteger vertexStride = 0;
     BOOL vertexStrideDynamic = NO;
+    NSUInteger maxVertexAmplificationCount = 1;
+    if (@available(macOS 10.15.4, iOS 13.0, *)) {
+        maxVertexAmplificationCount = descriptor == nil || descriptor.maxVertexAmplificationCount == 0 ?
+            1 : descriptor.maxVertexAmplificationCount;
+    }
     if (descriptor == nil || descriptor.vertexFunction == nil || descriptor.fragmentFunction == nil ||
         (descriptor.rasterSampleCount != 1 && descriptor.rasterSampleCount != 2 && descriptor.rasterSampleCount != 4) ||
+        maxVertexAmplificationCount > 2 ||
         !zpu_depth_format_supported(descriptor.depthAttachmentPixelFormat) ||
         !zpu_stencil_format_supported(descriptor.stencilAttachmentPixelFormat) ||
         (descriptor != nil && !zpu_vertex_layout_supported(descriptor.vertexDescriptor,
@@ -12447,7 +12462,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_render_pipeline_for_descriptor(
         vertex_layout.stepFunction == MTLVertexStepFunctionPerVertex && vertex_layout.stepRate == 1;
     if (descriptor.alphaToCoverageState != MTL4AlphaToCoverageStateDisabled ||
         descriptor.alphaToOneState != MTL4AlphaToOneStateDisabled ||
-        descriptor.maxVertexAmplificationCount > 1 ||
+        descriptor.maxVertexAmplificationCount > 2 ||
         (descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateIdentity &&
          descriptor.colorAttachmentMappingState != MTL4LogicalToPhysicalColorAttachmentMappingStateInherited) ||
         !zpu_vertex_layout_supported(vertex_descriptor, &ignored_vertex_stride,
@@ -12608,6 +12623,10 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only one-, two-, or four-sample CPU mesh targets");
         return nil;
     }
+    if (descriptor.maxVertexAmplificationCount > 2) {
+        zpu_set_error(error, @"ZPU CPU Metal 4 supports at most two amplified views");
+        return nil;
+    }
     MTL4StaticLinkingDescriptor *object_linking = descriptor.objectStaticLinkingDescriptor;
     MTL4StaticLinkingDescriptor *mesh_linking = descriptor.meshStaticLinkingDescriptor;
     MTL4StaticLinkingDescriptor *fragment_linking = descriptor.fragmentStaticLinkingDescriptor;
@@ -12693,6 +12712,7 @@ static id<MTLRenderPipelineState> zpu_mtl4_mesh_pipeline_for_descriptor(
     pipeline->_supportsIndirectCommandBuffers =
         descriptor.supportIndirectCommandBuffers == MTL4IndirectCommandBufferSupportStateEnabled;
     pipeline->_rasterSampleCount = descriptor.rasterSampleCount == 0 ? 1 : descriptor.rasterSampleCount;
+    pipeline->_maxVertexAmplificationCount = descriptor.maxVertexAmplificationCount == 0 ? 1 : descriptor.maxVertexAmplificationCount;
     for (NSUInteger index = 0; index < color_attachment_count; ++index) {
         pipeline->_colorPixelFormats[index] = descriptor.colorAttachments[index].pixelFormat;
     }
@@ -15160,9 +15180,14 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
     if (viewports == NULL || count != 1) { [_owner markError]; return; }
     [(id)_legacy setViewports:viewports count:count];
 }
-- (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping *)viewMappings {
-    if (count != 1 || (viewMappings != NULL &&
-        (viewMappings[0].viewportArrayIndexOffset != 0 || viewMappings[0].renderTargetArrayIndexOffset != 0))) {
+- (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping * __nullable)viewMappings API_AVAILABLE(macos(10.15.4), ios(13.0), macCatalyst(13.4), tvos(16.0)) {
+    BOOL invalidMapping = NO;
+    if (viewMappings != NULL) {
+        for (NSUInteger index = 0; index < count && index < 2; ++index) {
+            if (viewMappings[index].viewportArrayIndexOffset != 0) invalidMapping = YES;
+        }
+    }
+    if (count == 0 || count > 2 || invalidMapping) {
         [_owner markError];
         return;
     }
@@ -20255,6 +20280,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     if ((self = [super init])) {
         _owner = owner;
         _zpuEncoder = encoder;
+        _vertexAmplificationCount = 1;
         _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
         _supportsColorAttachmentMapping = NO;
@@ -20876,15 +20902,22 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         viewport.height, viewport.znear, viewport.zfar,
     }) != ZPU_METAL_OK) [_owner markError];
 }
+- (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping *)viewMappings {
+    if (count == 0 || count > 2 || (_pipelineState != nil && count > _pipelineState->_maxVertexAmplificationCount)) {
+        [_owner markError];
+        return;
+    }
+    if (zpu_metal_render_encoder_set_vertex_amplification_count(
+            _zpuEncoder, count,
+            (const zpu_metal_vertex_amplification_view_mapping *)viewMappings) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    _vertexAmplificationCount = count;
+}
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
     if (viewports == NULL || count != 1) { [_owner markError]; return; }
     [self setViewport:viewports[0]];
-}
-- (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping * __nullable)viewMappings API_AVAILABLE(macos(10.15.4), ios(13.0), macCatalyst(13.4), tvos(16.0)) {
-    if (count != 1 || (viewMappings != NULL &&
-        (viewMappings[0].viewportArrayIndexOffset != 0 || viewMappings[0].renderTargetArrayIndexOffset != 0))) {
-        [_owner markError];
-    }
 }
 - (void)setScissorRect:(MTLScissorRect)scissorRect {
     uint32_t x, y, width, height;
@@ -20975,6 +21008,10 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState {
     ZPURenderPipelineState *state = (ZPURenderPipelineState *)pipelineState;
     if (![state isKindOfClass:[ZPURenderPipelineState class]] || state->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
+    if (_vertexAmplificationCount > state->_maxVertexAmplificationCount) {
         [_owner markError];
         return;
     }

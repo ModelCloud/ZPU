@@ -459,6 +459,8 @@ const DrawCommand = struct {
     // deferred argument resolution; non-layered draws retain zero.
     array_index: usize = 0,
     base_instance: usize = 0,
+    amplification_count: u8 = 1,
+    amplification_render_target_offsets: [2]u32 = .{ 0, 0 },
 };
 
 const TileCommand = struct {
@@ -1647,13 +1649,33 @@ pub const CommandBuffer = struct {
                 var resolved_draw = draw;
                 const instance_count = self.resolveIndirectDraw(&resolved_draw) catch |err| return self.fail(err);
                 if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
-                const array_index = if (active_array_target_count > 1)
+                if (resolved_draw.amplification_count == 0 or resolved_draw.amplification_count > 2)
+                    return self.fail(error.InvalidArgument);
+                const base_array_index = if (active_array_target_count > 1)
                     std.math.add(usize, resolved_draw.array_index, resolved_draw.base_instance) catch return self.fail(error.InvalidArgument)
                 else
                     0;
-                if (array_index >= active_array_target_count or
-                    instance_count > active_array_target_count - array_index)
-                    return self.fail(error.InvalidArgument);
+                var first_array_index = base_array_index;
+                if (active_array_target_count > 1) {
+                    first_array_index = std.math.add(
+                        usize,
+                        base_array_index,
+                        resolved_draw.amplification_render_target_offsets[0],
+                    ) catch return self.fail(error.InvalidArgument);
+                    for (resolved_draw.amplification_render_target_offsets[0..resolved_draw.amplification_count]) |offset| {
+                        const amplified_base = std.math.add(usize, base_array_index, offset) catch
+                            return self.fail(error.InvalidArgument);
+                        if (amplified_base >= active_array_target_count or
+                            (resolved_draw.indirect_buffer != null and
+                             instance_count > active_array_target_count - amplified_base))
+                            return self.fail(error.InvalidArgument);
+                    }
+                } else {
+                    for (resolved_draw.amplification_render_target_offsets[0..resolved_draw.amplification_count]) |offset| {
+                        if (offset != 0) return self.fail(error.InvalidArgument);
+                    }
+                }
+                const array_index = first_array_index;
                 const target_handle = active_array_color_attachments[0][array_index] orelse
                     (active_target orelse return self.fail(error.InvalidCommand));
                 if (!validTexture(target_handle)) return self.fail(error.InvalidResource);
@@ -1785,11 +1807,17 @@ pub const CommandBuffer = struct {
                 validateColorAttachmentOutputs(active_color_attachments, draw_options.color_attachment_map, logical_output_count) catch |err| return self.fail(err);
                 var stats: raster3d.Stats = .{};
                 if (active_sample_count == 1) {
-                    for (0..instance_count) |instance| {
-                        const instance_array_index = if (active_array_target_count > 1 and resolved_draw.indirect_buffer != null)
-                            array_index + instance
+                    for (0..resolved_draw.amplification_count) |amplification| {
+                        const amplified_array_index = if (active_array_target_count > 1)
+                            std.math.add(usize, base_array_index, resolved_draw.amplification_render_target_offsets[amplification]) catch
+                                return self.fail(error.InvalidArgument)
                         else
-                            array_index;
+                            0;
+                        for (0..instance_count) |instance| {
+                            const instance_array_index = if (active_array_target_count > 1 and resolved_draw.indirect_buffer != null)
+                                std.math.add(usize, amplified_array_index, instance) catch return self.fail(error.InvalidArgument)
+                            else
+                                amplified_array_index;
                         if (active_array_target_count > 1 and resolved_draw.indirect_buffer != null) {
                             const instance_target = active_array_color_attachments[0][instance_array_index] orelse
                                 return self.fail(error.InvalidResource);
@@ -1810,29 +1838,51 @@ pub const CommandBuffer = struct {
                             active_stencil_array_values[instance_array_index]
                         else
                             active_stencil;
-                        stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
-                            @constCast(&target),
-                            extra_targets[0..extra_count],
-                            sample_target,
-                            sample_mipmap_targets,
-                            depth_values,
-                            stencil_values,
-                            draw_vertices,
-                            resolved_draw.primitive,
-                            draw_options,
-                        ));
+                            if (active_array_target_count > 1 and resolved_draw.indirect_buffer == null) {
+                                const instance_target = active_array_color_attachments[0][instance_array_index] orelse
+                                    return self.fail(error.InvalidResource);
+                                target = instance_target.asTarget();
+                                for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                                    if (attachment != null) {
+                                        const instance_extra = active_array_color_attachments[physical_index + 1][instance_array_index] orelse
+                                            return self.fail(error.InvalidResource);
+                                        extra_targets_storage[physical_index] = instance_extra.asTarget();
+                                    }
+                                }
+                            }
+                            stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
+                                @constCast(&target),
+                                extra_targets[0..extra_count],
+                                sample_target,
+                                sample_mipmap_targets,
+                                depth_values,
+                                stencil_values,
+                                draw_vertices,
+                                resolved_draw.primitive,
+                                draw_options,
+                            ));
+                        }
                     }
                 } else {
                     const pixel_count = std.math.mul(usize, target_handle.width, target_handle.height) catch return self.fail(error.InvalidArgument);
                     const layered_samples = active_sample_array_color_attachments[0][0][0] != null;
-                    for (0..instance_count) |instance| {
-                        const instance_array_index = if (active_array_target_count > 1)
-                            array_index + instance
+                    for (0..resolved_draw.amplification_count) |amplification| {
+                        const amplified_array_index = if (active_array_target_count > 1)
+                            std.math.add(usize, base_array_index, resolved_draw.amplification_render_target_offsets[amplification]) catch
+                                return self.fail(error.InvalidArgument)
                         else
                             0;
-                        if (instance_array_index >= active_array_target_count)
-                            return self.fail(error.InvalidArgument);
-                        for (0..active_sample_count) |sample_index| {
+                        for (0..instance_count) |instance| {
+                            const instance_array_index = if (active_array_target_count > 1)
+                                (if (resolved_draw.indirect_buffer != null)
+                                    std.math.add(usize, amplified_array_index, instance) catch return self.fail(error.InvalidArgument)
+                                else
+                                    amplified_array_index)
+                            else
+                                0;
+                            if (instance_array_index >= active_array_target_count)
+                                return self.fail(error.InvalidArgument);
+                            for (0..active_sample_count) |sample_index| {
                             const sample = if (layered_samples)
                                 active_sample_array_color_attachments[0][instance_array_index][sample_index]
                             else
@@ -1872,17 +1922,18 @@ pub const CommandBuffer = struct {
                                 values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
                             else
                                 null;
-                            stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
-                                &sample_target_value,
-                                sample_extra_targets[0..sample_extra_count],
-                                sample_target,
-                                sample_mipmap_targets,
-                                depth_values,
-                                stencil_values,
-                                draw_vertices,
-                                resolved_draw.primitive,
-                                draw_options,
-                            ));
+                                stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
+                                    &sample_target_value,
+                                    sample_extra_targets[0..sample_extra_count],
+                                    sample_target,
+                                    sample_mipmap_targets,
+                                    depth_values,
+                                    stencil_values,
+                                    draw_vertices,
+                                    resolved_draw.primitive,
+                                    draw_options,
+                                ));
+                            }
                         }
                     }
                 }
@@ -2891,6 +2942,8 @@ pub const RenderEncoder = struct {
     command_buffer: *CommandBuffer,
     begin_index: usize,
     pipeline_sample_count: u8 = 1,
+    vertex_amplification_count: u8 = 1,
+    vertex_amplification_render_target_offsets: [2]u32 = .{ 0, 0 },
     vertex_buffer: ?*Buffer = null,
     vertex_offset: usize = 0,
     vertex_stride: usize = @sizeOf(abi.Vertex),
@@ -3066,6 +3119,28 @@ pub const RenderEncoder = struct {
             },
             else => return error.InvalidCommand,
         }
+    }
+
+    pub fn setVertexAmplificationCount(
+        self: *RenderEncoder,
+        count: usize,
+        mappings: ?[*]const abi.VertexAmplificationViewMapping,
+    ) Error!void {
+        // Apple Metal currently exposes a maximum of two amplified views.
+        // The CPU profile has one viewport, so a non-zero viewport-array
+        // offset cannot be represented without inventing a second viewport;
+        // reject that case rather than silently changing pixel coordinates.
+        if (!self.open() or count == 0 or count > 2)
+            return error.InvalidArgument;
+        var offsets: [2]u32 = .{ 0, 0 };
+        if (mappings) |values| {
+            for (values[0..count], 0..) |mapping, index| {
+                if (mapping.viewport_array_index_offset != 0) return error.UnsupportedOperation;
+                offsets[index] = mapping.render_target_array_index_offset;
+            }
+        }
+        self.vertex_amplification_count = @intCast(count);
+        self.vertex_amplification_render_target_offsets = offsets;
     }
 
     pub fn setMultisampleTargets(self: *RenderEncoder, textures: ?[*]const ?*Texture, count: usize, resolve: ?*Texture) Error!void {
@@ -4185,6 +4260,8 @@ pub const RenderEncoder = struct {
                     std.math.add(usize, base_instance, instance) catch return error.InvalidArgument
                 else
                     0,
+                .amplification_count = self.vertex_amplification_count,
+                .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
             } });
         }
     }
@@ -4219,6 +4296,8 @@ pub const RenderEncoder = struct {
             .visibility_mode = self.visibility_mode,
             .visibility_offset = self.visibility_offset,
             .visibility_result_type = self.visibility_result_type,
+            .amplification_count = self.vertex_amplification_count,
+            .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
         } });
     }
 
@@ -4281,6 +4360,8 @@ pub const RenderEncoder = struct {
                     std.math.add(usize, base_instance, instance) catch return error.InvalidArgument
                 else
                     0,
+                .amplification_count = self.vertex_amplification_count,
+                .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
             } });
         }
     }
@@ -4319,6 +4400,8 @@ pub const RenderEncoder = struct {
             .visibility_mode = self.visibility_mode,
             .visibility_offset = self.visibility_offset,
             .visibility_result_type = self.visibility_result_type,
+            .amplification_count = self.vertex_amplification_count,
+            .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
         } });
     }
 
@@ -10698,6 +10781,87 @@ test "CPU render encoder maps indirect and indexed base instances to array color
     }
 }
 
+test "CPU render encoder expands vertex amplification on the top-left grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.80, -0.70, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0.75, -0.35, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ -0.20, 0.82, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    const mappings = [_]abi.VertexAmplificationViewMapping{
+        .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 0 },
+        .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 1 },
+    };
+    var layers: [2]*Texture = undefined;
+    var references: [2]*Texture = undefined;
+    for (&layers, &references) |*layer, *reference| {
+        layer.* = try createTexture(device, 7, 5, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+        reference.* = try createTexture(device, 7, 5, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    }
+    defer for (layers, &references) |layer, *reference| {
+        destroyTexture(layer);
+        destroyTexture(reference.*);
+    };
+    const pass = abi.RenderPassDescriptor{
+        .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0.13, .green = 0.21, .blue = 0.31, .alpha = 1 } },
+    };
+    const viewport = raster3d.PreciseViewport{ .origin_x = 1.25, .origin_y = 0.75, .width = 5, .height = 4, .znear = 0, .zfar = 1 };
+    const scissor = abi.ScissorRect{ .x = 1, .y = 0, .width = 6, .height = 5 };
+
+    var amplified_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(amplified_commands);
+    var amplified_encoder = try beginRender(amplified_commands, layers[0], pass);
+    try amplified_encoder.setRenderTargetArray(&layers, layers.len);
+    try amplified_encoder.setViewportPrecise(viewport);
+    try amplified_encoder.setScissorRect(scissor);
+    try amplified_encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try amplified_encoder.setVertexAmplificationCount(2, &mappings);
+    try amplified_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+    try amplified_encoder.endEncoding();
+    destroyRenderEncoder(amplified_encoder);
+
+    var reference_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(reference_commands);
+    for (references) |reference| {
+        var reference_encoder = try beginRender(reference_commands, reference, pass);
+        try reference_encoder.setViewportPrecise(viewport);
+        try reference_encoder.setScissorRect(scissor);
+        try reference_encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+        try reference_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
+        try reference_encoder.endEncoding();
+        destroyRenderEncoder(reference_encoder);
+    }
+    try amplified_commands.commit();
+    try reference_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, amplified_commands.status);
+    try std.testing.expectEqual(CommandStatus.completed, reference_commands.status);
+    for (layers, &references) |layer, *reference| {
+        try std.testing.expectEqualSlices(u8, reference.*.bytes, layer.bytes);
+    }
+}
+
+test "CPU render encoder rejects unsupported amplified viewport offsets" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const color = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(color);
+    const command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginRender(command_buffer, color, .{ .color = .{ .load_action = .clear, .store_action = .store } });
+    const mappings = [_]abi.VertexAmplificationViewMapping{
+        .{ .viewport_array_index_offset = 1, .render_target_array_index_offset = 0 },
+        .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 1 },
+    };
+    try std.testing.expectError(error.UnsupportedOperation, encoder.setVertexAmplificationCount(2, &mappings));
+    try encoder.endEncoding();
+    destroyRenderEncoder(encoder);
+}
+
 test "CPU layered triangle patches map base instances on the top-left grid" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -11847,6 +12011,15 @@ pub export fn zpu_metal_render_encoder_set_sample_positions(
     count: usize,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setSamplePositions(positions, count) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_vertex_amplification_count(
+    encoder: ?*RenderEncoder,
+    count: usize,
+    mappings: ?[*]const abi.VertexAmplificationViewMapping,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setVertexAmplificationCount(count, mappings) catch |err| return errorCode(err);
     return 0;
 }
 
