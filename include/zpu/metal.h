@@ -426,6 +426,11 @@ enum {
      * and output at texture(1); the CPU path preserves Metal's top-left
      * gid.x/gid.y mapping and raw four-byte texels. */
     ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE = 31,
+    /* Fixed CPU vector buffer arithmetic profiles. Each dispatch thread
+     * consumes one float4 from buffers 0/1 and writes one float4 to buffer 2. */
+    ZPU_METAL_COMPUTE_ADD_F32X4 = 32,
+    ZPU_METAL_COMPUTE_MUL_F32X4 = 33,
+    ZPU_METAL_COMPUTE_SUB_F32X4 = 34,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

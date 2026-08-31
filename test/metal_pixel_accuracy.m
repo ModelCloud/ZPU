@@ -189,6 +189,15 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_sub_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
+    "kernel void zpu_cpu_add_f32x4(device const float4 *left [[buffer(0)]], "
+    "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 5) return; output[gid] = left[gid] + right[gid]; }\n"
+    "kernel void zpu_cpu_mul_f32x4(device const float4 *left [[buffer(0)]], "
+    "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 5) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_sub_f32x4(device const float4 *left [[buffer(0)]], "
+    "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 5) return; output[gid] = left[gid] - right[gid]; }\n"
     "kernel void zpu_cpu_ml_mul_f16_oracle(device const half *left [[buffer(0)]], "
     "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
@@ -13461,6 +13470,111 @@ static int test_metal4_cpu_integer_matmul_profiles(
     return 0;
 }
 
+/* Vector arithmetic is a registered CPU/ZPU profile. Apple Metal supplies
+ * only the oracle bytes here; the adapter never submits its function source
+ * to Apple's compiler or uses a native command encoder. */
+static int test_cpu_vector_buffer_arithmetic_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
+    id<MTLCommandQueue> native_queue, id<MTLCommandQueue> adapter_queue) {
+    if (native_device == nil || adapter_device == nil || native_library == nil ||
+        adapter_library == nil || native_queue == nil || adapter_queue == nil) return 240;
+
+    enum { vector_count = 5, scalar_count = vector_count * 4 };
+    const float left_values[scalar_count] = {
+        -3.5f, 0.0f, 1.25f, 1000.0f, 2.0f, -0.5f, 8.0f, -16.0f,
+        0.125f, 4.75f, -2.25f, 3.5f, 17.0f, -9.0f, 0.25f, -0.0f,
+        1.0f, 2.0f, 3.0f, 4.0f,
+    };
+    const float right_values[scalar_count] = {
+        2.0f, -1.0f, 0.25f, -100.0f, -3.5f, 4.0f, -8.0f, 16.0f,
+        0.375f, -0.25f, 2.75f, -1.5f, -17.0f, 9.0f, 4.0f, 2.0f,
+        0.5f, -2.0f, 1.5f, -4.0f,
+    };
+    const char *function_names[] = {
+        "zpu_cpu_add_f32x4", "zpu_cpu_mul_f32x4", "zpu_cpu_sub_f32x4",
+    };
+    const zpu_metal_compute_kernel kernels[] = {
+        ZPU_METAL_COMPUTE_ADD_F32X4, ZPU_METAL_COMPUTE_MUL_F32X4,
+        ZPU_METAL_COMPUTE_SUB_F32X4,
+    };
+
+    for (size_t operation = 0; operation < sizeof(kernels) / sizeof(kernels[0]); ++operation) {
+        NSString *name = [NSString stringWithUTF8String:function_names[operation]];
+        id<MTLFunction> native_function = [native_library newFunctionWithName:name];
+        id<MTLFunction> adapter_function = [adapter_library newFunctionWithName:name];
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLComputePipelineState> native_pipeline =
+            [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+        id<MTLComputePipelineState> adapter_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+        id<MTLBuffer> native_left =
+            [native_device newBufferWithBytes:left_values length:sizeof(left_values)
+                                       options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_right =
+            [native_device newBufferWithBytes:right_values length:sizeof(right_values)
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_output =
+            [native_device newBufferWithLength:sizeof(left_values) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_left =
+            [adapter_device newBufferWithBytes:left_values length:sizeof(left_values)
+                                         options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_right =
+            [adapter_device newBufferWithBytes:right_values length:sizeof(right_values)
+                                          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_output =
+            [adapter_device newBufferWithLength:sizeof(left_values) options:MTLResourceStorageModeShared];
+        if (native_output != nil) memset(native_output.contents, 0xa5, native_output.length);
+        if (adapter_output != nil) memset(adapter_output.contents, 0xa5, adapter_output.length);
+
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+        id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+        if (native_pipeline != nil && adapter_pipeline != nil && native_left != nil &&
+            native_right != nil && native_output != nil && adapter_left != nil &&
+            adapter_right != nil && adapter_output != nil && native_encoder != nil &&
+            adapter_encoder != nil) {
+            [native_encoder setComputePipelineState:native_pipeline];
+            [native_encoder setBuffer:native_left offset:0 atIndex:0];
+            [native_encoder setBuffer:native_right offset:0 atIndex:1];
+            [native_encoder setBuffer:native_output offset:0 atIndex:2];
+            [native_encoder dispatchThreads:MTLSizeMake(vector_count, 1, 1)
+                         threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+            [native_encoder endEncoding];
+            [native_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+
+            [adapter_encoder setComputePipelineState:adapter_pipeline];
+            [adapter_encoder setBuffer:adapter_left offset:0 atIndex:0];
+            [adapter_encoder setBuffer:adapter_right offset:0 atIndex:1];
+            [adapter_encoder setBuffer:adapter_output offset:0 atIndex:2];
+            [adapter_encoder dispatchThreads:MTLSizeMake(vector_count, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+            [adapter_encoder endEncoding];
+            [adapter_command_buffer commit];
+            [adapter_command_buffer waitUntilCompleted];
+        }
+
+        const BOOL exact = native_function != nil && native_error == nil && native_pipeline != nil &&
+            native_left != nil && native_right != nil && native_output != nil &&
+            native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_function != nil && adapter_error == nil && adapter_pipeline != nil &&
+            adapter_left != nil && adapter_right != nil && adapter_output != nil &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_output.contents, adapter_output.contents, sizeof(left_values)) == 0;
+        if (!exact) {
+            fprintf(stderr, "metal-pixel: CPU vector buffer arithmetic mismatch for %s (kernel=%u)\n",
+                    function_names[operation], kernels[operation]);
+            fail_with_error("CPU vector buffer arithmetic exactness failed",
+                            adapter_error ?: native_error);
+            return 241 + (int)operation;
+        }
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -19701,6 +19815,9 @@ int main(void) {
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
             "kernel void zpu_cpu_sub_f32() {}\n"
+            "kernel void zpu_cpu_add_f32x4() {}\n"
+            "kernel void zpu_cpu_mul_f32x4() {}\n"
+            "kernel void zpu_cpu_sub_f32x4() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_matmul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f16() {}\n"
@@ -20301,7 +20418,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 71 ||
+            adapter_library.functionNames.count != 74 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -20328,6 +20445,9 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_sub_f32"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_add_f32x4"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32x4"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_sub_f32x4"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_copy_rgba8_texture_to_texture"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f32"].functionType != MTLFunctionTypeKernel ||
@@ -20372,6 +20492,11 @@ int main(void) {
             fail_with_error("CPU library/function metadata failed", adapter_library_error);
             return 50;
         }
+
+        const int vector_buffer_arithmetic_result =
+            test_cpu_vector_buffer_arithmetic_against_native(
+                device, adapter_device, library, adapter_library, queue, adapter_queue);
+        if (vector_buffer_arithmetic_result != 0) return vector_buffer_arithmetic_result;
 
         /* Dynamic libraries are CPU symbol packages. The adapter accepts the
          * same registered ZPU names, preserves the install name, and round
