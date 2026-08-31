@@ -564,7 +564,9 @@ triangle path:
   argument-buffer structs such as `array<SourceStructArrayElement, 2>` use
   the same anonymous `__elems` shape, recursively preserve each element's
   child layout and argument-index stride, and map child constant writes to
-  the CPU-owned buffer. It never compiles or executes arbitrary MSL
+  the CPU-owned buffer. Inline struct-valued members preserve their direct
+  nested `MTLDataTypeStruct` reflection and child constant offsets as well.
+  It never compiles or executes arbitrary MSL
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports

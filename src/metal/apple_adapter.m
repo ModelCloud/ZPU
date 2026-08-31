@@ -12403,6 +12403,19 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             }
             typeArrayArgumentSpan *= typeArrayLength;
         }
+        NSDictionary *typeStructLayout = nil;
+        NSUInteger typeStructArgumentSpan = 1;
+        NSString *fieldAddress = zpu_source_compact(zpu_source_match_string(rawField, match, 1));
+        NSString *fieldIndirection = zpu_source_compact(zpu_source_match_string(rawField, match, 4));
+        if (![fieldTypeName hasPrefix:@"array<"] && fieldAddress.length == 0 &&
+            fieldIndirection.length == 0 && structBodies[fieldTypeName] != nil) {
+            typeStructLayout = zpu_source_argument_layout_for_struct(fieldTypeName, structBodies, building);
+            typeStructArgumentSpan = [typeStructLayout[@"argumentIndexSpan"] unsignedIntegerValue];
+            if (typeStructLayout == nil || typeStructArgumentSpan == 0) {
+                [building removeObject:structName];
+                return nil;
+            }
+        }
         NSUInteger index = zpu_source_match_string(rawField, match, 7).integerValue;
         for (NSDictionary *field in fields) {
             if ([field[@"index"] unsignedIntegerValue] == index) {
@@ -12420,6 +12433,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             @"typeArrayLength": @(typeArrayLength),
             @"typeArrayArgumentSpan": @(typeArrayArgumentSpan),
             @"typeArrayElementLayout": typeArrayElementLayout ?: [NSNull null],
+            @"typeStructArgumentSpan": @(typeStructArgumentSpan),
+            @"typeStructLayout": typeStructLayout ?: [NSNull null],
             @"index": @(index),
         }];
     }
@@ -12431,7 +12446,9 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         NSUInteger arrayLength = arrayLengthString.length == 0 ?
             MAX((NSUInteger)1, [field[@"typeArrayLength"] unsignedIntegerValue]) :
             (NSUInteger)arrayLengthString.integerValue;
-        const NSUInteger argumentSpan = MAX((NSUInteger)1, [field[@"typeArrayArgumentSpan"] unsignedIntegerValue]);
+        const NSUInteger argumentSpan = [field[@"typeArrayElementLayout"] isKindOfClass:[NSDictionary class]] ?
+            MAX((NSUInteger)1, [field[@"typeArrayArgumentSpan"] unsignedIntegerValue]) :
+            MAX((NSUInteger)1, [field[@"typeStructArgumentSpan"] unsignedIntegerValue]);
         if (arrayLength == 0 || argumentSpan == 0 || (hasPreviousField && index < previousEnd) ||
             index > NSUIntegerMax - argumentSpan) {
             [building removeObject:structName];
@@ -12459,6 +12476,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         BOOL arrayPointer = NO;
         BOOL arrayPointeeConst = NO;
         BOOL arrayStruct = NO;
+        NSDictionary *structLayout = field[@"typeStructLayout"];
+        BOOL structValue = [structLayout isKindOfClass:[NSDictionary class]];
         if ([typeName hasPrefix:@"array<"]) {
             if (arrayLengthString.length != 0 || address.length != 0 || indirection.length != 0 ||
                 !zpu_source_array_type_for_name(typeName, &arrayElementName, &arrayLength, &arrayResource,
@@ -12502,6 +12521,10 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             elementDataType = MTLDataTypeStruct;
             access = MTLBindingAccessReadOnly;
             arrayElementLayouts[@(index)] = arrayElementLayout;
+        } else if (structValue) {
+            dataType = MTLDataTypeStruct;
+            elementDataType = MTLDataTypeStruct;
+            access = MTLBindingAccessReadOnly;
         } else if ([indirection isEqualToString:@"*"]) {
             if (!zpu_source_data_type_for_name(typeName, &dataType)) {
                 [building removeObject:structName];
@@ -12548,10 +12571,11 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             memberNames[@(elementIndex)] = field[@"name"];
             memberMetadata[@(elementIndex)] = @{
                 @"kind": nested ? @"nested" :
+                    (structValue ? @"struct" :
                     ([indirection isEqualToString:@"*"] ? @"pointer" :
                      (([typeName hasPrefix:@"texture"] || [typeName hasPrefix:@"depth"]) ? @"texture" :
                       ([typeName isEqualToString:@"sampler"] ? @"sampler" :
-                       (resource ? @"resource" : @"constant")))),
+                       (resource ? @"resource" : @"constant"))))),
                 @"elementDataType": @(elementDataType),
                 @"access": @(access),
                 @"textureType": @(textureType),
@@ -12565,6 +12589,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
                     return nil;
                 }
                 nestedArguments[@(elementIndex)] = childLayout;
+            } else if (structValue) {
+                nestedArguments[@(elementIndex)] = structLayout;
             }
         }
     }
@@ -18609,7 +18635,12 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         ZPUArrayType *arrayType = nil;
         ZPUPointerType *pointerType = nil;
         ZPUTextureReferenceType *textureReferenceType = nil;
-        if ([kind isEqualToString:@"nested"] || [kind isEqualToString:@"pointer"]) {
+        if ([kind isEqualToString:@"struct"]) {
+            NSDictionary *childLayout = nestedArguments[indexKey];
+            MTLStructType *childStruct = zpu_source_argument_struct_type(childLayout);
+            if (childStruct == nil) return nil;
+            [member setStructType:childStruct arrayType:nil tensorReferenceType:nil];
+        } else if ([kind isEqualToString:@"nested"] || [kind isEqualToString:@"pointer"]) {
             NSDictionary *childLayout = nestedArguments[@(descriptor.index)];
             MTLStructType *childStruct = nil;
             NSUInteger childSize = sizeof(uint64_t);
@@ -18759,14 +18790,17 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
             NSUInteger elementSize = 0;
             NSUInteger elementAlignment = 0;
             NSDictionary *arrayElementLayout = _arrayElementLayouts[@(descriptor.index)];
+            NSDictionary *structMemberLayout = arrayElementLayout == nil &&
+                descriptor.dataType == MTLDataTypeStruct ? _nestedArguments[@(descriptor.index)] : nil;
+            NSDictionary *childLayout = arrayElementLayout ?: structMemberLayout;
             ZPUArgumentEncoder *arrayElementEncoder = nil;
-            if (arrayElementLayout != nil) {
+            if (childLayout != nil) {
                 if (descriptor.dataType != MTLDataTypeStruct ||
-                    ![arrayElementLayout[@"arguments"] isKindOfClass:[NSArray class]]) return nil;
+                    ![childLayout[@"arguments"] isKindOfClass:[NSArray class]]) return nil;
                 arrayElementEncoder = [[ZPUArgumentEncoder alloc]
-                    initWithOwner:owner arguments:arrayElementLayout[@"arguments"]
-                    nestedArguments:arrayElementLayout[@"nestedArguments"]
-                    arrayElementLayouts:arrayElementLayout[@"arrayElementLayouts"]];
+                    initWithOwner:owner arguments:childLayout[@"arguments"]
+                    nestedArguments:childLayout[@"nestedArguments"]
+                    arrayElementLayouts:childLayout[@"arrayElementLayouts"]];
                 if (arrayElementEncoder == nil) return nil;
                 elementSize = arrayElementEncoder->_encodedLength;
                 elementAlignment = arrayElementEncoder->_alignment;
@@ -18785,10 +18819,13 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
             if (!zpu_argument_align_up(cursor, blockAlignment, &cursor)) return nil;
             if (blockAlignment > maximumAlignment) maximumAlignment = blockAlignment;
             if (arrayElementEncoder != nil) {
-                NSUInteger argumentIndexStride = [arrayElementLayout[@"argumentIndexSpan"] unsignedIntegerValue];
+                const BOOL isArrayLayout = arrayElementLayout != nil;
+                NSUInteger argumentIndexStride = isArrayLayout ?
+                    [childLayout[@"argumentIndexSpan"] unsignedIntegerValue] : 1;
+                NSUInteger logicalElements = isArrayLayout ? elements : 1;
                 if (argumentIndexStride == 0 ||
-                    (elements != 0 && argumentIndexStride > NSUIntegerMax / elements)) return nil;
-                for (NSUInteger element = 0; element < elements; ++element) {
+                    (logicalElements != 0 && argumentIndexStride > NSUIntegerMax / logicalElements)) return nil;
+                for (NSUInteger element = 0; element < logicalElements; ++element) {
                     const NSUInteger elementIndexBase = element * argumentIndexStride;
                     const NSUInteger elementOffset = element * stride;
                     for (NSNumber *childKey in arrayElementEncoder->_argumentOffsets) {
@@ -18807,6 +18844,9 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
                         NSNumber *constantSize = arrayElementEncoder->_constantSizes[childKey];
                         if (constantSize != nil) _constantSizes[@(index)] = constantSize;
                     }
+                }
+                if (_argumentOffsets[@(descriptor.index)] == nil) {
+                    _argumentOffsets[@(descriptor.index)] = @(cursor);
                 }
             } else {
                 for (NSUInteger element = 0; element < elements; ++element) {

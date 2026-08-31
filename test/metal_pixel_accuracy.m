@@ -705,13 +705,18 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceStructArrayElement { float value [[id(0)]]; float4 color [[id(1)]]; };\n"
          "struct SourceStructArrays { array<SourceStructArrayElement, 2> values [[id(0)]]; };\n"
          "kernel void zpu_source_argument_buffer_struct_arrays(constant SourceStructArrays &arguments [[buffer(11)]]) { "
+         "(void)arguments; }\n"
+         "struct SourceInlineStructElement { float value [[id(0)]]; float4 color [[id(1)]]; };\n"
+         "struct SourceInlineStructArguments { SourceInlineStructElement value [[id(0)]]; "
+         "float scalar [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_inline_struct(constant SourceInlineStructArguments &arguments [[buffer(12)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 41) {
+        adapter_library.functionNames.count != 42) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1999,6 +2004,120 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_struct_array_reflection_ok || !source_struct_array_encoding_ok) {
         fail_with_error("source-defined struct array argument layout lowering failed", adapter_error ?: native_error);
         return 183;
+    }
+
+    id<MTLFunction> native_source_inline_struct_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_inline_struct"];
+    id<MTLFunction> adapter_source_inline_struct_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_inline_struct"];
+    id<MTLArgumentEncoder> native_source_inline_struct_encoder =
+        [native_source_inline_struct_function newArgumentEncoderWithBufferIndex:12];
+    id<MTLArgumentEncoder> adapter_source_inline_struct_encoder =
+        [adapter_source_inline_struct_function newArgumentEncoderWithBufferIndex:12];
+    BOOL source_inline_struct_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_inline_struct"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_inline_struct"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        MTLStructMember *native_value = native_struct.members.count == 2 ? native_struct.members[0] : nil;
+        MTLStructMember *adapter_value = adapter_struct.members.count == 2 ? adapter_struct.members[0] : nil;
+        MTLStructMember *native_scalar = native_struct.members.count == 2 ? native_struct.members[1] : nil;
+        MTLStructMember *adapter_scalar = adapter_struct.members.count == 2 ? adapter_struct.members[1] : nil;
+        MTLStructType *native_value_struct = native_value.structType;
+        MTLStructType *adapter_value_struct = adapter_value.structType;
+        source_inline_struct_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 12 &&
+            adapter_binding.index == 12 && native_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_binding.bufferDataType == MTLDataTypeStruct &&
+            native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
+            native_binding.bufferDataSize == 48 &&
+            native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
+            native_binding.bufferAlignment == 16 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2 &&
+            native_value != nil && adapter_value != nil && native_value.dataType == MTLDataTypeStruct &&
+            adapter_value.dataType == MTLDataTypeStruct && [native_value.name isEqualToString:@"value"] &&
+            [native_value.name isEqualToString:adapter_value.name] && native_value.offset == 0 &&
+            native_value.offset == adapter_value.offset && native_value.argumentIndex == 0 &&
+            native_value.argumentIndex == adapter_value.argumentIndex && native_value_struct != nil &&
+            adapter_value_struct != nil && native_value_struct.members.count == 2 &&
+            adapter_value_struct.members.count == 2 && native_scalar != nil && adapter_scalar != nil &&
+            [native_scalar.name isEqualToString:adapter_scalar.name] &&
+            [native_scalar.name isEqualToString:@"scalar"] && native_scalar.offset == 32 &&
+            native_scalar.offset == adapter_scalar.offset && native_scalar.dataType == MTLDataTypeFloat &&
+            adapter_scalar.dataType == MTLDataTypeFloat && native_scalar.argumentIndex == 2 &&
+            adapter_scalar.argumentIndex == 2;
+        if (source_inline_struct_reflection_ok) {
+            for (NSUInteger index = 0; index < native_value_struct.members.count; ++index) {
+                MTLStructMember *native_member = native_value_struct.members[index];
+                MTLStructMember *adapter_member = adapter_value_struct.members[index];
+                source_inline_struct_reflection_ok = source_inline_struct_reflection_ok &&
+                    [native_member.name isEqualToString:adapter_member.name] &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.dataType == adapter_member.dataType;
+            }
+            source_inline_struct_reflection_ok = source_inline_struct_reflection_ok &&
+                [native_value_struct.members[0].name isEqualToString:@"value"] &&
+                native_value_struct.members[0].offset == 0 &&
+                native_value_struct.members[0].dataType == MTLDataTypeFloat &&
+                [native_value_struct.members[1].name isEqualToString:@"color"] &&
+                native_value_struct.members[1].offset == 16 &&
+                native_value_struct.members[1].dataType == MTLDataTypeFloat4;
+        }
+    }
+    BOOL source_inline_struct_encoding_ok = NO;
+    id<MTLBuffer> native_inline_struct_buffer =
+        [native_device newBufferWithLength:48 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_inline_struct_buffer =
+        [adapter_device newBufferWithLength:48 options:MTLResourceStorageModeShared];
+    if (native_source_inline_struct_encoder != nil && adapter_source_inline_struct_encoder != nil &&
+        native_inline_struct_buffer != nil && adapter_inline_struct_buffer != nil &&
+        native_source_inline_struct_encoder.encodedLength == adapter_source_inline_struct_encoder.encodedLength &&
+        native_source_inline_struct_encoder.encodedLength == 48 &&
+        native_source_inline_struct_encoder.alignment == adapter_source_inline_struct_encoder.alignment &&
+        native_source_inline_struct_encoder.alignment == 16) {
+        memset(native_inline_struct_buffer.contents, 0, native_inline_struct_buffer.length);
+        memset(adapter_inline_struct_buffer.contents, 0, adapter_inline_struct_buffer.length);
+        [native_source_inline_struct_encoder setArgumentBuffer:native_inline_struct_buffer offset:0];
+        [adapter_source_inline_struct_encoder setArgumentBuffer:adapter_inline_struct_buffer offset:0];
+        const float inline_value = 11.25f;
+        const float inline_color[] = {12.0f, 13.0f, 14.0f, 15.0f};
+        const float inline_scalar = 16.25f;
+        void *native_value_data = [native_source_inline_struct_encoder constantDataAtIndex:0];
+        void *adapter_value_data = [adapter_source_inline_struct_encoder constantDataAtIndex:0];
+        void *native_color_data = [native_source_inline_struct_encoder constantDataAtIndex:1];
+        void *adapter_color_data = [adapter_source_inline_struct_encoder constantDataAtIndex:1];
+        void *native_scalar_data = [native_source_inline_struct_encoder constantDataAtIndex:2];
+        void *adapter_scalar_data = [adapter_source_inline_struct_encoder constantDataAtIndex:2];
+        if (native_value_data != NULL && adapter_value_data != NULL && native_color_data != NULL &&
+            adapter_color_data != NULL && native_scalar_data != NULL && adapter_scalar_data != NULL) {
+            memcpy(native_value_data, &inline_value, sizeof(inline_value));
+            memcpy(adapter_value_data, &inline_value, sizeof(inline_value));
+            memcpy(native_color_data, inline_color, sizeof(inline_color));
+            memcpy(adapter_color_data, inline_color, sizeof(inline_color));
+            memcpy(native_scalar_data, &inline_scalar, sizeof(inline_scalar));
+            memcpy(adapter_scalar_data, &inline_scalar, sizeof(inline_scalar));
+            source_inline_struct_encoding_ok =
+                memcmp(native_inline_struct_buffer.contents, adapter_inline_struct_buffer.contents, 48) == 0 &&
+                (uint8_t *)native_value_data - (uint8_t *)native_inline_struct_buffer.contents == 0 &&
+                (uint8_t *)adapter_value_data - (uint8_t *)adapter_inline_struct_buffer.contents == 0 &&
+                (uint8_t *)native_color_data - (uint8_t *)native_inline_struct_buffer.contents == 16 &&
+                (uint8_t *)adapter_color_data - (uint8_t *)adapter_inline_struct_buffer.contents == 16 &&
+                (uint8_t *)native_scalar_data - (uint8_t *)native_inline_struct_buffer.contents == 32 &&
+                (uint8_t *)adapter_scalar_data - (uint8_t *)adapter_inline_struct_buffer.contents == 32;
+        }
+    }
+    if (native_source_inline_struct_function == nil || adapter_source_inline_struct_function == nil ||
+        native_source_inline_struct_encoder == nil || adapter_source_inline_struct_encoder == nil ||
+        !source_inline_struct_reflection_ok || !source_inline_struct_encoding_ok) {
+        fail_with_error("source-defined inline struct argument layout lowering failed", adapter_error ?: native_error);
+        return 184;
     }
     return 0;
 }
