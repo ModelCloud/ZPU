@@ -851,7 +851,8 @@ triangle path:
   buffers defer presentation until synchronous CPU completion, deliver
   presented handlers, and expose host-time/monotonic-ID metadata. Metal 4
   drawable signal/wait validates the same ownership graph and remains a CPU
-  no-op. Tensor shader binding, arbitrary ML graph execution, arbitrary
+  no-op. Tensor shader binding and ML graph execution outside the registered
+  CPU-provider ABI, arbitrary
   ray-intersection execution, opaque native 3D sparse-tail backing layout, and arbitrary
   tile/mesh render-pass features remain explicit fail-closed
   boundaries. The registered tile and mesh profiles are the bounded
