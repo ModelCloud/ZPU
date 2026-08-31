@@ -12297,7 +12297,8 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
                 candidatePointeeConst = YES;
                 pointee = [pointee substringFromIndex:5];
             }
-            if (pointee.length != 0 && zpu_source_data_type_for_name(pointee, &dataType)) {
+            if (pointee.length != 0 &&
+                (zpu_source_data_type_for_name(pointee, &dataType) || structBodies[pointee] != nil)) {
                 candidateElement = pointee;
                 candidateAddressSpace = addressCandidate;
                 candidatePointer = YES;
@@ -12344,6 +12345,10 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
     NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
     NSMutableSet<NSString *> *building);
 
+static NSDictionary *zpu_source_data_struct_layout_for_struct(
+    NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
+    NSMutableSet<NSString *> *building);
+
 /* Construct a synthetic one-member struct for an array element that is itself
  * an array. Native Metal exposes every array level through an anonymous
  * `__elems` struct, so the recursive layout must retain both the byte layout
@@ -12366,6 +12371,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
     MTLTextureType textureType = MTLTextureType2D;
     BOOL depthTexture = NO;
     NSDictionary *childLayout = nil;
+    NSDictionary *pointerStructLayout = nil;
     NSUInteger argumentIndexSpan = arrayLength;
     NSString *kind = @"constant";
     if ([elementName hasPrefix:@"array<"]) {
@@ -12376,7 +12382,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
         if (childLayout == nil || argumentIndexSpan == 0 ||
             arrayLength > NSUIntegerMax / argumentIndexSpan) return nil;
         argumentIndexSpan *= arrayLength;
-    } else if (structBodies[elementName] != nil) {
+    } else if (!pointer && structBodies[elementName] != nil) {
         childLayout = zpu_source_argument_layout_for_struct(elementName, structBodies, building);
         elementDataType = MTLDataTypeStruct;
         dataType = MTLDataTypeStruct;
@@ -12385,7 +12391,13 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
             arrayLength > NSUIntegerMax / argumentIndexSpan) return nil;
         argumentIndexSpan *= arrayLength;
     } else if (pointer) {
-        if (!zpu_source_data_type_for_name(elementName, &elementDataType)) return nil;
+        if (structBodies[elementName] != nil) {
+            pointerStructLayout = zpu_source_data_struct_layout_for_struct(elementName, structBodies, building);
+            if (pointerStructLayout == nil) return nil;
+            elementDataType = MTLDataTypeStruct;
+        } else if (!zpu_source_data_type_for_name(elementName, &elementDataType)) {
+            return nil;
+        }
         dataType = MTLDataTypePointer;
         kind = @"pointer";
         access = (pointeeConst || [addressSpace isEqualToString:@"constant"]) ?
@@ -12417,7 +12429,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
     if (dataType == MTLDataTypeTexture) descriptor.textureType = textureType;
     return @{
         @"arguments": @[descriptor],
-        @"nestedArguments": @{},
+        @"nestedArguments": pointerStructLayout == nil ? @{} : @{@0: pointerStructLayout},
         @"memberNames": @{@0: @"__elems"},
         @"memberMetadata": @{@0: @{
             @"kind": kind,
@@ -12444,10 +12456,6 @@ static NSString *zpu_source_match_string(NSString *source, NSTextCheckingResult 
  * without making the parser guess a C layout. */
 static BOOL zpu_argument_align_up(NSUInteger value, NSUInteger alignment, NSUInteger *result);
 static BOOL zpu_argument_type_size_align(MTLDataType dataType, NSUInteger *size, NSUInteger *alignment);
-
-static NSDictionary *zpu_source_data_struct_layout_for_struct(
-    NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
-    NSMutableSet<NSString *> *building);
 
 /* A device/constant pointer in an argument buffer may point at an ordinary
  * MSL data struct.  Such a struct is not an argument-buffer descriptor tree:
@@ -12590,8 +12598,18 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             return nil;
         }
         NSDictionary *typeArrayElementLayout = nil;
+        NSDictionary *typeArrayPointerStructLayout = nil;
         NSUInteger typeArrayArgumentSpan = typeArrayLength;
-        if ([fieldTypeName hasPrefix:@"array<"] &&
+        if ([fieldTypeName hasPrefix:@"array<"] && typeArrayPointer &&
+            structBodies[typeArrayElementName] != nil) {
+            typeArrayPointerStructLayout = zpu_source_data_struct_layout_for_struct(
+                typeArrayElementName, structBodies, building);
+            if (typeArrayPointerStructLayout == nil) {
+                [building removeObject:structName];
+                return nil;
+            }
+        }
+        if ([fieldTypeName hasPrefix:@"array<"] && !typeArrayPointer &&
             (structBodies[typeArrayElementName] != nil || [typeArrayElementName hasPrefix:@"array<"])) {
             typeArrayElementLayout = [typeArrayElementName hasPrefix:@"array<"] ?
                 zpu_source_argument_layout_for_array_type(typeArrayElementName, structBodies, building) :
@@ -12647,6 +12665,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             @"typeArrayLength": @(typeArrayLength),
             @"typeArrayArgumentSpan": @(typeArrayArgumentSpan),
             @"typeArrayElementLayout": typeArrayElementLayout ?: [NSNull null],
+            @"typeArrayPointerStructLayout": typeArrayPointerStructLayout ?: [NSNull null],
             @"typeStructArgumentSpan": @(typeStructArgumentSpan),
             @"typeStructLayout": typeStructLayout ?: [NSNull null],
             @"pointerStructLayout": pointerStructLayout ?: [NSNull null],
@@ -12692,7 +12711,9 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         BOOL arrayPointeeConst = NO;
         BOOL arrayStruct = NO;
         NSDictionary *arrayElementLayout = field[@"typeArrayElementLayout"];
+        NSDictionary *arrayPointerStructLayout = field[@"typeArrayPointerStructLayout"];
         BOOL arrayComposite = [arrayElementLayout isKindOfClass:[NSDictionary class]];
+        BOOL arrayPointerStruct = [arrayPointerStructLayout isKindOfClass:[NSDictionary class]];
         NSDictionary *structLayout = field[@"typeStructLayout"];
         BOOL structValue = [structLayout isKindOfClass:[NSDictionary class]];
         NSDictionary *pointerStructLayout = field[@"pointerStructLayout"];
@@ -12706,10 +12727,14 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
                 return nil;
             }
             typeName = arrayElementName;
-            arrayStruct = structBodies[typeName] != nil;
+            arrayStruct = structBodies[typeName] != nil && !arrayPointer;
             if (arrayPointer) {
                 address = arrayAddressSpace;
                 indirection = @"*";
+                if (arrayPointerStruct) {
+                    pointerStructLayout = arrayPointerStructLayout;
+                    pointerStruct = YES;
+                }
             }
         }
         if (arrayLength == 0 || (arrayLength > 1 && index > NSUIntegerMax - (arrayLength - 1))) {
