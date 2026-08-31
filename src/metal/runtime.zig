@@ -276,11 +276,18 @@ pub const SharedEvent = struct {
     condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER,
 };
 
+const HeapAllocation = struct {
+    offset: usize,
+    size: usize,
+};
+
 pub const Heap = struct {
     magic: u64 = heap_magic,
     device: *Device,
     size: usize,
+    backing: []u8,
     used: usize = 0,
+    allocations: std.ArrayList(HeapAllocation) = .empty,
 };
 
 const SparsePage = struct {
@@ -338,7 +345,7 @@ pub const Buffer = struct {
         for (self.sparse_mappings.items) |mapping| mapping.page.release();
         self.sparse_mappings.deinit(allocator);
         if (self.owns_bytes) allocator.free(self.bytes);
-        releaseHeapAllocation(self.heap, self.heap_allocation_size);
+        releaseHeapAllocation(self.heap, self.heap_allocation_offset, self.heap_allocation_size);
         self.magic = 0;
     }
 };
@@ -364,7 +371,7 @@ pub const Texture = struct {
         for (self.sparse_mappings.items) |mapping| mapping.page.release();
         self.sparse_mappings.deinit(allocator);
         if (self.owns_bytes) allocator.free(self.bytes);
-        releaseHeapAllocation(self.heap, self.heap_allocation_size);
+        releaseHeapAllocation(self.heap, self.heap_allocation_offset, self.heap_allocation_size);
         self.magic = 0;
     }
 
@@ -6374,69 +6381,142 @@ pub fn destroyQueue(queue: *CommandQueue) void {
 
 pub fn createHeap(device: *Device, size: usize) Error!*Heap {
     if (!validDevice(device) or size == 0) return error.InvalidArgument;
+    const backing = allocator.alignedAlloc(u8, std.mem.Alignment.of(f32), size) catch return error.OutOfMemory;
+    errdefer allocator.free(backing);
+    @memset(backing, 0);
     const result = allocator.create(Heap) catch return error.OutOfMemory;
-    result.* = .{ .device = device, .size = size };
+    result.* = .{ .device = device, .size = size, .backing = backing };
     return result;
 }
 
 pub fn destroyHeap(heap: *Heap) void {
     if (!validHeap(heap)) return;
+    heap.allocations.deinit(allocator);
+    allocator.free(heap.backing);
     heap.magic = 0;
     allocator.destroy(heap);
 }
 
 fn reserveHeapAllocation(heap: *Heap, size: usize, alignment: usize) Error!usize {
     if (!validHeap(heap) or alignment == 0 or (alignment & (alignment - 1)) != 0) return error.InvalidArgument;
-    const mask = alignment - 1;
-    const previous = heap.used;
-    const start = (std.math.add(usize, previous, mask) catch return error.InvalidArgument) & ~mask;
-    return reserveHeapAllocationAtOffset(heap, size, alignment, start);
+    var candidate: usize = 0;
+    while (true) {
+        const mask = alignment - 1;
+        candidate = (std.math.add(usize, candidate, mask) catch return error.InvalidArgument) & ~mask;
+        const end = std.math.add(usize, candidate, size) catch return error.InvalidArgument;
+        var next_offset: ?usize = null;
+        for (heap.allocations.items) |allocation| {
+            if (allocation.offset < candidate) continue;
+            if (next_offset == null or allocation.offset < next_offset.?) next_offset = allocation.offset;
+        }
+        if (next_offset == null or end <= next_offset.?) {
+            return reserveHeapAllocationAtOffset(heap, size, alignment, candidate);
+        }
+        const occupied = next_offset.?;
+        const occupied_end = for (heap.allocations.items) |allocation| {
+            if (allocation.offset == occupied) {
+                break std.math.add(usize, allocation.offset, allocation.size) catch return error.InvalidArgument;
+            }
+        } else return error.InvalidArgument;
+        candidate = occupied_end;
+    }
 }
 
 fn reserveHeapAllocationAtOffset(heap: *Heap, size: usize, alignment: usize, offset: usize) Error!usize {
     if (!validHeap(heap) or alignment == 0 or (alignment & (alignment - 1)) != 0 or
-        (offset & (alignment - 1)) != 0 or offset != heap.used) return error.InvalidArgument;
+        (offset & (alignment - 1)) != 0) return error.InvalidArgument;
     const end = std.math.add(usize, offset, size) catch return error.InvalidArgument;
     if (end > heap.size) return error.OutOfMemory;
-    heap.used = end;
+    for (heap.allocations.items) |allocation| {
+        const allocation_end = std.math.add(usize, allocation.offset, allocation.size) catch return error.InvalidArgument;
+        if (size != 0 and allocation.offset < end and offset < allocation_end) return error.InvalidArgument;
+    }
+    if (size == 0) return offset;
+    if (heap.used > std.math.maxInt(usize) - size) return error.InvalidArgument;
+    heap.used += size;
+    heap.allocations.append(allocator, .{ .offset = offset, .size = size }) catch return error.OutOfMemory;
+    var index = heap.allocations.items.len - 1;
+    while (index > 0 and heap.allocations.items[index].offset < heap.allocations.items[index - 1].offset) : (index -= 1) {
+        std.mem.swap(HeapAllocation, &heap.allocations.items[index], &heap.allocations.items[index - 1]);
+    }
     return offset;
 }
 
-fn releaseHeapAllocation(heap: ?*Heap, allocation_size: usize) void {
+fn releaseHeapAllocation(heap: ?*Heap, offset: usize, allocation_size: usize) void {
     if (heap) |value| {
-        if (validHeap(value) and allocation_size <= value.used) value.used -= allocation_size;
+        if (!validHeap(value) or allocation_size == 0) return;
+        for (value.allocations.items, 0..) |allocation, index| {
+            if (allocation.offset == offset and allocation.size == allocation_size) {
+                _ = value.allocations.orderedRemove(index);
+                value.used -= allocation_size;
+                return;
+            }
+        }
     }
 }
 
 pub fn heapMaxAvailableSize(heap: *const Heap, alignment: usize) usize {
     if (!validHeap(@constCast(heap)) or alignment == 0 or (alignment & (alignment - 1)) != 0) return 0;
+    var cursor: usize = 0;
+    var maximum: usize = 0;
+    for (heap.allocations.items) |allocation| {
+        const start = alignHeapOffset(cursor, alignment) catch return 0;
+        if (start <= allocation.offset) maximum = @max(maximum, allocation.offset - start);
+        cursor = std.math.add(usize, allocation.offset, allocation.size) catch return 0;
+    }
+    const start = alignHeapOffset(cursor, alignment) catch return 0;
+    if (start <= heap.size) maximum = @max(maximum, heap.size - start);
+    return maximum;
+}
+
+fn alignHeapOffset(offset: usize, alignment: usize) Error!usize {
+    if (alignment == 0 or (alignment & (alignment - 1)) != 0) return error.InvalidArgument;
     const mask = alignment - 1;
-    const start = (std.math.add(usize, heap.used, mask) catch return 0) & ~mask;
-    return if (start > heap.size) 0 else heap.size - start;
+    return (std.math.add(usize, offset, mask) catch return error.InvalidArgument) & ~mask;
 }
 
 pub fn createBufferInHeap(heap: *Heap, length: usize, initial_bytes: ?[*]const u8) Error!*Buffer {
     if (!validHeap(heap)) return error.InvalidResource;
-    const result = try createBuffer(heap.device, length, initial_bytes);
-    errdefer destroyBuffer(result);
-    const previous = heap.used;
     const allocation_offset = try reserveHeapAllocation(heap, length, @alignOf(u32));
-    result.heap = heap;
-    result.heap_allocation_offset = allocation_offset;
-    result.heap_allocation_size = heap.used - previous;
+    errdefer releaseHeapAllocation(heap, allocation_offset, length);
+    const bytes = heap.backing[allocation_offset .. allocation_offset + length];
+    @memset(bytes, 0);
+    if (initial_bytes) |ptr| if (length != 0) @memcpy(bytes, ptr[0..length]);
+    const result = allocator.create(Buffer) catch return error.OutOfMemory;
+    result.* = .{
+        .device = heap.device,
+        .bytes = bytes,
+        .owns_bytes = false,
+        .heap = heap,
+        .heap_allocation_offset = allocation_offset,
+        .heap_allocation_size = length,
+    };
     return result;
 }
 
 pub fn createBufferInHeapAtOffset(heap: *Heap, length: usize, initial_bytes: ?[*]const u8, offset: usize) Error!*Buffer {
     if (!validHeap(heap)) return error.InvalidResource;
-    const result = try createBuffer(heap.device, length, initial_bytes);
-    errdefer destroyBuffer(result);
-    const previous = heap.used;
     const allocation_offset = try reserveHeapAllocationAtOffset(heap, length, @alignOf(u32), offset);
-    result.heap = heap;
-    result.heap_allocation_offset = allocation_offset;
-    result.heap_allocation_size = heap.used - previous;
+    errdefer releaseHeapAllocation(heap, allocation_offset, length);
+    const bytes = heap.backing[allocation_offset .. allocation_offset + length];
+    @memset(bytes, 0);
+    if (initial_bytes) |ptr| if (length != 0) @memcpy(bytes, ptr[0..length]);
+    const result = allocator.create(Buffer) catch return error.OutOfMemory;
+    result.* = .{
+        .device = heap.device,
+        .bytes = bytes,
+        .owns_bytes = false,
+        .heap = heap,
+        .heap_allocation_offset = allocation_offset,
+        .heap_allocation_size = length,
+    };
     return result;
+}
+
+pub fn makeBufferAliasable(buffer: *Buffer) void {
+    if (!validBuffer(buffer) or buffer.heap == null or buffer.heap_allocation_size == 0) return;
+    releaseHeapAllocation(buffer.heap, buffer.heap_allocation_offset, buffer.heap_allocation_size);
+    buffer.heap_allocation_size = 0;
 }
 
 pub fn createBuffer(device: *Device, length: usize, initial_bytes: ?[*]const u8) Error!*Buffer {
@@ -6503,26 +6583,60 @@ pub fn createSparseTexture(device: *Device, width: u32, height: u32, format_raw:
 
 pub fn createTextureInHeap(heap: *Heap, width: u32, height: u32, format_raw: u16) Error!*Texture {
     if (!validHeap(heap)) return error.InvalidResource;
-    const result = try createTexture(heap.device, width, height, format_raw);
-    errdefer destroyTexture(result);
-    const previous = heap.used;
-    const allocation_offset = try reserveHeapAllocation(heap, result.bytes.len, @alignOf(f32));
-    result.heap = heap;
-    result.heap_allocation_offset = allocation_offset;
-    result.heap_allocation_size = heap.used - previous;
+    if (width == 0 or height == 0) return error.InvalidArgument;
+    const format = textureFormatFromRaw(format_raw) orelse return error.UnsupportedFormat;
+    const stride = std.math.mul(usize, width, format.bytesPerPixel()) catch return error.InvalidArgument;
+    const length = std.math.mul(usize, stride, height) catch return error.InvalidArgument;
+    const allocation_offset = try reserveHeapAllocation(heap, length, @alignOf(f32));
+    errdefer releaseHeapAllocation(heap, allocation_offset, length);
+    const bytes = heap.backing[allocation_offset .. allocation_offset + length];
+    @memset(bytes, 0);
+    const result = allocator.create(Texture) catch return error.OutOfMemory;
+    result.* = .{
+        .device = heap.device,
+        .width = width,
+        .height = height,
+        .stride = stride,
+        .format = format,
+        .bytes = bytes,
+        .owns_bytes = false,
+        .heap = heap,
+        .heap_allocation_offset = allocation_offset,
+        .heap_allocation_size = length,
+    };
     return result;
 }
 
 pub fn createTextureInHeapAtOffset(heap: *Heap, width: u32, height: u32, format_raw: u16, offset: usize) Error!*Texture {
     if (!validHeap(heap)) return error.InvalidResource;
-    const result = try createTexture(heap.device, width, height, format_raw);
-    errdefer destroyTexture(result);
-    const previous = heap.used;
-    const allocation_offset = try reserveHeapAllocationAtOffset(heap, result.bytes.len, @alignOf(f32), offset);
-    result.heap = heap;
-    result.heap_allocation_offset = allocation_offset;
-    result.heap_allocation_size = heap.used - previous;
+    if (width == 0 or height == 0) return error.InvalidArgument;
+    const format = textureFormatFromRaw(format_raw) orelse return error.UnsupportedFormat;
+    const stride = std.math.mul(usize, width, format.bytesPerPixel()) catch return error.InvalidArgument;
+    const length = std.math.mul(usize, stride, height) catch return error.InvalidArgument;
+    const allocation_offset = try reserveHeapAllocationAtOffset(heap, length, @alignOf(f32), offset);
+    errdefer releaseHeapAllocation(heap, allocation_offset, length);
+    const bytes = heap.backing[allocation_offset .. allocation_offset + length];
+    @memset(bytes, 0);
+    const result = allocator.create(Texture) catch return error.OutOfMemory;
+    result.* = .{
+        .device = heap.device,
+        .width = width,
+        .height = height,
+        .stride = stride,
+        .format = format,
+        .bytes = bytes,
+        .owns_bytes = false,
+        .heap = heap,
+        .heap_allocation_offset = allocation_offset,
+        .heap_allocation_size = length,
+    };
     return result;
+}
+
+pub fn makeTextureAliasable(texture: *Texture) void {
+    if (!validTexture(texture) or texture.heap == null or texture.heap_allocation_size == 0) return;
+    releaseHeapAllocation(texture.heap, texture.heap_allocation_offset, texture.heap_allocation_size);
+    texture.heap_allocation_size = 0;
 }
 
 pub fn createTextureFromBuffer(buffer: *Buffer, width: u32, height: u32, format_raw: u16, offset: usize, bytes_per_row: usize) Error!*Texture {
@@ -10980,6 +11094,37 @@ test "no-copy buffers alias caller storage" {
     try std.testing.expectEqual(@as(u8, 9), bytes[0]);
 }
 
+test "CPU heap resources alias backing storage and reuse released ranges" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const heap = try createHeap(device, 64);
+    defer destroyHeap(heap);
+    const first = try createBufferInHeap(heap, 16, null);
+    const texture = try createTextureInHeap(heap, 2, 2, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    try std.testing.expectEqual(@as(usize, 0), first.heap_allocation_offset);
+    try std.testing.expectEqual(@as(usize, 16), texture.heap_allocation_offset);
+    try std.testing.expectEqual(@intFromPtr(heap.backing.ptr), @intFromPtr(first.bytes.ptr));
+    try std.testing.expectEqual(@intFromPtr(heap.backing.ptr + 16), @intFromPtr(texture.bytes.ptr));
+    try std.testing.expectEqual(@as(usize, 32), heap.used);
+    try std.testing.expectEqual(@as(usize, 32), heapMaxAvailableSize(heap, 4));
+
+    @memset(texture.bytes, 0xa5);
+    destroyBuffer(first);
+    try std.testing.expectEqual(@as(usize, 16), heap.used);
+    try std.testing.expectError(error.InvalidArgument, createBufferInHeapAtOffset(heap, 8, null, texture.heap_allocation_offset));
+
+    {
+        const replacement = try createBufferInHeapAtOffset(heap, 16, null, 0);
+        defer destroyBuffer(replacement);
+        try std.testing.expectEqual(@intFromPtr(heap.backing.ptr), @intFromPtr(replacement.bytes.ptr));
+        @memset(replacement.bytes, 0x3c);
+        try std.testing.expectEqualSlices(u8, &[_]u8{0xa5} ** 16, texture.bytes);
+        try std.testing.expectEqual(@as(usize, 32), heap.used);
+    }
+    try std.testing.expectEqual(@as(usize, 16), heap.used);
+}
+
 test "texture creation rejects zero-sized resources" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -12624,6 +12769,10 @@ pub export fn zpu_metal_buffer_destroy(buffer: ?*Buffer) callconv(.c) void {
     if (buffer) |value| destroyBuffer(value);
 }
 
+pub export fn zpu_metal_buffer_make_aliasable(buffer: ?*Buffer) callconv(.c) void {
+    if (buffer) |value| makeBufferAliasable(value);
+}
+
 pub export fn zpu_metal_device_new_heap(device: ?*Device, size: usize) callconv(.c) ?*Heap {
     return createHeap(device orelse return null, size) catch null;
 }
@@ -12716,6 +12865,10 @@ pub export fn zpu_metal_heap_new_texture_at_offset(heap: ?*Heap, descriptor: ?*c
 
 pub export fn zpu_metal_texture_destroy(texture: ?*Texture) callconv(.c) void {
     if (texture) |value| destroyTexture(value);
+}
+
+pub export fn zpu_metal_texture_make_aliasable(texture: ?*Texture) callconv(.c) void {
+    if (texture) |value| makeTextureAliasable(value);
 }
 
 pub export fn zpu_metal_texture_view(texture: ?*const Texture, format_raw: u16) callconv(.c) ?*Texture {

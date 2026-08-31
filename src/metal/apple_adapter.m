@@ -48,6 +48,8 @@ extern int zpu_metal_render_encoder_set_viewports_precise(
     zpu_metal_render_encoder *encoder, const zpu_metal_precise_viewport *viewports, size_t count);
 extern int zpu_metal_render_encoder_set_scissor_rects(
     zpu_metal_render_encoder *encoder, const zpu_metal_scissor_rect *scissors, size_t count);
+extern void zpu_metal_buffer_make_aliasable(zpu_metal_buffer *buffer);
+extern void zpu_metal_texture_make_aliasable(zpu_metal_texture *texture);
 
 /* These enum members are introduced after the adapter's iOS 15 deployment
  * target. Their Metal ABI bit positions are stable, so keep the internal
@@ -5480,7 +5482,10 @@ static ZPUTensor *zpu_create_tensor(ZPUDevice *owner, ZPUBuffer *storageBuffer,
 - (id<MTLHeap>)heap { return (id<MTLHeap>)_heap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (BOOL)isAliasable { return _aliasable; }
-- (void)makeAliasable { _aliasable = YES; }
+- (void)makeAliasable {
+    _aliasable = YES;
+    if (_heap != nil) zpu_metal_buffer_make_aliasable(_zpuBuffer);
+}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (void)didModifyRange:(NSRange)range { (void)range; }
 - (void)addDebugMarker:(NSString *)marker range:(NSRange)range API_AVAILABLE(macos(10.12), ios(10.0)) {
@@ -6951,6 +6956,17 @@ static void zpu_destroy_texture_arrays(NSArray *sliceMipmapTextures) {
     }
 }
 
+static void zpu_make_texture_array_aliasable(NSArray *sliceMipmapTextures) {
+    for (NSArray *slice in sliceMipmapTextures) {
+        for (id value in slice) {
+            if ([value isKindOfClass:[NSValue class]]) {
+                zpu_metal_texture *texture = (zpu_metal_texture *)[value pointerValue];
+                if (texture != NULL) zpu_metal_texture_make_aliasable(texture);
+            }
+        }
+    }
+}
+
 static NSArray *zpu_make_additional_sample_planes(ZPUDevice *owner, ZPUHeap *heap,
                                                   uint32_t width, uint32_t height,
                                                   MTLPixelFormat pixelFormat, NSUInteger sampleCount,
@@ -7320,7 +7336,18 @@ static NSArray *zpu_make_sample_texture_slice_views(ZPUTexture *source, MTLPixel
     return _backing != nil ? [_backing isSparse] : _sparseMappings != nil;
 }
 - (BOOL)isAliasable { return _aliasable; }
-- (void)makeAliasable { _aliasable = YES; }
+- (void)makeAliasable {
+    _aliasable = YES;
+    if (_heap == nil || _backing != nil || _backingBuffer != nil) return;
+    zpu_make_texture_array_aliasable(_sliceMipmapTextures);
+    zpu_make_texture_array_aliasable(_sampleSliceTextures);
+    for (id value in _sampleTextures) {
+        if ([value isKindOfClass:[NSValue class]]) {
+            zpu_metal_texture *texture = (zpu_metal_texture *)[value pointerValue];
+            if (texture != NULL) zpu_metal_texture_make_aliasable(texture);
+        }
+    }
+}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
 - (void)getBytes:(void *)destination bytesPerRow:(NSUInteger)bytesPerRow fromRegion:(MTLRegion)region mipmapLevel:(NSUInteger)level {
     if (_sampleCount != 1) return;

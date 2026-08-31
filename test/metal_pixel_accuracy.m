@@ -37722,6 +37722,28 @@ int main(void) {
             fprintf(stderr, "metal-pixel: heap texture byte identity failed\n");
             return 38;
         }
+        [adapter_heap_texture makeAliasable];
+        id<MTLBuffer> adapter_heap_texture_alias_buffer =
+            [adapter_heap newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        const uint8_t heap_texture_alias_pixels[] = {
+            33, 34, 35, 36, 37, 38, 39, 40,
+            41, 42, 43, 44, 45, 46, 47, 48,
+        };
+        uint8_t heap_texture_alias_copy[sizeof(heap_texture_alias_pixels)] = {0};
+        if (!adapter_heap_texture.isAliasable || adapter_heap_texture_alias_buffer == nil ||
+            adapter_heap_texture_alias_buffer.heapOffset != 16 || adapter_heap.usedSize != 32) {
+            fprintf(stderr, "metal-pixel: heap texture aliasable range was not reusable\n");
+            return 41;
+        }
+        memcpy(adapter_heap_texture_alias_buffer.contents, heap_texture_alias_pixels,
+               sizeof(heap_texture_alias_pixels));
+        [adapter_heap_texture getBytes:heap_texture_alias_copy bytesPerRow:8
+                            fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0];
+        if (memcmp(heap_texture_alias_pixels, heap_texture_alias_copy,
+                   sizeof(heap_texture_alias_pixels)) != 0) {
+            fprintf(stderr, "metal-pixel: heap texture alias bytes were not shared\n");
+            return 42;
+        }
         id<MTLBuffer> adapter_heap_offset_buffer =
             [adapter_heap newBufferWithLength:16 options:MTLResourceStorageModeShared offset:32];
         id<MTLBuffer> adapter_heap_bad_offset_buffer =
@@ -37731,6 +37753,25 @@ int main(void) {
             adapter_device.currentAllocatedSize != adapter_allocated_before_heap_resources + adapter_heap.usedSize) {
             fprintf(stderr, "metal-pixel: explicit heap buffer offset handling failed\n");
             return 40;
+        }
+        const uint8_t heap_buffer_alias_pixels[] = {
+            49, 50, 51, 52, 53, 54, 55, 56,
+            57, 58, 59, 60, 61, 62, 63, 64,
+        };
+        [adapter_heap_offset_buffer makeAliasable];
+        id<MTLBuffer> adapter_heap_buffer_alias =
+            [adapter_heap newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        if (!adapter_heap_offset_buffer.isAliasable || adapter_heap_buffer_alias == nil ||
+            adapter_heap_buffer_alias.heapOffset != 32 || adapter_heap.usedSize != 48) {
+            fprintf(stderr, "metal-pixel: heap buffer aliasable range was not reusable\n");
+            return 43;
+        }
+        memcpy(adapter_heap_buffer_alias.contents, heap_buffer_alias_pixels,
+               sizeof(heap_buffer_alias_pixels));
+        if (memcmp(adapter_heap_offset_buffer.contents, heap_buffer_alias_pixels,
+                   sizeof(heap_buffer_alias_pixels)) != 0 || adapter_heap.usedSize != 48) {
+            fprintf(stderr, "metal-pixel: heap buffer alias bytes were not shared\n");
+            return 44;
         }
 
         MTLHeapDescriptor *adapter_mip_heap_descriptor = [MTLHeapDescriptor new];
