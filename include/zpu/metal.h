@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 40u
+#define ZPU_METAL_ABI_VERSION 41u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -447,23 +447,30 @@ enum {
     ZPU_METAL_COMPUTE_DIV_F32X4 = 42,
     ZPU_METAL_COMPUTE_DIV_F32X2 = 43,
     ZPU_METAL_COMPUTE_DIV_F32X3 = 44,
+    /* Fixed CPU ray-query profile for Metal 4 bounding-box geometry. */
+    ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8 = 45,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u
-#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION 1u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION 2u
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_HEADER_BYTES 32u
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET 256u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLES 1u
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS 2u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS 4u
 
 /* Stable little-endian CPU payload shared by the Objective-C adapter and the
  * ZPU runtime. The payload is intentionally a registered profile rather than
  * an Apple hardware BVH representation. When
  * ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS is set, reserved[0]
  * contains the little-endian offset of one uint32 visibility mask per
- * serialized triangle. The fixed primary-ray profile uses Metal's default
- * all-bits ray mask, so a zero instance mask is invisible while nonzero masks
- * remain visible; this preserves the useful bounded subset without exposing
- * an Apple hardware BVH layout. */
+ * serialized triangle. When the AABBS flag is set, reserved[1] contains the
+ * offset of the AABB records and reserved[2] contains their count. Version 1
+ * triangle payloads remain readable; version 2 adds AABBs. The fixed
+ * primary-ray profiles use Metal's default all-bits ray mask, so a zero
+ * instance mask is invisible while nonzero masks remain visible; this
+ * preserves the useful bounded subset without exposing an Apple hardware BVH
+ * layout. */
 typedef struct zpu_metal_cpu_acceleration_structure_header {
     uint32_t magic;
     uint32_t version;
@@ -476,6 +483,10 @@ typedef struct zpu_metal_cpu_acceleration_structure_header {
 typedef struct zpu_metal_cpu_acceleration_triangle {
     float positions[9];
 } zpu_metal_cpu_acceleration_triangle;
+
+typedef struct zpu_metal_cpu_acceleration_aabb {
+    float bounds[6]; /* min.xyz followed by max.xyz */
+} zpu_metal_cpu_acceleration_aabb;
 
 /* Tile kernels are explicit CPU/ZPU operations. They are not MSL and do not
  * invoke Apple's Metal tile encoder. The bounded profile emits one logical

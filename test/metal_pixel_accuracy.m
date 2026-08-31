@@ -4974,6 +4974,129 @@ static int test_cpu_trace_triangles_against_native(
     return 0;
 }
 
+static int test_cpu_trace_aabbs_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLCommandQueue> native_queue, id<MTLCommandQueue> adapter_queue)
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    enum { width = 9, height = 7, byte_count = width * height * 4 };
+    const float bounds[] = {-0.80f, -0.70f, -0.10f, 0.80f, 0.70f, 0.10f};
+    NSString *source =
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+         "kernel void zpu_cpu_trace_aabbs_rgba8(device const float *bounds [[buffer(0)]], "
+         "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
+         "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+         "float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height()); "
+         "float3 origin = float3(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y, 1.0); "
+         "bool hit = origin.x >= bounds[0] && origin.x <= bounds[3] && "
+         "origin.y >= bounds[1] && origin.y <= bounds[4] && "
+         "bounds[2] <= origin.z && origin.z - bounds[2] >= 0.0; "
+         "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n";
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
+    id<MTLFunction> native_function = [native_library newFunctionWithName:@"zpu_cpu_trace_aabbs_rgba8"];
+    id<MTLComputePipelineState> native_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+    id<MTLFunction> adapter_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_trace_aabbs_rgba8");
+    id<MTLComputePipelineState> adapter_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLBuffer> native_bounds =
+        [native_device newBufferWithBytes:bounds length:sizeof(bounds) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_bounds =
+        [adapter_device newBufferWithBytes:bounds length:sizeof(bounds) options:MTLResourceStorageModeShared];
+    MTL4CommandAllocatorDescriptor *allocator_descriptor = [MTL4CommandAllocatorDescriptor new];
+    id<MTL4CommandAllocator> allocator =
+        [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&adapter_error];
+    MTL4CommandQueueDescriptor *queue_descriptor = [MTL4CommandQueueDescriptor new];
+    id<MTL4CommandQueue> metal4_queue =
+        [adapter_device newMTL4CommandQueueWithDescriptor:queue_descriptor error:&adapter_error];
+    MTL4PrimitiveAccelerationStructureDescriptor *acceleration_descriptor =
+        [MTL4PrimitiveAccelerationStructureDescriptor new];
+    MTL4AccelerationStructureBoundingBoxGeometryDescriptor *geometry =
+        [MTL4AccelerationStructureBoundingBoxGeometryDescriptor new];
+    geometry.boundingBoxBuffer = MTL4BufferRangeMake(adapter_bounds.gpuAddress, UINT64_MAX);
+    geometry.boundingBoxStride = 6 * sizeof(float);
+    geometry.boundingBoxCount = 1;
+    acceleration_descriptor.geometryDescriptors = @[geometry];
+    MTLAccelerationStructureSizes sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:acceleration_descriptor];
+    id<MTLAccelerationStructure> acceleration_structure =
+        sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+    id<MTLBuffer> scratch = [adapter_device
+        newBufferWithLength:sizes.buildScratchBufferSize == 0 ? 1 : sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTL4CommandBuffer> build_command_buffer = [adapter_device newCommandBuffer];
+    [build_command_buffer beginCommandBufferWithAllocator:allocator];
+    id<MTL4ComputeCommandEncoder> build_encoder = [build_command_buffer computeCommandEncoder];
+    [build_encoder buildAccelerationStructure:acceleration_structure descriptor:acceleration_descriptor
+                                 scratchBuffer:MTL4BufferRangeMake(scratch.gpuAddress, scratch.length)];
+    [build_encoder endEncoding];
+    [build_command_buffer endCommandBuffer];
+    id<MTL4CommandBuffer> build_buffers[] = {build_command_buffer};
+    MTL4CommitOptions *commit_options = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *build_feedback_error = nil;
+    [commit_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        build_feedback_error = feedback.error;
+    }];
+    if (metal4_queue != nil && build_command_buffer != nil) {
+        [metal4_queue commit:build_buffers count:1 options:commit_options];
+    }
+
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+    [native_encoder setComputePipelineState:native_pipeline];
+    [native_encoder setBuffer:native_bounds offset:0 atIndex:0];
+    [native_encoder setTexture:native_texture atIndex:0];
+    [native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+              threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [native_encoder endEncoding];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+    [adapter_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_encoder setAccelerationStructure:acceleration_structure atBufferIndex:0];
+    [adapter_encoder setTexture:adapter_texture atIndex:0];
+    [adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+               threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    const BOOL exact = native_library != nil && native_function != nil && native_pipeline != nil &&
+        adapter_function != nil && adapter_pipeline != nil && native_bounds != nil && adapter_bounds != nil &&
+        allocator != nil && metal4_queue != nil && acceleration_descriptor != nil && geometry != nil &&
+        acceleration_structure != nil && scratch != nil && build_command_buffer != nil && build_encoder != nil &&
+        commit_options != nil && build_feedback_error == nil && native_texture != nil && adapter_texture != nil &&
+        native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        memcmp(native_pixels, adapter_pixels, byte_count) == 0;
+    if (!exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: CPU AABB/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("CPU AABB trace command failed", native_error ?: adapter_error);
+        return 161;
+    }
+    return 0;
+}
+
 /* A custom intersection function is still executed by the CPU/ZPU path. The
  * native pipeline below is only an oracle: its registered triangle function
  * rejects every candidate, so both textures must contain exact opaque black
@@ -22911,6 +23034,11 @@ int main(void) {
             const int intersection_oracle_result = test_cpu_intersection_function_against_native(
                 device, adapter_device, queue, adapter_queue);
             if (intersection_oracle_result != 0) return intersection_oracle_result;
+        }
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            const int aabb_oracle_result = test_cpu_trace_aabbs_against_native(
+                device, adapter_device, queue, adapter_queue);
+            if (aabb_oracle_result != 0) return aabb_oracle_result;
         }
         if (@available(macOS 14.0, iOS 17.0, *)) {
             const int indirect_trace_oracle_result = test_cpu_indirect_trace_triangles_against_native(

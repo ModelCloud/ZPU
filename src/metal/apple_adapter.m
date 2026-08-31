@@ -128,6 +128,8 @@ static NSString *const zpu_cpu_div_f32x3_function_name = @"zpu_cpu_div_f32x3";
 static NSString *const zpu_cpu_copy_rgba8_texture_to_texture_function_name = @"zpu_cpu_copy_rgba8_texture_to_texture";
 static NSString *const zpu_cpu_intersection_triangle_function_name = @"zpu_cpu_intersection_triangle";
 static NSString *const zpu_cpu_intersection_triangle_accept_function_name = @"zpu_cpu_intersection_triangle_accept";
+static NSString *const zpu_cpu_trace_aabbs_function_name = @"zpu_cpu_trace_aabbs_rgba8";
+static NSString *const zpu_cpu_intersection_aabb_accept_function_name = @"zpu_cpu_intersection_aabb_accept";
 
 static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32 || kernel == ZPU_METAL_COMPUTE_MUL_F32 ||
@@ -7766,6 +7768,7 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
     NSUInteger primitiveCount = 0;
     BOOL recognized = NO;
     BOOL hasTriangleMasks = NO;
+    NSUInteger aabbCount = 0;
     if ([descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) {
         recognized = YES;
         primitiveCount = ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors.count;
@@ -7784,6 +7787,13 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         if ([descriptor isKindOfClass:[MTL4PrimitiveAccelerationStructureDescriptor class]]) {
             recognized = YES;
             primitiveCount = ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors.count;
+            for (MTL4AccelerationStructureGeometryDescriptor *geometry in
+                 ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
+                if (![geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) continue;
+                const NSUInteger count = ((MTL4AccelerationStructureBoundingBoxGeometryDescriptor *)geometry).boundingBoxCount;
+                if (count > SIZE_MAX - aabbCount) return 0;
+                aabbCount += count;
+            }
         } else if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
             recognized = YES;
             primitiveCount = ((MTL4InstanceAccelerationStructureDescriptor *)descriptor).instanceCount;
@@ -7856,6 +7866,8 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         if (triangleCount > (SIZE_MAX - size) / sizeof(uint32_t)) return 0;
         size += triangleCount * sizeof(uint32_t);
     }
+    if (aabbCount > (SIZE_MAX - size) / sizeof(zpu_metal_cpu_acceleration_aabb)) return 0;
+    size += aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb);
     /* This is a deterministic CPU backing footprint, not an Apple hardware
      * BVH-size prediction. The first 256 bytes contain the CPU profile header;
      * triangle payload follows the descriptor bookkeeping area. */
@@ -9021,7 +9033,8 @@ static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_c
         const BOOL volumeTexture = kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
         const MTLTextureType textureType = volumeTexture ? MTLTextureType3D :
             (arrayTexture ? MTLTextureType2DArray : MTLTextureType2D);
-        if (kernel == ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8) {
+        if (kernel == ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8 ||
+            kernel == ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8) {
             ZPUArgument *accelerationStructure = zpu_reflection_argument(
                 @"accelerationStructure", MTLArgumentTypeBuffer, MTLBindingAccessReadOnly, 0);
             [accelerationStructure setBufferDataSize:0 dataType:MTLDataTypePointer];
@@ -9451,7 +9464,8 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
             initWithBindings:@[] userAnnotation:nil];
     }
     if ([name isEqualToString:zpu_cpu_intersection_triangle_function_name] ||
-        [name isEqualToString:zpu_cpu_intersection_triangle_accept_function_name]) {
+        [name isEqualToString:zpu_cpu_intersection_triangle_accept_function_name] ||
+        [name isEqualToString:zpu_cpu_intersection_aabb_accept_function_name]) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
     }
@@ -9518,6 +9532,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba16_sint"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_SINT;
         else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgb10a2_uint"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGB10A2_UINT;
         else if ([name isEqualToString:zpu_cpu_trace_triangles_function_name]) kernel = ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8;
+        else if ([name isEqualToString:zpu_cpu_trace_aabbs_function_name]) kernel = ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8;
         else if ([name isEqualToString:zpu_cpu_add_f32_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32;
         else if ([name isEqualToString:zpu_cpu_mul_f32_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32;
         else if ([name isEqualToString:zpu_cpu_sub_f32_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32;
@@ -9663,8 +9678,10 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_sub_f32x3_function_name,
         zpu_cpu_div_f32x3_function_name,
         zpu_cpu_trace_triangles_function_name,
+        zpu_cpu_trace_aabbs_function_name,
         zpu_cpu_intersection_triangle_function_name,
         zpu_cpu_intersection_triangle_accept_function_name,
+        zpu_cpu_intersection_aabb_accept_function_name,
         zpu_cpu_tile_gradient_function_name,
         zpu_cpu_mesh_gradient_function_name,
         zpu_cpu_mesh_gradient_fragment_name,
@@ -14353,8 +14370,10 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             zpu_cpu_sub_f32x3_function_name,
             zpu_cpu_div_f32x3_function_name,
             zpu_cpu_trace_triangles_function_name,
+            zpu_cpu_trace_aabbs_function_name,
             zpu_cpu_intersection_triangle_function_name,
             zpu_cpu_intersection_triangle_accept_function_name,
+            zpu_cpu_intersection_aabb_accept_function_name,
             zpu_cpu_tile_gradient_function_name,
             zpu_cpu_mesh_gradient_function_name,
             zpu_cpu_mesh_gradient_fragment_name,
@@ -14497,6 +14516,17 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             implementations[zpu_cpu_intersection_triangle_accept_function_name] =
                 zpu_cpu_intersection_triangle_accept_function_name;
         }
+        if ([source hasPrefix:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 "] &&
+            ![names containsObject:zpu_cpu_trace_aabbs_function_name]) {
+            [names addObject:zpu_cpu_trace_aabbs_function_name];
+            implementations[zpu_cpu_trace_aabbs_function_name] = zpu_cpu_trace_aabbs_function_name;
+        }
+        if ([source hasPrefix:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 "] &&
+            ![names containsObject:zpu_cpu_intersection_aabb_accept_function_name]) {
+            [names addObject:zpu_cpu_intersection_aabb_accept_function_name];
+            implementations[zpu_cpu_intersection_aabb_accept_function_name] =
+                zpu_cpu_intersection_aabb_accept_function_name;
+        }
         /* A CPU ZML provider may publish named graph entry points without
          * putting them into the source metadata string. Add the provider's
          * validated catalog entries to the executable library so normal Metal
@@ -14527,8 +14557,9 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
              [implementationName isEqualToString:@"zpu_cpu_uniform_color_fragment"] ? MTLFunctionTypeFragment :
              MTLFunctionTypeKernel);
     } else {
-        functionType = ([implementationName isEqualToString:zpu_cpu_intersection_triangle_function_name] ||
-                        [implementationName isEqualToString:zpu_cpu_intersection_triangle_accept_function_name]) ?
+    functionType = ([implementationName isEqualToString:zpu_cpu_intersection_triangle_function_name] ||
+                        [implementationName isEqualToString:zpu_cpu_intersection_triangle_accept_function_name] ||
+                        [implementationName isEqualToString:zpu_cpu_intersection_aabb_accept_function_name]) ?
             MTLFunctionTypeIntersection :
             ([_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0);
     }
@@ -19330,6 +19361,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_SINT: return @"zpu_cpu_fill_gradient_rgba16_sint";
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGB10A2_UINT: return @"zpu_cpu_fill_gradient_rgb10a2_uint";
         case ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8: return zpu_cpu_trace_triangles_function_name;
+        case ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8: return zpu_cpu_trace_aabbs_function_name;
         case ZPU_METAL_COMPUTE_ADD_F32: return zpu_cpu_add_f32_function_name;
         case ZPU_METAL_COMPUTE_MUL_F32: return zpu_cpu_mul_f32_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32: return zpu_cpu_sub_f32_function_name;
@@ -19365,7 +19397,8 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
  * intersection function into the CPU runtime's bounded profile. No native
  * MTLFunctionHandle or table allocation is consulted during execution. */
 static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
-    if (encoder == nil || encoder->_kernel != ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8) return YES;
+    if (encoder == nil || (encoder->_kernel != ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8 &&
+                           encoder->_kernel != ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8)) return YES;
     uint32_t profile = 0;
     id value = encoder->_boundIntersectionFunctionTables[@1];
     if (value != nil && value != (id)[NSNull null]) {
@@ -19377,10 +19410,15 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
             ZPUFunctionHandle *handle = (ZPUFunctionHandle *)function;
             if (![handle isKindOfClass:[ZPUFunctionHandle class]] || handle->_owner != [encoder->_owner device] ||
                 handle->_functionType != MTLFunctionTypeIntersection) return NO;
-            if ([handle->_name isEqualToString:zpu_cpu_intersection_triangle_function_name]) {
+            if (encoder->_kernel == ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8 &&
+                [handle->_name isEqualToString:zpu_cpu_intersection_triangle_function_name]) {
                 profile = 1;
-            } else if ([handle->_name isEqualToString:zpu_cpu_intersection_triangle_accept_function_name]) {
+            } else if (encoder->_kernel == ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8 &&
+                       [handle->_name isEqualToString:zpu_cpu_intersection_triangle_accept_function_name]) {
                 profile = 2;
+            } else if (encoder->_kernel == ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8 &&
+                       [handle->_name isEqualToString:zpu_cpu_intersection_aabb_accept_function_name]) {
+                profile = 3;
             } else {
                 /* A different custom function has no CPU implementation yet;
                  * fail closed instead of silently changing its hit behavior. */
@@ -19467,6 +19505,8 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGB10A2_UINT;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_trace_triangles_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_trace_aabbs_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32_function_name]) {
@@ -22130,6 +22170,23 @@ static BOOL zpu_cpu_acceleration_read_position(ZPUBuffer *buffer, NSUInteger off
     return isfinite(position[0]) && isfinite(position[1]) && isfinite(position[2]);
 }
 
+static BOOL zpu_cpu_acceleration_read_aabb(zpu_metal_cpu_acceleration_aabb *aabb,
+                                           ZPUBuffer *buffer, NSUInteger offset,
+                                           NSUInteger stride, NSUInteger rangeLength,
+                                           NSUInteger index) {
+    if (aabb == NULL || buffer == nil || buffer.contents == NULL || stride < sizeof(*aabb) ||
+        stride % sizeof(float) != 0 || index > (NSUIntegerMax - offset) / stride) return NO;
+    const NSUInteger byteOffset = offset + index * stride;
+    if (byteOffset > buffer.length || buffer.length - byteOffset < sizeof(*aabb) ||
+        byteOffset - offset > rangeLength || rangeLength - (byteOffset - offset) < sizeof(*aabb)) return NO;
+    memcpy(aabb, (const uint8_t *)buffer.contents + byteOffset, sizeof(*aabb));
+    for (NSUInteger value = 0; value < 6; ++value) {
+        if (!isfinite(aabb->bounds[value])) return NO;
+    }
+    return aabb->bounds[0] <= aabb->bounds[3] &&
+        aabb->bounds[1] <= aabb->bounds[4] && aabb->bounds[2] <= aabb->bounds[5];
+}
+
 static BOOL zpu_cpu_acceleration_write_triangle(zpu_metal_cpu_acceleration_triangle *triangle,
                                                  ZPUBuffer *vertexBuffer, NSUInteger vertexOffset,
                                                  NSUInteger vertexStride, NSUInteger vertexRangeLength,
@@ -22164,6 +22221,10 @@ static BOOL zpu_cpu_acceleration_write_triangle(zpu_metal_cpu_acceleration_trian
     return YES;
 }
 
+static BOOL zpu_cpu_acceleration_version_supported(uint32_t version) {
+    return version == 1u || version == ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION;
+}
+
 static BOOL zpu_cpu_acceleration_payload_info(ZPUAccelerationStructure *structure,
                                                NSUInteger *triangleCount,
                                                NSUInteger *triangleOffset) {
@@ -22173,7 +22234,7 @@ static BOOL zpu_cpu_acceleration_payload_info(ZPUAccelerationStructure *structur
     zpu_metal_cpu_acceleration_structure_header header;
     memcpy(&header, structure->_storage.contents, sizeof(header));
     if (header.magic != ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC ||
-        header.version != ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION ||
+        !zpu_cpu_acceleration_version_supported(header.version) ||
         header.triangle_offset < ZPU_METAL_CPU_ACCELERATION_STRUCTURE_HEADER_BYTES) return NO;
     const NSUInteger offset = header.triangle_offset;
     const NSUInteger count = header.triangle_count;
@@ -22194,7 +22255,7 @@ static BOOL zpu_cpu_acceleration_triangle_mask(ZPUAccelerationStructure *structu
     zpu_metal_cpu_acceleration_structure_header header;
     memcpy(&header, structure->_storage.contents, sizeof(header));
     if (header.magic != ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC ||
-        header.version != ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION ||
+        !zpu_cpu_acceleration_version_supported(header.version) ||
         header.triangle_offset != triangleOffset || header.triangle_count != triangleCount) return NO;
     if ((header.flags & ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS) == 0) {
         *mask = UINT32_MAX;
@@ -22918,27 +22979,62 @@ static BOOL zpu_cpu_acceleration_write_indirect_instance_payload(
 API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_cpu_acceleration_write_metal4_payload(
     ZPUAccelerationStructure *target, MTL4PrimitiveAccelerationStructureDescriptor *descriptor) {
-    if (!zpu_acceleration_storage_range_valid(target, target->_size)) return NO;
+    if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 || descriptor == nil) return NO;
     NSUInteger triangleCount = 0;
+    NSUInteger aabbCount = 0;
     for (MTL4AccelerationStructureGeometryDescriptor *geometry in descriptor.geometryDescriptors) {
-        if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) return NO;
-        const NSUInteger count = ((MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry).triangleCount;
-        if (count > SIZE_MAX - triangleCount) return NO;
-        triangleCount += count;
+        if ([geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+            const NSUInteger count = ((MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry).triangleCount;
+            if (count > SIZE_MAX - triangleCount) return NO;
+            triangleCount += count;
+        } else if ([geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) {
+            const NSUInteger count = ((MTL4AccelerationStructureBoundingBoxGeometryDescriptor *)geometry).boundingBoxCount;
+            if (count > SIZE_MAX - aabbCount) return NO;
+            aabbCount += count;
+        } else {
+            return NO;
+        }
     }
-    if (triangleCount > UINT32_MAX || triangleCount > (target->_size - 256) / sizeof(zpu_metal_cpu_acceleration_triangle)) return NO;
+    if (triangleCount > UINT32_MAX || aabbCount > UINT32_MAX ||
+        triangleCount > (target->_size - 256) / sizeof(zpu_metal_cpu_acceleration_triangle)) return NO;
+    const NSUInteger aabbOffset = 256 + triangleCount * sizeof(zpu_metal_cpu_acceleration_triangle);
+    if (aabbCount > (target->_size - aabbOffset) / sizeof(zpu_metal_cpu_acceleration_aabb)) return NO;
     memset(target->_storage.contents, 0, target->_size);
     zpu_metal_cpu_acceleration_structure_header header = {
         .magic = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
         .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
         .triangle_count = (uint32_t)triangleCount,
-        .flags = triangleCount == 0 ? 0u : 1u,
+        .flags = (triangleCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLES) |
+            (aabbCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS),
         .triangle_offset = 256,
-        .reserved = {0, 0, 0},
+        .reserved = {0, aabbCount == 0 ? 0u : (uint32_t)aabbOffset, (uint32_t)aabbCount},
     };
     memcpy(target->_storage.contents, &header, sizeof(header));
     NSUInteger destinationIndex = 0;
+    NSUInteger aabbDestinationIndex = 0;
     for (MTL4AccelerationStructureGeometryDescriptor *geometry in descriptor.geometryDescriptors) {
+        if ([geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) {
+            MTL4AccelerationStructureBoundingBoxGeometryDescriptor *boxes =
+                (MTL4AccelerationStructureBoundingBoxGeometryDescriptor *)geometry;
+            ZPUBuffer *boxBuffer = nil;
+            NSUInteger boxOffset = 0;
+            if (!zpu_metal4_buffer_range(boxes.boundingBoxBuffer, target->_owner, &boxBuffer, &boxOffset) ||
+                boxOffset % sizeof(float) != 0) return NO;
+            const NSUInteger boxRangeLength = boxes.boundingBoxBuffer.length == UINT64_MAX ?
+                boxBuffer.length - boxOffset : (NSUInteger)boxes.boundingBoxBuffer.length;
+            const NSUInteger boxStride = boxes.boundingBoxStride == 0 ? sizeof(zpu_metal_cpu_acceleration_aabb) :
+                boxes.boundingBoxStride;
+            if (boxStride < sizeof(zpu_metal_cpu_acceleration_aabb) || boxStride % sizeof(float) != 0) return NO;
+            for (NSUInteger boxIndex = 0; boxIndex < boxes.boundingBoxCount; ++boxIndex) {
+                zpu_metal_cpu_acceleration_aabb aabb;
+                if (!zpu_cpu_acceleration_read_aabb(&aabb, boxBuffer, boxOffset, boxStride,
+                                                    boxRangeLength, boxIndex)) return NO;
+                memcpy((uint8_t *)target->_storage.contents + aabbOffset +
+                           aabbDestinationIndex * sizeof(aabb), &aabb, sizeof(aabb));
+                aabbDestinationIndex += 1;
+            }
+            continue;
+        }
         MTL4AccelerationStructureTriangleGeometryDescriptor *triangles =
             (MTL4AccelerationStructureTriangleGeometryDescriptor *)geometry;
         ZPUBuffer *vertexBuffer = nil;
@@ -23044,6 +23140,9 @@ static void zpu_cpu_acceleration_retain_descriptor_ranges(
                     zpu_cpu_acceleration_retain_metal4_range(owner, triangles.vertexBuffer);
                     zpu_cpu_acceleration_retain_metal4_range(owner, triangles.indexBuffer);
                     zpu_cpu_acceleration_retain_metal4_range(owner, triangles.transformationMatrixBuffer);
+                } else if ([geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) {
+                    zpu_cpu_acceleration_retain_metal4_range(
+                        owner, ((MTL4AccelerationStructureBoundingBoxGeometryDescriptor *)geometry).boundingBoxBuffer);
                 }
             }
         } else if ([descriptor isKindOfClass:[MTL4InstanceAccelerationStructureDescriptor class]]) {
@@ -23130,7 +23229,8 @@ static BOOL zpu_cpu_acceleration_build_payload(
             BOOL traceable = YES;
             for (MTL4AccelerationStructureGeometryDescriptor *geometry in
                  ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
-                if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]] &&
+                    ![geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) {
                     traceable = NO;
                     break;
                 }
@@ -23275,7 +23375,8 @@ static BOOL zpu_cpu_acceleration_build_payload(
                     BOOL traceable = YES;
                     for (MTL4AccelerationStructureGeometryDescriptor *geometry in
                          ((MTL4PrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
-                        if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
+                        if (![geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]] &&
+                            ![geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) {
                             traceable = NO;
                             break;
                         }
@@ -26054,7 +26155,8 @@ id<MTLFunction> ZPUMetalCreateCPUFunction(id<MTLDevice> device, NSString *name) 
     if (![device isKindOfClass:[ZPUDevice class]] || !zpu_cpu_function_name_supported(name)) return nil;
     const MTLFunctionType functionType =
         ([name isEqualToString:zpu_cpu_intersection_triangle_function_name] ||
-         [name isEqualToString:zpu_cpu_intersection_triangle_accept_function_name]) ?
+         [name isEqualToString:zpu_cpu_intersection_triangle_accept_function_name] ||
+         [name isEqualToString:zpu_cpu_intersection_aabb_accept_function_name]) ?
         MTLFunctionTypeIntersection : 0;
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:(ZPUDevice *)device name:name
                                                        functionType:functionType];

@@ -358,7 +358,12 @@ triangle path:
   descriptors flatten resource-ID children while honoring their CPU-owned
   instance-count buffer, while motion instances,
   curves, custom intersection functions, and arbitrary ray tracing remain
-  fail-closed
+  fail-closed. The registered Metal 4 AABB trace profile separately serializes
+  finite `MTL4AccelerationStructureBoundingBoxGeometryDescriptor` ranges into
+  ZPU-owned min/max records and traverses them with the same half-pixel,
+  upper-left primary-ray grid; its exact RGBA8 output is checked against a
+  native Metal shader oracle, while native acceleration structures are never
+  used for adapter execution
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
@@ -775,7 +780,9 @@ triangle path:
   bounded, and indirect instance geometry, including active instance-count
   buffer ranges, packed affine transforms, and per-instance visibility masks;
   zero-mask instances are filtered using the fixed all-bits primary-ray mask;
-  arbitrary ray intersection execution remains fail-closed
+  the Metal 4 bounding-box profile traverses CPU-owned AABB records with
+  finite ordered bounds and exact top-left pixel mapping; arbitrary ray
+  intersection execution remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level
@@ -945,6 +952,7 @@ coverage, color interpolation, BGRA channel order, object lifetimes, depth
 ordering, pipeline/depth/sampler state, blending, texture views, indirect
 draws, render and compute indirect command buffers, the CPU compute path
   against a native Metal oracle, the Metal 4 CPU argument-table compute and
+  Metal 4 AABB trace output against a native shader oracle,
   ordinary render paths, compiler-created Metal 4 compute/render and archive
   metadata paths, deferred indirect-thread dispatch, and deferred
   indirect array z filtering, explicit 3D texture plane/stride copies, and

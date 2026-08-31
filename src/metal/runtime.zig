@@ -29,10 +29,12 @@ const fence_magic: u64 = 0x5a50555f46454e43; // ZPU_FENC
 const shared_event_magic: u64 = 0x5a50555f53455654; // ZPU_SEVT
 
 const cpu_acceleration_structure_magic: u32 = 0x5a505541;
-const cpu_acceleration_structure_version: u32 = 1;
+const cpu_acceleration_structure_version: u32 = 2;
 const cpu_acceleration_structure_header_bytes: usize = 32;
 const cpu_acceleration_structure_triangle_bytes: usize = 9 * @sizeOf(f32);
+const cpu_acceleration_structure_aabb_bytes: usize = 6 * @sizeOf(f32);
 const cpu_acceleration_structure_flag_triangle_masks: u32 = 2;
+const cpu_acceleration_structure_flag_aabbs: u32 = 4;
 const max_viewport_count = 16;
 
 pub const TextureFormat = enum {
@@ -5197,7 +5199,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 44) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 45) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5303,7 +5305,7 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn setIntersectionFunctionProfile(self: *ComputeEncoder, profile: u32) Error!void {
-        if (!self.open() or profile > 2) return error.UnsupportedOperation;
+        if (!self.open() or profile > 3) return error.UnsupportedOperation;
         self.intersection_function_profile = @intCast(profile);
     }
 
@@ -5426,7 +5428,8 @@ pub const ComputeEncoder = struct {
         if (self.textureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
-        if (self.kernel == 7 and (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
+        if ((self.kernel == 7 or self.kernel == 45) and
+            (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
         if ((self.kernel != 3 and self.kernel != 4 and threads_per_grid.depth != 1) or
             threads_per_threadgroup.width == 0 or
             threads_per_threadgroup.height == 0 or threads_per_threadgroup.depth == 0) return error.InvalidArgument;
@@ -5502,6 +5505,8 @@ pub const ComputeEncoder = struct {
         if (self.textureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
+        if ((self.kernel == 7 or self.kernel == 45) and
+            (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
@@ -5546,6 +5551,8 @@ pub const ComputeEncoder = struct {
         if (self.textureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
+        if ((self.kernel == 7 or self.kernel == 45) and
+            (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
@@ -5866,6 +5873,10 @@ fn readF32Little(bytes: []const u8, offset: usize) f32 {
     return @bitCast(readU32Little(bytes, offset));
 }
 
+fn cpuAccelerationVersionSupported(version: u32) bool {
+    return version == 1 or version == cpu_acceleration_structure_version;
+}
+
 fn cpuRayTriangleHit(origin: CpuRayVec3, direction: CpuRayVec3, v0: CpuRayVec3, v1: CpuRayVec3, v2: CpuRayVec3) ?f32 {
     const edge1 = cpuRaySub(v1, v0);
     const edge2 = cpuRaySub(v2, v0);
@@ -5884,6 +5895,30 @@ fn cpuRayTriangleHit(origin: CpuRayVec3, direction: CpuRayVec3, v0: CpuRayVec3, 
     return distance;
 }
 
+fn cpuRayAabbHit(origin: CpuRayVec3, direction: CpuRayVec3, minimum: CpuRayVec3, maximum: CpuRayVec3) ?f32 {
+    var near: f32 = 0.0;
+    var far: f32 = std.math.inf(f32);
+    const origins = [_]f32{ origin.x, origin.y, origin.z };
+    const directions = [_]f32{ direction.x, direction.y, direction.z };
+    const minima = [_]f32{ minimum.x, minimum.y, minimum.z };
+    const maxima = [_]f32{ maximum.x, maximum.y, maximum.z };
+    for (0..3) |axis| {
+        if (!std.math.isFinite(minima[axis]) or !std.math.isFinite(maxima[axis]) or minima[axis] > maxima[axis]) return null;
+        if (@abs(directions[axis]) < 0.0000001) {
+            if (origins[axis] < minima[axis] or origins[axis] > maxima[axis]) return null;
+            continue;
+        }
+        const inverse_direction = 1.0 / directions[axis];
+        var first = (minima[axis] - origins[axis]) * inverse_direction;
+        var second = (maxima[axis] - origins[axis]) * inverse_direction;
+        if (first > second) std.mem.swap(f32, &first, &second);
+        near = @max(near, first);
+        far = @min(far, second);
+        if (near > far) return null;
+    }
+    return if (far >= 0.0 and std.math.isFinite(far)) near else null;
+}
+
 fn executeTraceTriangles(command: ComputeCommand) Error!void {
     const texture = command.texture orelse return error.InvalidResource;
     if (texture.format != .rgba8_unorm) return error.UnsupportedFormat;
@@ -5892,7 +5927,7 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
     if (!validBuffer(acceleration_structure) or acceleration_structure.device != texture.device) return error.InvalidResource;
     if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
     if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or
-        readU32Little(acceleration_structure.bytes, 4) != cpu_acceleration_structure_version) return error.InvalidResource;
+        !cpuAccelerationVersionSupported(readU32Little(acceleration_structure.bytes, 4))) return error.InvalidResource;
     const triangle_count: usize = @intCast(readU32Little(acceleration_structure.bytes, 8));
     const flags = readU32Little(acceleration_structure.bytes, 12);
     const triangle_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 16));
@@ -5950,6 +5985,82 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
             }
         }
         target.storeColor(x, y, if (nearest != null) .{ 1.0, 0.0, 0.0, 1.0 } else .{ 0.0, 0.0, 0.0, 1.0 });
+    };
+}
+
+fn executeTraceAabbs(command: ComputeCommand) Error!void {
+    const texture = command.texture orelse return error.InvalidResource;
+    if (texture.format != .rgba8_unorm) return error.UnsupportedFormat;
+    const acceleration_structure = command.acceleration_structure orelse return error.InvalidCommand;
+    if (command.intersection_function_profile != 0 and command.intersection_function_profile != 3)
+        return error.UnsupportedOperation;
+    if (!validBuffer(acceleration_structure) or acceleration_structure.device != texture.device) return error.InvalidResource;
+    if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
+    if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or
+        readU32Little(acceleration_structure.bytes, 4) != cpu_acceleration_structure_version) return error.InvalidResource;
+    const triangle_count: usize = @intCast(readU32Little(acceleration_structure.bytes, 8));
+    const flags = readU32Little(acceleration_structure.bytes, 12);
+    if ((flags & cpu_acceleration_structure_flag_aabbs) == 0) return error.InvalidResource;
+    const triangle_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 16));
+    const triangle_bytes = std.math.mul(usize, triangle_count, cpu_acceleration_structure_triangle_bytes) catch return error.InvalidArgument;
+    const triangle_end = std.math.add(usize, triangle_offset, triangle_bytes) catch return error.InvalidArgument;
+    if (triangle_offset < cpu_acceleration_structure_header_bytes or
+        !rangeValid(acceleration_structure.bytes.len, triangle_offset, triangle_bytes)) return error.InvalidArgument;
+    const aabb_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 24));
+    const aabb_count: usize = @intCast(readU32Little(acceleration_structure.bytes, 28));
+    const aabb_bytes = std.math.mul(usize, aabb_count, cpu_acceleration_structure_aabb_bytes) catch return error.InvalidArgument;
+    if (aabb_count == 0 or aabb_offset < triangle_end or
+        !rangeValid(acceleration_structure.bytes.len, aabb_offset, aabb_bytes)) return error.InvalidArgument;
+    var validation_index: usize = 0;
+    while (validation_index < aabb_count) : (validation_index += 1) {
+        const base = aabb_offset + validation_index * cpu_acceleration_structure_aabb_bytes;
+        const minimum = CpuRayVec3{
+            .x = readF32Little(acceleration_structure.bytes, base),
+            .y = readF32Little(acceleration_structure.bytes, base + 4),
+            .z = readF32Little(acceleration_structure.bytes, base + 8),
+        };
+        const maximum = CpuRayVec3{
+            .x = readF32Little(acceleration_structure.bytes, base + 12),
+            .y = readF32Little(acceleration_structure.bytes, base + 16),
+            .z = readF32Little(acceleration_structure.bytes, base + 20),
+        };
+        if (!std.math.isFinite(minimum.x) or !std.math.isFinite(minimum.y) or !std.math.isFinite(minimum.z) or
+            !std.math.isFinite(maximum.x) or !std.math.isFinite(maximum.y) or !std.math.isFinite(maximum.z) or
+            minimum.x > maximum.x or minimum.y > maximum.y or minimum.z > maximum.z)
+            return error.InvalidArgument;
+    }
+    const width = @min(command.threads_per_grid.width, texture.width);
+    const height = @min(command.threads_per_grid.height, texture.height);
+    var target = texture.asTarget();
+    for (0..height) |y| for (0..width) |x| {
+        // Metal's row zero is the upper edge. Keep the same half-pixel
+        // origin as the triangle profile for exact X/Y grid agreement.
+        const origin = CpuRayVec3{
+            .x = 2.0 * ((@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(texture.width))) - 1.0,
+            .y = 1.0 - 2.0 * ((@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(texture.height))),
+            .z = 1.0,
+        };
+        const direction = CpuRayVec3{ .x = 0.0, .y = 0.0, .z = -1.0 };
+        var hit = false;
+        var aabb_index: usize = 0;
+        while (aabb_index < aabb_count) : (aabb_index += 1) {
+            const base = aabb_offset + aabb_index * cpu_acceleration_structure_aabb_bytes;
+            const minimum = CpuRayVec3{
+                .x = readF32Little(acceleration_structure.bytes, base),
+                .y = readF32Little(acceleration_structure.bytes, base + 4),
+                .z = readF32Little(acceleration_structure.bytes, base + 8),
+            };
+            const maximum = CpuRayVec3{
+                .x = readF32Little(acceleration_structure.bytes, base + 12),
+                .y = readF32Little(acceleration_structure.bytes, base + 16),
+                .z = readF32Little(acceleration_structure.bytes, base + 20),
+            };
+            if (cpuRayAabbHit(origin, direction, minimum, maximum) != null) {
+                hit = true;
+                break;
+            }
+        }
+        target.storeColor(x, y, if (hit) .{ 1.0, 0.0, 0.0, 1.0 } else .{ 0.0, 0.0, 0.0, 1.0 });
     };
 }
 
@@ -6220,6 +6331,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
             });
         },
         7 => return executeTraceTriangles(command),
+        45 => return executeTraceAabbs(command),
         else => return error.UnsupportedOperation,
     }
 }
@@ -9469,6 +9581,102 @@ test "CPU triangle intersection profile rejects candidates" {
     for (0..texture.height) |y| for (0..texture.width) |x| {
         try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[(y * texture.stride + x * 4)..][0..4]);
     };
+}
+
+test "CPU AABB trace preserves the Metal 4 top-left pixel grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 7, 5, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const acceleration_structure = try createBuffer(device, 64, null);
+    defer destroyBuffer(acceleration_structure);
+
+    writeU32Little(acceleration_structure.bytes, 0, cpu_acceleration_structure_magic);
+    writeU32Little(acceleration_structure.bytes, 4, cpu_acceleration_structure_version);
+    writeU32Little(acceleration_structure.bytes, 8, 0);
+    writeU32Little(acceleration_structure.bytes, 12, cpu_acceleration_structure_flag_aabbs);
+    writeU32Little(acceleration_structure.bytes, 16, cpu_acceleration_structure_header_bytes);
+    writeU32Little(acceleration_structure.bytes, 24, cpu_acceleration_structure_header_bytes);
+    writeU32Little(acceleration_structure.bytes, 28, 1);
+    const bounds = [_]f32{ -0.8, -0.7, -0.1, 0.8, 0.7, 0.1 };
+    for (bounds, 0..) |value, index| {
+        std.mem.writeInt(u32, acceleration_structure.bytes[cpu_acceleration_structure_header_bytes + index * 4 ..][0..4], @bitCast(value), .little);
+    }
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(45);
+    try encoder.setTexture(texture, 0);
+    try encoder.setAccelerationStructure(acceleration_structure, 0);
+    try encoder.dispatchThreads(.{ .width = 7, .height = 5, .depth = 1 }, .{ .width = 7, .height = 5, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+
+    const miss = [_]u8{ 0, 0, 0, 255 };
+    const hit = [_]u8{ 255, 0, 0, 255 };
+    try std.testing.expectEqualSlices(u8, &miss, texture.bytes[(0 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &hit, texture.bytes[(1 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &hit, texture.bytes[(2 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &hit, texture.bytes[(3 * texture.stride + 3 * 4)..][0..4]);
+    try std.testing.expectEqualSlices(u8, &miss, texture.bytes[(4 * texture.stride + 3 * 4)..][0..4]);
+}
+
+test "CPU AABB trace rejects truncated and non-finite payloads" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+
+    const truncated = try createBuffer(device, cpu_acceleration_structure_header_bytes, null);
+    defer destroyBuffer(truncated);
+    writeU32Little(truncated.bytes, 0, cpu_acceleration_structure_magic);
+    writeU32Little(truncated.bytes, 4, cpu_acceleration_structure_version);
+    writeU32Little(truncated.bytes, 12, cpu_acceleration_structure_flag_aabbs);
+    writeU32Little(truncated.bytes, 16, cpu_acceleration_structure_header_bytes);
+    writeU32Little(truncated.bytes, 24, cpu_acceleration_structure_header_bytes);
+    writeU32Little(truncated.bytes, 28, 1);
+    var truncated_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(truncated_commands);
+    var truncated_encoder = try beginCompute(truncated_commands);
+    try truncated_encoder.setKernel(45);
+    try truncated_encoder.setTexture(texture, 0);
+    try truncated_encoder.setAccelerationStructure(truncated, 0);
+    try truncated_encoder.dispatchThreads(.{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 });
+    try truncated_encoder.endEncoding();
+    destroyComputeEncoder(truncated_encoder);
+    try std.testing.expectError(error.InvalidArgument, truncated_commands.commit());
+    try std.testing.expectEqual(CommandStatus.failed, truncated_commands.status);
+
+    const invalid = try createBuffer(device, 64, null);
+    defer destroyBuffer(invalid);
+    writeU32Little(invalid.bytes, 0, cpu_acceleration_structure_magic);
+    writeU32Little(invalid.bytes, 4, cpu_acceleration_structure_version);
+    writeU32Little(invalid.bytes, 12, cpu_acceleration_structure_flag_aabbs);
+    writeU32Little(invalid.bytes, 16, cpu_acceleration_structure_header_bytes);
+    writeU32Little(invalid.bytes, 24, cpu_acceleration_structure_header_bytes);
+    writeU32Little(invalid.bytes, 28, 1);
+    const invalid_bounds = [_]f32{ 1.0, -1.0, -1.0, 0.0, 1.0, 1.0 };
+    for (invalid_bounds, 0..) |value, index| {
+        std.mem.writeInt(u32, invalid.bytes[cpu_acceleration_structure_header_bytes + index * 4 ..][0..4], @bitCast(value), .little);
+    }
+    var invalid_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(invalid_commands);
+    var invalid_encoder = try beginCompute(invalid_commands);
+    try invalid_encoder.setKernel(45);
+    try invalid_encoder.setTexture(texture, 0);
+    try invalid_encoder.setAccelerationStructure(invalid, 0);
+    try invalid_encoder.dispatchThreads(.{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 });
+    try invalid_encoder.endEncoding();
+    destroyComputeEncoder(invalid_encoder);
+    try std.testing.expectError(error.InvalidArgument, invalid_commands.commit());
+    try std.testing.expectEqual(CommandStatus.failed, invalid_commands.status);
 }
 
 test "CPU compute acceleration bindings can be explicitly unbound" {
