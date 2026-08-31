@@ -1012,6 +1012,30 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
                         completion_intersection_error);
         return 184;
     }
+    native_intersection_descriptor.specializedName = @"zpu_cpu_intersection_triangle_alias";
+    adapter_intersection_descriptor.specializedName = @"zpu_cpu_intersection_triangle_alias";
+    NSError *native_specialized_intersection_error = nil;
+    NSError *adapter_specialized_intersection_error = nil;
+    id<MTLFunction> native_specialized_intersection_function =
+        [native_library newIntersectionFunctionWithDescriptor:native_intersection_descriptor
+                                                         error:&native_specialized_intersection_error];
+    id<MTLFunction> adapter_specialized_intersection_function =
+        [adapter_library newIntersectionFunctionWithDescriptor:adapter_intersection_descriptor
+                                                          error:&adapter_specialized_intersection_error];
+    if (native_specialized_intersection_function == nil ||
+        native_specialized_intersection_error != nil ||
+        adapter_specialized_intersection_function == nil ||
+        adapter_specialized_intersection_error != nil ||
+        native_specialized_intersection_function.functionType != MTLFunctionTypeIntersection ||
+        adapter_specialized_intersection_function.functionType != MTLFunctionTypeIntersection ||
+        ![native_specialized_intersection_function.name
+            isEqualToString:adapter_specialized_intersection_function.name] ||
+        ![adapter_specialized_intersection_function.name
+            isEqualToString:@"zpu_cpu_intersection_triangle_alias"]) {
+        fail_with_error("CPU specialized intersection-function lowering failed",
+                        adapter_specialized_intersection_error ?: native_specialized_intersection_error);
+        return 185;
+    }
     id<MTLFunction> native_metadata_function =
         [native_library newFunctionWithName:@"zpu_source_metadata_direct"];
     id<MTLFunction> adapter_metadata_function =
