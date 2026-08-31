@@ -1510,6 +1510,7 @@ static uint64_t zpu_next_cpu_drawable_id;
 @public
     ZPUDevice *_owner;
     NSArray *_functionNames;
+    NSDictionary *_functionImplementations;
     NSSet *_visibleFunctionNames;
     NSString *_label;
     MTLLibraryType _type;
@@ -10842,7 +10843,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     }
     ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:self source:source type:type installName:installName];
     if (library->_functionNames.count == 0) {
-        zpu_set_error(error, @"ZPU CPU Metal source contains no registered CPU kernel");
+        zpu_set_error(error, @"ZPU CPU Metal source contains no registered or CPU-lowerable kernel");
         return nil;
     }
     if (error != NULL) *error = nil;
@@ -11768,6 +11769,73 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
     return NO;
 }
 
+/* Source compilation is intentionally a small, fail-closed lowering
+ * profile.  These are the only source-defined kernels that can be mapped to
+ * an existing ZPU CPU implementation without invoking Apple's compiler or
+ * guessing at arbitrary MSL semantics. */
+static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functions(NSString *source) {
+    if (source.length == 0) return @{};
+    NSError *regexError = nil;
+    NSRegularExpression *kernelExpression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"\\bkernel\\s+void\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\(([^{}]*)\\)\\s*\\{([^{}]*)\\}"
+                                   options:0 error:&regexError];
+    if (kernelExpression == nil || regexError != nil) return @{};
+    NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
+    [kernelExpression enumerateMatchesInString:source options:0 range:NSMakeRange(0, source.length)
+                                    usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *functionName = [source substringWithRange:[match rangeAtIndex:1]];
+        NSString *signature = [source substringWithRange:[match rangeAtIndex:2]];
+        NSString *body = [source substringWithRange:[match rangeAtIndex:3]];
+        NSArray<NSString *> *signatureParts =
+            [signature componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *compactSignature = [signatureParts componentsJoinedByString:@""];
+        NSArray<NSString *> *bodyParts =
+            [body componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString *compactBody = [bodyParts componentsJoinedByString:@""];
+
+        NSError *indexError = nil;
+        NSRegularExpression *indexExpression = [NSRegularExpression
+            regularExpressionWithPattern:@"uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[thread_position_in_grid\\]\\]"
+                                   options:0 error:&indexError];
+        if (indexExpression == nil || indexError != nil) return;
+        NSTextCheckingResult *indexMatch = [indexExpression firstMatchInString:compactSignature
+                                                                        options:0
+                                                                          range:NSMakeRange(0, compactSignature.length)];
+        if (indexMatch == nil) return;
+        NSString *indexName = [compactSignature substringWithRange:[indexMatch rangeAtIndex:1]];
+        NSString *expectedSignature = [NSString stringWithFormat:
+            @"deviceconstfloat*left[[buffer(0)]],deviceconstfloat*right[[buffer(1)]],"
+             "devicefloat*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        if (![compactSignature isEqualToString:expectedSignature]) return;
+
+        NSString *assignment = [NSString stringWithFormat:
+            @"output[%@]=left[%@]PLUSright[%@];", indexName, indexName, indexName];
+        NSString *multiplication = [NSString stringWithFormat:
+            @"output[%@]=left[%@]MULright[%@];", indexName, indexName, indexName];
+        NSString *addAssignment = [assignment stringByReplacingOccurrencesOfString:@"PLUS" withString:@"+"];
+        NSString *mulAssignment = [multiplication stringByReplacingOccurrencesOfString:@"MUL" withString:@"*"];
+        BOOL isAdd = [compactBody hasSuffix:addAssignment];
+        BOOL isMultiply = [compactBody hasSuffix:mulAssignment];
+        if (!isAdd && !isMultiply) return;
+
+        NSString *prefix = [compactBody substringToIndex:compactBody.length -
+            (isAdd ? addAssignment.length : mulAssignment.length)];
+        if (prefix.length != 0) {
+            NSString *guardPattern = [NSString stringWithFormat:@"^if\\(%@>=[0-9]+\\)return;$", indexName];
+            NSError *guardError = nil;
+            NSRegularExpression *guardExpression = [NSRegularExpression
+                regularExpressionWithPattern:guardPattern options:0 error:&guardError];
+            if (guardExpression == nil || guardError != nil ||
+                [guardExpression firstMatchInString:prefix options:0 range:NSMakeRange(0, prefix.length)] == nil) return;
+        }
+        implementations[functionName] = isAdd ? zpu_cpu_add_f32_function_name : zpu_cpu_mul_f32_function_name;
+    }];
+    return [implementations copy];
+}
+
 @implementation ZPULibrary
 - (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source {
     return [self initWithOwner:owner source:source type:MTLLibraryTypeExecutable installName:nil];
@@ -11779,6 +11847,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
         _type = type;
         _installName = [installName copy];
         _visibleFunctionNames = [NSSet set];
+        NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
         NSMutableArray *names = [NSMutableArray array];
         for (NSString *name in @[
             @"zpu_test_vertex",
@@ -11888,9 +11957,21 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_tensor_argument_buffer_function_name,
             zpu_cpu_tensor_argument_buffer_array_function_name,
         ]) {
-            if (zpu_source_contains_identifier(source, name)) [names addObject:name];
+            if (zpu_source_contains_identifier(source, name)) {
+                [names addObject:name];
+                implementations[name] = name;
+            }
         }
+        [zpu_source_lowerable_compute_functions(source) enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *name, NSString *implementation, BOOL *stop) {
+                (void)stop;
+                if (![names containsObject:name]) {
+                    [names addObject:name];
+                    implementations[name] = implementation;
+                }
+            }];
         _functionNames = [names copy];
+        _functionImplementations = [implementations copy];
     }
     return self;
 }
@@ -11900,10 +11981,15 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
 - (id<MTLFunction>)newFunctionWithName:(NSString *)functionName {
     if (_type != MTLLibraryTypeExecutable) return nil;
     if (![_functionNames containsObject:functionName]) return nil;
-    MTLFunctionType functionType = [_visibleFunctionNames containsObject:functionName] ?
-        MTLFunctionTypeVisible : 0;
-    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner name:functionName
-                                                        functionType:functionType];
+    NSString *implementationName = _functionImplementations[functionName] ?: functionName;
+    const BOOL sourceLowered = ![implementationName isEqualToString:functionName];
+    MTLFunctionType functionType = sourceLowered ? MTLFunctionTypeKernel :
+        ([_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0);
+    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner
+                                                               name:implementationName
+                                                     specializedName:sourceLowered ? functionName : nil
+                                                         functionType:functionType
+                                                              options:MTLFunctionOptionNone];
 }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)constantValues error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)constantValues;
@@ -11924,7 +12010,8 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
 - (NSString *)installName API_AVAILABLE(macos(11.0), ios(14.0)) { return _installName; }
 - (MTLFunctionReflection *)reflectionForFunctionWithName:(NSString *)functionName API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (_type != MTLLibraryTypeExecutable || ![_functionNames containsObject:functionName]) return nil;
-    return zpu_function_reflection(functionName);
+    NSString *implementationName = _functionImplementations[functionName] ?: functionName;
+    return zpu_function_reflection(implementationName);
 }
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
     if (descriptor == nil || descriptor.name.length == 0) {
@@ -11972,8 +12059,10 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
         return registered;
     }
     if (error != NULL) *error = nil;
-    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:self->_owner name:function.name
-                                                   specializedName:descriptor.specializedName
+    NSString *implementationName = zpu_cpu_function_implementation_name(function);
+    NSString *publicName = descriptor.specializedName.length != 0 ? descriptor.specializedName : function.name;
+    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:self->_owner name:implementationName
+                                                   specializedName:publicName
                                                         functionType:function.functionType options:normalizedOptions];
 }
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor
@@ -12886,7 +12975,7 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     ZPULibrary *library = [[ZPULibrary alloc] initWithOwner:_owner source:descriptor.source
                                                        type:type installName:installName];
     if (library->_functionNames.count == 0) {
-        zpu_set_error(error, @"ZPU CPU Metal 4 source contains no registered CPU kernel");
+        zpu_set_error(error, @"ZPU CPU Metal 4 source contains no registered or CPU-lowerable kernel");
         return nil;
     }
     if (descriptor.name.length != 0) library->_label = [descriptor.name copy];

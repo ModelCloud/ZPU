@@ -546,6 +546,116 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     return result;
 }
 
+/* Source-defined compute kernels are compiled by native Metal only for the
+ * oracle. The adapter must recognize the bounded source shape, lower it to
+ * a ZPU CPU implementation, and produce identical raw Float32 bytes. */
+static int test_source_lowering_against_native(id<MTLDevice> native_device,
+                                               id<MTLDevice> adapter_device,
+                                               id<MTLCommandQueue> native_queue,
+                                               id<MTLCommandQueue> adapter_queue) {
+    if (native_device == nil || adapter_device == nil || native_queue == nil || adapter_queue == nil) return 166;
+    NSString *source =
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+         "kernel void zpu_source_add_f32(device const float *left [[buffer(0)]], "
+         "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_f32(device const float *left [[buffer(0)]], "
+         "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n";
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
+    id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
+    if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
+        adapter_library.functionNames.count != 2) {
+        fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
+        return 166;
+    }
+
+    const struct {
+        NSString *name;
+        NSUInteger count;
+        BOOL multiply;
+    } cases[] = {
+        {@"zpu_source_add_f32", 12, NO},
+        {@"zpu_source_mul_f32", 10, YES},
+    };
+    const float left_values[12] = {
+        -3.5f, -2.25f, -0.0f, 0.5f, 1.25f, 2.0f,
+        3.5f, 4.75f, 8.0f, -16.0f, 0.125f, 1000.0f,
+    };
+    const float right_values[12] = {
+        2.0f, 0.25f, 1.0f, -0.5f, 2.75f, -1.0f,
+        -3.5f, 0.25f, -8.0f, 16.0f, 0.375f, -100.0f,
+    };
+    for (NSUInteger case_index = 0; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+        id<MTLFunction> native_function = [native_library newFunctionWithName:cases[case_index].name];
+        id<MTLFunction> adapter_function = [adapter_library newFunctionWithName:cases[case_index].name];
+        NSError *native_pipeline_error = nil;
+        NSError *adapter_pipeline_error = nil;
+        id<MTLComputePipelineState> native_pipeline =
+            [native_device newComputePipelineStateWithFunction:native_function error:&native_pipeline_error];
+        id<MTLComputePipelineState> adapter_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_pipeline_error];
+        id<MTLBuffer> native_left = [native_device newBufferWithBytes:left_values length:sizeof(left_values)
+                                                               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_right = [native_device newBufferWithBytes:right_values length:sizeof(right_values)
+                                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_output = [native_device newBufferWithLength:sizeof(left_values)
+                                                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_left = [adapter_device newBufferWithBytes:left_values length:sizeof(left_values)
+                                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_right = [adapter_device newBufferWithBytes:right_values length:sizeof(right_values)
+                                                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_output = [adapter_device newBufferWithLength:sizeof(left_values)
+                                                                      options:MTLResourceStorageModeShared];
+        if (native_output != nil) memset(native_output.contents, 0xa5, native_output.length);
+        if (adapter_output != nil) memset(adapter_output.contents, 0xa5, adapter_output.length);
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+        id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+        if (native_function != nil && adapter_function != nil && native_pipeline != nil && adapter_pipeline != nil &&
+            native_left != nil && native_right != nil && native_output != nil && adapter_left != nil &&
+            adapter_right != nil && adapter_output != nil && native_encoder != nil && adapter_encoder != nil) {
+            [native_encoder setComputePipelineState:native_pipeline];
+            [native_encoder setBuffer:native_left offset:0 atIndex:0];
+            [native_encoder setBuffer:native_right offset:0 atIndex:1];
+            [native_encoder setBuffer:native_output offset:0 atIndex:2];
+            [native_encoder dispatchThreads:MTLSizeMake(cases[case_index].count, 1, 1)
+                         threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [native_encoder endEncoding];
+            [native_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+            [adapter_encoder setComputePipelineState:adapter_pipeline];
+            [adapter_encoder setBuffer:adapter_left offset:0 atIndex:0];
+            [adapter_encoder setBuffer:adapter_right offset:0 atIndex:1];
+            [adapter_encoder setBuffer:adapter_output offset:0 atIndex:2];
+            [adapter_encoder dispatchThreads:MTLSizeMake(cases[case_index].count, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [adapter_encoder endEncoding];
+            [adapter_command_buffer commit];
+            [adapter_command_buffer waitUntilCompleted];
+        }
+        BOOL reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *reflection = [adapter_library reflectionForFunctionWithName:cases[case_index].name];
+            reflection_ok = reflection != nil && reflection.bindings.count == 3;
+        }
+        const BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&
+            memcmp(native_output.contents, adapter_output.contents, cases[case_index].count * sizeof(float)) == 0;
+        if (!exact) {
+            fprintf(stderr, "metal-pixel: source-defined CPU %s lowering mismatch\n",
+                    cases[case_index].multiply ? "multiply" : "add");
+            fail_with_error("source-defined CPU lowering execution failed",
+                            adapter_pipeline_error ?: native_pipeline_error);
+            return 167 + (int)case_index;
+        }
+    }
+    return 0;
+}
+
 static int test_adapter_extended_object_protocols(id<MTLDevice> adapter_device,
                                                   id<MTLBuffer> adapter_buffer,
                                                   id<MTLTexture> adapter_texture)
@@ -12069,6 +12179,10 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_test_sample_fragment");
         id<MTLCommandQueue> adapter_queue = [adapter_device newCommandQueue];
         NSError *adapter_pipeline_error = nil;
+
+        const int source_lowering_result = test_source_lowering_against_native(
+            device, adapter_device, queue, adapter_queue);
+        if (source_lowering_result != 0) return source_lowering_result;
 
         const int adapter_packed_depth_stencil_blit_result =
             test_adapter_packed_depth_stencil_blit_options(adapter_device);
