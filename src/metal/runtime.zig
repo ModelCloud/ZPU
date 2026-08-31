@@ -744,6 +744,10 @@ const MipmapCommand = struct {
     destination: *Texture,
 };
 
+const MipmapChainCommand = struct {
+    levels: []const *Texture,
+};
+
 const Mipmap3DCommand = struct {
     source0: *Texture,
     source1: ?*Texture,
@@ -863,6 +867,7 @@ const Command = union(enum) {
     copy_texture_to_buffer: TextureBufferCommand,
     copy_texture_to_texture: TextureTextureCommand,
     generate_mipmap: MipmapCommand,
+    generate_srgb_mipmap_chain: MipmapChainCommand,
     generate_mipmap_3d: Mipmap3DCommand,
     generate_mipmap_3d_array: Mipmap3DArrayCommand,
     fill_buffer: FillBufferCommand,
@@ -891,6 +896,7 @@ pub const CommandBuffer = struct {
     vertices: std.ArrayList(abi.Vertex) = .empty,
     sample_mipmaps: std.ArrayList(*Texture) = .empty,
     owned_mipmap_source_lists: std.ArrayList([]*Texture) = .empty,
+    owned_mipmap_chain_lists: std.ArrayList([]*Texture) = .empty,
     owned_compute_buffers: std.ArrayList(*Buffer) = .empty,
 
     pub fn deinit(self: *CommandBuffer) void {
@@ -899,6 +905,8 @@ pub const CommandBuffer = struct {
         self.sample_mipmaps.deinit(allocator);
         for (self.owned_mipmap_source_lists.items) |sources| allocator.free(sources);
         self.owned_mipmap_source_lists.deinit(allocator);
+        for (self.owned_mipmap_chain_lists.items) |levels| allocator.free(levels);
+        self.owned_mipmap_chain_lists.deinit(allocator);
         for (self.owned_compute_buffers.items) |buffer| destroyBuffer(buffer);
         self.owned_compute_buffers.deinit(allocator);
         self.magic = 0;
@@ -933,6 +941,21 @@ pub const CommandBuffer = struct {
             .destination = destination,
         } }) catch |err| {
             self.owned_mipmap_source_lists.items.len -= 1;
+            allocator.free(owned);
+            return err;
+        };
+    }
+
+    fn appendSrgbMipmapChain(self: *CommandBuffer, levels: []const *Texture) Error!void {
+        if (levels.len < 2) return error.InvalidArgument;
+        const owned = allocator.alloc(*Texture, levels.len) catch return error.OutOfMemory;
+        @memcpy(owned, levels);
+        self.owned_mipmap_chain_lists.append(allocator, owned) catch {
+            allocator.free(owned);
+            return error.OutOfMemory;
+        };
+        _ = self.append(.{ .generate_srgb_mipmap_chain = .{ .levels = owned } }) catch |err| {
+            self.owned_mipmap_chain_lists.items.len -= 1;
             allocator.free(owned);
             return err;
         };
@@ -2765,6 +2788,15 @@ pub const CommandBuffer = struct {
                 defer sparseFlushTexture(mipmap.source);
                 defer sparseFlushTexture(mipmap.destination);
                 generateMipmap(mipmap) catch |err| return self.fail(err);
+            },
+            .generate_srgb_mipmap_chain => |mipmap| {
+                if (mipmap.levels.len < 2) return self.fail(error.InvalidArgument);
+                for (mipmap.levels) |level| {
+                    if (!validTexture(level) or level.device != self.queue.device) return self.fail(error.InvalidResource);
+                    sparseSyncTexture(level);
+                }
+                defer for (mipmap.levels) |level| sparseFlushTexture(level);
+                generateSrgb8MipmapChain(mipmap.levels) catch |err| return self.fail(err);
             },
             .generate_mipmap_3d => |mipmap| {
                 if (!validTexture(mipmap.source0) or !validTexture(mipmap.destination) or
@@ -4894,6 +4926,16 @@ pub const BlitEncoder = struct {
         _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
     }
 
+    pub fn generateSrgbMipmapChain(self: *BlitEncoder, levels: []const *Texture) Error!void {
+        if (!self.open() or levels.len < 2) return error.InvalidArgument;
+        const format = levels[0].format;
+        if (!isSrgb8Format(format)) return error.UnsupportedFormat;
+        for (levels) |level| {
+            if (!validTexture(level) or level.device != self.command_buffer.queue.device or level.format != format) return error.InvalidArgument;
+        }
+        try self.command_buffer.appendSrgbMipmapChain(levels);
+    }
+
     pub fn generateMipmap3D(self: *BlitEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture) Error!void {
         const denominator: u32 = if (source1 != null) 2 else 1;
         try self.generateMipmap3DWeighted(source0, source1, destination, if (source1 != null) 1 else 0, denominator);
@@ -5274,6 +5316,16 @@ pub const ComputeEncoder = struct {
         _ = try self.command_buffer.append(.{ .generate_mipmap = .{ .source = source, .destination = destination } });
     }
 
+    pub fn generateSrgbMipmapChain(self: *ComputeEncoder, levels: []const *Texture) Error!void {
+        if (!self.open() or levels.len < 2) return error.InvalidArgument;
+        const format = levels[0].format;
+        if (!isSrgb8Format(format)) return error.UnsupportedFormat;
+        for (levels) |level| {
+            if (!validTexture(level) or level.device != self.command_buffer.queue.device or level.format != format) return error.InvalidArgument;
+        }
+        try self.command_buffer.appendSrgbMipmapChain(levels);
+    }
+
     pub fn generateMipmap3D(self: *ComputeEncoder, source0: *Texture, source1: ?*Texture, destination: *Texture) Error!void {
         const denominator: u32 = if (source1 != null) 2 else 1;
         try self.generateMipmap3DWeighted(source0, source1, destination, if (source1 != null) 1 else 0, denominator);
@@ -5457,6 +5509,13 @@ fn srgb8ChannelCount(format: TextureFormat) usize {
         .rg8_unorm_srgb => 2,
         .rgba8_unorm_srgb, .bgra8_unorm_srgb => 4,
         else => unreachable,
+    };
+}
+
+fn isSrgb8Format(format: TextureFormat) bool {
+    return switch (format) {
+        .r8_unorm_srgb, .rg8_unorm_srgb, .rgba8_unorm_srgb, .bgra8_unorm_srgb => true,
+        else => false,
     };
 }
 
@@ -7122,28 +7181,132 @@ fn generateUnorm8Mipmap(command: MipmapCommand) Error!void {
 fn generateSrgb8Mipmap(command: MipmapCommand) Error!void {
     const channels = srgb8ChannelCount(command.source.format);
     if (command.destination.width == 0 or command.destination.height == 0 or
-        command.destination.width >= command.source.width or command.destination.height >= command.source.height or
+        command.destination.width > command.source.width or (command.source.width > 1 and command.destination.width == command.source.width) or
+        command.destination.height > command.source.height or (command.source.height > 1 and command.destination.height == command.source.height) or
         command.destination.format != command.source.format) return error.InvalidArgument;
+    // When the source footprint is an integral number of destination texels,
+    // Apple's sRGB mip generator uses the complete footprint. Preserve that
+    // path for direct multi-level reductions (for example 8x8 -> 2x2); the
+    // center-weighted path below is needed only when an odd dimension leaves
+    // a fractional footprint (for example 5x3 -> 2x1).
+    if (command.source.width % command.destination.width == 0 and
+        command.source.height % command.destination.height == 0)
+    {
+        for (0..command.destination.height) |y| {
+            const source_y = mipmapRange(command.source.height, command.destination.height, y);
+            for (0..command.destination.width) |x| {
+                const source_x = mipmapRange(command.source.width, command.destination.width, x);
+                const footprint = (source_x.high - source_x.low) * (source_y.high - source_y.low);
+                const denominator = @as(f64, @floatFromInt(footprint));
+                var sums = [_]f64{ 0, 0, 0, 0 };
+                var alpha_sum: f32 = 0;
+                for (source_y.low..source_y.high) |source_y_index| {
+                    for (source_x.low..source_x.high) |source_x_index| {
+                        const color = readSrgb8MipmapColor(command.source, source_x_index, source_y_index);
+                        for (0..channels) |component| sums[component] += color[component];
+                        if (channels == 4) alpha_sum += @floatCast(color[3]);
+                    }
+                }
+                writeSrgb8MipmapColor(command.destination, x, y, .{
+                    sums[0] / denominator, sums[1] / denominator,
+                    sums[2] / denominator, if (channels == 4) @as(f64, @floatCast(alpha_sum / @as(f32, @floatFromInt(footprint)))) else 1,
+                });
+            }
+        }
+        return;
+    }
     for (0..command.destination.height) |y| {
-        const source_y = mipmapRange(command.source.height, command.destination.height, y);
+        const source_y = mipmapAxis(command.source.height, command.destination.height, y);
         for (0..command.destination.width) |x| {
-            const source_x = mipmapRange(command.source.width, command.destination.width, x);
-            const footprint = (source_x.high - source_x.low) * (source_y.high - source_y.low);
-            const denominator = @as(f64, @floatFromInt(footprint));
+            const source_x = mipmapAxis(command.source.width, command.destination.width, x);
+            const denominator = @as(f64, @floatFromInt(source_x.denominator * source_y.denominator));
             var sums = [_]f64{ 0, 0, 0, 0 };
-            var alpha_sum: f32 = 0;
-            for (source_y.low..source_y.high) |source_y_index| {
-                for (source_x.low..source_x.high) |source_x_index| {
-                    const color = readSrgb8MipmapColor(command.source, source_x_index, source_y_index);
-                    for (0..channels) |component| sums[component] += color[component];
-                    if (channels == 4) alpha_sum += @floatCast(color[3]);
+            const x_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_x.low, .weight = source_x.low_weight },
+                .{ .index = source_x.high, .weight = source_x.high_weight },
+            };
+            const y_weights = [_]struct { index: usize, weight: u64 }{
+                .{ .index = source_y.low, .weight = source_y.low_weight },
+                .{ .index = source_y.high, .weight = source_y.high_weight },
+            };
+            for (y_weights) |y_sample| {
+                if (y_sample.weight == 0) continue;
+                for (x_weights) |x_sample| {
+                    if (x_sample.weight == 0) continue;
+                    const color = readSrgb8MipmapColor(command.source, x_sample.index, y_sample.index);
+                    const weight = @as(f64, @floatFromInt(x_sample.weight * y_sample.weight));
+                    for (0..channels) |component| sums[component] += color[component] * weight;
                 }
             }
             writeSrgb8MipmapColor(command.destination, x, y, .{
                 sums[0] / denominator, sums[1] / denominator,
-                sums[2] / denominator, if (channels == 4) @as(f64, @floatCast(alpha_sum / @as(f32, @floatFromInt(footprint)))) else 1,
+                sums[2] / denominator, if (channels == 4) sums[3] / denominator else 1,
             });
         }
+    }
+}
+
+fn generateSrgb8MipmapChain(levels: []const *Texture) Error!void {
+    if (levels.len < 2) return error.InvalidArgument;
+    const base = levels[0];
+    const channels = srgb8ChannelCount(base.format);
+    if (base.width == 0 or base.height == 0) return error.InvalidArgument;
+    for (levels) |level| {
+        if (level.format != base.format or level.width == 0 or level.height == 0) return error.InvalidArgument;
+    }
+
+    const base_pixel_count = std.math.mul(usize, base.width, base.height) catch return error.InvalidArgument;
+    var current = allocator.alloc([4]f64, base_pixel_count) catch return error.OutOfMemory;
+    defer allocator.free(current);
+    for (0..base.height) |y| {
+        for (0..base.width) |x| {
+            current[y * base.width + x] = readSrgb8MipmapColor(base, x, y);
+        }
+    }
+
+    var source_width = base.width;
+    var source_height = base.height;
+    for (levels[1..]) |destination| {
+        const destination_width = if (source_width > 1) source_width / 2 else 1;
+        const destination_height = if (source_height > 1) source_height / 2 else 1;
+        if (destination.width != destination_width or destination.height != destination_height) return error.InvalidArgument;
+        const destination_pixel_count = std.math.mul(usize, destination_width, destination_height) catch return error.InvalidArgument;
+        var next = allocator.alloc([4]f64, destination_pixel_count) catch return error.OutOfMemory;
+        errdefer allocator.free(next);
+        for (0..destination_height) |y| {
+            const source_y = mipmapAxis(source_height, destination_height, y);
+            for (0..destination_width) |x| {
+                const source_x = mipmapAxis(source_width, destination_width, x);
+                const denominator = @as(f64, @floatFromInt(source_x.denominator * source_y.denominator));
+                var sums = [_]f64{ 0, 0, 0, 0 };
+                const x_weights = [_]struct { index: usize, weight: u64 }{
+                    .{ .index = source_x.low, .weight = source_x.low_weight },
+                    .{ .index = source_x.high, .weight = source_x.high_weight },
+                };
+                const y_weights = [_]struct { index: usize, weight: u64 }{
+                    .{ .index = source_y.low, .weight = source_y.low_weight },
+                    .{ .index = source_y.high, .weight = source_y.high_weight },
+                };
+                for (y_weights) |y_sample| {
+                    if (y_sample.weight == 0) continue;
+                    for (x_weights) |x_sample| {
+                        if (x_sample.weight == 0) continue;
+                        const color = current[y_sample.index * source_width + x_sample.index];
+                        const weight = @as(f64, @floatFromInt(x_sample.weight * y_sample.weight));
+                        for (0..channels) |component| sums[component] += color[component] * weight;
+                    }
+                }
+                next[y * destination_width + x] = .{
+                    sums[0] / denominator, sums[1] / denominator,
+                    sums[2] / denominator, if (channels == 4) sums[3] / denominator else 1,
+                };
+                writeSrgb8MipmapColor(destination, x, y, next[y * destination_width + x]);
+            }
+        }
+        allocator.free(current);
+        current = next;
+        source_width = destination_width;
+        source_height = destination_height;
     }
 }
 
@@ -13098,6 +13261,16 @@ pub export fn zpu_metal_blit_encoder_generate_mipmap(encoder: ?*BlitEncoder, sou
     return 0;
 }
 
+pub export fn zpu_metal_blit_encoder_generate_srgb_mipmap_chain(encoder: ?*BlitEncoder, levels: ?[*]const ?*Texture, level_count: usize) callconv(.c) c_int {
+    const values = levels orelse return -1;
+    if (level_count < 2) return errorCode(error.InvalidArgument);
+    var unwrapped = allocator.alloc(*Texture, level_count) catch return errorCode(error.OutOfMemory);
+    defer allocator.free(unwrapped);
+    for (0..level_count) |index| unwrapped[index] = values[index] orelse return errorCode(error.InvalidArgument);
+    (encoder orelse return -1).generateSrgbMipmapChain(unwrapped) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_blit_encoder_generate_mipmap_3d(encoder: ?*BlitEncoder, source0: ?*Texture, source1: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
     (encoder orelse return -1).generateMipmap3D(source0 orelse return -1, source1, destination orelse return -1) catch |err| return errorCode(err);
     return 0;
@@ -13202,6 +13375,16 @@ pub export fn zpu_metal_compute_encoder_copy_texture_to_texture(encoder: ?*Compu
 
 pub export fn zpu_metal_compute_encoder_generate_mipmap(encoder: ?*ComputeEncoder, source: ?*Texture, destination: ?*Texture) callconv(.c) c_int {
     (encoder orelse return -1).generateMipmap(source orelse return -1, destination orelse return -1) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_generate_srgb_mipmap_chain(encoder: ?*ComputeEncoder, levels: ?[*]const ?*Texture, level_count: usize) callconv(.c) c_int {
+    const values = levels orelse return -1;
+    if (level_count < 2) return errorCode(error.InvalidArgument);
+    var unwrapped = allocator.alloc(*Texture, level_count) catch return errorCode(error.OutOfMemory);
+    defer allocator.free(unwrapped);
+    for (0..level_count) |index| unwrapped[index] = values[index] orelse return errorCode(error.InvalidArgument);
+    (encoder orelse return -1).generateSrgbMipmapChain(unwrapped) catch |err| return errorCode(err);
     return 0;
 }
 

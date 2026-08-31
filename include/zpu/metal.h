@@ -735,6 +735,7 @@ int zpu_metal_blit_encoder_copy_buffer_to_texture(zpu_metal_blit_encoder *encode
 int zpu_metal_blit_encoder_copy_texture_to_buffer(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source, zpu_metal_region source_region, zpu_metal_buffer *destination, size_t destination_offset, size_t destination_bytes_per_row);
 int zpu_metal_blit_encoder_copy_texture_to_texture(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source, zpu_metal_region source_region, zpu_metal_texture *destination, zpu_metal_region destination_region);
 int zpu_metal_blit_encoder_generate_mipmap(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination);
+int zpu_metal_blit_encoder_generate_srgb_mipmap_chain(zpu_metal_blit_encoder *encoder, zpu_metal_texture *const *levels, size_t level_count);
 int zpu_metal_blit_encoder_generate_mipmap_3d(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination);
 int zpu_metal_blit_encoder_generate_mipmap_3d_weighted(zpu_metal_blit_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination, uint32_t source1_weight_numerator, uint32_t source1_weight_denominator);
 int zpu_metal_blit_encoder_generate_mipmap_3d_array(zpu_metal_blit_encoder *encoder, zpu_metal_texture *const *source_planes, size_t source_count, zpu_metal_texture *destination);
@@ -774,6 +775,7 @@ int zpu_metal_compute_encoder_copy_buffer_to_texture(zpu_metal_compute_encoder *
 int zpu_metal_compute_encoder_copy_texture_to_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source, zpu_metal_region source_region, zpu_metal_buffer *destination, size_t destination_offset, size_t destination_bytes_per_row);
 int zpu_metal_compute_encoder_copy_texture_to_texture(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source, zpu_metal_region source_region, zpu_metal_texture *destination, zpu_metal_region destination_region);
 int zpu_metal_compute_encoder_generate_mipmap(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source, zpu_metal_texture *destination);
+int zpu_metal_compute_encoder_generate_srgb_mipmap_chain(zpu_metal_compute_encoder *encoder, zpu_metal_texture *const *levels, size_t level_count);
 int zpu_metal_compute_encoder_generate_mipmap_3d(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination);
 int zpu_metal_compute_encoder_generate_mipmap_3d_weighted(zpu_metal_compute_encoder *encoder, zpu_metal_texture *source0, zpu_metal_texture *source1, zpu_metal_texture *destination, uint32_t source1_weight_numerator, uint32_t source1_weight_denominator);
 int zpu_metal_compute_encoder_generate_mipmap_3d_array(zpu_metal_compute_encoder *encoder, zpu_metal_texture *const *source_planes, size_t source_count, zpu_metal_texture *destination);

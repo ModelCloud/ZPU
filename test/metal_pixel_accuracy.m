@@ -17077,6 +17077,96 @@ int main(void) {
             return 71;
         }
 
+        /* Odd dimensions are not equivalent to a simple 2x2 box: Metal's
+         * destination-center filter gives the edge texels fractional weight.
+         * Exercise the complete 5x3 -> 2x1 -> 1x1 chain for both ordinary and
+         * sRGB storage. Apple remains the oracle; the adapter's mip levels
+         * must be produced by its CPU/ZPU blit path and remain zero until the
+         * command buffer is committed. */
+        const MTLPixelFormat odd_mipmap_formats[] = {
+            MTLPixelFormatRGBA8Unorm, MTLPixelFormatRGBA8Unorm_sRGB,
+        };
+        for (NSUInteger odd_format_index = 0;
+             odd_format_index < sizeof(odd_mipmap_formats) / sizeof(odd_mipmap_formats[0]);
+             ++odd_format_index) {
+            MTLTextureDescriptor *odd_mipmap_descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:odd_mipmap_formats[odd_format_index]
+                                                                    width:5 height:3 mipmapped:YES];
+            odd_mipmap_descriptor.storageMode = MTLStorageModeShared;
+            odd_mipmap_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            id<MTLTexture> native_odd_mipmap_texture = [device newTextureWithDescriptor:odd_mipmap_descriptor];
+            id<MTLTexture> adapter_odd_mipmap_texture =
+                [adapter_device newTextureWithDescriptor:odd_mipmap_descriptor];
+            uint8_t odd_mipmap_base[5 * 3 * 4];
+            for (size_t index = 0; index < sizeof(odd_mipmap_base); ++index) {
+                odd_mipmap_base[index] = (uint8_t)((index * 47u + odd_format_index * 19u + 13u) & 0xffu);
+            }
+            [native_odd_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                         mipmapLevel:0
+                                           withBytes:odd_mipmap_base
+                                         bytesPerRow:5 * 4];
+            [adapter_odd_mipmap_texture replaceRegion:MTLRegionMake2D(0, 0, 5, 3)
+                                          mipmapLevel:0
+                                            withBytes:odd_mipmap_base
+                                          bytesPerRow:5 * 4];
+            id<MTLCommandBuffer> native_odd_mipmap_command_buffer = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> native_odd_mipmap_blit =
+                [native_odd_mipmap_command_buffer blitCommandEncoder];
+            [native_odd_mipmap_blit generateMipmapsForTexture:native_odd_mipmap_texture];
+            [native_odd_mipmap_blit endEncoding];
+            [native_odd_mipmap_command_buffer commit];
+            [native_odd_mipmap_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_odd_mipmap_command_buffer = [adapter_queue commandBuffer];
+            id<MTLBlitCommandEncoder> adapter_odd_mipmap_blit =
+                [adapter_odd_mipmap_command_buffer blitCommandEncoder];
+            [adapter_odd_mipmap_blit generateMipmapsForTexture:adapter_odd_mipmap_texture];
+            [adapter_odd_mipmap_blit endEncoding];
+            uint8_t adapter_odd_deferred_level_one[2 * 1 * 4];
+            [adapter_odd_mipmap_texture getBytes:adapter_odd_deferred_level_one
+                                      bytesPerRow:2 * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, 2, 1)
+                                      mipmapLevel:1];
+            [adapter_odd_mipmap_command_buffer commit];
+            [adapter_odd_mipmap_command_buffer waitUntilCompleted];
+            uint8_t native_odd_level_one[2 * 1 * 4];
+            uint8_t adapter_odd_level_one[2 * 1 * 4];
+            uint8_t native_odd_level_two[4];
+            uint8_t adapter_odd_level_two[4];
+            [native_odd_mipmap_texture getBytes:native_odd_level_one
+                                     bytesPerRow:2 * 4
+                                      fromRegion:MTLRegionMake2D(0, 0, 2, 1)
+                                     mipmapLevel:1];
+            [adapter_odd_mipmap_texture getBytes:adapter_odd_level_one
+                                      bytesPerRow:2 * 4
+                                       fromRegion:MTLRegionMake2D(0, 0, 2, 1)
+                                      mipmapLevel:1];
+            [native_odd_mipmap_texture getBytes:native_odd_level_two
+                                     bytesPerRow:4
+                                      fromRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                     mipmapLevel:2];
+            [adapter_odd_mipmap_texture getBytes:adapter_odd_level_two
+                                      bytesPerRow:4
+                                       fromRegion:MTLRegionMake2D(0, 0, 1, 1)
+                                      mipmapLevel:2];
+            if (native_odd_mipmap_texture == nil || adapter_odd_mipmap_texture == nil ||
+                native_odd_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                adapter_odd_mipmap_command_buffer.status != MTLCommandBufferStatusCompleted ||
+                memcmp(adapter_odd_deferred_level_one, (const uint8_t[sizeof(adapter_odd_deferred_level_one)]){0},
+                       sizeof(adapter_odd_deferred_level_one)) != 0 ||
+                memcmp(native_odd_level_one, adapter_odd_level_one, sizeof(native_odd_level_one)) != 0 ||
+                memcmp(native_odd_level_two, adapter_odd_level_two, sizeof(native_odd_level_two)) != 0) {
+                size_t mismatch = 0;
+                while (mismatch < sizeof(native_odd_level_one) &&
+                       native_odd_level_one[mismatch] == adapter_odd_level_one[mismatch]) mismatch += 1;
+                fprintf(stderr, "metal-pixel: odd-dimension %s mipmap mismatch at byte %zu Metal=%u ZPU=%u\n",
+                        odd_mipmap_formats[odd_format_index] == MTLPixelFormatRGBA8Unorm_sRGB ? "sRGB" : "linear",
+                        mismatch,
+                        mismatch < sizeof(native_odd_level_one) ? native_odd_level_one[mismatch] : 0,
+                        mismatch < sizeof(adapter_odd_level_one) ? adapter_odd_level_one[mismatch] : 0);
+                return 73;
+            }
+        }
+
         MTLTextureDescriptor *mip_render_descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                 width:4

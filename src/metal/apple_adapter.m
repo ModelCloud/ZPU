@@ -17405,11 +17405,30 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
         _stages |= MTLStageBlit;
         return;
     }
+    if (zpu_srgb_texture_format(zpuTexture->_pixelFormat)) {
+        const NSUInteger levelCount = zpuTexture.mipmapLevelCount;
+        if (levelCount > SIZE_MAX / sizeof(zpu_metal_texture *)) { [_owner markError]; return; }
+        for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
+            zpu_metal_texture **levels = calloc(levelCount, sizeof(zpu_metal_texture *));
+            if (levels == NULL) { [_owner markError]; return; }
+            BOOL valid = YES;
+            for (NSUInteger level = 0; level < levelCount; ++level) {
+                levels[level] = [zpuTexture zpuTextureAtLevel:level slice:slice];
+                valid = valid && levels[level] != NULL;
+            }
+            const BOOL encoded = valid &&
+                zpu_metal_compute_encoder_generate_srgb_mipmap_chain(_legacy->_zpuEncoder, levels, levelCount) == ZPU_METAL_OK;
+            free(levels);
+            if (!encoded) { [_owner markError]; return; }
+        }
+        [_owner->_legacyBuffer retainResource:zpuTexture];
+        _stages |= MTLStageBlit;
+        return;
+    }
     for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
-            const NSUInteger sourceLevel = zpu_srgb_texture_format(zpuTexture->_pixelFormat) ? 0 : level;
             if (zpu_metal_compute_encoder_generate_mipmap(
-                    _legacy->_zpuEncoder, [zpuTexture zpuTextureAtLevel:sourceLevel slice:slice],
+                    _legacy->_zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
                     [zpuTexture zpuTextureAtLevel:level + 1 slice:slice]) != ZPU_METAL_OK) {
                 [_owner markError];
                 return;
@@ -19818,11 +19837,29 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
         [_owner retainResource:zpuTexture];
         return;
     }
+    if (zpu_srgb_texture_format(zpuTexture->_pixelFormat)) {
+        const NSUInteger levelCount = zpuTexture.mipmapLevelCount;
+        if (levelCount > SIZE_MAX / sizeof(zpu_metal_texture *)) { [_owner markError]; return; }
+        for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
+            zpu_metal_texture **levels = calloc(levelCount, sizeof(zpu_metal_texture *));
+            if (levels == NULL) { [_owner markError]; return; }
+            BOOL valid = YES;
+            for (NSUInteger level = 0; level < levelCount; ++level) {
+                levels[level] = [zpuTexture zpuTextureAtLevel:level slice:slice];
+                valid = valid && levels[level] != NULL;
+            }
+            const BOOL encoded = valid &&
+                zpu_metal_blit_encoder_generate_srgb_mipmap_chain(_zpuEncoder, levels, levelCount) == ZPU_METAL_OK;
+            free(levels);
+            if (!encoded) { [_owner markError]; return; }
+        }
+        [_owner retainResource:zpuTexture];
+        return;
+    }
     for (NSUInteger slice = 0; slice < zpu_texture_transfer_slice_count(zpuTexture); ++slice) {
         for (NSUInteger level = 0; level + 1 < zpuTexture.mipmapLevelCount; ++level) {
-            const NSUInteger sourceLevel = zpu_srgb_texture_format(zpuTexture->_pixelFormat) ? 0 : level;
             if (zpu_metal_blit_encoder_generate_mipmap(
-                    _zpuEncoder, [zpuTexture zpuTextureAtLevel:sourceLevel slice:slice],
+                    _zpuEncoder, [zpuTexture zpuTextureAtLevel:level slice:slice],
                     [zpuTexture zpuTextureAtLevel:level + 1 slice:slice]) != ZPU_METAL_OK) { [_owner markError]; return; }
         }
     }
