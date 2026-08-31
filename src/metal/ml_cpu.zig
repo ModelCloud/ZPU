@@ -239,8 +239,7 @@ fn writeNibble(view: *const TensorView, info: ViewInfo, element: usize, value: u
     return true;
 }
 
-fn copyElement(source: *const TensorView, source_info: ViewInfo, source_element: usize,
-               destination: *const TensorView, destination_info: ViewInfo, destination_element: usize) bool {
+fn copyElement(source: *const TensorView, source_info: ViewInfo, source_element: usize, destination: *const TensorView, destination_info: ViewInfo, destination_element: usize) bool {
     if (source_info.element_bits == 4) {
         const value = readNibble(source, source_info, source_element) orelse return false;
         return writeNibble(destination, destination_info, destination_element, value);
@@ -251,8 +250,7 @@ fn copyElement(source: *const TensorView, source_info: ViewInfo, source_element:
     const destination_data = destination.data orelse return false;
     if (source_offset > source.byte_length - source_info.element_bytes or
         destination_offset > destination.byte_length - destination_info.element_bytes) return false;
-    @memcpy(destination_data[destination_offset .. destination_offset + destination_info.element_bytes],
-        source_data[source_offset .. source_offset + source_info.element_bytes]);
+    @memcpy(destination_data[destination_offset .. destination_offset + destination_info.element_bytes], source_data[source_offset .. source_offset + source_info.element_bytes]);
     return true;
 }
 
@@ -320,12 +318,10 @@ fn makeDenseView(template: TensorView, info: ViewInfo, storage: []u8) TensorView
     return view;
 }
 
-fn copyDenseToDestination(dense: *const TensorView, dense_info: ViewInfo,
-                         destination: *const TensorView, destination_info: ViewInfo) bool {
+fn copyDenseToDestination(dense: *const TensorView, dense_info: ViewInfo, destination: *const TensorView, destination_info: ViewInfo) bool {
     var output_coordinates: [max_rank]usize = @splat(0);
     for (0..destination_info.element_count) |element| {
-        const destination_element = logicalElementOffset(destination,
-            output_coordinates[0..destination_info.rank]) orelse return false;
+        const destination_element = logicalElementOffset(destination, output_coordinates[0..destination_info.rank]) orelse return false;
         if (!copyElement(dense, dense_info, element, destination, destination_info, destination_element)) {
             return false;
         }
@@ -427,8 +423,7 @@ pub fn operation(arguments: *const OperationArguments) Status {
     const status = providerStatus(callback(backend.context, &dense_arguments));
     if (status != .ok) return status;
     const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
-    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination,
-                                 &arguments.destination, destination_info)) return .invalid_argument;
+    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
     return .ok;
 }
 
@@ -438,8 +433,7 @@ pub fn operation(arguments: *const OperationArguments) Status {
 /// tensor view contract: the provider sees offset-zero, axis-0-fast, dense
 /// buffers only. A provider decline leaves the original destination untouched
 /// and falls through to the exact strided ZPU reference path.
-fn tryProvider(arguments: *const TransposeArguments, source_info: ViewInfo,
-               destination_info: ViewInfo) ?Status {
+fn tryProvider(arguments: *const TransposeArguments, source_info: ViewInfo, destination_info: ViewInfo) ?Status {
     const backend = backendSnapshot() orelse return null;
     const callback = backend.transpose orelse return .unsupported;
     const source_bytes = denseByteCount(source_info) orelse return .invalid_argument;
@@ -463,8 +457,7 @@ fn tryProvider(arguments: *const TransposeArguments, source_info: ViewInfo,
     if (status != .ok) return status;
 
     const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
-    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination,
-                                 &arguments.destination, destination_info)) return .invalid_argument;
+    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
     return .ok;
 }
 
@@ -632,7 +625,8 @@ fn addOperationProvider(context: ?*anyopaque, arguments: *const OperationArgumen
         arguments.inputs[1].offset_bytes != 0 or arguments.destination.offset_bytes != 0 or
         arguments.inputs[0].strides[0] != 1 or arguments.inputs[0].strides[1] != 2 or
         arguments.inputs[1].strides[0] != 1 or arguments.inputs[1].strides[1] != 2 or
-        arguments.destination.strides[0] != 1 or arguments.destination.strides[1] != 2) {
+        arguments.destination.strides[0] != 1 or arguments.destination.strides[1] != 2)
+    {
         return @intFromEnum(Status.invalid_argument);
     }
     const left = @as([*]const u32, @ptrCast(@alignCast(arguments.inputs[0].data orelse return @intFromEnum(Status.invalid_argument))));
@@ -642,9 +636,7 @@ fn addOperationProvider(context: ?*anyopaque, arguments: *const OperationArgumen
     return @intFromEnum(Status.ok);
 }
 
-fn providerTestArguments(source_storage: []u32, destination_storage: []u32,
-                         dimensions: [max_rank]usize, output_dimensions: [max_rank]usize,
-                         strides: [max_rank]usize, output_strides: [max_rank]usize) TransposeArguments {
+fn providerTestArguments(source_storage: []u32, destination_storage: []u32, dimensions: [max_rank]usize, output_dimensions: [max_rank]usize, strides: [max_rank]usize, output_strides: [max_rank]usize) TransposeArguments {
     return .{
         .source = testView(u32, source_storage, 2, dimensions, strides),
         .destination = testView(u32, destination_storage, 2, output_dimensions, output_strides),
@@ -665,8 +657,7 @@ test "optional CPU provider receives dense views and preserves raw layout" {
     const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
     const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
     const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
-    const arguments = providerTestArguments(&source_storage, &destination_storage,
-        dimensions, output_dimensions, strides, output_strides);
+    const arguments = providerTestArguments(&source_storage, &destination_storage, dimensions, output_dimensions, strides, output_strides);
     var probe = ProviderProbe{};
     const context: *anyopaque = @ptrCast(&probe);
     const backend = Backend{
@@ -706,8 +697,7 @@ test "unsupported CPU provider falls back to exact ZPU transpose" {
     const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
     const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
     const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
-    const arguments = providerTestArguments(&source_storage, &destination_storage,
-        dimensions, output_dimensions, strides, output_strides);
+    const arguments = providerTestArguments(&source_storage, &destination_storage, dimensions, output_dimensions, strides, output_strides);
     var probe = ProviderProbe{};
     const context: *anyopaque = @ptrCast(&probe);
     const backend = Backend{
@@ -753,16 +743,10 @@ test "optional CPU operation provider receives dense ZML views" {
         .input_count = 2,
         .reserved = 0,
         .inputs = .{
-            .{ .data = @ptrCast(left_storage[0..].ptr), .byte_length = left_storage.len * @sizeOf(u32),
-               .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions,
-               .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
-            .{ .data = @ptrCast(right_storage[0..].ptr), .byte_length = right_storage.len * @sizeOf(u32),
-               .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions,
-               .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+            .{ .data = @ptrCast(left_storage[0..].ptr), .byte_length = left_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+            .{ .data = @ptrCast(right_storage[0..].ptr), .byte_length = right_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
         },
-        .destination = .{ .data = @ptrCast(destination_storage[0..].ptr), .byte_length = destination_storage.len * @sizeOf(u32),
-            .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions,
-            .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+        .destination = .{ .data = @ptrCast(destination_storage[0..].ptr), .byte_length = destination_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
         .permutation = @splat(0),
     };
     var probe = OperationProbe{};
