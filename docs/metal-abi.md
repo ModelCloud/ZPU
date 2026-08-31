@@ -870,7 +870,12 @@ triangle path:
   only offset-zero dense CPU views; the operation provider receives an
   explicit operation and element-type identifier, while a named provider
   receives a bounded function name plus its input count and element type. This
-  is the intended seam for ZML/cpu graph functions: the provider can use its
+  named seam also has an optional versioned catalog hook; catalog entries are
+  copied into `MTLLibrary.functionNames` only after the provider query accepts
+  their UTF-8 name and tensor signature. This keeps dynamic ZML/cpu graph
+  functions discoverable through the ordinary Metal-shaped library API while
+  preserving the same CPU-only dispatch path.
+  This is the intended seam for ZML/cpu graph functions: the provider can use its
   own portable CPU runtime and ISA kernels (AdvSIMD/NEON on arm64, AVX tiers on
   x86_64) without this package learning Metal, MSL, or MLIR. Returning
   `ZPU_CPU_ML_STATUS_UNSUPPORTED` selects the exact ZPU reference

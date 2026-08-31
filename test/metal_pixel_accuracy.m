@@ -13992,6 +13992,7 @@ typedef struct {
 typedef struct {
     NSUInteger queryCalls;
     NSUInteger operationCalls;
+    NSUInteger catalogCalls;
 } ZPUCPUMLNamedProviderProbe;
 
 /* This callback stands in for an external ZML/cpu provider. It receives only
@@ -14072,6 +14073,18 @@ static int zpu_test_cpu_ml_named_transpose_provider(
             destination[x + y * 3] = source[y + x * 2];
         }
     }
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int zpu_test_cpu_ml_named_transpose_name_at(
+    void *context, size_t index, const char **functionName, size_t *functionNameLength) {
+    ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
+    if (probe == NULL || functionName == NULL || functionNameLength == NULL || index != 0) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->catalogCalls;
+    *functionName = "zml_cpu_transpose_f32";
+    *functionNameLength = strlen("zml_cpu_transpose_f32");
     return ZPU_CPU_ML_STATUS_OK;
 }
 
@@ -14218,6 +14231,7 @@ static int test_metal4_cpu_named_transpose_provider_profile(
     id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
     id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
     id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
+    (void)adapterLibrary;
     enum { sourceWordCount = 34, destinationWordCount = 19 };
     MTLTensorExtents *sourceDimensions =
         [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){2, 3}];
@@ -14254,15 +14268,24 @@ static int test_metal4_cpu_named_transpose_provider_profile(
         .query = zpu_test_cpu_ml_named_transpose_query,
         .operation = zpu_test_cpu_ml_named_transpose_provider,
     };
+    const zpu_cpu_ml_named_operation_catalog catalog = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_CATALOG_ABI_VERSION,
+        .context = &providerProbe,
+        .count = 1,
+        .name_at = zpu_test_cpu_ml_named_transpose_name_at,
+    };
     const int providerRegistration = zpu_cpu_ml_set_named_operation_backend(&provider);
+    const int catalogRegistration = zpu_cpu_ml_set_named_operation_catalog(&catalog);
 
     NSError *adapterError = nil;
     MTL4LibraryFunctionDescriptor *functionDescriptor = [MTL4LibraryFunctionDescriptor new];
-    functionDescriptor.library = adapterLibrary;
+    id<MTLLibrary> providerLibrary =
+        [adapterDevice newLibraryWithSource:@"" options:nil error:&adapterError];
+    functionDescriptor.library = providerLibrary;
     functionDescriptor.name = @"zml_cpu_transpose_f32";
-    id<MTLFunction> providerFunction = [adapterLibrary newFunctionWithName:functionDescriptor.name];
+    id<MTLFunction> providerFunction = [providerLibrary newFunctionWithName:functionDescriptor.name];
     MTLFunctionReflection *providerReflection =
-        [adapterLibrary reflectionForFunctionWithName:functionDescriptor.name];
+        [providerLibrary reflectionForFunctionWithName:functionDescriptor.name];
     MTL4MachineLearningPipelineDescriptor *pipelineDescriptor =
         [MTL4MachineLearningPipelineDescriptor new];
     pipelineDescriptor.machineLearningFunctionDescriptor = functionDescriptor;
@@ -14323,6 +14346,7 @@ static int test_metal4_cpu_named_transpose_provider_profile(
         feedbackError = feedback.error;
     }];
     [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+    const int catalogUnregistration = zpu_cpu_ml_set_named_operation_catalog(NULL);
     const int providerUnregistration = zpu_cpu_ml_set_named_operation_backend(NULL);
     if (destinationBuffer != nil && destinationBuffer.contents != NULL) {
         memcpy(adapterValues, destinationBuffer.contents, sizeof(adapterValues));
@@ -14355,8 +14379,11 @@ static int test_metal4_cpu_named_transpose_provider_profile(
         (id<MTLTensorBinding>)pipeline.reflection.bindings[0] : nil;
     id<MTLTensorBinding> outputBinding = pipeline.reflection.bindings.count > 1 ?
         (id<MTLTensorBinding>)pipeline.reflection.bindings[1] : nil;
-    if (providerRegistration != ZPU_CPU_ML_STATUS_OK || providerUnregistration != ZPU_CPU_ML_STATUS_OK ||
-        providerProbe.operationCalls != 1 || providerProbe.queryCalls == 0 || providerFunction == nil ||
+    if (providerRegistration != ZPU_CPU_ML_STATUS_OK || catalogRegistration != ZPU_CPU_ML_STATUS_OK ||
+        catalogUnregistration != ZPU_CPU_ML_STATUS_OK || providerUnregistration != ZPU_CPU_ML_STATUS_OK ||
+        providerProbe.catalogCalls != 1 || providerProbe.operationCalls != 1 || providerProbe.queryCalls == 0 ||
+        providerLibrary == nil || providerLibrary.functionNames.count != 1 ||
+        ![providerLibrary.functionNames containsObject:@"zml_cpu_transpose_f32"] || providerFunction == nil ||
         providerFunction.functionType != MTLFunctionTypeKernel || providerReflection == nil ||
         providerReflection.bindings.count != 2 || adapterError != nil || pipeline == nil ||
         source == nil || destination == nil || table == nil || commandBuffer == nil || encoder == nil ||

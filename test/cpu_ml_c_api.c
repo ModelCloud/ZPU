@@ -9,6 +9,7 @@ struct probe {
     int calls;
     int named_query_calls;
     int named_calls;
+    int catalog_calls;
 };
 
 static int add_u32(void *context, const zpu_cpu_ml_operation_arguments *arguments) {
@@ -65,6 +66,18 @@ static int named_transpose(void *context, const zpu_cpu_ml_named_operation_argum
             destination[x + y * 3] = source[y + x * 2];
         }
     }
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int named_catalog_name_at(void *context, size_t index, const char **function_name,
+                                 size_t *function_name_length) {
+    struct probe *probe = (struct probe *)context;
+    if (probe == NULL || function_name == NULL || function_name_length == NULL || index != 0) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->catalog_calls;
+    *function_name = "zml_cpu_transpose";
+    *function_name_length = strlen("zml_cpu_transpose");
     return ZPU_CPU_ML_STATUS_OK;
 }
 
@@ -135,6 +148,12 @@ int main(void) {
         .query = named_query,
         .operation = named_transpose,
     };
+    const zpu_cpu_ml_named_operation_catalog catalog = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_CATALOG_ABI_VERSION,
+        .context = &probe,
+        .count = 1,
+        .name_at = named_catalog_name_at,
+    };
     zpu_cpu_ml_named_operation_signature signature = {0, 0};
     const zpu_cpu_ml_named_operation_arguments named_arguments = {
         .function_name = "zml_cpu_transpose",
@@ -164,7 +183,15 @@ int main(void) {
         },
         .permutation = {1, 0},
     };
+    const char *catalog_name = NULL;
+    size_t catalog_name_length = 0;
     if (zpu_cpu_ml_set_named_operation_backend(&named_backend) != ZPU_CPU_ML_STATUS_OK ||
+        zpu_cpu_ml_set_named_operation_catalog(&catalog) != ZPU_CPU_ML_STATUS_OK ||
+        zpu_cpu_ml_named_operation_count() != 1 ||
+        zpu_cpu_ml_named_operation_name_at(0, &catalog_name, &catalog_name_length) != ZPU_CPU_ML_STATUS_OK ||
+        catalog_name_length != strlen("zml_cpu_transpose") ||
+        memcmp(catalog_name, "zml_cpu_transpose", catalog_name_length) != 0 ||
+        probe.catalog_calls != 1 ||
         zpu_cpu_ml_named_operation_supported("zml_cpu_transpose", strlen("zml_cpu_transpose"),
                                              &signature) != ZPU_CPU_ML_STATUS_OK ||
         signature.input_count != 1 || signature.element_type != ZPU_CPU_ML_ELEMENT_UINT32 ||
@@ -174,6 +201,7 @@ int main(void) {
         transpose_output[4] != 2 || transpose_output[5] != 4 || transpose_output[6] != 6 ||
         transpose_output[3] != UINT32_C(0xcafebabe) ||
         transpose_output[7] != UINT32_C(0xcafebabe) ||
+        zpu_cpu_ml_set_named_operation_catalog(NULL) != ZPU_CPU_ML_STATUS_OK ||
         zpu_cpu_ml_set_named_operation_backend(NULL) != ZPU_CPU_ML_STATUS_OK) return 92;
     return 0;
 }

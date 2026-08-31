@@ -25,6 +25,7 @@ extern "C" {
 #define ZPU_CPU_ML_BACKEND_ABI_VERSION 1u
 #define ZPU_CPU_ML_OPERATION_ABI_VERSION 1u
 #define ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION 1u
+#define ZPU_CPU_ML_NAMED_OPERATION_CATALOG_ABI_VERSION 1u
 #define ZPU_CPU_ML_MAX_RANK 16u
 #define ZPU_CPU_ML_MAX_INPUTS 2u
 
@@ -147,6 +148,25 @@ typedef struct zpu_cpu_ml_named_operation_backend {
     zpu_cpu_ml_named_operation_fn operation;
 } zpu_cpu_ml_named_operation_backend;
 
+/* Optional discovery for the same named provider. The callback returns a
+ * borrowed UTF-8 byte string that remains valid until the next catalog call
+ * or catalog replacement. The adapter copies it before asking for the next
+ * entry. The provider's query callback remains authoritative for the input
+ * signature, so a catalog cannot advertise an executable function without
+ * also describing its tensor contract. */
+typedef int (*zpu_cpu_ml_named_operation_name_fn)(
+    void *context,
+    size_t index,
+    const char **function_name,
+    size_t *function_name_length);
+
+typedef struct zpu_cpu_ml_named_operation_catalog {
+    uint32_t abi_version;
+    void *context;
+    size_t count;
+    zpu_cpu_ml_named_operation_name_fn name_at;
+} zpu_cpu_ml_named_operation_catalog;
+
 /* Passing NULL unregisters the optional provider. */
 int zpu_cpu_ml_set_backend(const zpu_cpu_ml_backend *backend);
 
@@ -170,6 +190,14 @@ int zpu_cpu_ml_named_operation_supported(
     zpu_cpu_ml_named_operation_signature *signature);
 int zpu_cpu_ml_set_named_operation_backend(
     const zpu_cpu_ml_named_operation_backend *backend);
+/* Passing NULL unregisters optional named-function discovery. */
+int zpu_cpu_ml_set_named_operation_catalog(
+    const zpu_cpu_ml_named_operation_catalog *catalog);
+size_t zpu_cpu_ml_named_operation_count(void);
+int zpu_cpu_ml_named_operation_name_at(
+    size_t index,
+    const char **function_name,
+    size_t *function_name_length);
 int zpu_cpu_ml_named_operation(
     const zpu_cpu_ml_named_operation_arguments *arguments);
 

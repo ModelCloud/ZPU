@@ -5742,6 +5742,24 @@ static BOOL zpu_cpu_ml_named_function_signature(NSString *functionName,
         zpu_cpu_ml_named_operation_supported(name, length, signature) == ZPU_CPU_ML_STATUS_OK;
 }
 
+static void zpu_append_named_cpu_ml_catalog(
+    NSMutableArray<NSString *> *names, NSMutableDictionary<NSString *, NSString *> *implementations) {
+    const size_t count = zpu_cpu_ml_named_operation_count();
+    for (size_t index = 0; index < count; ++index) {
+        const char *bytes = NULL;
+        size_t length = 0;
+        if (zpu_cpu_ml_named_operation_name_at(index, &bytes, &length) != ZPU_CPU_ML_STATUS_OK ||
+            bytes == NULL || length == 0 || length > NSUIntegerMax) continue;
+        NSString *name = [[NSString alloc] initWithBytes:bytes length:(NSUInteger)length
+                                                 encoding:NSUTF8StringEncoding];
+        zpu_cpu_ml_named_operation_signature signature = {0, 0};
+        if (name.length == 0 || !zpu_cpu_ml_named_function_signature(name, &signature) ||
+            [names containsObject:name]) continue;
+        [names addObject:name];
+        implementations[name] = name;
+    }
+}
+
 static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
                                                  ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
                                                  ZPUTensor *destination, uint32_t elementType,
@@ -14448,6 +14466,11 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             implementations[zpu_cpu_intersection_triangle_accept_function_name] =
                 zpu_cpu_intersection_triangle_accept_function_name;
         }
+        /* A CPU ZML provider may publish named graph entry points without
+         * putting them into the source metadata string. Add the provider's
+         * validated catalog entries to the executable library so normal Metal
+         * discovery and direct name lookup observe the same symbol set. */
+        zpu_append_named_cpu_ml_catalog(names, implementations);
         _functionNames = [names copy];
         _functionImplementations = [implementations copy];
         _functionArgumentBufferLayouts = [sourceArgumentBufferLayouts copy];

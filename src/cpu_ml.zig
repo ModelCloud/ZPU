@@ -140,10 +140,28 @@ pub const NamedOperationBackend = extern struct {
 };
 pub const named_operation_backend_abi_version: u32 = 1;
 
+/// Optional discovery callback for the named provider. The returned name is
+/// borrowed until the callback returns; the caller copies it if it needs to
+/// retain it. Signatures are obtained through the provider query callback.
+pub const NamedOperationNameFn = *const fn (
+    context: ?*anyopaque,
+    index: usize,
+    function_name: *?[*]const u8,
+    function_name_length: *usize,
+) callconv(.c) c_int;
+pub const NamedOperationCatalog = extern struct {
+    abi_version: u32,
+    context: ?*anyopaque,
+    count: usize,
+    name_at: ?NamedOperationNameFn,
+};
+pub const named_operation_catalog_abi_version: u32 = 1;
+
 var backend_mutex: std.atomic.Mutex = .unlocked;
 var registered_backend: ?Backend = null;
 var registered_operation_backend: ?OperationBackend = null;
 var registered_named_operation_backend: ?NamedOperationBackend = null;
+var registered_named_operation_catalog: ?NamedOperationCatalog = null;
 
 fn lockBackend() void {
     while (!backend_mutex.tryLock()) std.atomic.spinLoopHint();
@@ -165,6 +183,12 @@ fn namedOperationBackendSnapshot() ?NamedOperationBackend {
     lockBackend();
     defer backend_mutex.unlock();
     return registered_named_operation_backend;
+}
+
+fn namedOperationCatalogSnapshot() ?NamedOperationCatalog {
+    lockBackend();
+    defer backend_mutex.unlock();
+    return registered_named_operation_catalog;
 }
 
 fn checkedAdd(a: usize, b: usize) ?usize {
@@ -487,6 +511,26 @@ pub fn namedOperationSupported(name: []const u8, signature: *NamedOperationSigna
     return .ok;
 }
 
+pub fn namedOperationCount() usize {
+    const catalog = namedOperationCatalogSnapshot() orelse return 0;
+    return catalog.count;
+}
+
+/// Return one provider-owned function name for library discovery. The name is
+/// valid until the next catalog callback or catalog replacement; callers must
+/// copy it when retaining it in an object graph.
+pub fn namedOperationNameAt(index: usize, name: *?[*]const u8, length: *usize) Status {
+    name.* = null;
+    length.* = 0;
+    const catalog = namedOperationCatalogSnapshot() orelse return .unsupported;
+    if (index >= catalog.count) return .invalid_argument;
+    const callback = catalog.name_at orelse return .unsupported;
+    const status = providerStatus(callback(catalog.context, index, name, length));
+    if (status != .ok) return status;
+    if (name.* == null or length.* == 0) return .invalid_argument;
+    return .ok;
+}
+
 /// Stage a named provider operation through the same dense CPU boundary used
 /// by fixed operations. The provider receives the function name and no ZPU,
 /// Metal, or platform-specific storage/layout object.
@@ -711,6 +755,34 @@ pub export fn zpu_cpu_ml_set_named_operation_backend(
     return @intFromEnum(Status.ok);
 }
 
+pub export fn zpu_cpu_ml_set_named_operation_catalog(
+    catalog: ?*const NamedOperationCatalog,
+) callconv(.c) c_int {
+    if (catalog) |candidate| {
+        if (candidate.abi_version != named_operation_catalog_abi_version or candidate.name_at == null) {
+            return @intFromEnum(Status.invalid_argument);
+        }
+    }
+    lockBackend();
+    defer backend_mutex.unlock();
+    registered_named_operation_catalog = if (catalog) |candidate| candidate.* else null;
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn zpu_cpu_ml_named_operation_count() callconv(.c) usize {
+    return namedOperationCount();
+}
+
+pub export fn zpu_cpu_ml_named_operation_name_at(
+    index: usize,
+    function_name: ?*?[*]const u8,
+    function_name_length: ?*usize,
+) callconv(.c) c_int {
+    const output_name = function_name orelse return @intFromEnum(Status.invalid_argument);
+    const output_length = function_name_length orelse return @intFromEnum(Status.invalid_argument);
+    return @intFromEnum(namedOperationNameAt(index, output_name, output_length));
+}
+
 pub export fn zpu_cpu_ml_named_operation(
     arguments: ?*const NamedOperationArguments,
 ) callconv(.c) c_int {
@@ -752,6 +824,11 @@ const NamedOperationProbe = struct {
     name_matches: bool = false,
     source_stride: usize = 0,
     destination_stride: usize = 0,
+};
+
+const NamedOperationCatalogProbe = struct {
+    names: []const []const u8,
+    calls: usize = 0,
 };
 
 fn referenceProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
@@ -829,6 +906,20 @@ fn namedTransposeProvider(context: ?*anyopaque, arguments: *const NamedOperation
         .permutation = arguments.permutation,
     };
     return @intFromEnum(referenceTranspose(&transpose_arguments));
+}
+
+fn namedOperationNameAtProvider(
+    context: ?*anyopaque,
+    index: usize,
+    function_name: *?[*]const u8,
+    function_name_length: *usize,
+) callconv(.c) c_int {
+    const probe = @as(*NamedOperationCatalogProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    if (index >= probe.names.len) return @intFromEnum(Status.invalid_argument);
+    probe.calls += 1;
+    function_name.* = probe.names[index].ptr;
+    function_name_length.* = probe.names[index].len;
+    return @intFromEnum(Status.ok);
 }
 
 fn providerTestArguments(source_storage: []u32, destination_storage: []u32, dimensions: [max_rank]usize, output_dimensions: [max_rank]usize, strides: [max_rank]usize, output_strides: [max_rank]usize) TransposeArguments {
@@ -1040,6 +1131,35 @@ test "named CPU provider receives a portable graph name and dense transpose view
     try std.testing.expectEqual(@as(u32, 6), destination_storage[6]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
+}
+
+test "named CPU provider catalog exposes discoverable function names" {
+    const names = [_][]const u8{ "zml_cpu_transpose", "zml_cpu_add" };
+    var probe = NamedOperationCatalogProbe{ .names = &names };
+    const catalog = NamedOperationCatalog{
+        .abi_version = named_operation_catalog_abi_version,
+        .context = @ptrCast(&probe),
+        .count = names.len,
+        .name_at = namedOperationNameAtProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_catalog(&catalog));
+    defer _ = zpu_cpu_ml_set_named_operation_catalog(null);
+
+    try std.testing.expectEqual(names.len, namedOperationCount());
+    var function_name: ?[*]const u8 = null;
+    var function_name_length: usize = 0;
+    try std.testing.expectEqual(
+        Status.ok,
+        namedOperationNameAt(1, &function_name, &function_name_length),
+    );
+    try std.testing.expectEqualStrings("zml_cpu_add", function_name.?[0..function_name_length]);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(
+        Status.invalid_argument,
+        namedOperationNameAt(names.len, &function_name, &function_name_length),
+    );
+    try std.testing.expectEqual(@as(?[*]const u8, null), function_name);
+    try std.testing.expectEqual(@as(usize, 0), function_name_length);
 }
 
 test "optional CPU provider preserves packed 4-bit tensor padding" {
