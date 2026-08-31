@@ -34613,6 +34613,48 @@ int main(void) {
             return 67;
         }
 
+        /* Counter resolves target ZPU backing storage directly, so a private
+         * MTL4 buffer remains usable even though its public contents pointer
+         * is nil. Copy it back through a CPU-owned blit to verify the bytes. */
+        id<MTLBuffer> adapter_private_counter_buffer =
+            [adapter_device newBufferWithLength:sizeof(MTL4TimestampHeapEntry)
+                                        options:MTLResourceStorageModePrivate];
+        id<MTL4CommandBuffer> adapter_private_counter_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_private_counter_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        [adapter_private_counter_command_buffer endCommandBuffer];
+        [adapter_private_counter_command_buffer resolveCounterHeap:adapter_counter_heap
+                                                           withRange:NSMakeRange(1, 1)
+                                                          intoBuffer:MTL4BufferRangeMake(
+                                                              adapter_private_counter_buffer.gpuAddress,
+                                                              sizeof(MTL4TimestampHeapEntry))
+                                                           waitFence:adapter_counter_fence
+                                                         updateFence:nil];
+        id<MTL4CommandBuffer> adapter_private_counter_command_buffers[] = {
+            adapter_private_counter_command_buffer,
+        };
+        [metal4_queue commit:adapter_private_counter_command_buffers count:1];
+        id<MTLCommandBuffer> adapter_private_counter_copy_command_buffer = [adapter_queue commandBuffer];
+        id<MTLBlitCommandEncoder> adapter_private_counter_copy_encoder =
+            [adapter_private_counter_copy_command_buffer blitCommandEncoder];
+        [adapter_private_counter_copy_encoder copyFromBuffer:adapter_private_counter_buffer
+                                                sourceOffset:0
+                                                    toBuffer:adapter_counter_buffer
+                                           destinationOffset:3 * sizeof(MTL4TimestampHeapEntry)
+                                                        size:sizeof(MTL4TimestampHeapEntry)];
+        [adapter_private_counter_copy_encoder endEncoding];
+        [adapter_private_counter_copy_command_buffer commit];
+        [adapter_private_counter_copy_command_buffer waitUntilCompleted];
+        const MTL4TimestampHeapEntry *adapter_private_counter_entries =
+            (const MTL4TimestampHeapEntry *)adapter_counter_buffer.contents;
+        if (adapter_private_counter_buffer == nil ||
+            adapter_private_counter_buffer.storageMode != MTLStorageModePrivate ||
+            adapter_private_counter_command_buffer == nil || adapter_private_counter_copy_encoder == nil ||
+            adapter_private_counter_copy_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_private_counter_entries[3].timestamp != preserved_counter_timestamp) {
+            fail_with_error("Metal 4 CPU private counter resolve failed", metal4_error);
+            return 80;
+        }
+
         /* Metal 4 counter resolution accepts optional fences, but a fence
          * from another CPU adapter device must not cross the ownership
          * boundary merely because it has the right Objective-C protocol. */
