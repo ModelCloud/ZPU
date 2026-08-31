@@ -128,8 +128,13 @@ static int named_sum3(void *context, const zpu_cpu_ml_named_operation_arguments_
 }
 
 int main(void) {
+    zpu_cpu_ml_operation_arguments malformed_operation = {0};
+    malformed_operation.operation = ZPU_CPU_ML_OPERATION_ADD;
+    malformed_operation.element_type = ZPU_CPU_ML_ELEMENT_UINT32;
+    malformed_operation.input_count = 2;
     if (zpu_cpu_ml_set_operation_backend(NULL) != ZPU_CPU_ML_STATUS_OK ||
-        zpu_cpu_ml_operation(NULL) != ZPU_CPU_ML_STATUS_INVALID_ARGUMENT) return 90;
+        zpu_cpu_ml_operation(NULL) != ZPU_CPU_ML_STATUS_INVALID_ARGUMENT ||
+        zpu_cpu_ml_operation(&malformed_operation) != ZPU_CPU_ML_STATUS_INVALID_ARGUMENT) return 90;
 
     uint32_t left[12] = {1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0};
     uint32_t right[12] = {10, 20, 0, 0, 30, 40, 0, 0, 50, 60, 0, 0};
