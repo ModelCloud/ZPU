@@ -11,9 +11,69 @@ static int check_equal(const uint8_t *actual, const uint8_t *expected, size_t le
     return memcmp(actual, expected, length) == 0 ? 0 : 1;
 }
 
+static int cpu_ml_transpose_provider(void *context,
+                                     const zpu_cpu_ml_transpose_arguments *arguments) {
+    int *calls = (int *)context;
+    *calls += 1;
+    if (arguments == NULL || arguments->source.offset_bytes != 0 ||
+        arguments->destination.offset_bytes != 0 || arguments->source.rank != 2 ||
+        arguments->destination.rank != 2 || arguments->source.element_bits != 32 ||
+        arguments->destination.element_bits != 32 || arguments->source.strides[0] != 1 ||
+        arguments->source.strides[1] != 2 || arguments->destination.strides[0] != 1 ||
+        arguments->destination.strides[1] != 3 || arguments->permutation[0] != 1 ||
+        arguments->permutation[1] != 0) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    const uint32_t *source = (const uint32_t *)arguments->source.data;
+    uint32_t *destination = (uint32_t *)arguments->destination.data;
+    destination[0] = source[0];
+    destination[1] = source[2];
+    destination[2] = source[4];
+    destination[3] = source[1];
+    destination[4] = source[3];
+    destination[5] = source[5];
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
 int main(void) {
     if (zpu_cpu_ml_set_backend(NULL) != ZPU_CPU_ML_STATUS_OK ||
         zpu_cpu_ml_transpose(NULL) != ZPU_CPU_ML_STATUS_INVALID_ARGUMENT) return 90;
+
+    uint32_t provider_source[12] = {1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0};
+    uint32_t provider_destination[8];
+    for (size_t index = 0; index < 8; ++index) provider_destination[index] = 0xcafebabeu;
+    int provider_calls = 0;
+    const zpu_cpu_ml_backend provider = {
+        .abi_version = ZPU_CPU_ML_BACKEND_ABI_VERSION,
+        .context = &provider_calls,
+        .transpose = cpu_ml_transpose_provider,
+    };
+    if (zpu_cpu_ml_set_backend(&provider) != ZPU_CPU_ML_STATUS_OK) return 91;
+    const zpu_cpu_ml_transpose_arguments provider_arguments = {
+        .source = {
+            .data = (uint8_t *)provider_source,
+            .byte_length = sizeof(provider_source),
+            .offset_bytes = 0,
+            .rank = 2,
+            .element_bits = 32,
+            .dimensions = {2, 3},
+            .strides = {1, 4},
+        },
+        .destination = {
+            .data = (uint8_t *)provider_destination,
+            .byte_length = sizeof(provider_destination),
+            .offset_bytes = 0,
+            .rank = 2,
+            .element_bits = 32,
+            .dimensions = {3, 2},
+            .strides = {1, 4},
+        },
+        .permutation = {1, 0},
+    };
+    if (zpu_cpu_ml_transpose(&provider_arguments) != ZPU_CPU_ML_STATUS_OK ||
+        provider_calls != 1 || provider_destination[0] != 1 || provider_destination[1] != 3 ||
+        provider_destination[2] != 5 || provider_destination[3] != 0xcafebabeu ||
+        provider_destination[4] != 2 || provider_destination[5] != 4 ||
+        provider_destination[6] != 6 || provider_destination[7] != 0xcafebabeu ||
+        zpu_cpu_ml_set_backend(NULL) != ZPU_CPU_ML_STATUS_OK) return 92;
 
     uint8_t pixels[4 * 4 * 4];
     memset(pixels, 0xa5, sizeof(pixels));
