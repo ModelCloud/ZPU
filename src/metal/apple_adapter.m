@@ -12315,16 +12315,121 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
         isTexture = zpu_source_texture_type_for_name(candidateElement, &textureType, &dataType, &access,
                                                       &depthTexture);
     }
+    BOOL nestedArray = [candidateElement hasPrefix:@"array<"];
+    BOOL nestedArrayResource = NO;
+    if (nestedArray) {
+        NSString *nestedElementName = nil;
+        NSUInteger nestedLength = 0;
+        NSString *nestedAddressSpace = nil;
+        BOOL nestedPointer = NO;
+        BOOL nestedPointeeConst = NO;
+        nestedArray = zpu_source_array_type_for_name(candidateElement, &nestedElementName, &nestedLength,
+                                                      &nestedArrayResource, &nestedAddressSpace, &nestedPointer,
+                                                      &nestedPointeeConst, structBodies);
+    }
     if (!candidatePointer && !isResource && !zpu_source_data_type_for_name(candidateElement, &dataType) &&
         ![candidateElement isEqualToString:@"sampler"] && !isTexture &&
-        structBodies[candidateElement] == nil) return NO;
+        structBodies[candidateElement] == nil && !nestedArray) return NO;
     *elementName = candidateElement;
     *arrayLength = length;
-    *resource = candidatePointer || isResource || isTexture || [candidateElement isEqualToString:@"sampler"];
+    *resource = candidatePointer || isResource || isTexture || [candidateElement isEqualToString:@"sampler"] ||
+        nestedArrayResource;
     *addressSpace = candidateAddressSpace;
     *pointer = candidatePointer;
     *pointeeConst = candidatePointeeConst;
     return YES;
+}
+
+static NSDictionary *zpu_source_argument_layout_for_struct(
+    NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
+    NSMutableSet<NSString *> *building);
+
+/* Construct a synthetic one-member struct for an array element that is itself
+ * an array. Native Metal exposes every array level through an anonymous
+ * `__elems` struct, so the recursive layout must retain both the byte layout
+ * and the flattened argument-index span at each level. */
+static NSDictionary *zpu_source_argument_layout_for_array_type(
+    NSString *arrayType, NSDictionary<NSString *, NSString *> *structBodies,
+    NSMutableSet<NSString *> *building) {
+    NSString *elementName = nil;
+    NSUInteger arrayLength = 0;
+    BOOL resource = NO;
+    NSString *addressSpace = nil;
+    BOOL pointer = NO;
+    BOOL pointeeConst = NO;
+    if (!zpu_source_array_type_for_name(arrayType, &elementName, &arrayLength, &resource,
+                                        &addressSpace, &pointer, &pointeeConst, structBodies)) return nil;
+
+    MTLDataType dataType = MTLDataTypeNone;
+    MTLDataType elementDataType = MTLDataTypeNone;
+    MTLBindingAccess access = MTLBindingAccessReadOnly;
+    MTLTextureType textureType = MTLTextureType2D;
+    BOOL depthTexture = NO;
+    NSDictionary *childLayout = nil;
+    NSUInteger argumentIndexSpan = arrayLength;
+    NSString *kind = @"constant";
+    if ([elementName hasPrefix:@"array<"]) {
+        childLayout = zpu_source_argument_layout_for_array_type(elementName, structBodies, building);
+        elementDataType = MTLDataTypeStruct;
+        dataType = MTLDataTypeStruct;
+        argumentIndexSpan = [childLayout[@"argumentIndexSpan"] unsignedIntegerValue];
+        if (childLayout == nil || argumentIndexSpan == 0 ||
+            arrayLength > NSUIntegerMax / argumentIndexSpan) return nil;
+        argumentIndexSpan *= arrayLength;
+    } else if (structBodies[elementName] != nil) {
+        childLayout = zpu_source_argument_layout_for_struct(elementName, structBodies, building);
+        elementDataType = MTLDataTypeStruct;
+        dataType = MTLDataTypeStruct;
+        argumentIndexSpan = [childLayout[@"argumentIndexSpan"] unsignedIntegerValue];
+        if (childLayout == nil || argumentIndexSpan == 0 ||
+            arrayLength > NSUIntegerMax / argumentIndexSpan) return nil;
+        argumentIndexSpan *= arrayLength;
+    } else if (pointer) {
+        if (!zpu_source_data_type_for_name(elementName, &elementDataType)) return nil;
+        dataType = MTLDataTypePointer;
+        kind = @"pointer";
+        access = (pointeeConst || [addressSpace isEqualToString:@"constant"]) ?
+            MTLBindingAccessReadOnly : MTLBindingAccessReadWrite;
+    } else if ([elementName hasPrefix:@"texture"] || [elementName hasPrefix:@"depth"]) {
+        if (!zpu_source_texture_type_for_name(elementName, &textureType, &elementDataType, &access,
+                                              &depthTexture)) return nil;
+        dataType = MTLDataTypeTexture;
+        kind = @"texture";
+    } else if ([elementName isEqualToString:@"sampler"]) {
+        dataType = MTLDataTypeSampler;
+        elementDataType = MTLDataTypeSampler;
+        kind = @"sampler";
+    } else if (zpu_source_resource_type_for_name(elementName, &dataType)) {
+        elementDataType = dataType;
+        kind = @"resource";
+    } else if (!zpu_source_data_type_for_name(elementName, &dataType)) {
+        return nil;
+    } else {
+        elementDataType = dataType;
+    }
+    (void)resource;
+
+    MTLArgumentDescriptor *descriptor = [MTLArgumentDescriptor argumentDescriptor];
+    descriptor.dataType = dataType;
+    descriptor.index = 0;
+    descriptor.arrayLength = arrayLength;
+    descriptor.access = access;
+    if (dataType == MTLDataTypeTexture) descriptor.textureType = textureType;
+    return @{
+        @"arguments": @[descriptor],
+        @"nestedArguments": @{},
+        @"memberNames": @{@0: @"__elems"},
+        @"memberMetadata": @{@0: @{
+            @"kind": kind,
+            @"elementDataType": @(elementDataType),
+            @"access": @(access),
+            @"textureType": @(textureType),
+            @"depthTexture": @(depthTexture),
+        }},
+        @"arrayElementLayouts": childLayout == nil ? @{} : @{@0: childLayout},
+        @"syntheticArrayElement": @YES,
+        @"argumentIndexSpan": @(argumentIndexSpan),
+    };
 }
 
 static NSString *zpu_source_match_string(NSString *source, NSTextCheckingResult *match, NSUInteger index) {
@@ -12389,9 +12494,11 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         }
         NSDictionary *typeArrayElementLayout = nil;
         NSUInteger typeArrayArgumentSpan = typeArrayLength;
-        if ([fieldTypeName hasPrefix:@"array<"] && structBodies[typeArrayElementName] != nil) {
-            typeArrayElementLayout = zpu_source_argument_layout_for_struct(
-                typeArrayElementName, structBodies, building);
+        if ([fieldTypeName hasPrefix:@"array<"] &&
+            (structBodies[typeArrayElementName] != nil || [typeArrayElementName hasPrefix:@"array<"])) {
+            typeArrayElementLayout = [typeArrayElementName hasPrefix:@"array<"] ?
+                zpu_source_argument_layout_for_array_type(typeArrayElementName, structBodies, building) :
+                zpu_source_argument_layout_for_struct(typeArrayElementName, structBodies, building);
             typeArrayArgumentSpan = [typeArrayElementLayout[@"argumentIndexSpan"] unsignedIntegerValue];
             if (typeArrayElementLayout == nil || typeArrayArgumentSpan == 0) {
                 [building removeObject:structName];
@@ -12476,6 +12583,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         BOOL arrayPointer = NO;
         BOOL arrayPointeeConst = NO;
         BOOL arrayStruct = NO;
+        NSDictionary *arrayElementLayout = field[@"typeArrayElementLayout"];
+        BOOL arrayComposite = [arrayElementLayout isKindOfClass:[NSDictionary class]];
         NSDictionary *structLayout = field[@"typeStructLayout"];
         BOOL structValue = [structLayout isKindOfClass:[NSDictionary class]];
         if ([typeName hasPrefix:@"array<"]) {
@@ -12511,9 +12620,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             dataType = MTLDataTypePointer;
             elementDataType = MTLDataTypeStruct;
             access = MTLBindingAccessReadOnly;
-        } else if (arrayStruct) {
-            NSDictionary *arrayElementLayout = field[@"typeArrayElementLayout"];
-            if (![arrayElementLayout isKindOfClass:[NSDictionary class]]) {
+        } else if (arrayStruct || arrayComposite) {
+            if (!arrayComposite) {
                 [building removeObject:structName];
                 return nil;
             }
@@ -18593,6 +18701,7 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
     NSDictionary<NSNumber *, NSString *> *memberNames = layout[@"memberNames"];
     NSDictionary<NSNumber *, NSDictionary *> *memberMetadata = layout[@"memberMetadata"];
     NSDictionary<NSNumber *, NSDictionary *> *arrayElementLayouts = layout[@"arrayElementLayouts"];
+    BOOL syntheticArrayElement = [layout[@"syntheticArrayElement"] boolValue];
     if (![arguments isKindOfClass:[NSArray class]] ||
         (nestedArguments != nil && ![nestedArguments isKindOfClass:[NSDictionary class]]) ||
         (memberNames != nil && ![memberNames isKindOfClass:[NSDictionary class]]) ||
@@ -18619,14 +18728,15 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         MTLBindingAccess access = (MTLBindingAccess)[metadata[@"access"] unsignedIntegerValue];
         MTLTextureType textureType = (MTLTextureType)[metadata[@"textureType"] unsignedIntegerValue];
         BOOL depthTexture = [metadata[@"depthTexture"] boolValue];
+        BOOL anonymousArrayStruct = !syntheticArrayElement &&
+            ([kind isEqualToString:@"constant"] || [kind isEqualToString:@"pointer"] ||
+             arrayElementLayout != nil);
         /* Native Metal reflects scalar and pointer `array<T,N>` members as
          * an anonymous struct containing `__elems`, while resource arrays
          * such as textures are exposed directly as MTLDataTypeArray.
          * Preserve that distinction in the CPU reflection object. */
         MTLDataType memberDataType = arrayLength > 1 ?
-            (([kind isEqualToString:@"constant"] || [kind isEqualToString:@"pointer"] ||
-              arrayElementLayout != nil) ?
-                MTLDataTypeStruct : MTLDataTypeArray) :
+            (anonymousArrayStruct ? MTLDataTypeStruct : MTLDataTypeArray) :
             descriptor.dataType;
         ZPUStructMember *member = [[ZPUStructMember alloc] initWithName:memberName
                                                                     offset:offset
@@ -18700,8 +18810,7 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
                                                         structType:arrayElementStruct arrayType:nil
                                              textureReferenceType:textureReferenceType
                                                     pointerType:pointerType tensorReferenceType:nil];
-            if ([kind isEqualToString:@"constant"] || [kind isEqualToString:@"pointer"] ||
-                arrayElementLayout != nil) {
+            if (anonymousArrayStruct) {
                 /* Metal models scalar and pointer array members as an
                  * anonymous one-member struct containing `__elems`, rather
                  * than as a top-level MTLDataTypeArray member. */

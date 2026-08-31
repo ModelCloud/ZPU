@@ -710,13 +710,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceInlineStructArguments { SourceInlineStructElement value [[id(0)]]; "
          "float scalar [[id(2)]]; };\n"
          "kernel void zpu_source_argument_buffer_inline_struct(constant SourceInlineStructArguments &arguments [[buffer(12)]]) { "
+         "(void)arguments; }\n"
+         "struct SourceNestedArrays { array<array<float, 2>, 2> values [[id(0)]]; "
+         "float scalar [[id(4)]]; };\n"
+         "kernel void zpu_source_argument_buffer_nested_arrays(constant SourceNestedArrays &arguments [[buffer(13)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 42) {
+        adapter_library.functionNames.count != 43) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -2118,6 +2122,129 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_inline_struct_reflection_ok || !source_inline_struct_encoding_ok) {
         fail_with_error("source-defined inline struct argument layout lowering failed", adapter_error ?: native_error);
         return 184;
+    }
+
+    id<MTLFunction> native_source_nested_array_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_nested_arrays"];
+    id<MTLFunction> adapter_source_nested_array_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_nested_arrays"];
+    id<MTLArgumentEncoder> native_source_nested_array_encoder =
+        [native_source_nested_array_function newArgumentEncoderWithBufferIndex:13];
+    id<MTLArgumentEncoder> adapter_source_nested_array_encoder =
+        [adapter_source_nested_array_function newArgumentEncoderWithBufferIndex:13];
+    BOOL source_nested_array_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_nested_arrays"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_nested_arrays"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        MTLStructMember *native_values = native_struct.members.count == 2 ? native_struct.members[0] : nil;
+        MTLStructMember *adapter_values = adapter_struct.members.count == 2 ? adapter_struct.members[0] : nil;
+        MTLStructMember *native_scalar = native_struct.members.count == 2 ? native_struct.members[1] : nil;
+        MTLStructMember *adapter_scalar = adapter_struct.members.count == 2 ? adapter_struct.members[1] : nil;
+        MTLStructMember *native_outer_elements = native_values.structType.members.count == 1 ?
+            native_values.structType.members[0] : nil;
+        MTLStructMember *adapter_outer_elements = adapter_values.structType.members.count == 1 ?
+            adapter_values.structType.members[0] : nil;
+        MTLArrayType *native_outer_array = native_outer_elements.arrayType;
+        MTLArrayType *adapter_outer_array = adapter_outer_elements.arrayType;
+        MTLStructType *native_inner_struct = native_outer_array.elementStructType;
+        MTLStructType *adapter_inner_struct = adapter_outer_array.elementStructType;
+        MTLStructMember *native_inner_elements = native_inner_struct.members.count == 1 ?
+            native_inner_struct.members[0] : nil;
+        MTLStructMember *adapter_inner_elements = adapter_inner_struct.members.count == 1 ?
+            adapter_inner_struct.members[0] : nil;
+        MTLArrayType *native_inner_array = native_inner_elements.arrayType;
+        MTLArrayType *adapter_inner_array = adapter_inner_elements.arrayType;
+        source_nested_array_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 13 &&
+            adapter_binding.index == 13 && native_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_binding.bufferDataType == MTLDataTypeStruct &&
+            native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
+            native_binding.bufferDataSize == 20 && native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
+            native_binding.bufferAlignment == 4 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2 && native_values != nil &&
+            adapter_values != nil && native_values.dataType == MTLDataTypeStruct &&
+            adapter_values.dataType == MTLDataTypeStruct && [native_values.name isEqualToString:@"values"] &&
+            [native_values.name isEqualToString:adapter_values.name] && native_values.offset == 0 &&
+            native_values.offset == adapter_values.offset && native_values.argumentIndex == 0 &&
+            native_values.argumentIndex == adapter_values.argumentIndex && native_values.structType != nil &&
+            adapter_values.structType != nil && native_values.structType.members.count == 1 &&
+            adapter_values.structType.members.count == 1 && native_outer_elements != nil &&
+            adapter_outer_elements != nil && [native_outer_elements.name isEqualToString:@"__elems"] &&
+            [adapter_outer_elements.name isEqualToString:@"__elems"] &&
+            native_outer_elements.dataType == MTLDataTypeArray &&
+            adapter_outer_elements.dataType == MTLDataTypeArray && native_outer_array != nil &&
+            adapter_outer_array != nil && native_outer_array.elementType == MTLDataTypeStruct &&
+            adapter_outer_array.elementType == MTLDataTypeStruct && native_outer_array.arrayLength == 2 &&
+            adapter_outer_array.arrayLength == 2 && native_outer_array.stride == adapter_outer_array.stride &&
+            native_outer_array.stride == 8 &&
+            native_outer_array.argumentIndexStride == adapter_outer_array.argumentIndexStride &&
+            native_outer_array.argumentIndexStride == 2 && native_inner_struct != nil &&
+            adapter_inner_struct != nil && native_inner_struct.members.count == 1 &&
+            adapter_inner_struct.members.count == 1 && native_inner_elements != nil &&
+            adapter_inner_elements != nil && [native_inner_elements.name isEqualToString:@"__elems"] &&
+            [adapter_inner_elements.name isEqualToString:@"__elems"] &&
+            native_inner_elements.dataType == MTLDataTypeArray &&
+            adapter_inner_elements.dataType == MTLDataTypeArray && native_inner_array != nil &&
+            adapter_inner_array != nil && native_inner_array.elementType == MTLDataTypeFloat &&
+            adapter_inner_array.elementType == MTLDataTypeFloat && native_inner_array.arrayLength == 2 &&
+            adapter_inner_array.arrayLength == 2 && native_inner_array.stride == adapter_inner_array.stride &&
+            native_inner_array.stride == 4 &&
+            native_inner_array.argumentIndexStride == adapter_inner_array.argumentIndexStride &&
+            native_inner_array.argumentIndexStride == 1 && native_scalar != nil && adapter_scalar != nil &&
+            [native_scalar.name isEqualToString:adapter_scalar.name] &&
+            [native_scalar.name isEqualToString:@"scalar"] && native_scalar.offset == 16 &&
+            native_scalar.offset == adapter_scalar.offset && native_scalar.dataType == MTLDataTypeFloat &&
+            adapter_scalar.dataType == MTLDataTypeFloat && native_scalar.argumentIndex == 4 &&
+            adapter_scalar.argumentIndex == 4;
+    }
+    BOOL source_nested_array_encoding_ok = NO;
+    id<MTLBuffer> native_nested_array_buffer =
+        [native_device newBufferWithLength:20 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_nested_array_buffer =
+        [adapter_device newBufferWithLength:20 options:MTLResourceStorageModeShared];
+    if (native_source_nested_array_encoder != nil && adapter_source_nested_array_encoder != nil &&
+        native_nested_array_buffer != nil && adapter_nested_array_buffer != nil &&
+        native_source_nested_array_encoder.encodedLength == adapter_source_nested_array_encoder.encodedLength &&
+        native_source_nested_array_encoder.encodedLength == 20 &&
+        native_source_nested_array_encoder.alignment == adapter_source_nested_array_encoder.alignment &&
+        native_source_nested_array_encoder.alignment == 4) {
+        memset(native_nested_array_buffer.contents, 0, native_nested_array_buffer.length);
+        memset(adapter_nested_array_buffer.contents, 0, adapter_nested_array_buffer.length);
+        [native_source_nested_array_encoder setArgumentBuffer:native_nested_array_buffer offset:0];
+        [adapter_source_nested_array_encoder setArgumentBuffer:adapter_nested_array_buffer offset:0];
+        const float nested_array_values[] = {21.0f, 22.0f, 23.0f, 24.0f, 25.0f};
+        source_nested_array_encoding_ok = YES;
+        for (NSUInteger index = 0; index < 5; ++index) {
+            void *native_data = [native_source_nested_array_encoder constantDataAtIndex:index];
+            void *adapter_data = [adapter_source_nested_array_encoder constantDataAtIndex:index];
+            if (native_data == NULL || adapter_data == NULL) {
+                source_nested_array_encoding_ok = NO;
+                break;
+            }
+            memcpy(native_data, &nested_array_values[index], sizeof(float));
+            memcpy(adapter_data, &nested_array_values[index], sizeof(float));
+            source_nested_array_encoding_ok = source_nested_array_encoding_ok &&
+                (NSUInteger)((uint8_t *)native_data - (uint8_t *)native_nested_array_buffer.contents) ==
+                    index * sizeof(float) &&
+                (NSUInteger)((uint8_t *)adapter_data - (uint8_t *)adapter_nested_array_buffer.contents) ==
+                    index * sizeof(float);
+        }
+        source_nested_array_encoding_ok = source_nested_array_encoding_ok &&
+            memcmp(native_nested_array_buffer.contents, adapter_nested_array_buffer.contents, 20) == 0;
+    }
+    if (native_source_nested_array_function == nil || adapter_source_nested_array_function == nil ||
+        native_source_nested_array_encoder == nil || adapter_source_nested_array_encoder == nil ||
+        !source_nested_array_reflection_ok || !source_nested_array_encoding_ok) {
+        fail_with_error("source-defined nested array argument layout lowering failed", adapter_error ?: native_error);
+        return 185;
     }
     return 0;
 }
