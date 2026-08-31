@@ -398,7 +398,7 @@ Ineligible work remains on a strict conventional ordered path.
 
 ## Multicore scheduling
 
-The CPU-locality layer now allows raster roles to map to distinct selected CPUs when enough CPUs are available. This is only the foundation; the required intra-NUMA work-graph and LLC-local scheduling contract is defined in [mosaic-scalability.md](mosaic-scalability.md).
+The CPU-locality layer now exposes the selected CPUs' NUMA and LLC equivalence classes. The scalar physical-packet executor consumes that topology through immutable Morton-ordered pass plans, persistent pinned workers, per-core supertile queues, same-LLC then same-NUMA stealing, and one pass completion barrier. The contract and current one-LLC versus multi-LLC measurements are defined in [mosaic-scalability.md](mosaic-scalability.md).
 
 The target worker model is:
 
@@ -413,7 +413,7 @@ NUMA node
         └── local tile-group deque
 ```
 
-Workers should prefer local Morton-like tile groups, then steal batches when local work is exhausted. The first hard gate is scaling across 1/2/3/4 physical cores selected from one NUMA node, with LLC placement and queue/imbalance metrics in the benchmark report. Cross-NUMA work stealing is explicitly deferred.
+Workers consume their local Morton supertiles first, then steal from the same LLC and finally from the same NUMA node. The `benchmark-mosaic-scaling` gate reports placement, aggregate steal classes, per-worker item counts, checksums, and 1/2/3/4-core medians. Cross-NUMA work stealing is explicitly rejected and deferred.
 
 ## Autotuning
 

@@ -11,11 +11,13 @@ kernel. It is the companion to [the Mosaic renderer design](mosaic-renderer.md).
 
 ## Current measurement boundary
 
-The current Vulkan benchmark exercises Mosaic's prepared scalar batch bridge;
+The Vulkan benchmark still exercises Mosaic's prepared scalar batch bridge;
 it does not yet lower every Vulkan draw into the physical
-`LOCAL`/`MACRO`/`GLOBAL` packet executor. Its results are therefore useful for
-measuring preparation and raster-band scheduling, but they are not proof that
-the final physical packet scheduler scales.
+`LOCAL`/`MACRO`/`GLOBAL` packet executor. A separate
+`benchmark-mosaic-scaling` gate now measures the physical scalar executor
+directly. It prepares and validates one immutable pass plan, constructs a
+tile-local index for `LOCAL` packets without expanding `MACRO` or `GLOBAL`
+commands, and excludes planning and thread creation from frame timing.
 
 The current host topology used for the 1/2/3/4-core sweep has one NUMA node
 and one package. The selected CPUs are consequently on one coherent NUMA
@@ -30,6 +32,45 @@ Cross-NUMA optimization is deliberately out of scope for the first Mosaic
 scaling gate. A machine with multiple NUMA nodes must select and report one
 render domain for this gate; a later domain scheduler may add remote work
 stealing.
+
+## Implemented scalar scheduling checkpoint
+
+The scalar physical-packet path now has this execution shape:
+
+```text
+admitted immutable pass plan
+        ↓
+Morton-ordered supertiles partitioned into per-core queues
+        ↓
+persistent workers pinned to reported CPU / NUMA / LLC identities
+        ↓
+own queue → same-LLC steal → same-NUMA steal
+        ↓
+one completion barrier per pass
+```
+
+Each plan owns stable packet slices, validated prepared-cluster ranges,
+tile-local `LOCAL` packet indices, compact `MACRO`/`GLOBAL` streams, load
+operation, and setup accounting. Queue cursors and worker results occupy
+separate cache lines. A plan containing workers from different NUMA nodes is
+rejected; cross-NUMA stealing does not exist.
+
+The first 800×600 ReleaseFast median sweep produced the following exact-output
+checkpoint. These are five-sample scheduler medians, not p95/p99 release
+claims:
+
+| Workload | 1 core | 4 cores, one LLC | Speedup | 4 cores, three LLCs | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Terminal glyph grid | 2,127 µs | 575 µs | 3.70× | 984 µs | 2.17× |
+| Desktop UI | 1,719 µs | 475 µs | 3.62× | 866 µs | 1.98× |
+| Complex 3D demo | 3,748 µs | 942 µs | 3.98× | 1,350 µs | 2.77× |
+
+Color, depth, visibility, counters, and checksums match the serial physical
+packet oracle for every 1/2/3/4-core run. The one-LLC result demonstrates that
+the queue and completion design can scale approximately linearly. The
+multi-LLC result deliberately remains visible: cache-domain placement and
+same-NUMA memory traffic are the next topology costs, rather than a reason to
+hide a fixed worker ceiling.
 
 ## Non-negotiable invariants
 
@@ -199,8 +240,9 @@ still serializes preparation or funnels all workers through one queue.
 1. Add topology identity and per-worker/per-LLC accounting to the benchmark
    report.
 2. Introduce immutable frame/pass plans and bounded spatial work-item types.
-3. Replace the whole-batch dispatch barrier with readiness counters and
-   per-LLC batch deques, keeping the scalar executor unchanged.
+3. Replace the whole-batch dispatch barrier with persistent per-core queues,
+   same-LLC/same-NUMA stealing, and one pass completion barrier. **Done for the
+   scalar physical-packet executor.**
 4. Make physical packet execution match the current expanded packet and
    `cpu_cube` references.
 5. Route a narrow eligible Vulkan draw subset through the new scheduler;
