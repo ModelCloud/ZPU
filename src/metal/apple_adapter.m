@@ -14509,7 +14509,13 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
 - (MTLLibraryType)type API_AVAILABLE(macos(11.0), ios(14.0)) { return _type; }
 - (NSString *)installName API_AVAILABLE(macos(11.0), ios(14.0)) { return _installName; }
 - (MTLFunctionReflection *)reflectionForFunctionWithName:(NSString *)functionName API_AVAILABLE(macos(26.0), ios(26.0)) {
-    if (_type != MTLLibraryTypeExecutable || ![_functionNames containsObject:functionName]) return nil;
+    if (_type != MTLLibraryTypeExecutable) return nil;
+    if (![_functionNames containsObject:functionName]) {
+        /* A named ZML/cpu provider is discovered at query time rather than
+         * being present in the source registry. Expose the same tensor
+         * bindings as MTL4 pipeline reflection for that dynamic function. */
+        return zpu_mtl4_ml_function_reflection(functionName);
+    }
     NSString *implementationName = _functionImplementations[functionName] ?: functionName;
     if ([implementationName isEqualToString:zpu_cpu_source_argument_buffer_function_name]) {
         return zpu_source_argument_buffer_function_reflection(_functionArgumentBufferLayouts[functionName]);

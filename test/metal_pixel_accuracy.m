@@ -14261,6 +14261,8 @@ static int test_metal4_cpu_named_transpose_provider_profile(
     functionDescriptor.library = adapterLibrary;
     functionDescriptor.name = @"zml_cpu_transpose_f32";
     id<MTLFunction> providerFunction = [adapterLibrary newFunctionWithName:functionDescriptor.name];
+    MTLFunctionReflection *providerReflection =
+        [adapterLibrary reflectionForFunctionWithName:functionDescriptor.name];
     MTL4MachineLearningPipelineDescriptor *pipelineDescriptor =
         [MTL4MachineLearningPipelineDescriptor new];
     pipelineDescriptor.machineLearningFunctionDescriptor = functionDescriptor;
@@ -14355,7 +14357,8 @@ static int test_metal4_cpu_named_transpose_provider_profile(
         (id<MTLTensorBinding>)pipeline.reflection.bindings[1] : nil;
     if (providerRegistration != ZPU_CPU_ML_STATUS_OK || providerUnregistration != ZPU_CPU_ML_STATUS_OK ||
         providerProbe.operationCalls != 1 || providerProbe.queryCalls == 0 || providerFunction == nil ||
-        providerFunction.functionType != MTLFunctionTypeKernel || adapterError != nil || pipeline == nil ||
+        providerFunction.functionType != MTLFunctionTypeKernel || providerReflection == nil ||
+        providerReflection.bindings.count != 2 || adapterError != nil || pipeline == nil ||
         source == nil || destination == nil || table == nil || commandBuffer == nil || encoder == nil ||
         commitOptions == nil || feedbackError != nil || inputBinding == nil || outputBinding == nil ||
         inputBinding.tensorDataType != MTLTensorDataTypeFloat32 ||
