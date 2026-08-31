@@ -588,6 +588,8 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
     id<MTLLibrary> library = [adapter_device newDefaultLibrary];
     id<MTLFunction> function = ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
+    id<MTLFunction> default_intersection_function =
+        [library newFunctionWithName:@"zpu_cpu_intersection_triangle"];
     MTLComputePipelineDescriptor *compute_descriptor = [MTLComputePipelineDescriptor new];
     compute_descriptor.computeFunction = function;
     id<MTLComputePipelineState> compute_pipeline =
@@ -623,7 +625,9 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
         parallel_encoder = [[queue commandBuffer] parallelRenderCommandEncoderWithDescriptor:pass];
     }
     if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
-        library == nil || function == nil || compute_pipeline == nil || render_pipeline == nil ||
+        library == nil || function == nil || default_intersection_function == nil ||
+        default_intersection_function.functionType != MTLFunctionTypeIntersection ||
+        compute_pipeline == nil || render_pipeline == nil ||
         sampler == nil || depth == nil || fence == nil || argument_encoder == nil ||
         compute_encoder == nil || blit_encoder == nil || render_encoder == nil || parallel_encoder == nil) {
         fprintf(stderr, "metal-pixel: CPU adapter core protocol audit object allocation failed "

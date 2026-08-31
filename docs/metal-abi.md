@@ -683,8 +683,8 @@ triangle path:
   descriptor, so supported unspecialized blend state can be resolved through
   `newRenderPipelineDescriptorForSpecialization` and the CPU compiler path
 - `newDefaultLibrary` returns the same CPU metadata library for the registered
-  ZPU kernels, including the array, 3D, and bounded tile kernels; it does not load or compile an Apple
-  `.metallib`
+  ZPU kernels, including the array, 3D, bounded tile, and intersection
+  descriptor profiles; it does not load or compile an Apple `.metallib`
 - CPU binary archives persist and reload deterministic metadata for registered
   ZPU compute/render functions; the Metal 4 archive view can reopen registered
   compute metadata; neither archive API serializes Apple GPU binaries

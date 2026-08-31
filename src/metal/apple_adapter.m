@@ -14090,6 +14090,16 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                     implementations[name] = zpu_cpu_source_metadata_function_name;
                 }
             }];
+        /* The built-in library is a CPU profile table rather than a native
+         * metallib. Keep the bounded intersection descriptor profile
+         * discoverable from that table as well as through the direct factory;
+         * arbitrary custom-intersection execution remains fail-closed. */
+        if ([source hasPrefix:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 "] &&
+            ![names containsObject:zpu_cpu_intersection_triangle_function_name]) {
+            [names addObject:zpu_cpu_intersection_triangle_function_name];
+            implementations[zpu_cpu_intersection_triangle_function_name] =
+                zpu_cpu_intersection_triangle_function_name;
+        }
         _functionNames = [names copy];
         _functionImplementations = [implementations copy];
         _functionArgumentBufferLayouts = [sourceArgumentBufferLayouts copy];
