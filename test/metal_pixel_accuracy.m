@@ -714,13 +714,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceNestedArrays { array<array<float, 2>, 2> values [[id(0)]]; "
          "float scalar [[id(4)]]; };\n"
          "kernel void zpu_source_argument_buffer_nested_arrays(constant SourceNestedArrays &arguments [[buffer(13)]]) { "
+         "(void)arguments; }\n"
+         "struct SourceSingletonArrays { array<SourceStructArrayElement, 1> values [[id(0)]]; "
+         "array<float, 1> scalarArray [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_singleton_arrays(constant SourceSingletonArrays &arguments [[buffer(14)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 43) {
+        adapter_library.functionNames.count != 44) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -2245,6 +2249,134 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_nested_array_reflection_ok || !source_nested_array_encoding_ok) {
         fail_with_error("source-defined nested array argument layout lowering failed", adapter_error ?: native_error);
         return 185;
+    }
+
+    id<MTLFunction> native_source_singleton_array_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_singleton_arrays"];
+    id<MTLFunction> adapter_source_singleton_array_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_singleton_arrays"];
+    id<MTLArgumentEncoder> native_source_singleton_array_encoder =
+        [native_source_singleton_array_function newArgumentEncoderWithBufferIndex:14];
+    id<MTLArgumentEncoder> adapter_source_singleton_array_encoder =
+        [adapter_source_singleton_array_function newArgumentEncoderWithBufferIndex:14];
+    BOOL source_singleton_array_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_singleton_arrays"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_singleton_arrays"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        MTLStructMember *native_values = native_struct.members.count == 2 ? native_struct.members[0] : nil;
+        MTLStructMember *adapter_values = adapter_struct.members.count == 2 ? adapter_struct.members[0] : nil;
+        MTLStructMember *native_scalar_array = native_struct.members.count == 2 ? native_struct.members[1] : nil;
+        MTLStructMember *adapter_scalar_array = adapter_struct.members.count == 2 ? adapter_struct.members[1] : nil;
+        MTLStructMember *native_value_elements = native_values.structType.members.count == 1 ?
+            native_values.structType.members[0] : nil;
+        MTLStructMember *adapter_value_elements = adapter_values.structType.members.count == 1 ?
+            adapter_values.structType.members[0] : nil;
+        MTLStructMember *native_scalar_elements = native_scalar_array.structType.members.count == 1 ?
+            native_scalar_array.structType.members[0] : nil;
+        MTLStructMember *adapter_scalar_elements = adapter_scalar_array.structType.members.count == 1 ?
+            adapter_scalar_array.structType.members[0] : nil;
+        MTLArrayType *native_value_array = native_value_elements.arrayType;
+        MTLArrayType *adapter_value_array = adapter_value_elements.arrayType;
+        MTLArrayType *native_scalar_array_type = native_scalar_elements.arrayType;
+        MTLArrayType *adapter_scalar_array_type = adapter_scalar_elements.arrayType;
+        source_singleton_array_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 14 &&
+            adapter_binding.index == 14 && native_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_binding.bufferDataType == MTLDataTypeStruct &&
+            native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
+            native_binding.bufferDataSize == 48 &&
+            native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
+            native_binding.bufferAlignment == 16 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2 && native_values != nil &&
+            adapter_values != nil && native_values.dataType == MTLDataTypeStruct &&
+            adapter_values.dataType == MTLDataTypeStruct && [native_values.name isEqualToString:@"values"] &&
+            [native_values.name isEqualToString:adapter_values.name] && native_values.offset == 0 &&
+            native_values.offset == adapter_values.offset && native_values.argumentIndex == 0 &&
+            native_values.argumentIndex == adapter_values.argumentIndex && native_value_elements != nil &&
+            adapter_value_elements != nil && [native_value_elements.name isEqualToString:@"__elems"] &&
+            [adapter_value_elements.name isEqualToString:@"__elems"] &&
+            native_value_elements.dataType == MTLDataTypeArray &&
+            adapter_value_elements.dataType == MTLDataTypeArray && native_value_array != nil &&
+            adapter_value_array != nil && native_value_array.elementType == MTLDataTypeStruct &&
+            adapter_value_array.elementType == MTLDataTypeStruct && native_value_array.arrayLength == 1 &&
+            adapter_value_array.arrayLength == 1 && native_value_array.stride == adapter_value_array.stride &&
+            native_value_array.stride == 32 &&
+            native_value_array.argumentIndexStride == adapter_value_array.argumentIndexStride &&
+            native_value_array.argumentIndexStride == 2 && native_value_array.elementStructType != nil &&
+            adapter_value_array.elementStructType != nil && native_scalar_array != nil &&
+            adapter_scalar_array != nil && native_scalar_array.dataType == MTLDataTypeStruct &&
+            adapter_scalar_array.dataType == MTLDataTypeStruct &&
+            [native_scalar_array.name isEqualToString:adapter_scalar_array.name] &&
+            [native_scalar_array.name isEqualToString:@"scalarArray"] && native_scalar_array.offset == 32 &&
+            native_scalar_array.offset == adapter_scalar_array.offset && native_scalar_array.argumentIndex == 2 &&
+            adapter_scalar_array.argumentIndex == 2 && native_scalar_elements != nil &&
+            adapter_scalar_elements != nil && [native_scalar_elements.name isEqualToString:@"__elems"] &&
+            [adapter_scalar_elements.name isEqualToString:@"__elems"] &&
+            native_scalar_elements.dataType == MTLDataTypeArray &&
+            adapter_scalar_elements.dataType == MTLDataTypeArray && native_scalar_array_type != nil &&
+            adapter_scalar_array_type != nil && native_scalar_array_type.elementType == MTLDataTypeFloat &&
+            adapter_scalar_array_type.elementType == MTLDataTypeFloat &&
+            native_scalar_array_type.arrayLength == 1 && adapter_scalar_array_type.arrayLength == 1 &&
+            native_scalar_array_type.stride == adapter_scalar_array_type.stride &&
+            native_scalar_array_type.stride == 4 &&
+            native_scalar_array_type.argumentIndexStride == adapter_scalar_array_type.argumentIndexStride &&
+            native_scalar_array_type.argumentIndexStride == 1;
+    }
+    BOOL source_singleton_array_encoding_ok = NO;
+    id<MTLBuffer> native_singleton_array_buffer =
+        [native_device newBufferWithLength:48 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_singleton_array_buffer =
+        [adapter_device newBufferWithLength:48 options:MTLResourceStorageModeShared];
+    if (native_source_singleton_array_encoder != nil && adapter_source_singleton_array_encoder != nil &&
+        native_singleton_array_buffer != nil && adapter_singleton_array_buffer != nil &&
+        native_source_singleton_array_encoder.encodedLength == adapter_source_singleton_array_encoder.encodedLength &&
+        native_source_singleton_array_encoder.encodedLength == 48 &&
+        native_source_singleton_array_encoder.alignment == adapter_source_singleton_array_encoder.alignment &&
+        native_source_singleton_array_encoder.alignment == 16) {
+        memset(native_singleton_array_buffer.contents, 0, native_singleton_array_buffer.length);
+        memset(adapter_singleton_array_buffer.contents, 0, adapter_singleton_array_buffer.length);
+        [native_source_singleton_array_encoder setArgumentBuffer:native_singleton_array_buffer offset:0];
+        [adapter_source_singleton_array_encoder setArgumentBuffer:adapter_singleton_array_buffer offset:0];
+        const float singleton_value = 31.0f;
+        const float singleton_color[] = {32.0f, 33.0f, 34.0f, 35.0f};
+        const float singleton_scalar = 36.0f;
+        void *native_value_data = [native_source_singleton_array_encoder constantDataAtIndex:0];
+        void *adapter_value_data = [adapter_source_singleton_array_encoder constantDataAtIndex:0];
+        void *native_color_data = [native_source_singleton_array_encoder constantDataAtIndex:1];
+        void *adapter_color_data = [adapter_source_singleton_array_encoder constantDataAtIndex:1];
+        void *native_scalar_data = [native_source_singleton_array_encoder constantDataAtIndex:2];
+        void *adapter_scalar_data = [adapter_source_singleton_array_encoder constantDataAtIndex:2];
+        if (native_value_data != NULL && adapter_value_data != NULL && native_color_data != NULL &&
+            adapter_color_data != NULL && native_scalar_data != NULL && adapter_scalar_data != NULL) {
+            memcpy(native_value_data, &singleton_value, sizeof(singleton_value));
+            memcpy(adapter_value_data, &singleton_value, sizeof(singleton_value));
+            memcpy(native_color_data, singleton_color, sizeof(singleton_color));
+            memcpy(adapter_color_data, singleton_color, sizeof(singleton_color));
+            memcpy(native_scalar_data, &singleton_scalar, sizeof(singleton_scalar));
+            memcpy(adapter_scalar_data, &singleton_scalar, sizeof(singleton_scalar));
+            source_singleton_array_encoding_ok =
+                memcmp(native_singleton_array_buffer.contents, adapter_singleton_array_buffer.contents, 48) == 0 &&
+                (NSUInteger)((uint8_t *)native_value_data - (uint8_t *)native_singleton_array_buffer.contents) == 0 &&
+                (NSUInteger)((uint8_t *)adapter_value_data - (uint8_t *)adapter_singleton_array_buffer.contents) == 0 &&
+                (NSUInteger)((uint8_t *)native_color_data - (uint8_t *)native_singleton_array_buffer.contents) == 16 &&
+                (NSUInteger)((uint8_t *)adapter_color_data - (uint8_t *)adapter_singleton_array_buffer.contents) == 16 &&
+                (NSUInteger)((uint8_t *)native_scalar_data - (uint8_t *)native_singleton_array_buffer.contents) == 32 &&
+                (NSUInteger)((uint8_t *)adapter_scalar_data - (uint8_t *)adapter_singleton_array_buffer.contents) == 32;
+        }
+    }
+    if (native_source_singleton_array_function == nil || adapter_source_singleton_array_function == nil ||
+        native_source_singleton_array_encoder == nil || adapter_source_singleton_array_encoder == nil ||
+        !source_singleton_array_reflection_ok || !source_singleton_array_encoding_ok) {
+        fail_with_error("source-defined singleton array argument layout lowering failed", adapter_error ?: native_error);
+        return 186;
     }
     return 0;
 }

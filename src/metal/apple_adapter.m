@@ -12425,6 +12425,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
             @"access": @(access),
             @"textureType": @(textureType),
             @"depthTexture": @(depthTexture),
+            @"isArray": @YES,
         }},
         @"arrayElementLayouts": childLayout == nil ? @{} : @{@0: childLayout},
         @"syntheticArrayElement": @YES,
@@ -12537,6 +12538,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             @"indirection": zpu_source_compact(zpu_source_match_string(rawField, match, 4)),
             @"name": zpu_source_compact(zpu_source_match_string(rawField, match, 5)),
             @"arrayLength": declaratorArrayLength,
+            @"typeArray": @([fieldTypeName hasPrefix:@"array<"]),
             @"typeArrayLength": @(typeArrayLength),
             @"typeArrayArgumentSpan": @(typeArrayArgumentSpan),
             @"typeArrayElementLayout": typeArrayElementLayout ?: [NSNull null],
@@ -12688,6 +12690,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
                 @"access": @(access),
                 @"textureType": @(textureType),
                 @"depthTexture": @(depthTexture),
+                @"isArray": @([field[@"typeArray"] boolValue]),
             };
             if (nested) {
                 NSDictionary *childLayout = zpu_source_argument_layout_for_struct(
@@ -18728,6 +18731,7 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         MTLBindingAccess access = (MTLBindingAccess)[metadata[@"access"] unsignedIntegerValue];
         MTLTextureType textureType = (MTLTextureType)[metadata[@"textureType"] unsignedIntegerValue];
         BOOL depthTexture = [metadata[@"depthTexture"] boolValue];
+        BOOL isArray = [metadata[@"isArray"] boolValue];
         BOOL anonymousArrayStruct = !syntheticArrayElement &&
             ([kind isEqualToString:@"constant"] || [kind isEqualToString:@"pointer"] ||
              arrayElementLayout != nil);
@@ -18735,7 +18739,7 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
          * an anonymous struct containing `__elems`, while resource arrays
          * such as textures are exposed directly as MTLDataTypeArray.
          * Preserve that distinction in the CPU reflection object. */
-        MTLDataType memberDataType = arrayLength > 1 ?
+        MTLDataType memberDataType = isArray ?
             (anonymousArrayStruct ? MTLDataTypeStruct : MTLDataTypeArray) :
             descriptor.dataType;
         ZPUStructMember *member = [[ZPUStructMember alloc] initWithName:memberName
@@ -18776,7 +18780,7 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
                 initWithTextureType:textureType dataType:elementDataType access:access];
             textureReferenceType->_depthTexture = depthTexture;
         }
-        if (arrayLength > 1) {
+        if (isArray) {
             NSUInteger elementSize = 0;
             NSUInteger elementAlignment = 0;
             MTLStructType *arrayElementStruct = nil;

@@ -567,7 +567,8 @@ triangle path:
   the CPU-owned buffer. Inline struct-valued members preserve their direct
   nested `MTLDataTypeStruct` reflection and child constant offsets as well;
   nested native arrays recursively preserve each `__elems` level, including
-  per-level element strides and argument-index spans.
+  per-level element strides and argument-index spans. Singleton arrays retain
+  their array reflection instead of collapsing to scalar or struct members.
   It never compiles or executes arbitrary MSL
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
