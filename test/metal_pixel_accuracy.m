@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <float.h>
+#include <math.h>
 #include <objc/runtime.h>
 
 #include "zpu/metal.h"
@@ -462,6 +463,117 @@ static void fail_with_error(const char *message, NSError *error) {
     } else {
         fprintf(stderr, "metal-pixel: %s\n", message);
     }
+}
+
+/* Native Metal is an oracle for the CPU/ZPU-owned ML path. Floating-point
+ * reductions can legally associate differently between the two implementations,
+ * so compare finite values with a scale-aware tolerance while keeping NaN and
+ * infinity behavior strict. These tolerances never affect CPU execution. */
+static const double kMetalMLInferenceTolerance = 2.0e-3;
+static const double kMetalMLPureMathTolerance = 1.0e-6;
+
+static BOOL zpu_ml_scalar_within_tolerance(double reference, double actual, double tolerance) {
+    if (reference == actual) {
+        return YES;
+    }
+    if (isnan(reference) || isnan(actual)) {
+        return isnan(reference) && isnan(actual);
+    }
+    if (isinf(reference) || isinf(actual)) {
+        return NO;
+    }
+    const double scale = fmax(1.0, fmax(fabs(reference), fabs(actual)));
+    return fabs(reference - actual) <= tolerance * scale;
+}
+
+static BOOL zpu_ml_float32_values_within_tolerance(const float *reference,
+                                                   const float *actual,
+                                                   size_t count,
+                                                   double tolerance) {
+    for (size_t index = 0; index < count; index++) {
+        if (!zpu_ml_scalar_within_tolerance((double)reference[index],
+                                            (double)actual[index], tolerance)) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL zpu_ml_float16_values_within_tolerance(const _Float16 *reference,
+                                                   const _Float16 *actual,
+                                                   size_t count,
+                                                   double tolerance) {
+    for (size_t index = 0; index < count; index++) {
+        if (!zpu_ml_scalar_within_tolerance((double)reference[index],
+                                            (double)actual[index], tolerance)) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static double zpu_ml_float16_bits_to_double(uint16_t bits) {
+    _Float16 value = 0;
+    memcpy(&value, &bits, sizeof(value));
+    return (double)value;
+}
+
+static BOOL zpu_ml_float16_bits_within_tolerance(const uint16_t *reference,
+                                                 const uint16_t *actual,
+                                                 size_t count,
+                                                 double tolerance) {
+    for (size_t index = 0; index < count; index++) {
+        if (!zpu_ml_scalar_within_tolerance(zpu_ml_float16_bits_to_double(reference[index]),
+                                            zpu_ml_float16_bits_to_double(actual[index]), tolerance)) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static double zpu_ml_bfloat16_bits_to_double(uint16_t bits) {
+    uint32_t float_bits = (uint32_t)bits << 16;
+    float value = 0;
+    memcpy(&value, &float_bits, sizeof(value));
+    return (double)value;
+}
+
+static BOOL zpu_ml_bfloat16_values_within_tolerance(const uint16_t *reference,
+                                                    const uint16_t *actual,
+                                                    size_t count,
+                                                    double tolerance) {
+    for (size_t index = 0; index < count; index++) {
+        if (!zpu_ml_scalar_within_tolerance(zpu_ml_bfloat16_bits_to_double(reference[index]),
+                                            zpu_ml_bfloat16_bits_to_double(actual[index]), tolerance)) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+static BOOL zpu_ml_oracle_tolerance_unit_test(void) {
+    const float pure_reference[] = {1.0f};
+    const float pure_within[] = {1.0f + 5.0e-7f};
+    const float pure_outside[] = {1.0f + 2.0e-6f};
+    const float inference_reference[] = {1000.0f};
+    const float inference_within[] = {1001.0f};
+    const float inference_outside[] = {1003.0f};
+    const uint16_t half_reference[] = {0x3c00u};
+    const uint16_t half_actual[] = {0x3c00u};
+    const uint16_t bfloat_reference[] = {0x3f80u};
+    const uint16_t bfloat_actual[] = {0x3f80u};
+    return zpu_ml_float32_values_within_tolerance(pure_reference, pure_within, 1,
+                                                  kMetalMLPureMathTolerance) &&
+           !zpu_ml_float32_values_within_tolerance(pure_reference, pure_outside, 1,
+                                                   kMetalMLPureMathTolerance) &&
+           zpu_ml_float32_values_within_tolerance(inference_reference, inference_within, 1,
+                                                   kMetalMLInferenceTolerance) &&
+           !zpu_ml_float32_values_within_tolerance(inference_reference, inference_outside, 1,
+                                                   kMetalMLInferenceTolerance) &&
+           zpu_ml_float16_bits_within_tolerance(half_reference, half_actual, 1,
+                                                kMetalMLPureMathTolerance) &&
+           zpu_ml_bfloat16_values_within_tolerance(bfloat_reference, bfloat_actual, 1,
+                                                   kMetalMLPureMathTolerance);
 }
 
 static int test_source_gradient_texture_shape(id<MTLDevice> native_device,
@@ -16444,6 +16556,10 @@ static int test_cpu_metal4_acceleration_rejects_unrepresented_geometry_state(
 
 int main(void) {
     @autoreleasepool {
+        if (!zpu_ml_oracle_tolerance_unit_test()) {
+            fprintf(stderr, "metal-pixel: ML oracle tolerance unit test failed\n");
+            return 1;
+        }
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device == nil) {
             fprintf(stderr, "metal-pixel: no system Metal device\n");
@@ -29803,8 +29919,10 @@ int main(void) {
             metal4_ml_add_f32_command_buffer == nil || metal4_ml_add_f32_feedback_error != nil ||
             native_ml_add_f32_function == nil || native_ml_add_f32_pipeline == nil ||
             native_ml_add_f32_error != nil || native_ml_add_f32_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            memcmp(native_ml_add_f32_values, metal4_ml_add_f32_values,
-                   sizeof(metal4_ml_add_f32_values)) != 0) {
+            !zpu_ml_float32_values_within_tolerance(native_ml_add_f32_values,
+                                                    metal4_ml_add_f32_values,
+                                                    sizeof(metal4_ml_add_f32_values) / sizeof(float),
+                                                    kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML Float32 add profile failed",
                             metal4_ml_add_f32_error ?: metal4_ml_add_f32_feedback_error ?: native_ml_add_f32_error);
             return 163;
@@ -29952,8 +30070,10 @@ int main(void) {
             native_ml_sub_f32_function == nil || native_ml_sub_f32_pipeline == nil ||
             native_ml_sub_f32_error != nil ||
             native_ml_sub_f32_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            memcmp(native_ml_sub_f32_values, metal4_ml_sub_f32_values,
-                   sizeof(metal4_ml_sub_f32_values)) != 0) {
+            !zpu_ml_float32_values_within_tolerance(native_ml_sub_f32_values,
+                                                    metal4_ml_sub_f32_values,
+                                                    sizeof(metal4_ml_sub_f32_values) / sizeof(float),
+                                                    kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML Float32 subtract profile failed",
                             metal4_ml_sub_f32_error ?: metal4_ml_sub_f32_feedback_error ?: native_ml_sub_f32_error);
             return 164;
@@ -30109,8 +30229,10 @@ int main(void) {
             metal4_ml_mul_f32_binding.indexType != MTLDataTypeInt ||
             metal4_ml_mul_f32_binding.dimensions.rank != 1 ||
             [metal4_ml_mul_f32_binding.dimensions extentAtDimensionIndex:0] != 10 ||
-            memcmp(native_ml_mul_f32_values, metal4_ml_mul_f32_values,
-                   sizeof(metal4_ml_mul_f32_values)) != 0) {
+            !zpu_ml_float32_values_within_tolerance(native_ml_mul_f32_values,
+                                                    metal4_ml_mul_f32_values,
+                                                    sizeof(metal4_ml_mul_f32_values) / sizeof(float),
+                                                    kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML Float32 multiply profile failed",
                             metal4_ml_mul_f32_error ?: metal4_ml_mul_f32_feedback_error ?: native_ml_mul_f32_error);
             return 180;
@@ -30265,8 +30387,10 @@ int main(void) {
             metal4_ml_mul_f16_binding.indexType != MTLDataTypeInt ||
             metal4_ml_mul_f16_binding.dimensions.rank != 1 ||
             [metal4_ml_mul_f16_binding.dimensions extentAtDimensionIndex:0] != 12 ||
-            memcmp(native_ml_mul_f16_values, metal4_ml_mul_f16_values,
-                   sizeof(metal4_ml_mul_f16_values)) != 0) {
+            !zpu_ml_float16_values_within_tolerance(native_ml_mul_f16_values,
+                                                    metal4_ml_mul_f16_values,
+                                                    sizeof(metal4_ml_mul_f16_values) / sizeof(_Float16),
+                                                    kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML Float16 multiply profile failed",
                             metal4_ml_mul_f16_error ?: metal4_ml_mul_f16_feedback_error ?: native_ml_mul_f16_error);
             return 181;
@@ -30441,8 +30565,10 @@ int main(void) {
             metal4_ml_matmul_f32_binding.dimensions.rank != 2 ||
             [metal4_ml_matmul_f32_binding.dimensions extentAtDimensionIndex:0] != 2 ||
             [metal4_ml_matmul_f32_binding.dimensions extentAtDimensionIndex:1] != 4 ||
-            memcmp(native_ml_matmul_f32_values, metal4_ml_matmul_f32_values,
-                   sizeof(metal4_ml_matmul_f32_values)) != 0) {
+            !zpu_ml_float32_values_within_tolerance(native_ml_matmul_f32_values,
+                                                    metal4_ml_matmul_f32_values,
+                                                    sizeof(metal4_ml_matmul_f32_values) / sizeof(float),
+                                                    kMetalMLInferenceTolerance)) {
             fail_with_error("Metal 4 CPU ML Float32 matrix-multiply profile failed",
                             metal4_ml_matmul_f32_error ?: metal4_ml_matmul_f32_feedback_error ?: native_ml_matmul_f32_error);
             return 192;
@@ -30617,8 +30743,10 @@ int main(void) {
             metal4_ml_matmul_f16_binding.dimensions.rank != 2 ||
             [metal4_ml_matmul_f16_binding.dimensions extentAtDimensionIndex:0] != 2 ||
             [metal4_ml_matmul_f16_binding.dimensions extentAtDimensionIndex:1] != 4 ||
-            memcmp(native_ml_matmul_f16_values, metal4_ml_matmul_f16_values,
-                   sizeof(metal4_ml_matmul_f16_values)) != 0) {
+            !zpu_ml_float16_values_within_tolerance(native_ml_matmul_f16_values,
+                                                    metal4_ml_matmul_f16_values,
+                                                    sizeof(metal4_ml_matmul_f16_values) / sizeof(_Float16),
+                                                    kMetalMLInferenceTolerance)) {
             fail_with_error("Metal 4 CPU ML Float16 matrix-multiply profile failed",
                             metal4_ml_matmul_f16_error ?: metal4_ml_matmul_f16_feedback_error ?: native_ml_matmul_f16_error);
             return 193;
@@ -30793,8 +30921,10 @@ int main(void) {
             metal4_ml_matmul_bf16_binding.dimensions.rank != 2 ||
             [metal4_ml_matmul_bf16_binding.dimensions extentAtDimensionIndex:0] != 2 ||
             [metal4_ml_matmul_bf16_binding.dimensions extentAtDimensionIndex:1] != 4 ||
-            memcmp(native_ml_matmul_bf16_values, metal4_ml_matmul_bf16_values,
-                   sizeof(metal4_ml_matmul_bf16_values)) != 0) {
+            !zpu_ml_bfloat16_values_within_tolerance(native_ml_matmul_bf16_values,
+                                                     metal4_ml_matmul_bf16_values,
+                                                     sizeof(metal4_ml_matmul_bf16_values) / sizeof(uint16_t),
+                                                     kMetalMLInferenceTolerance)) {
             fail_with_error("Metal 4 CPU ML BFloat16 matrix-multiply profile failed",
                             metal4_ml_matmul_bf16_error ?: metal4_ml_matmul_bf16_feedback_error ?: native_ml_matmul_bf16_error);
             return 194;
@@ -31690,8 +31820,10 @@ int main(void) {
             native_ml_add_f16_function == nil || native_ml_add_f16_pipeline == nil ||
             native_ml_add_f16_error != nil ||
             native_ml_add_f16_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            memcmp(native_ml_add_f16_values, metal4_ml_add_f16_values,
-                   sizeof(metal4_ml_add_f16_values)) != 0) {
+            !zpu_ml_float16_bits_within_tolerance(native_ml_add_f16_values,
+                                                  metal4_ml_add_f16_values,
+                                                  sizeof(metal4_ml_add_f16_values) / sizeof(uint16_t),
+                                                  kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML Float16 add profile failed",
                             metal4_ml_add_f16_error ?: metal4_ml_add_f16_feedback_error ?: native_ml_add_f16_error);
             return 169;
@@ -31838,8 +31970,10 @@ int main(void) {
             native_ml_add_bf16_function == nil || native_ml_add_bf16_pipeline == nil ||
             native_ml_add_bf16_error != nil ||
             native_ml_add_bf16_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            memcmp(native_ml_add_bf16_values, metal4_ml_add_bf16_values,
-                   sizeof(metal4_ml_add_bf16_values)) != 0) {
+            !zpu_ml_bfloat16_values_within_tolerance(native_ml_add_bf16_values,
+                                                     metal4_ml_add_bf16_values,
+                                                     sizeof(metal4_ml_add_bf16_values) / sizeof(uint16_t),
+                                                     kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML BFloat16 add profile failed",
                             metal4_ml_add_bf16_error ?: metal4_ml_add_bf16_feedback_error ?: native_ml_add_bf16_error);
             return 170;
@@ -31992,8 +32126,10 @@ int main(void) {
             metal4_ml_mul_bf16_binding.dimensions.rank != 2 ||
             [metal4_ml_mul_bf16_binding.dimensions extentAtDimensionIndex:0] != 4 ||
             [metal4_ml_mul_bf16_binding.dimensions extentAtDimensionIndex:1] != 3 ||
-            memcmp(native_ml_mul_bf16_values, metal4_ml_mul_bf16_values,
-                   sizeof(metal4_ml_mul_bf16_values)) != 0) {
+            !zpu_ml_bfloat16_values_within_tolerance(native_ml_mul_bf16_values,
+                                                     metal4_ml_mul_bf16_values,
+                                                     sizeof(metal4_ml_mul_bf16_values) / sizeof(uint16_t),
+                                                     kMetalMLPureMathTolerance)) {
             fail_with_error("Metal 4 CPU ML BFloat16 multiply profile failed",
                             metal4_ml_mul_bf16_error ?: metal4_ml_mul_bf16_feedback_error ?: native_ml_mul_bf16_error);
             return 194;

@@ -469,6 +469,11 @@ triangle path:
   coverage; line-filled patches rasterize the generated CPU triangle grid,
   including per-sample coverage and attachment-global 8-bit subpixel
   interpolation for 2x/4x multisample targets
+- native Metal ML comparisons are oracle-only and use a scale-aware floating
+  tolerance: `1e-6` for pure elementwise math and `2e-3` for matrix
+  multiplication, accumulation, and inference outputs. Integer and identity
+  profiles remain byte-exact, and these tolerances do not change CPU/ZPU
+  execution semantics
 - CPU-owned Metal 4 pipeline-data serializers record those registered compute
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
