@@ -577,6 +577,23 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; "
          "output.write(float4(source[gid.y * output.get_width() + gid.x]) / 255.0, gid); }\n"
+         "kernel void zpu_source_r32_float(texture2d<float, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write((float(gid.x) + 1.0) / 8.0, gid); }\n"
+         "kernel void zpu_source_rgba16_float(texture2d<float, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
+         "(float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+         "kernel void zpu_source_r32_uint(texture2d<uint, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(uint4(gid.x + 1u, 0u, 0u, 0u), gid); }\n"
+         "kernel void zpu_source_r32_sint(texture2d<int, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(int4(int(gid.x) + 1, 0, 0, 0), gid); }\n"
+         "kernel void zpu_source_rgba32_uint(texture2d<uint, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(uint4(gid.x + 1u, gid.y + 1u, "
+         "gid.x + gid.y + 1u, 0xffffffffu), gid); }\n"
          "struct SourceNestedInner { device float *data [[id(0)]]; texture2d<float> tex [[id(1)]]; };\n"
          "struct SourceNestedOuter { constant SourceNestedInner &inner [[id(0)]]; "
          "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
@@ -586,7 +603,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 8) {
+        adapter_library.functionNames.count != 13) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -840,6 +857,96 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU copy lowering execution failed",
                         adapter_copy_error ?: native_copy_error);
         return 173;
+    }
+
+    const struct {
+        NSString *name;
+        MTLPixelFormat format;
+        NSUInteger bytes_per_pixel;
+    } typed_gradient_cases[] = {
+        {@"zpu_source_r32_float", MTLPixelFormatR32Float, 4},
+        {@"zpu_source_rgba16_float", MTLPixelFormatRGBA16Float, 8},
+        {@"zpu_source_r32_uint", MTLPixelFormatR32Uint, 4},
+        {@"zpu_source_r32_sint", MTLPixelFormatR32Sint, 4},
+        {@"zpu_source_rgba32_uint", MTLPixelFormatRGBA32Uint, 16},
+    };
+    enum { typed_gradient_width = 7, typed_gradient_height = 5,
+           typed_gradient_max_bytes = typed_gradient_width * typed_gradient_height * 16 };
+    for (NSUInteger case_index = 0;
+         case_index < sizeof(typed_gradient_cases) / sizeof(typed_gradient_cases[0]); ++case_index) {
+        id<MTLFunction> native_function =
+            [native_library newFunctionWithName:typed_gradient_cases[case_index].name];
+        id<MTLFunction> adapter_function =
+            [adapter_library newFunctionWithName:typed_gradient_cases[case_index].name];
+        NSError *native_error = nil;
+        NSError *adapter_error = nil;
+        id<MTLComputePipelineState> native_pipeline =
+            [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+        id<MTLComputePipelineState> adapter_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:typed_gradient_cases[case_index].format
+                                                                width:typed_gradient_width height:typed_gradient_height
+                                                             mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderWrite;
+        id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:descriptor];
+        id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:descriptor];
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+        id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+        if (native_pipeline != nil && adapter_pipeline != nil && native_texture != nil &&
+            adapter_texture != nil && native_encoder != nil && adapter_encoder != nil) {
+            [native_encoder setComputePipelineState:native_pipeline];
+            [native_encoder setTexture:native_texture atIndex:0];
+            [native_encoder dispatchThreads:MTLSizeMake(typed_gradient_width, typed_gradient_height, 1)
+                         threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+            [native_encoder endEncoding];
+            [native_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+            [adapter_encoder setComputePipelineState:adapter_pipeline];
+            [adapter_encoder setTexture:adapter_texture atIndex:0];
+            [adapter_encoder dispatchThreads:MTLSizeMake(typed_gradient_width, typed_gradient_height, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+            [adapter_encoder endEncoding];
+            [adapter_command_buffer commit];
+            [adapter_command_buffer waitUntilCompleted];
+        }
+        uint8_t native_pixels[typed_gradient_max_bytes] = {0};
+        uint8_t adapter_pixels[typed_gradient_max_bytes] = {0};
+        const NSUInteger image_bytes = typed_gradient_width * typed_gradient_height *
+            typed_gradient_cases[case_index].bytes_per_pixel;
+        if (native_texture != nil) {
+            [native_texture getBytes:native_pixels
+                         bytesPerRow:typed_gradient_width * typed_gradient_cases[case_index].bytes_per_pixel
+                         fromRegion:MTLRegionMake2D(0, 0, typed_gradient_width, typed_gradient_height)
+                         mipmapLevel:0];
+        }
+        if (adapter_texture != nil) {
+            [adapter_texture getBytes:adapter_pixels
+                          bytesPerRow:typed_gradient_width * typed_gradient_cases[case_index].bytes_per_pixel
+                          fromRegion:MTLRegionMake2D(0, 0, typed_gradient_width, typed_gradient_height)
+                          mipmapLevel:0];
+        }
+        BOOL reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *reflection =
+                [adapter_library reflectionForFunctionWithName:typed_gradient_cases[case_index].name];
+            reflection_ok = reflection != nil && reflection.bindings.count == 1 &&
+                reflection.bindings[0].type == MTLBindingTypeTexture &&
+                reflection.bindings[0].index == 0;
+        }
+        if (native_function == nil || adapter_function == nil || native_error != nil ||
+            adapter_error != nil || native_pipeline == nil || adapter_pipeline == nil ||
+            native_texture == nil || adapter_texture == nil ||
+            native_command_buffer.status != MTLCommandBufferStatusCompleted ||
+            adapter_command_buffer.status != MTLCommandBufferStatusCompleted || !reflection_ok ||
+            memcmp(native_pixels, adapter_pixels, image_bytes) != 0) {
+            fail_with_error("source-defined CPU typed gradient lowering execution failed",
+                            adapter_error ?: native_error);
+            return 174 + (int)case_index;
+        }
     }
 
     id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_source_vertex"];
