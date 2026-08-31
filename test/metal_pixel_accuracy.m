@@ -686,13 +686,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceArrayArguments { array<float4, 2> colors [[id(0)]]; "
          "array<primitive_acceleration_structure, 2> structures [[id(2)]]; };\n"
          "kernel void zpu_source_argument_buffer_arrays(constant SourceArrayArguments &arguments [[buffer(7)]]) { "
+         "(void)arguments; }\n"
+         "struct SourceTextureSamplerArrays { array<texture2d<float, access::read>, 2> textures [[id(0)]]; "
+         "array<sampler, 2> samplers [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_texture_sampler_arrays(constant SourceTextureSamplerArrays &arguments [[buffer(8)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 37) {
+        adapter_library.functionNames.count != 38) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1630,6 +1634,80 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_array_reflection_ok) {
         fail_with_error("source-defined array argument layout lowering failed", adapter_error ?: native_error);
         return 177;
+    }
+
+    id<MTLFunction> native_source_texture_sampler_array_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_texture_sampler_arrays"];
+    id<MTLFunction> adapter_source_texture_sampler_array_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_texture_sampler_arrays"];
+    id<MTLArgumentEncoder> native_source_texture_sampler_array_encoder =
+        [native_source_texture_sampler_array_function newArgumentEncoderWithBufferIndex:8];
+    id<MTLArgumentEncoder> adapter_source_texture_sampler_array_encoder =
+        [adapter_source_texture_sampler_array_function newArgumentEncoderWithBufferIndex:8];
+    BOOL source_texture_sampler_array_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_texture_sampler_arrays"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_texture_sampler_arrays"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        source_texture_sampler_array_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 8 &&
+            adapter_binding.index == 8 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2;
+        if (source_texture_sampler_array_reflection_ok) {
+            MTLStructMember *native_textures = native_struct.members[0];
+            MTLStructMember *adapter_textures = adapter_struct.members[0];
+            MTLStructMember *native_samplers = native_struct.members[1];
+            MTLStructMember *adapter_samplers = adapter_struct.members[1];
+            MTLArrayType *native_texture_array = native_textures.arrayType;
+            MTLArrayType *adapter_texture_array = adapter_textures.arrayType;
+            MTLArrayType *native_sampler_array = native_samplers.arrayType;
+            MTLArrayType *adapter_sampler_array = adapter_samplers.arrayType;
+            MTLTextureReferenceType *native_texture_reference = native_texture_array.elementTextureReferenceType;
+            MTLTextureReferenceType *adapter_texture_reference = adapter_texture_array.elementTextureReferenceType;
+            source_texture_sampler_array_reflection_ok =
+                [native_textures.name isEqualToString:adapter_textures.name] &&
+                native_textures.offset == adapter_textures.offset &&
+                native_textures.dataType == MTLDataTypeArray &&
+                adapter_textures.dataType == MTLDataTypeArray &&
+                native_texture_array != nil && adapter_texture_array != nil &&
+                native_texture_array.elementType == MTLDataTypeTexture &&
+                adapter_texture_array.elementType == MTLDataTypeTexture &&
+                native_texture_array.arrayLength == 2 && adapter_texture_array.arrayLength == 2 &&
+                native_texture_array.stride == adapter_texture_array.stride &&
+                native_texture_reference != nil && adapter_texture_reference != nil &&
+                native_texture_reference.textureType == MTLTextureType2D &&
+                adapter_texture_reference.textureType == MTLTextureType2D &&
+                native_texture_reference.textureDataType == MTLDataTypeFloat &&
+                adapter_texture_reference.textureDataType == MTLDataTypeFloat &&
+                [native_samplers.name isEqualToString:adapter_samplers.name] &&
+                native_samplers.offset == adapter_samplers.offset &&
+                native_samplers.dataType == MTLDataTypeArray &&
+                adapter_samplers.dataType == MTLDataTypeArray &&
+                native_sampler_array != nil && adapter_sampler_array != nil &&
+                native_sampler_array.elementType == MTLDataTypeSampler &&
+                adapter_sampler_array.elementType == MTLDataTypeSampler &&
+                native_sampler_array.arrayLength == 2 && adapter_sampler_array.arrayLength == 2 &&
+                native_sampler_array.stride == adapter_sampler_array.stride;
+        }
+    }
+    if (native_source_texture_sampler_array_function == nil ||
+        adapter_source_texture_sampler_array_function == nil ||
+        native_source_texture_sampler_array_encoder == nil ||
+        adapter_source_texture_sampler_array_encoder == nil ||
+        native_source_texture_sampler_array_encoder.encodedLength !=
+            adapter_source_texture_sampler_array_encoder.encodedLength ||
+        native_source_texture_sampler_array_encoder.alignment !=
+            adapter_source_texture_sampler_array_encoder.alignment ||
+        !source_texture_sampler_array_reflection_ok) {
+        fail_with_error("source-defined texture and sampler array layout lowering failed", adapter_error ?: native_error);
+        return 180;
     }
     return 0;
 }

@@ -12235,14 +12235,27 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
     if (name == nil || elementName == NULL || arrayLength == NULL || resource == NULL) return NO;
     if (![name hasPrefix:@"array<"] || ![name hasSuffix:@">"]) return NO;
     NSString *arguments = [name substringWithRange:NSMakeRange(6, name.length - 7)];
-    NSRange comma = [arguments rangeOfString:@","];
-    if (comma.location == NSNotFound || comma.location == 0 || comma.location + 1 >= arguments.length ||
-        [arguments rangeOfString:@"," options:0 range:NSMakeRange(comma.location + 1,
-                                                                    arguments.length - comma.location - 1)].location != NSNotFound) {
+    NSUInteger angleDepth = 0;
+    NSUInteger commaLocation = NSNotFound;
+    for (NSUInteger position = 0; position < arguments.length; ++position) {
+        const unichar character = [arguments characterAtIndex:position];
+        if (character == '<') {
+            if (angleDepth == NSUIntegerMax) return NO;
+            angleDepth += 1;
+        } else if (character == '>') {
+            if (angleDepth == 0) return NO;
+            angleDepth -= 1;
+        } else if (character == ',' && angleDepth == 0) {
+            if (commaLocation != NSNotFound) return NO;
+            commaLocation = position;
+        }
+    }
+    if (angleDepth != 0 || commaLocation == NSNotFound || commaLocation == 0 ||
+        commaLocation + 1 >= arguments.length) {
         return NO;
     }
-    NSString *candidateElement = [arguments substringToIndex:comma.location];
-    NSString *candidateLength = [arguments substringFromIndex:comma.location + 1];
+    NSString *candidateElement = [arguments substringToIndex:commaLocation];
+    NSString *candidateLength = [arguments substringFromIndex:commaLocation + 1];
     NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
     if (candidateLength.length == 0 || [candidateLength rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
         return NO;
@@ -12251,11 +12264,17 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
     if (length == 0 || length == NSUIntegerMax) return NO;
     MTLDataType dataType = MTLDataTypeNone;
     BOOL isResource = zpu_source_resource_type_for_name(candidateElement, &dataType);
+    BOOL isTexture = NO;
+    if (!isResource && [candidateElement hasPrefix:@"texture"]) {
+        MTLTextureType textureType = MTLTextureType2D;
+        MTLBindingAccess access = MTLBindingAccessReadOnly;
+        isTexture = zpu_source_texture_type_for_name(candidateElement, &textureType, &dataType, &access);
+    }
     if (!isResource && !zpu_source_data_type_for_name(candidateElement, &dataType) &&
-        ![candidateElement isEqualToString:@"sampler"]) return NO;
+        ![candidateElement isEqualToString:@"sampler"] && !isTexture) return NO;
     *elementName = candidateElement;
     *arrayLength = length;
-    *resource = isResource || [candidateElement isEqualToString:@"sampler"];
+    *resource = isResource || isTexture || [candidateElement isEqualToString:@"sampler"];
     return YES;
 }
 
@@ -12280,7 +12299,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
     NSRegularExpression *fieldExpression = [NSRegularExpression
         regularExpressionWithPattern:
             @"^\\s*(constant|device|threadgroup)?\\s*(const)?\\s*"
-             "([A-Za-z_][A-Za-z0-9_]*(?:<[^<>]+>)?)\\s*(\\*|&)?\\s*"
+             "([A-Za-z_][A-Za-z0-9_]*(?:<[^<>]*(?:<[^<>]*>[^<>]*)?>)?)\\s*(\\*|&)?\\s*"
              "([A-Za-z_][A-Za-z0-9_]*)(?:\\[([0-9]+)\\])?\\s*"
              "\\[\\[id\\(([0-9]+)\\)\\]\\]\\s*$"
                                options:0 error:&fieldError];
