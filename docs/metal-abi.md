@@ -369,6 +369,8 @@ triangle path:
   elementwise UInt8 tensor addition through ZPU-owned storage; the registered
   `zpu_cpu_ml_add_f32` profile performs deferred elementwise Float32 tensor
   addition through the same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_sub_f32` profile performs deferred elementwise Float32 tensor
+  subtraction through that same ZPU-owned storage path; the registered
   `zpu_cpu_ml_add_i32` profile performs deferred elementwise Int32 tensor
   addition with Metal-compatible 32-bit wraparound through that same ZPU-owned
   storage path; the registered `zpu_cpu_ml_add_u32` profile performs deferred
@@ -435,7 +437,8 @@ triangle path:
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
 - the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_add_u8`,
-  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_add_i32`, `zpu_cpu_ml_add_u32`,
+  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_sub_f32`, `zpu_cpu_ml_add_i32`,
+  `zpu_cpu_ml_add_u32`,
   `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`,
   `zpu_cpu_ml_add_f16`, `zpu_cpu_ml_add_bf16`, `zpu_cpu_ml_add_i4`,
   `zpu_cpu_ml_add_u4`, `zpu_cpu_ml_mul_u8`, `zpu_cpu_ml_mul_i8`,
