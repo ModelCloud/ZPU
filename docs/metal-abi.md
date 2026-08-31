@@ -168,9 +168,10 @@ triangle path:
   is released
 - heap-backed buffers and textures with bounded allocation accounting; heap
   storage/cache mismatches are rejected, heap offsets are retained for
-  resources, explicit aligned append placement is supported for heap buffers,
-  and default heap hazard tracking is resolved as untracked, matching Metal's
-  heap rules
+  resources, aligned first-fit and explicit non-overlapping placement are
+  supported, and `makeAliasable` releases a live range for true CPU backing
+  reuse while the old resource remains a byte-visible alias. Default heap
+  hazard tracking is resolved as untracked, matching Metal's heap rules
 - owned Depth16Unorm/Depth32Float and combined depth/stencil textures bound as
   render-pass depth attachments, with configurable Metal compare functions,
   write masks, explicit CPU pack/unpack, and depth clears
