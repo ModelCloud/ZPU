@@ -944,11 +944,23 @@ requiring the repository's Linux Vulkan/XCB install artifacts.
 The focused checks are:
 
 ```sh
+tools/limited-cpus.sh bash tools/cpu_ml_portability_gate.sh
+tools/limited-cpus.sh zig build cpu-ml-test
+tools/limited-cpus.sh zig build cpu-ml-c-api
 tools/limited-cpus.sh zig build metal-test
 tools/limited-cpus.sh zig build metal-c-api
 tools/limited-cpus.sh zig build metal-pixel
 tools/limited-cpus.sh zig build metal-install -Dtarget=aarch64-ios -Dxcb=false
 ```
+
+The CPU ML package is intentionally a separate artifact. Its ABI is ordinary
+host CPU memory and does not select a backend from the host OS: arm64 providers
+may use AdvSIMD/NEON (including Apple silicon), while x86_64 providers may use
+AVX tiers when the provider's own target and runtime checks permit it. The
+standalone package never links Metal, Foundation, PJRT, or an Apple SDK; the
+Apple adapter only stages ZPU-owned tensors into that ABI. The portability gate
+cross-compiles this package for x86_64 Linux, arm64 Linux, and arm64 macOS to
+keep that separation reviewable.
 
 The last command is a compile-only iOS arm64 check; an iOS device or simulator
 is still required for runtime execution.

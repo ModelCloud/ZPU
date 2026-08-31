@@ -21,6 +21,8 @@ jobs:
         run: tools/limited-cpus.sh zig build -Dcore-only=true
       - name: Dependency-free render test gate
         run: tools/limited-cpus.sh zig build test -Dcore-only=true
+      - name: Standalone CPU ML portability gate
+        run: tools/limited-cpus.sh bash tools/cpu_ml_portability_gate.sh
 
   build:
     needs: core
