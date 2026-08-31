@@ -718,7 +718,9 @@ triangle path:
   binding reflection onto the pipeline object on SDKs that expose the Metal 4
   reflection property; reflection therefore does not depend on selecting the
   Metal 4 compiler factory.
-  Unsupported arbitrary MSL and stitched libraries still fail closed
+  Unsupported arbitrary MSL and stitched libraries still fail closed; the
+  CPU adapter accepts only graphs made from the registered visible identity
+  profiles, with input-zero or previous-node data flow
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
   descriptor, so supported unspecialized blend state can be resolved through
   `newRenderPipelineDescriptorForSpecialization` and the CPU compiler path

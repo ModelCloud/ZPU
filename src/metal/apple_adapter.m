@@ -11584,31 +11584,45 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         zpu_set_error(error, @"ZPU CPU Metal stitched libraries require non-nil function and graph arrays");
         return nil;
     }
+    NSMutableSet<NSString *> *identityFunctions = [NSMutableSet set];
     for (id<MTLFunction> function in descriptor.functions) {
         ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
         if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != self ||
             cpuFunction.functionType != MTLFunctionTypeVisible ||
-            ![cpuFunction.name isEqualToString:@"zpu_test_visible"]) {
-            zpu_set_error(error, @"ZPU CPU Metal stitched libraries accept only the registered identity function");
+            (![cpuFunction.name isEqualToString:@"zpu_test_visible"] &&
+             ![cpuFunction.name isEqualToString:@"zpu_test_visible_secondary"]) ||
+            [identityFunctions containsObject:cpuFunction.name]) {
+            zpu_set_error(error, @"ZPU CPU Metal stitched libraries accept only unique registered identity functions");
             return nil;
         }
+        [identityFunctions addObject:cpuFunction.name];
     }
     NSMutableArray<NSString *> *graphNames = [NSMutableArray arrayWithCapacity:descriptor.functionGraphs.count];
     for (MTLFunctionStitchingGraph *graph in descriptor.functionGraphs) {
         if (![graph isKindOfClass:[MTLFunctionStitchingGraph class]] || graph.functionName.length == 0 ||
-            [graphNames containsObject:graph.functionName] || graph.nodes.count != 1 ||
-            graph.outputNode != graph.nodes[0] || graph.attributes.count != 0) {
-            zpu_set_error(error, @"ZPU CPU Metal supports only unique one-node stitched identity graphs");
+            [graphNames containsObject:graph.functionName] || graph.nodes.count == 0 ||
+            graph.outputNode != graph.nodes.lastObject || graph.attributes.count != 0) {
+            zpu_set_error(error, @"ZPU CPU Metal supports only unique stitched identity graphs");
             return nil;
         }
-        MTLFunctionStitchingFunctionNode *node = graph.nodes[0];
-        if (![node isKindOfClass:[MTLFunctionStitchingFunctionNode class]] ||
-            ![node.name isEqualToString:@"zpu_test_visible"] || node.arguments.count != 1 ||
-            node.controlDependencies.count != 0 ||
-            ![node.arguments[0] isKindOfClass:[MTLFunctionStitchingInputNode class]] ||
-            [(MTLFunctionStitchingInputNode *)node.arguments[0] argumentIndex] != 0) {
-            zpu_set_error(error, @"ZPU CPU Metal stitched graphs must be identity functions of argument zero");
-            return nil;
+        for (NSUInteger index = 0; index < graph.nodes.count; ++index) {
+            MTLFunctionStitchingFunctionNode *node = graph.nodes[index];
+            if (![node isKindOfClass:[MTLFunctionStitchingFunctionNode class]] ||
+                ([node.name isEqualToString:@"zpu_test_visible"] == NO &&
+                 [node.name isEqualToString:@"zpu_test_visible_secondary"] == NO) ||
+                ![identityFunctions containsObject:node.name] || node.arguments.count != 1 ||
+                node.controlDependencies.count != 0) {
+                zpu_set_error(error, @"ZPU CPU Metal stitched graphs must use registered identity nodes");
+                return nil;
+            }
+            id argument = node.arguments[0];
+            const BOOL inputArgument = [argument isKindOfClass:[MTLFunctionStitchingInputNode class]] &&
+                [(MTLFunctionStitchingInputNode *)argument argumentIndex] == 0;
+            const BOOL previousNodeArgument = index != 0 && argument == graph.nodes[index - 1];
+            if (!inputArgument && !previousNodeArgument) {
+                zpu_set_error(error, @"ZPU CPU Metal stitched identity nodes must consume input zero or the previous node");
+                return nil;
+            }
         }
         [graphNames addObject:graph.functionName];
     }
