@@ -12143,8 +12143,11 @@ static BOOL zpu_source_data_type_for_name(NSString *name, MTLDataType *dataType)
             @"long3": @(MTLDataTypeLong3), @"long4": @(MTLDataTypeLong4),
             @"ulong": @(MTLDataTypeULong), @"ulong2": @(MTLDataTypeULong2),
             @"ulong3": @(MTLDataTypeULong3), @"ulong4": @(MTLDataTypeULong4),
-            @"bfloat": @(MTLDataTypeBFloat), @"bfloat2": @(MTLDataTypeBFloat2),
-            @"bfloat3": @(MTLDataTypeBFloat3), @"bfloat4": @(MTLDataTypeBFloat4),
+            /* MTLDataTypeBFloat* is unavailable at the iOS 15 deployment
+             * target. These values are reserved by the SDK as 121..124 and
+             * are already handled numerically by the layout helper below. */
+            @"bfloat": @((MTLDataType)121), @"bfloat2": @((MTLDataType)122),
+            @"bfloat3": @((MTLDataType)123), @"bfloat4": @((MTLDataType)124),
             @"float2x2": @(MTLDataTypeFloat2x2), @"float2x3": @(MTLDataTypeFloat2x3),
             @"float2x4": @(MTLDataTypeFloat2x4), @"float3x2": @(MTLDataTypeFloat3x2),
             @"float3x3": @(MTLDataTypeFloat3x3), @"float3x4": @(MTLDataTypeFloat3x4),
