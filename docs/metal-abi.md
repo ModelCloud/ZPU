@@ -582,6 +582,11 @@ triangle path:
   members, Metal size/alignment, and read-only/read-write access metadata;
   fixed-size arrays of those pointers retain the native `__elems` shape,
   pointer stride, and following argument indices.
+  Metal 4 source argument-buffer metadata also recognizes the validated
+  `tensor<device float, dextents<int32_t, N>>` reference form with dynamic
+  rank-`N` extents, and the `depth_stencil_state` resource handle; tensor
+  references and depth/stencil handles remain ZPU-owned and are never passed
+  to a native Metal encoder.
   It never compiles or executes arbitrary MSL
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support

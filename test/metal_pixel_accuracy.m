@@ -738,6 +738,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "float scale [[id(2)]]; };\n"
          "kernel void zpu_source_argument_buffer_pointer_struct_array(constant SourcePointerStructArrayArguments &arguments [[buffer(16)]]) { "
          "(void)arguments; }\n"
+         "struct SourceModernArguments { tensor<device float, dextents<int32_t, 2>> tensorValue [[id(0)]]; "
+         "depth_stencil_state depthState [[id(1)]]; };\n"
+         "kernel void zpu_source_argument_buffer_modern(constant SourceModernArguments &arguments [[buffer(17)]]) { "
+         "(void)arguments; }\n"
          "kernel void zpu_source_metadata_direct(device const float *input [[buffer(0)]], "
          "device float4 *output [[buffer(1)]], "
          "texture2d<float, access::read> sourceTexture [[texture(2)]], "
@@ -755,7 +759,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 51) {
+        adapter_library.functionNames.count != 52) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -3123,6 +3127,101 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_pointer_struct_array_reflection_ok || !source_pointer_struct_array_encoding_ok) {
         fail_with_error("source-defined pointer-to-struct array layout lowering failed", adapter_error ?: native_error);
         return 188;
+    }
+
+    id<MTLFunction> native_source_modern_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_modern"];
+    id<MTLFunction> adapter_source_modern_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_modern"];
+    id<MTLArgumentEncoder> native_source_modern_encoder =
+        [native_source_modern_function newArgumentEncoderWithBufferIndex:17];
+    id<MTLArgumentEncoder> adapter_source_modern_encoder =
+        [adapter_source_modern_function newArgumentEncoderWithBufferIndex:17];
+    BOOL source_modern_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_modern"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_modern"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        MTLStructMember *native_tensor = native_struct.members.count > 0 ? native_struct.members[0] : nil;
+        MTLStructMember *adapter_tensor = adapter_struct.members.count > 0 ? adapter_struct.members[0] : nil;
+        MTLStructMember *native_depth = native_struct.members.count > 1 ? native_struct.members[1] : nil;
+        MTLStructMember *adapter_depth = adapter_struct.members.count > 1 ? adapter_struct.members[1] : nil;
+        MTLTensorReferenceType *native_tensor_reference = native_tensor.tensorReferenceType;
+        MTLTensorReferenceType *adapter_tensor_reference = adapter_tensor.tensorReferenceType;
+        source_modern_reflection_ok =
+            native_reflection != nil && adapter_reflection != nil && native_binding != nil &&
+            adapter_binding != nil && native_binding.index == adapter_binding.index &&
+            native_binding.index == 17 && native_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_binding.bufferDataType == MTLDataTypeStruct &&
+            native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
+            native_binding.bufferDataSize == 16 &&
+            native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
+            native_binding.bufferAlignment == 8 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2 &&
+            native_tensor != nil && adapter_tensor != nil &&
+            [native_tensor.name isEqualToString:adapter_tensor.name] &&
+            [native_tensor.name isEqualToString:@"tensorValue"] &&
+            native_tensor.dataType == adapter_tensor.dataType &&
+            native_tensor.dataType == MTLDataTypeTensor &&
+            native_tensor.offset == adapter_tensor.offset && native_tensor.offset == 0 &&
+            native_tensor.argumentIndex == adapter_tensor.argumentIndex &&
+            native_tensor.argumentIndex == 0 && native_tensor_reference != nil &&
+            adapter_tensor_reference != nil &&
+            native_tensor_reference.tensorDataType == adapter_tensor_reference.tensorDataType &&
+            native_tensor_reference.tensorDataType == MTLTensorDataTypeFloat32 &&
+            native_tensor_reference.indexType == adapter_tensor_reference.indexType &&
+            native_tensor_reference.indexType == MTLDataTypeInt &&
+            native_tensor_reference.access == adapter_tensor_reference.access &&
+            native_tensor_reference.access == MTLBindingAccessReadWrite &&
+            native_tensor_reference.dimensions != nil && adapter_tensor_reference.dimensions != nil &&
+            native_tensor_reference.dimensions.rank == adapter_tensor_reference.dimensions.rank &&
+            native_tensor_reference.dimensions.rank == 2 &&
+            [native_tensor_reference.dimensions extentAtDimensionIndex:0] == -1 &&
+            [native_tensor_reference.dimensions extentAtDimensionIndex:1] == -1 &&
+            native_depth != nil && adapter_depth != nil &&
+            [native_depth.name isEqualToString:adapter_depth.name] &&
+            [native_depth.name isEqualToString:@"depthState"] &&
+            native_depth.dataType == adapter_depth.dataType &&
+            native_depth.dataType == (MTLDataType)139 &&
+            native_depth.offset == adapter_depth.offset && native_depth.offset == 8 &&
+            native_depth.argumentIndex == adapter_depth.argumentIndex &&
+            native_depth.argumentIndex == 1 && native_depth.tensorReferenceType == nil &&
+            adapter_depth.tensorReferenceType == nil;
+    }
+    BOOL source_modern_encoding_ok = NO;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLDepthStencilDescriptor *adapter_depth_descriptor = [MTLDepthStencilDescriptor new];
+        id<MTLDepthStencilState> adapter_depth_state =
+            [adapter_device newDepthStencilStateWithDescriptor:adapter_depth_descriptor];
+        id<MTLBuffer> adapter_modern_buffer =
+            [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+        if (adapter_source_modern_encoder != nil && adapter_modern_buffer != nil &&
+            adapter_depth_state != nil && adapter_source_modern_encoder.encodedLength == 16 &&
+            adapter_source_modern_encoder.alignment == 8) {
+            memset(adapter_modern_buffer.contents, 0, adapter_modern_buffer.length);
+            [adapter_source_modern_encoder setArgumentBuffer:adapter_modern_buffer offset:0];
+            [adapter_source_modern_encoder setDepthStencilState:adapter_depth_state atIndex:1];
+            uint64_t encoded_depth_resource = 0;
+            memcpy(&encoded_depth_resource, (uint8_t *)adapter_modern_buffer.contents + 8,
+                   sizeof(encoded_depth_resource));
+            source_modern_encoding_ok =
+                encoded_depth_resource == adapter_depth_state.gpuResourceID._impl;
+        }
+    }
+    if (native_source_modern_function == nil || adapter_source_modern_function == nil ||
+        native_source_modern_encoder == nil || adapter_source_modern_encoder == nil ||
+        native_source_modern_encoder.encodedLength != adapter_source_modern_encoder.encodedLength ||
+        native_source_modern_encoder.alignment != adapter_source_modern_encoder.alignment ||
+        !source_modern_reflection_ok || !source_modern_encoding_ok) {
+        fail_with_error("source-defined tensor/depth-state argument layout lowering failed", adapter_error ?: native_error);
+        return 189;
     }
     return 0;
 }

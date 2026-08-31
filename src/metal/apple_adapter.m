@@ -1790,6 +1790,21 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     API_AVAILABLE(macos(13.0), ios(16.0));
 @end
 
+/* MTLArgumentDescriptor predates Metal 4 tensor and depth-stencil argument
+ * members. Apple's descriptor setter asserts for those newer data-type
+ * values, even though an argument-buffer reflection object can describe
+ * them. Keep the parser's internal descriptor tree in a ZPU-owned subclass
+ * so it never routes those metadata values through Apple's validator. */
+@interface ZPUArgumentDescriptor : MTLArgumentDescriptor {
+@public
+    MTLDataType _dataType;
+    NSUInteger _index;
+    NSUInteger _arrayLength;
+    MTLBindingAccess _access;
+    MTLTextureType _textureType;
+}
+@end
+
 @interface ZPURenderEncoder : NSObject <MTLRenderCommandEncoder> {
 @public
     zpu_metal_render_encoder *_zpuEncoder;
@@ -8377,6 +8392,29 @@ API_AVAILABLE(macos(10.12), ios(10.0))
 }
 @end
 
+@implementation ZPUArgumentDescriptor
+- (instancetype)init {
+    if ((self = [super init])) {
+        _dataType = MTLDataTypeNone;
+        _index = 0;
+        _arrayLength = 0;
+        _access = MTLBindingAccessReadOnly;
+        _textureType = MTLTextureType2D;
+    }
+    return self;
+}
+- (MTLDataType)dataType { return _dataType; }
+- (void)setDataType:(MTLDataType)dataType { _dataType = dataType; }
+- (NSUInteger)index { return _index; }
+- (void)setIndex:(NSUInteger)index { _index = index; }
+- (NSUInteger)arrayLength { return _arrayLength; }
+- (void)setArrayLength:(NSUInteger)arrayLength { _arrayLength = arrayLength; }
+- (MTLBindingAccess)access { return _access; }
+- (void)setAccess:(MTLBindingAccess)access { _access = access; }
+- (MTLTextureType)textureType { return _textureType; }
+- (void)setTextureType:(MTLTextureType)textureType { _textureType = textureType; }
+@end
+
 @implementation ZPUBinding
 - (instancetype)initWithName:(NSString *)name type:(MTLBindingType)type
                        access:(MTLBindingAccess)access index:(NSUInteger)index {
@@ -12272,6 +12310,91 @@ static BOOL zpu_source_data_type_for_name(NSString *name, MTLDataType *dataType)
     return YES;
 }
 
+static NSArray<NSString *> *zpu_source_split_parameters(NSString *parameters);
+
+static MTLArgumentDescriptor *zpu_source_argument_descriptor_for_data_type(MTLDataType dataType) {
+    if (dataType == (MTLDataType)139 || dataType == (MTLDataType)140) {
+        return [[ZPUArgumentDescriptor alloc] init];
+    }
+    return [MTLArgumentDescriptor argumentDescriptor];
+}
+
+/* Parse the validated Metal tensor-reference spelling used in argument
+ * buffers. This is metadata-only: the adapter keeps tensor resources in ZPU
+ * and never asks Apple's compiler or command encoder to execute the source
+ * function. Shader-bound extents are dynamic by definition, so reflection
+ * reports one -1 extent for each declared rank. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_source_tensor_type_for_name(NSString *name,
+                                             MTLDataType *tensorDataType,
+                                             MTLDataType *indexType,
+                                             id *dimensions,
+                                             MTLBindingAccess *access) {
+    if (name == nil || tensorDataType == NULL || indexType == NULL ||
+        dimensions == NULL || access == NULL) return NO;
+    NSString *compactName = zpu_source_compact(name);
+    if (![compactName hasPrefix:@"tensor<"] || ![compactName hasSuffix:@">"] ||
+        compactName.length <= 8) return NO;
+    NSString *arguments = [compactName substringWithRange:
+        NSMakeRange(7, compactName.length - 8)];
+    NSArray<NSString *> *parts = zpu_source_split_parameters(arguments);
+    if (parts.count != 2) return NO;
+
+    NSString *element = parts[0];
+    MTLDataType elementDataType = MTLDataTypeNone;
+    BOOL readOnly = NO;
+    if ([element hasPrefix:@"deviceconst"]) {
+        readOnly = YES;
+        element = [element substringFromIndex:11];
+    } else if ([element hasPrefix:@"device"]) {
+        element = [element substringFromIndex:6];
+    } else {
+        return NO;
+    }
+    if (element.length == 0 || !zpu_source_data_type_for_name(element, &elementDataType)) return NO;
+    switch (elementDataType) {
+        case MTLDataTypeFloat:
+        case MTLDataTypeHalf:
+        case MTLDataTypeChar:
+        case MTLDataTypeUChar:
+        case MTLDataTypeShort:
+        case MTLDataTypeUShort:
+        case MTLDataTypeInt:
+        case MTLDataTypeUInt:
+        case MTLDataTypeBFloat:
+            break;
+        default:
+            return NO;
+    }
+
+    NSString *extentSpec = parts[1];
+    if (![extentSpec hasPrefix:@"dextents<"] || ![extentSpec hasSuffix:@">"] ||
+        extentSpec.length <= 10) return NO;
+    NSString *extentArguments = [extentSpec substringWithRange:
+        NSMakeRange(9, extentSpec.length - 10)];
+    NSArray<NSString *> *extentParts = zpu_source_split_parameters(extentArguments);
+    if (extentParts.count != 2) return NO;
+    MTLDataType parsedIndexType = MTLDataTypeNone;
+    if ([extentParts[0] isEqualToString:@"int32_t"]) parsedIndexType = MTLDataTypeInt;
+    else if ([extentParts[0] isEqualToString:@"uint32_t"]) parsedIndexType = MTLDataTypeUInt;
+    else return NO;
+    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+    NSString *rankString = extentParts[1];
+    if (rankString.length == 0 || [rankString rangeOfCharacterFromSet:nonDigits].location != NSNotFound) return NO;
+    NSUInteger rank = rankString.integerValue;
+    if (rank == 0 || rank > MTL_TENSOR_MAX_RANK || rank == NSUIntegerMax) return NO;
+    NSInteger dynamicValues[MTL_TENSOR_MAX_RANK];
+    for (NSUInteger dimension = 0; dimension < rank; ++dimension) dynamicValues[dimension] = -1;
+    MTLTensorExtents *dynamicDimensions =
+        [[MTLTensorExtents alloc] initWithRank:rank values:dynamicValues];
+    if (dynamicDimensions == nil) return NO;
+    *tensorDataType = elementDataType;
+    *indexType = parsedIndexType;
+    *dimensions = dynamicDimensions;
+    *access = readOnly ? MTLBindingAccessReadOnly : MTLBindingAccessReadWrite;
+    return YES;
+}
+
 static BOOL zpu_source_texture_type_for_name(NSString *name, MTLTextureType *textureType,
                                               MTLDataType *dataType, MTLBindingAccess *access,
                                               BOOL *depthTexture) {
@@ -12335,6 +12458,7 @@ static BOOL zpu_source_resource_type_for_name(NSString *name, MTLDataType *dataT
         @"compute_pipeline_state": @(MTLDataTypeComputePipeline),
         @"primitive_acceleration_structure": @(MTLDataTypePrimitiveAccelerationStructure),
         @"instance_acceleration_structure": @(MTLDataTypeInstanceAccelerationStructure),
+        @"depth_stencil_state": @((MTLDataType)139),
     };
     NSNumber *value = resourceTypes[name];
     if (value == nil) return NO;
@@ -12469,6 +12593,9 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
     MTLBindingAccess access = MTLBindingAccessReadOnly;
     MTLTextureType textureType = MTLTextureType2D;
     BOOL depthTexture = NO;
+    MTLDataType tensorDataType = MTLDataTypeNone;
+    MTLDataType tensorIndexType = MTLDataTypeNone;
+    id tensorDimensions = nil;
     NSDictionary *childLayout = nil;
     NSDictionary *pointerStructLayout = nil;
     NSUInteger argumentIndexSpan = arrayLength;
@@ -12501,7 +12628,8 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
         kind = @"pointer";
         access = (pointeeConst || [addressSpace isEqualToString:@"constant"]) ?
             MTLBindingAccessReadOnly : MTLBindingAccessReadWrite;
-    } else if ([elementName hasPrefix:@"texture"] || [elementName hasPrefix:@"depth"]) {
+    } else if ([elementName hasPrefix:@"texture"] ||
+               ([elementName hasPrefix:@"depth"] && [elementName rangeOfString:@"<"].location != NSNotFound)) {
         if (!zpu_source_texture_type_for_name(elementName, &textureType, &elementDataType, &access,
                                               &depthTexture)) return nil;
         dataType = MTLDataTypeTexture;
@@ -12510,6 +12638,16 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
         dataType = MTLDataTypeSampler;
         elementDataType = MTLDataTypeSampler;
         kind = @"sampler";
+    } else if ([elementName hasPrefix:@"tensor<"]) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            if (!zpu_source_tensor_type_for_name(elementName, &tensorDataType, &tensorIndexType,
+                                                  &tensorDimensions, &access)) return nil;
+        } else {
+            return nil;
+        }
+        dataType = (MTLDataType)140;
+        elementDataType = (MTLDataType)140;
+        kind = @"tensor";
     } else if (zpu_source_resource_type_for_name(elementName, &dataType)) {
         elementDataType = dataType;
         kind = @"resource";
@@ -12520,7 +12658,8 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
     }
     (void)resource;
 
-    MTLArgumentDescriptor *descriptor = [MTLArgumentDescriptor argumentDescriptor];
+    MTLArgumentDescriptor *descriptor =
+        zpu_source_argument_descriptor_for_data_type(dataType);
     descriptor.dataType = dataType;
     descriptor.index = 0;
     descriptor.arrayLength = arrayLength;
@@ -12536,6 +12675,9 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
             @"access": @(access),
             @"textureType": @(textureType),
             @"depthTexture": @(depthTexture),
+            @"tensorDataType": @(tensorDataType),
+            @"tensorIndexType": @(tensorIndexType),
+            @"tensorDimensions": tensorDimensions ?: [NSNull null],
             @"isArray": @YES,
         }},
         @"arrayElementLayouts": childLayout == nil ? @{} : @{@0: childLayout},
@@ -12846,6 +12988,9 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         MTLBindingAccess access = MTLBindingAccessReadOnly;
         MTLTextureType textureType = MTLTextureType2D;
         BOOL depthTexture = NO;
+        MTLDataType tensorDataType = MTLDataTypeNone;
+        MTLDataType tensorIndexType = MTLDataTypeNone;
+        id tensorDimensions = nil;
         BOOL resource = NO;
         NSString *pointeeConst = arrayPointer && arrayPointeeConst ? @"const" : field[@"const"];
         BOOL nested = [indirection isEqualToString:@"&"] && [address isEqualToString:@"constant"] &&
@@ -12881,7 +13026,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             access = ([pointeeConst isEqualToString:@"const"] ||
                       [address isEqualToString:@"constant"]) ? MTLBindingAccessReadOnly :
                 MTLBindingAccessReadWrite;
-        } else if ([typeName hasPrefix:@"texture"] || [typeName hasPrefix:@"depth"]) {
+        } else if ([typeName hasPrefix:@"texture"] ||
+                   ([typeName hasPrefix:@"depth"] && [typeName rangeOfString:@"<"].location != NSNotFound)) {
             if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access,
                                                   &depthTexture)) {
                 [building removeObject:structName];
@@ -12893,6 +13039,20 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             dataType = MTLDataTypeSampler;
             elementDataType = MTLDataTypeSampler;
             access = MTLBindingAccessReadOnly;
+        } else if ([typeName hasPrefix:@"tensor<"]) {
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                if (!zpu_source_tensor_type_for_name(typeName, &tensorDataType, &tensorIndexType,
+                                                      &tensorDimensions, &access)) {
+                    [building removeObject:structName];
+                    return nil;
+                }
+            } else {
+                [building removeObject:structName];
+                return nil;
+            }
+            dataType = (MTLDataType)140;
+            elementDataType = (MTLDataType)140;
+            resource = YES;
         } else if (zpu_source_resource_type_for_name(typeName, &dataType)) {
             elementDataType = dataType;
             access = MTLBindingAccessReadOnly;
@@ -12905,7 +13065,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         }
         if (arrayResource) resource = YES;
 
-        MTLArgumentDescriptor *descriptor = [MTLArgumentDescriptor argumentDescriptor];
+        MTLArgumentDescriptor *descriptor =
+            zpu_source_argument_descriptor_for_data_type(dataType);
         descriptor.dataType = dataType;
         descriptor.index = index;
         descriptor.arrayLength = arrayLength;
@@ -12915,17 +13076,25 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         for (NSUInteger element = 0; element < arrayLength; ++element) {
             NSUInteger elementIndex = index + element;
             memberNames[@(elementIndex)] = field[@"name"];
+            NSString *kind = resource ? @"resource" : @"constant";
+            if ([typeName isEqualToString:@"sampler"]) kind = @"sampler";
+            if ([typeName hasPrefix:@"texture"] ||
+                ([typeName hasPrefix:@"depth"] && [typeName rangeOfString:@"<"].location != NSNotFound)) {
+                kind = @"texture";
+            }
+            if ([typeName hasPrefix:@"tensor<"]) kind = @"tensor";
+            if ([indirection isEqualToString:@"*"]) kind = @"pointer";
+            if (structValue) kind = @"struct";
+            if (nested) kind = @"nested";
             memberMetadata[@(elementIndex)] = @{
-                @"kind": nested ? @"nested" :
-                    (structValue ? @"struct" :
-                    ([indirection isEqualToString:@"*"] ? @"pointer" :
-                     (([typeName hasPrefix:@"texture"] || [typeName hasPrefix:@"depth"]) ? @"texture" :
-                      ([typeName isEqualToString:@"sampler"] ? @"sampler" :
-                       (resource ? @"resource" : @"constant"))))),
+                @"kind": kind,
                 @"elementDataType": @(elementDataType),
                 @"access": @(access),
                 @"textureType": @(textureType),
                 @"depthTexture": @(depthTexture),
+                @"tensorDataType": @(tensorDataType),
+                @"tensorIndexType": @(tensorIndexType),
+                @"tensorDimensions": tensorDimensions ?: [NSNull null],
                 @"isArray": @([field[@"typeArray"] boolValue]),
             };
             if (nested) {
@@ -19462,6 +19631,20 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         MTLTextureType textureType = (MTLTextureType)[metadata[@"textureType"] unsignedIntegerValue];
         BOOL depthTexture = [metadata[@"depthTexture"] boolValue];
         BOOL isArray = [metadata[@"isArray"] boolValue];
+        ZPUTensorReferenceType *tensorReferenceType = nil;
+        if ([kind isEqualToString:@"tensor"]) {
+            NSNumber *tensorDataTypeValue = metadata[@"tensorDataType"];
+            NSNumber *tensorIndexTypeValue = metadata[@"tensorIndexType"];
+            id tensorDimensionsValue = metadata[@"tensorDimensions"];
+            if (![tensorDataTypeValue isKindOfClass:[NSNumber class]] ||
+                ![tensorIndexTypeValue isKindOfClass:[NSNumber class]] ||
+                ![tensorDimensionsValue isKindOfClass:[MTLTensorExtents class]]) return nil;
+            tensorReferenceType = [[ZPUTensorReferenceType alloc]
+                initWithTensorDataType:(MTLTensorDataType)tensorDataTypeValue.unsignedIntegerValue
+                              indexType:(MTLDataType)tensorIndexTypeValue.unsignedIntegerValue
+                            dimensions:(MTLTensorExtents *)tensorDimensionsValue
+                                access:access];
+        }
         BOOL anonymousArrayStruct = !syntheticArrayElement &&
             ([kind isEqualToString:@"constant"] || [kind isEqualToString:@"pointer"] ||
              arrayElementLayout != nil);
@@ -19544,13 +19727,14 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
                 ([kind isEqualToString:@"constant"] ? elementDataType :
                 ([kind isEqualToString:@"texture"] ? MTLDataTypeTexture :
                  ([kind isEqualToString:@"sampler"] ? MTLDataTypeSampler :
-                  ([kind isEqualToString:@"resource"] ? descriptor.dataType : MTLDataTypePointer))));
+                  ([kind isEqualToString:@"tensor"] ? MTLDataTypeTensor :
+                  ([kind isEqualToString:@"resource"] ? descriptor.dataType : MTLDataTypePointer)))));
             arrayType = [[ZPUArrayType alloc] initWithElementType:arrayElementType
                                                         arrayLength:arrayLength stride:stride
                                           argumentIndexStride:argumentIndexStride
                                                         structType:arrayElementStruct arrayType:nil
                                              textureReferenceType:textureReferenceType
-                                                    pointerType:pointerType tensorReferenceType:nil];
+                                                    pointerType:pointerType tensorReferenceType:tensorReferenceType];
             if (anonymousArrayStruct) {
                 /* Metal models scalar and pointer array members as an
                  * anonymous one-member struct containing `__elems`, rather
@@ -19565,6 +19749,8 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
             } else {
                 [member setStructType:nil arrayType:arrayType tensorReferenceType:nil];
             }
+        } else if (tensorReferenceType != nil) {
+            [member setStructType:nil arrayType:nil tensorReferenceType:tensorReferenceType];
         } else if (pointerType != nil || textureReferenceType != nil) {
             [member setPointerType:pointerType textureReferenceType:textureReferenceType];
         }
