@@ -18,11 +18,20 @@ projects:
 | `wezterm_terminal` | [WezTerm](https://github.com/wezterm/wezterm), whose WebGPU front end can select Vulkan | 120×40 terminal cells plus a background; 4,801 draws, 19 legacy chunks versus one Mosaic batch |
 | `imgui_vulkan_app` | [Dear ImGui SDL2 + Vulkan example](https://github.com/ocornut/imgui/tree/master/examples/example_sdl2_vulkan) | 192 opaque UI panels, controls, icons, and text-like quads |
 | `khronos_complex_demo` | [Khronos Vulkan Samples](https://github.com/KhronosGroup/Vulkan-Samples) | 128 objects, six textured quad faces each, animated transforms and depth |
+| `vkquake_fps` | [vkQuake](https://github.com/Novum/vkQuake) | 2,048 BSP-like surfaces, entities, particles, sky, and HUD; static world geometry with moving actors |
+| `vkquake2_fps` | [vkQuake2](https://github.com/kondrak/vkQuake2) | 1,536 materialized surfaces, dynamic-light-like sprites, and HUD; mostly static world |
+| `vkdoom_fps` | [VkDoom](https://github.com/nashmuhandes/VkDoom) | 1,792 sector-wall-like quads, masked sprites, particles, sky, and HUD |
+| `vulkan_voxel_world` | [vulkan-voxel-game](https://github.com/pimpale/vulkan-voxel-game) | 1,024 chunk-face and atlas-material draws with a static chunk mesh |
+| `space_menace_platformer` | [Space Menace](https://github.com/amethyst/space-menace) | 768 Vulkan platformer-shaped tile, sprite, particle, and HUD draws |
 
 These are not external runtime dependencies and the suite does not claim to
 run those projects or implement general SPIR-V, blending, or alpha-compositor
-semantics. They provide realistic draw-count, update, texture, depth, and
-command-boundary shapes for the narrow renderer that ZPU actually exposes.
+semantics. They provide realistic draw-count, static-versus-dynamic update,
+texture, depth, and command-boundary shapes for the narrow renderer that ZPU
+actually exposes. The repository search did not identify a maintained
+Vulkan-based project named `Penguin Run`; `space_menace_platformer` is the
+verified Vulkan platformer proxy, while the Quake/Doom profiles use actual
+open-source Vulkan source ports.
 
 ## Run
 
@@ -86,13 +95,15 @@ retirement path used when a command buffer is destroyed while a queue submit
 still pins it. Unsupported commands remain hard Mosaic barriers, so stream
 coalescing does not reorder observable Vulkan work.
 
-On a representative latest ReleaseFast probe, the 4,801-draw WezTerm-shaped
-stream measured 57.12 ms p50 with 256-command chunking and 3.82 ms p50 through
-Mosaic at two selected cores (14.94×). At four same-NUMA selected cores it
-measured 24.35 ms versus 3.60 ms (6.76×). The ImGui-shaped 192-draw and
-Khronos-shaped 128-object streams remain one batch in both modes and therefore
-stay approximately 1.00×, with no regression. These are workload-specific
-measurements; the byte-identical color/depth oracle is the correctness gate.
+The current ReleaseFast probe uses static geometry revisions for the world and
+chunk portions of the game-shaped streams, while actor/sprite transforms still
+change every frame. At four selected physical cores, Mosaic versus per-draw
+dispatch measured 4.40× for the vkQuake-shaped stream, 3.85× for vkQuake2,
+3.78× for VkDoom, 4.15× for the voxel world, and 3.05× for the platformer
+profile. The WezTerm-shaped stream measured 2.41× in the same three-sample
+smoke run and remains sensitive to placement and cache state. These are
+workload-specific measurements, not claims about the upstream applications;
+the byte-identical color/depth oracle is the correctness gate.
 
 ## Core-width scaling result
 
@@ -103,11 +114,12 @@ absolute p50 is sensitive to CPU placement and background load. The short
 ImGui and Khronos profiles intentionally stay on their already-cheaper
 prepared batch path and remain approximately 1.00× over legacy at all widths.
 
-The next 4× target is to route eligible one-batch Vulkan draws through
-Mosaic's physical `LOCAL`/`MACRO`/`GLOBAL` packet executor, then parallelize
-packet preparation and tile work rather than only widening the existing CPU
-raster bands. The scalar packet path must first remain byte-identical to
-`cpu_cube`; SIMD and visibility/deferred paths follow that gate.
+The next target is to route more of the broad, textured game geometry through
+Mosaic's physical `LOCAL`/`MACRO`/`GLOBAL` packet executor. Large primitives
+that cross supertile boundaries currently take the strict ordered batch
+fallback because the existing interpolator is not yet proven bit-identical
+when segmented. The scalar packet path must first retain byte identity there;
+SIMD and visibility/deferred paths follow that gate.
 
 ## Next 4× target
 
@@ -117,20 +129,19 @@ limit cannot improve them. The adaptive policy keeps those streams on the
 prepared batch kernel instead of forcing them through a more expensive spatial
 plan.
 
-The next target is the one-batch raster path used by both short workloads:
-execute prepared geometry through tile-local physical packets, first with the
-scalar executor and then with portable primitive batches. The physical
-`LOCAL`/`MACRO`/`GLOBAL` scalar executor and its differential test now exist in
-`src/render/scalar_packet.zig`; driver lowering remains gated until its output
-matches the existing reference path across the broader semantic corpus. This
-is the measured route toward another 4×, rather than claiming a speedup from a
-submission change that these workloads do not exercise.
+The next target is the broad textured primitive path used by FPS and voxel
+profiles: preserve one-time static preparation, then make segmented
+`LOCAL`/`MACRO`/`GLOBAL` execution use one global interpolation origin. The
+current strict fallback is intentional and keeps Vulkan ordering and output
+correct while this kernel is developed. The physical scalar executor and its
+differential test now exist in `src/render/scalar_packet.zig`; driver lowering
+remains gated until the broader game corpus is byte-identical.
 
 ## Correctness contract
 
 `src/benchmark_vulkan_abi.zig` requires the legacy-chunked, Mosaic-batched, and
 per-draw paths to produce byte-identical color and depth attachments for all
-three profiles. The terminal profile intentionally fits under the 8,192-command
-Mosaic limit, keeping the complete frame in one bounded submission. Driver
-tests continue to cover the full Vulkan command executor and the existing
-serial raster oracle.
+eight profiles. The profiles intentionally fit under the 8,192-command Mosaic
+limit, keeping each complete frame in one bounded submission. Driver tests
+continue to cover the full Vulkan command executor and the existing serial
+raster oracle.
