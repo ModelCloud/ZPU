@@ -13,7 +13,7 @@ trap 'rm -rf "$work"' EXIT
 cd "$root"
 
 if rg -n '@cImport|@import\("(Metal|Foundation|Darwin|PJRT[^"}]*)' \
-    src/cpu_ml_root.zig src/metal/ml_cpu.zig; then
+    src/cpu_ml_root.zig src/cpu_ml.zig; then
     echo "cpu-ml-portability FAILED: standalone CPU ML Zig source imports Apple/PJRT code" >&2
     exit 1
 fi

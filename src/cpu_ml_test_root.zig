@@ -4,5 +4,5 @@
 //! Standalone tests for the host-OS-neutral CPU ML package.
 
 test {
-    _ = @import("metal/ml_cpu.zig");
+    _ = @import("cpu_ml.zig");
 }

@@ -5,7 +5,7 @@
 #define ZPU_CPU_ML_H
 
 /*
- * Optional, host-OS-neutral CPU ML extension for the ZPU Metal-shaped layer.
+ * Optional, host-OS-neutral CPU ML extension used by ZPU's Metal-shaped layer.
  *
  * This header intentionally includes no Metal, Foundation, PJRT, or platform
  * headers. A provider such as a ZML CPU bridge may register here, but it must
@@ -24,6 +24,7 @@ extern "C" {
 
 #define ZPU_CPU_ML_BACKEND_ABI_VERSION 1u
 #define ZPU_CPU_ML_OPERATION_ABI_VERSION 1u
+#define ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION 1u
 #define ZPU_CPU_ML_MAX_RANK 16u
 #define ZPU_CPU_ML_MAX_INPUTS 2u
 
@@ -109,6 +110,43 @@ typedef struct zpu_cpu_ml_operation_backend {
     zpu_cpu_ml_operation_fn operation;
 } zpu_cpu_ml_operation_backend;
 
+/* A named provider lets a ZML CPU bridge expose a graph/function without
+ * teaching this package an MLIR or MSL compiler. The bounded tensor signature
+ * is deliberately explicit; the provider may dispatch to any CPU runtime or
+ * ISA implementation it owns, but it must not require a Metal resource. */
+typedef struct zpu_cpu_ml_named_operation_signature {
+    uint32_t input_count;
+    uint32_t element_type;
+} zpu_cpu_ml_named_operation_signature;
+
+typedef struct zpu_cpu_ml_named_operation_arguments {
+    const char *function_name;
+    size_t function_name_length;
+    uint32_t input_count;
+    uint32_t element_type;
+    uint32_t reserved;
+    zpu_cpu_ml_tensor_view inputs[ZPU_CPU_ML_MAX_INPUTS];
+    zpu_cpu_ml_tensor_view destination;
+    uint32_t permutation[ZPU_CPU_ML_MAX_RANK];
+} zpu_cpu_ml_named_operation_arguments;
+
+typedef int (*zpu_cpu_ml_named_operation_query_fn)(
+    void *context,
+    const char *function_name,
+    size_t function_name_length,
+    zpu_cpu_ml_named_operation_signature *signature);
+
+typedef int (*zpu_cpu_ml_named_operation_fn)(
+    void *context,
+    const zpu_cpu_ml_named_operation_arguments *arguments);
+
+typedef struct zpu_cpu_ml_named_operation_backend {
+    uint32_t abi_version;
+    void *context;
+    zpu_cpu_ml_named_operation_query_fn query;
+    zpu_cpu_ml_named_operation_fn operation;
+} zpu_cpu_ml_named_operation_backend;
+
 /* Passing NULL unregisters the optional provider. */
 int zpu_cpu_ml_set_backend(const zpu_cpu_ml_backend *backend);
 
@@ -123,6 +161,17 @@ int zpu_cpu_ml_set_operation_backend(const zpu_cpu_ml_operation_backend *backend
  * installed or the provider declines; the caller may then use its exact ZPU
  * reference path. */
 int zpu_cpu_ml_operation(const zpu_cpu_ml_operation_arguments *arguments);
+
+/* Query and execute a provider-owned named CPU operation. The function name
+ * is a byte string and is valid only for the duration of the callback. */
+int zpu_cpu_ml_named_operation_supported(
+    const char *function_name,
+    size_t function_name_length,
+    zpu_cpu_ml_named_operation_signature *signature);
+int zpu_cpu_ml_set_named_operation_backend(
+    const zpu_cpu_ml_named_operation_backend *backend);
+int zpu_cpu_ml_named_operation(
+    const zpu_cpu_ml_named_operation_arguments *arguments);
 
 #ifdef __cplusplus
 }

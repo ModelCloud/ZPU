@@ -10,7 +10,7 @@ test {
     _ = @import("metal/mapping.zig");
     _ = @import("metal/raster3d.zig");
     _ = @import("metal/cpu.zig");
-    _ = @import("metal/ml_cpu.zig");
+    _ = @import("cpu_ml.zig");
     _ = @import("metal/c_api.zig");
     _ = @import("metal/runtime.zig");
 }

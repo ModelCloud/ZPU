@@ -13989,6 +13989,11 @@ typedef struct {
     NSUInteger calls;
 } ZPUCPUMLProviderProbe;
 
+typedef struct {
+    NSUInteger queryCalls;
+    NSUInteger operationCalls;
+} ZPUCPUMLNamedProviderProbe;
+
 /* This callback stands in for an external ZML/cpu provider. It receives only
  * dense CPU staging and proves that the Metal-shaped dispatch reaches the
  * host-OS-neutral provider ABI before the native Metal oracle is run. */
@@ -14014,6 +14019,50 @@ static int zpu_test_cpu_ml_divide_provider(
     }
     ++probe->calls;
     for (NSUInteger index = 0; index < 12; ++index) destination[index] = left[index] / right[index];
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int zpu_test_cpu_ml_named_transpose_query(
+    void *context, const char *functionName, size_t functionNameLength,
+    zpu_cpu_ml_named_operation_signature *signature) {
+    ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
+    if (probe == NULL || functionName == NULL || signature == NULL) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->queryCalls;
+    if (functionNameLength != strlen("zml_cpu_transpose_f32") ||
+        memcmp(functionName, "zml_cpu_transpose_f32", functionNameLength) != 0) {
+        return ZPU_CPU_ML_STATUS_UNSUPPORTED;
+    }
+    signature->input_count = 1;
+    signature->element_type = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int zpu_test_cpu_ml_named_transpose_provider(
+    void *context, const zpu_cpu_ml_named_operation_arguments *arguments) {
+    ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
+    if (probe == NULL || arguments == NULL || arguments->function_name == NULL ||
+        arguments->function_name_length != strlen("zml_cpu_transpose_f32") ||
+        memcmp(arguments->function_name, "zml_cpu_transpose_f32", arguments->function_name_length) != 0 ||
+        arguments->input_count != 1 || arguments->element_type != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->inputs[0].offset_bytes != 0 || arguments->destination.offset_bytes != 0 ||
+        arguments->inputs[0].rank != 2 || arguments->destination.rank != 2 ||
+        arguments->inputs[0].dimensions[0] != 2 || arguments->inputs[0].dimensions[1] != 3 ||
+        arguments->destination.dimensions[0] != 3 || arguments->destination.dimensions[1] != 2 ||
+        arguments->inputs[0].strides[0] != 1 || arguments->inputs[0].strides[1] != 2 ||
+        arguments->destination.strides[0] != 1 || arguments->destination.strides[1] != 3) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    const uint32_t *source = (const uint32_t *)arguments->inputs[0].data;
+    uint32_t *destination = (uint32_t *)arguments->destination.data;
+    if (source == NULL || destination == NULL) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    ++probe->operationCalls;
+    for (NSUInteger y = 0; y < 2; ++y) {
+        for (NSUInteger x = 0; x < 3; ++x) {
+            destination[x + y * 3] = source[y + x * 2];
+        }
+    }
     return ZPU_CPU_ML_STATUS_OK;
 }
 
@@ -14147,6 +14196,168 @@ static int test_metal4_cpu_float32_division_profile(
         fail_with_error("Metal 4 CPU ML Float32 division profile failed",
                         adapterError ?: feedbackError ?: nativeError);
         return 186;
+    }
+    return 0;
+}
+
+/* A provider-advertised ML function is resolved through the CPU-owned
+ * Metal-shaped library without adding a native Metal function or compiler.
+ * The native transpose kernel below remains an oracle for the exact raw bytes
+ * and padded-row behavior. */
+static int test_metal4_cpu_named_transpose_provider_profile(
+    id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
+    id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
+    id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
+    id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
+    enum { sourceWordCount = 34, destinationWordCount = 19 };
+    MTLTensorExtents *sourceDimensions =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){2, 3}];
+    MTLTensorExtents *destinationDimensions =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){3, 2}];
+    MTLTensorExtents *sourceStrides =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 16}];
+    MTLTensorExtents *destinationStrides =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 16}];
+    MTLTensorExtents *zero =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}];
+    uint32_t sourceInitial[sourceWordCount];
+    uint32_t sourceCommitted[sourceWordCount];
+    uint32_t destinationInitial[destinationWordCount];
+    uint32_t adapterValues[destinationWordCount] = {0};
+    for (NSUInteger index = 0; index < sourceWordCount; ++index) {
+        sourceInitial[index] = 0x11110000u + (uint32_t)index;
+        sourceCommitted[index] = 0x22220000u + (uint32_t)index;
+    }
+    for (NSUInteger index = 0; index < destinationWordCount; ++index) {
+        destinationInitial[index] = 0xdead0000u + (uint32_t)index;
+    }
+    sourceCommitted[0] = 0x41000011u;
+    sourceCommitted[1] = 0x41200012u;
+    sourceCommitted[16] = 0x41400013u;
+    sourceCommitted[17] = 0x41600014u;
+    sourceCommitted[32] = 0x41800015u;
+    sourceCommitted[33] = 0x41a00016u;
+
+    ZPUCPUMLNamedProviderProbe providerProbe = {0};
+    const zpu_cpu_ml_named_operation_backend provider = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION,
+        .context = &providerProbe,
+        .query = zpu_test_cpu_ml_named_transpose_query,
+        .operation = zpu_test_cpu_ml_named_transpose_provider,
+    };
+    const int providerRegistration = zpu_cpu_ml_set_named_operation_backend(&provider);
+
+    NSError *adapterError = nil;
+    MTL4LibraryFunctionDescriptor *functionDescriptor = [MTL4LibraryFunctionDescriptor new];
+    functionDescriptor.library = adapterLibrary;
+    functionDescriptor.name = @"zml_cpu_transpose_f32";
+    id<MTLFunction> providerFunction = [adapterLibrary newFunctionWithName:functionDescriptor.name];
+    MTL4MachineLearningPipelineDescriptor *pipelineDescriptor =
+        [MTL4MachineLearningPipelineDescriptor new];
+    pipelineDescriptor.machineLearningFunctionDescriptor = functionDescriptor;
+    [pipelineDescriptor setInputDimensions:sourceDimensions atBufferIndex:0];
+    [pipelineDescriptor setInputDimensions:destinationDimensions atBufferIndex:1];
+    id<MTL4MachineLearningPipelineState> pipeline =
+        [adapterCompiler newMachineLearningPipelineStateWithDescriptor:pipelineDescriptor
+                                                                   error:&adapterError];
+
+    MTLTensorDescriptor *sourceDescriptor = [MTLTensorDescriptor new];
+    sourceDescriptor.dimensions = sourceDimensions;
+    sourceDescriptor.strides = sourceStrides;
+    sourceDescriptor.dataType = MTLTensorDataTypeFloat32;
+    sourceDescriptor.usage = MTLTensorUsageMachineLearning;
+    sourceDescriptor.resourceOptions = MTLResourceStorageModeShared;
+    sourceDescriptor.storageMode = MTLStorageModeShared;
+    MTLTensorDescriptor *destinationDescriptor = [sourceDescriptor copy];
+    destinationDescriptor.dimensions = destinationDimensions;
+    destinationDescriptor.strides = destinationStrides;
+    id<MTLBuffer> sourceBuffer =
+        [adapterDevice newBufferWithLength:sizeof(sourceInitial) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> destinationBuffer =
+        [adapterDevice newBufferWithLength:sizeof(destinationInitial) options:MTLResourceStorageModeShared];
+    if (destinationBuffer != nil && destinationBuffer.contents != NULL) {
+        memcpy(destinationBuffer.contents, destinationInitial, sizeof(destinationInitial));
+    }
+    id<MTLTensor> source =
+        [sourceBuffer newTensorWithDescriptor:sourceDescriptor offset:0 error:&adapterError];
+    id<MTLTensor> destination =
+        [destinationBuffer newTensorWithDescriptor:destinationDescriptor offset:0 error:&adapterError];
+    if (source != nil) [source replaceSliceOrigin:zero sliceDimensions:sourceDimensions
+                                         withBytes:sourceInitial strides:sourceStrides];
+    if (destination != nil) [destination replaceSliceOrigin:zero sliceDimensions:destinationDimensions
+                                              withBytes:destinationInitial strides:destinationStrides];
+
+    MTL4ArgumentTableDescriptor *tableDescriptor = [MTL4ArgumentTableDescriptor new];
+    tableDescriptor.maxBufferBindCount = 2;
+    id<MTL4ArgumentTable> table =
+        [adapterDevice newArgumentTableWithDescriptor:tableDescriptor error:&adapterError];
+    if (table != nil && source != nil && destination != nil) {
+        [table setResource:source.gpuResourceID atBufferIndex:0];
+        [table setResource:destination.gpuResourceID atBufferIndex:1];
+    }
+    id<MTL4CommandBuffer> commandBuffer = [adapterDevice newCommandBuffer];
+    [commandBuffer beginCommandBufferWithAllocator:adapterAllocator];
+    id<MTL4MachineLearningCommandEncoder> encoder = [commandBuffer machineLearningCommandEncoder];
+    [encoder setPipelineState:pipeline];
+    [encoder setArgumentTable:table];
+    [encoder dispatchNetworkWithIntermediatesHeap:adapterHeap];
+    if (source != nil) [source replaceSliceOrigin:zero sliceDimensions:sourceDimensions
+                                         withBytes:sourceCommitted strides:sourceStrides];
+    [encoder endEncoding];
+    [commandBuffer endCommandBuffer];
+    id<MTL4CommandBuffer> commandBuffers[] = {commandBuffer};
+    MTL4CommitOptions *commitOptions = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *feedbackError = nil;
+    [commitOptions addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        feedbackError = feedback.error;
+    }];
+    [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+    const int providerUnregistration = zpu_cpu_ml_set_named_operation_backend(NULL);
+    if (destinationBuffer != nil && destinationBuffer.contents != NULL) {
+        memcpy(adapterValues, destinationBuffer.contents, sizeof(adapterValues));
+    }
+
+    NSError *nativeError = nil;
+    id<MTLCommandQueue> nativeQueue = [nativeDevice newCommandQueue];
+    id<MTLFunction> nativeFunction =
+        [nativeLibrary newFunctionWithName:@"zpu_cpu_ml_transpose_f32_oracle"];
+    id<MTLComputePipelineState> nativePipeline =
+        [nativeDevice newComputePipelineStateWithFunction:nativeFunction error:&nativeError];
+    id<MTLBuffer> nativeSource =
+        [nativeDevice newBufferWithBytes:sourceCommitted length:sizeof(sourceCommitted)
+                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> nativeDestination =
+        [nativeDevice newBufferWithBytes:destinationInitial length:sizeof(destinationInitial)
+                                 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> nativeCommandBuffer = [nativeQueue commandBuffer];
+    id<MTLComputeCommandEncoder> nativeEncoder = [nativeCommandBuffer computeCommandEncoder];
+    [nativeEncoder setComputePipelineState:nativePipeline];
+    [nativeEncoder setBuffer:nativeSource offset:0 atIndex:0];
+    [nativeEncoder setBuffer:nativeDestination offset:0 atIndex:1];
+    [nativeEncoder dispatchThreads:MTLSizeMake(3, 2, 1)
+              threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [nativeEncoder endEncoding];
+    [nativeCommandBuffer commit];
+    [nativeCommandBuffer waitUntilCompleted];
+
+    id<MTLTensorBinding> inputBinding = pipeline.reflection.bindings.count > 0 ?
+        (id<MTLTensorBinding>)pipeline.reflection.bindings[0] : nil;
+    id<MTLTensorBinding> outputBinding = pipeline.reflection.bindings.count > 1 ?
+        (id<MTLTensorBinding>)pipeline.reflection.bindings[1] : nil;
+    if (providerRegistration != ZPU_CPU_ML_STATUS_OK || providerUnregistration != ZPU_CPU_ML_STATUS_OK ||
+        providerProbe.operationCalls != 1 || providerProbe.queryCalls == 0 || providerFunction == nil ||
+        providerFunction.functionType != MTLFunctionTypeKernel || adapterError != nil || pipeline == nil ||
+        source == nil || destination == nil || table == nil || commandBuffer == nil || encoder == nil ||
+        commitOptions == nil || feedbackError != nil || inputBinding == nil || outputBinding == nil ||
+        inputBinding.tensorDataType != MTLTensorDataTypeFloat32 ||
+        outputBinding.tensorDataType != MTLTensorDataTypeFloat32 ||
+        nativeQueue == nil || nativeFunction == nil || nativePipeline == nil || nativeSource == nil ||
+        nativeDestination == nil || nativeError != nil ||
+        nativeCommandBuffer.status != MTLCommandBufferStatusCompleted ||
+        memcmp(adapterValues, nativeDestination.contents, sizeof(adapterValues)) != 0) {
+        fail_with_error("Metal 4 named CPU ML transpose provider failed",
+                        adapterError ?: feedbackError ?: nativeError);
+        return 188;
     }
     return 0;
 }
@@ -30652,6 +30863,11 @@ int main(void) {
             device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
             metal4_queue, metal4_allocator, adapter_three_d_heap);
         if (metal4_ml_float_transpose_result != 0) return metal4_ml_float_transpose_result;
+
+        const int metal4_ml_named_transpose_result = test_metal4_cpu_named_transpose_provider_profile(
+            device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
+            metal4_queue, metal4_allocator, adapter_three_d_heap);
+        if (metal4_ml_named_transpose_result != 0) return metal4_ml_named_transpose_result;
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only

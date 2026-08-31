@@ -6,6 +6,6 @@
 pub const abi = @import("metal/abi.zig");
 pub const mapping = @import("metal/mapping.zig");
 pub const cpu = @import("metal/cpu.zig");
-pub const ml_cpu = @import("metal/ml_cpu.zig");
+pub const ml_cpu = @import("cpu_ml.zig");
 pub const raster3d = @import("metal/raster3d.zig");
 pub const runtime = @import("metal/runtime.zig");

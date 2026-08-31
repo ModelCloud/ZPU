@@ -7,7 +7,7 @@
 //! separately so a ZML CPU provider can use the same ABI on macOS, iOS,
 //! Linux, or another supported target without pulling in an Apple SDK.
 
-const ml_cpu = @import("metal/ml_cpu.zig");
+const ml_cpu = @import("cpu_ml.zig");
 
 comptime {
     _ = ml_cpu;

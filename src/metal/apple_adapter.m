@@ -235,8 +235,11 @@ static BOOL zpu_cpu_ml_sub_function_name_supported(NSString *name) {
         ![name isEqualToString:zpu_cpu_ml_div_f32_function_name];
 }
 
+static BOOL zpu_cpu_ml_named_function_signature(NSString *functionName,
+                                                zpu_cpu_ml_named_operation_signature *signature);
+
 static BOOL zpu_cpu_ml_function_name_supported(NSString *name) {
-    return [name isEqualToString:zpu_cpu_ml_identity_function_name] ||
+    const BOOL fixedProfile = [name isEqualToString:zpu_cpu_ml_identity_function_name] ||
         [name isEqualToString:zpu_cpu_ml_transpose_function_name] ||
         zpu_cpu_ml_add_function_name_supported(name) ||
         zpu_cpu_ml_sub_or_div_function_name_supported(name) ||
@@ -253,10 +256,15 @@ static BOOL zpu_cpu_ml_function_name_supported(NSString *name) {
         [name isEqualToString:zpu_cpu_ml_matmul_i16_function_name] ||
         [name isEqualToString:zpu_cpu_ml_matmul_u32_function_name] ||
         [name isEqualToString:zpu_cpu_ml_matmul_i32_function_name];
+    if (fixedProfile) return YES;
+    zpu_cpu_ml_named_operation_signature signature = {0, 0};
+    return zpu_cpu_ml_named_function_signature(name, &signature);
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName);
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t elementType);
 static NSString *const zpu_cpu_trace_triangles_function_name = @"zpu_cpu_trace_triangles_rgba8";
 static NSString *const zpu_cpu_vertex_name = @"zpu_cpu_vertex";
 static NSString *const zpu_cpu_fragment_name = @"zpu_cpu_fragment";
@@ -1431,6 +1439,9 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_functionName;
     MTL4MachineLearningPipelineReflection *_reflection;
     MTLTensorExtents *_inputDimensions[3];
+    NSUInteger _inputCount;
+    BOOL _namedProvider;
+    uint32_t _namedElementType;
     NSUInteger _intermediatesHeapSize;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner
@@ -5708,6 +5719,43 @@ static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
     return zpu_cpu_ml_operation(&arguments);
 }
 
+static BOOL zpu_cpu_ml_named_function_signature(NSString *functionName,
+                                                zpu_cpu_ml_named_operation_signature *signature) {
+    if (functionName == nil || signature == NULL) return NO;
+    const char *name = functionName.UTF8String;
+    const NSUInteger length = [functionName lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    return name != NULL && length != 0 &&
+        zpu_cpu_ml_named_operation_supported(name, length, signature) == ZPU_CPU_ML_STATUS_OK;
+}
+
+static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
+                                                 ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
+                                                 ZPUTensor *destination, uint32_t elementType) {
+    if (functionName == nil || input0 == nil || inputCount == 0 ||
+        inputCount > ZPU_CPU_ML_MAX_INPUTS || destination == nil) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    const char *name = functionName.UTF8String;
+    const NSUInteger nameLength = [functionName lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (name == NULL || nameLength == 0) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    zpu_cpu_ml_named_operation_arguments arguments;
+    memset(&arguments, 0, sizeof(arguments));
+    arguments.function_name = name;
+    arguments.function_name_length = nameLength;
+    arguments.input_count = (uint32_t)inputCount;
+    arguments.element_type = elementType;
+    for (NSUInteger index = 0; index < inputCount; ++index) {
+        ZPUTensor *input = index == 0 ? input0 : input1;
+        if (!zpu_tensor_make_cpu_ml_view(input, &arguments.inputs[index])) {
+            return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    if (!zpu_tensor_make_cpu_ml_view(destination, &arguments.destination)) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    return zpu_cpu_ml_named_operation(&arguments);
+}
+
 static BOOL zpu_tensor_transpose_reverse(ZPUTensor *source, ZPUTensor *destination) {
     if (source == nil || destination == nil || source->_owner == nil ||
         source->_owner != destination->_owner || source->_dimensions == nil ||
@@ -9042,6 +9090,31 @@ static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
     const BOOL identity = [name isEqualToString:zpu_cpu_ml_identity_function_name];
     const BOOL transpose = [name isEqualToString:zpu_cpu_ml_transpose_function_name];
     const MTLTensorDataType tensorDataType = zpu_mtl4_ml_tensor_data_type(name);
+    zpu_cpu_ml_named_operation_signature namedSignature = {0, 0};
+    const BOOL named = !identity && !transpose &&
+        zpu_cpu_ml_named_function_signature(name, &namedSignature);
+    if (named) {
+        const MTLTensorDataType namedTensorDataType =
+            zpu_mtl4_ml_tensor_data_type_from_cpu_element(namedSignature.element_type);
+        if (namedTensorDataType == MTLTensorDataTypeNone) return nil;
+        NSMutableArray *bindings = [NSMutableArray arrayWithCapacity:namedSignature.input_count + 1];
+        for (NSUInteger index = 0; index < namedSignature.input_count; ++index) {
+            NSString *bindingName = namedSignature.input_count == 1 ?
+                @"input" : [NSString stringWithFormat:@"input%lu", (unsigned long)index];
+            ZPUTensorBinding *input = [[ZPUTensorBinding alloc]
+                initWithName:bindingName type:zpu_mtl_binding_type_tensor
+                access:MTLBindingAccessReadOnly index:index];
+            [input setTensorDataType:namedTensorDataType indexType:MTLDataTypeInt dimensions:nil];
+            [bindings addObject:input];
+        }
+        ZPUTensorBinding *output = [[ZPUTensorBinding alloc]
+            initWithName:@"output" type:zpu_mtl_binding_type_tensor
+            access:MTLBindingAccessWriteOnly index:namedSignature.input_count];
+        [output setTensorDataType:namedTensorDataType indexType:MTLDataTypeInt dimensions:nil];
+        [bindings addObject:output];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:bindings userAnnotation:nil];
+    }
     if (identity || transpose) {
         ZPUTensorBinding *input = [[ZPUTensorBinding alloc] initWithName:@"input"
                                                                      type:zpu_mtl_binding_type_tensor
@@ -14369,7 +14442,10 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
 - (void)setLabel:(NSString *)label { _label = [label copy]; }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)functionName {
     if (_type != MTLLibraryTypeExecutable) return nil;
-    if (![_functionNames containsObject:functionName]) return nil;
+    zpu_cpu_ml_named_operation_signature namedSignature = {0, 0};
+    const BOOL namedCPUMLFunction = ![_functionNames containsObject:functionName] &&
+        zpu_cpu_ml_named_function_signature(functionName, &namedSignature);
+    if (![_functionNames containsObject:functionName] && !namedCPUMLFunction) return nil;
     NSString *implementationName = _functionImplementations[functionName] ?: functionName;
     const BOOL sourceLowered = ![implementationName isEqualToString:functionName];
     MTLFunctionType functionType = 0;
@@ -14902,6 +14978,24 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     return MTLTensorDataTypeNone;
 }
 
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t elementType) {
+    switch (elementType) {
+        case ZPU_CPU_ML_ELEMENT_FLOAT32: return MTLTensorDataTypeFloat32;
+        case ZPU_CPU_ML_ELEMENT_FLOAT16: return MTLTensorDataTypeFloat16;
+        case ZPU_CPU_ML_ELEMENT_BFLOAT16: return MTLTensorDataTypeBFloat16;
+        case ZPU_CPU_ML_ELEMENT_INT8: return MTLTensorDataTypeInt8;
+        case ZPU_CPU_ML_ELEMENT_UINT8: return MTLTensorDataTypeUInt8;
+        case ZPU_CPU_ML_ELEMENT_INT16: return MTLTensorDataTypeInt16;
+        case ZPU_CPU_ML_ELEMENT_UINT16: return MTLTensorDataTypeUInt16;
+        case ZPU_CPU_ML_ELEMENT_INT32: return MTLTensorDataTypeInt32;
+        case ZPU_CPU_ML_ELEMENT_UINT32: return MTLTensorDataTypeUInt32;
+        case ZPU_CPU_ML_ELEMENT_INT4: return MTLTensorDataTypeInt4;
+        case ZPU_CPU_ML_ELEMENT_UINT4: return MTLTensorDataTypeUInt4;
+        default: return MTLTensorDataTypeNone;
+    }
+}
+
 @implementation ZPUMTL4MachineLearningPipeline
 - (instancetype)initWithOwner:(ZPUDevice *)owner
                      descriptor:(MTL4MachineLearningPipelineDescriptor *)descriptor
@@ -14934,13 +15028,19 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     const BOOL matmulI32 = [functionName isEqualToString:zpu_cpu_ml_matmul_i32_function_name];
     const BOOL matmul = matmulF32 || matmulF16 || matmulBF16 || matmulU8 || matmulI8 ||
         matmulU16 || matmulI16 || matmulU32 || matmulI32;
+    zpu_cpu_ml_named_operation_signature namedSignature = {0, 0};
+    const BOOL named = !identity && !transpose && !addition && !subtraction && !division &&
+        !multiplicationU8 && !multiplicationI8 && !multiplicationU16 && !multiplicationI16 &&
+        !multiplicationU32 && !multiplicationI32 && !multiplicationI4 && !multiplicationU4 &&
+        !multiplication && !multiplicationF16 && !multiplicationBF16 && !matmul &&
+        zpu_cpu_ml_named_function_signature(functionName, &namedSignature);
     if (owner == nil || descriptor == nil || (!identity && !transpose && !addition && !subtraction && !division && !multiplicationU8 &&
                                               !multiplicationI8 && !multiplicationU16 &&
                                               !multiplicationI16 && !multiplicationU32 &&
                                               !multiplicationI32 && !multiplicationI4 &&
                                               !multiplicationU4 && !multiplication &&
                                               !multiplicationF16 && !multiplicationBF16 &&
-                                              !matmul)) {
+                                              !matmul && !named)) {
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered tensor CPU profiles");
         return nil;
     }
@@ -14949,7 +15049,8 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
         [descriptor inputDimensionsAtBufferIndex:1],
         [descriptor inputDimensionsAtBufferIndex:2],
     };
-    const NSUInteger inputCount = (identity || transpose) ? 2 : ((addition || subtraction || division || multiplicationU8 || multiplicationI8 ||
+    const NSUInteger inputCount = named ? (NSUInteger)namedSignature.input_count + 1 :
+        (identity || transpose) ? 2 : ((addition || subtraction || division || multiplicationU8 || multiplicationI8 ||
                                    multiplicationU16 || multiplicationI16 || multiplicationU32 ||
                                    multiplicationI32 || multiplicationI4 || multiplicationU4 ||
                                    multiplication || multiplicationF16 || multiplicationBF16 ||
@@ -14968,11 +15069,36 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
         _owner = owner;
         _label = [descriptor.label copy];
         _functionName = [functionName copy];
+        _inputCount = inputCount;
+        _namedProvider = named;
+        _namedElementType = namedSignature.element_type;
         for (NSUInteger index = 0; index < inputCount; ++index) {
             _inputDimensions[index] = [inputDimensions[index] copy];
         }
         _intermediatesHeapSize = 0;
-        if (identity || transpose) {
+        if (named) {
+            const MTLTensorDataType tensorDataType =
+                zpu_mtl4_ml_tensor_data_type_from_cpu_element(namedSignature.element_type);
+            NSMutableArray *bindings = [NSMutableArray arrayWithCapacity:inputCount];
+            for (NSUInteger index = 0; index < namedSignature.input_count; ++index) {
+                NSString *bindingName = namedSignature.input_count == 1 ?
+                    @"input" : [NSString stringWithFormat:@"input%lu", (unsigned long)index];
+                ZPUTensorBinding *input = [[ZPUTensorBinding alloc]
+                    initWithName:bindingName type:zpu_mtl_binding_type_tensor
+                    access:MTLBindingAccessReadOnly index:index];
+                [input setTensorDataType:tensorDataType indexType:MTLDataTypeInt
+                               dimensions:inputDimensions[index]];
+                [bindings addObject:input];
+            }
+            ZPUTensorBinding *output = [[ZPUTensorBinding alloc]
+                initWithName:@"output" type:zpu_mtl_binding_type_tensor
+                access:MTLBindingAccessWriteOnly index:namedSignature.input_count];
+            [output setTensorDataType:tensorDataType indexType:MTLDataTypeInt
+                           dimensions:inputDimensions[namedSignature.input_count]];
+            [bindings addObject:output];
+            _reflection = [[ZPUMTL4MachineLearningPipelineReflection alloc]
+                initWithBindings:bindings];
+        } else if (identity || transpose) {
             ZPUTensorBinding *input = [[ZPUTensorBinding alloc] initWithName:@"input"
                                                                          type:zpu_mtl_binding_type_tensor
                                                                        access:MTLBindingAccessReadOnly index:0];
@@ -17390,17 +17516,19 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         multiplyU32 || multiplyI32 || multiplyI4 || multiplyU4;
     const BOOL elementwise = addition || subtraction || division || integerMultiplication || multiplyF32 || multiplyF16 || multiplyBF16;
     const BOOL binary = elementwise || matmul;
-    const NSUInteger inputCount = binary ? 3 : 2;
-    const uint32_t cpuMlOperation = identity ? ZPU_CPU_ML_OPERATION_IDENTITY :
+    const BOOL namedProvider = [pipeline isKindOfClass:[ZPUMTL4MachineLearningPipeline class]] &&
+        pipeline->_namedProvider;
+    const NSUInteger inputCount = namedProvider ? pipeline->_inputCount : (binary ? 3 : 2);
+    const uint32_t cpuMlOperation = namedProvider ? 0 : (identity ? ZPU_CPU_ML_OPERATION_IDENTITY :
         transpose ? ZPU_CPU_ML_OPERATION_TRANSPOSE :
         matmul ? ZPU_CPU_ML_OPERATION_MATMUL :
         division ? ZPU_CPU_ML_OPERATION_DIVIDE :
         addition ? ZPU_CPU_ML_OPERATION_ADD :
-        subtraction ? ZPU_CPU_ML_OPERATION_SUBTRACT : ZPU_CPU_ML_OPERATION_MULTIPLY;
+        subtraction ? ZPU_CPU_ML_OPERATION_SUBTRACT : ZPU_CPU_ML_OPERATION_MULTIPLY);
     if (_ended || _owner == nil || _owner->_failed || _owner->_legacyBuffer == nil ||
         ![pipeline isKindOfClass:[ZPUMTL4MachineLearningPipeline class]] ||
         pipeline->_owner != _owner->_owner ||
-        (!identity && !transpose && !binary) ||
+        (!identity && !transpose && !binary && !namedProvider) ||
         ![zpuHeap isKindOfClass:[ZPUHeap class]] || zpuHeap->_owner != _owner->_owner ||
         zpuHeap.size < pipeline->_intermediatesHeapSize ||
         ![_argumentTable isKindOfClass:[ZPUMTL4ArgumentTable class]] ||
@@ -17411,15 +17539,17 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     }
     const uint64_t *resourceIDs = (const uint64_t *)_argumentTable->_bufferResources.bytes;
     ZPUTensor *source = (ZPUTensor *)zpu_resource_for_id(resourceIDs[0]);
-    ZPUTensor *right = binary ? (ZPUTensor *)zpu_resource_for_id(resourceIDs[1]) : nil;
+    const BOOL hasRightInput = binary || (namedProvider && inputCount > 2);
+    ZPUTensor *right = hasRightInput ? (ZPUTensor *)zpu_resource_for_id(resourceIDs[1]) : nil;
     ZPUTensor *destination = (ZPUTensor *)zpu_resource_for_id(resourceIDs[inputCount - 1]);
     if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
         source->_owner != _owner->_owner || destination->_owner != _owner->_owner ||
         (source->_usage & MTLTensorUsageMachineLearning) == 0 ||
         (destination->_usage & MTLTensorUsageMachineLearning) == 0 ||
-        (binary && (![right isKindOfClass:[ZPUTensor class]] || right->_owner != _owner->_owner ||
+        (hasRightInput && (![right isKindOfClass:[ZPUTensor class]] || right->_owner != _owner->_owner ||
                    (right->_usage & MTLTensorUsageMachineLearning) == 0)) ||
-        source->_dataType != destination->_dataType || (binary && right->_dataType != source->_dataType) ||
+        source->_dataType != destination->_dataType || (hasRightInput && right->_dataType != source->_dataType) ||
+        (namedProvider && zpu_cpu_ml_element_type(source) != pipeline->_namedElementType) ||
         (multiplyU8 && source->_dataType != MTLTensorDataTypeUInt8) ||
         (multiplyI8 && source->_dataType != MTLTensorDataTypeInt8) ||
         (multiplyU16 && source->_dataType != MTLTensorDataTypeUInt16) ||
@@ -17464,7 +17594,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         (addI4 && source->_dataType != MTLTensorDataTypeInt4) ||
         (addU4 && source->_dataType != MTLTensorDataTypeUInt4) ||
         source->_dimensions == nil || destination->_dimensions == nil ||
-        (!matmul && source->_dimensions.rank != destination->_dimensions.rank) ||
+        (!matmul && !namedProvider && source->_dimensions.rank != destination->_dimensions.rank) ||
         !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[0], source->_dimensions) ||
         !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[inputCount - 1], destination->_dimensions) ||
         (transpose && !zpu_mtl4_ml_transpose_dimensions_valid(source, destination)) ||
@@ -17473,6 +17603,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
                    right->_dimensions.rank != source->_dimensions.rank ||
                    !zpu_mtl4_ml_dimensions_equal(source->_dimensions, right->_dimensions) ||
                    !zpu_mtl4_ml_dimensions_equal(source->_dimensions, destination->_dimensions))) ||
+        (namedProvider && hasRightInput && (right->_dimensions == nil ||
+                   !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[1], right->_dimensions))) ||
         (matmul && (right->_dimensions == nil ||
                    !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[1], right->_dimensions) ||
                    !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[2], destination->_dimensions) ||
@@ -17481,9 +17613,16 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         return;
     }
     if (!zpu_defer_operation(_owner->_legacyBuffer, ^BOOL {
-        const int providerStatus = zpu_tensor_try_cpu_ml_operation(source, right, destination, cpuMlOperation);
+        int providerStatus = ZPU_CPU_ML_STATUS_UNSUPPORTED;
+        if (namedProvider) {
+            providerStatus = zpu_tensor_try_cpu_ml_named_operation(functionName, source, right,
+                pipeline->_inputCount - 1, destination, pipeline->_namedElementType);
+        } else {
+            providerStatus = zpu_tensor_try_cpu_ml_operation(source, right, destination, cpuMlOperation);
+        }
         if (providerStatus == ZPU_CPU_ML_STATUS_OK) return YES;
         if (providerStatus != ZPU_CPU_ML_STATUS_UNSUPPORTED) return NO;
+        if (namedProvider) return NO;
         if (identity) return zpu_tensor_copy_identity(source, destination);
         if (transpose) return zpu_tensor_transpose_reverse(source, destination);
         if (subtractU8) return zpu_tensor_sub_u8(source, right, destination);
