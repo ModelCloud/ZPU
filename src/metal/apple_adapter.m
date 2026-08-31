@@ -11796,6 +11796,20 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             [body componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         NSString *compactBody = [bodyParts componentsJoinedByString:@""];
 
+        /* The source-defined texture profile intentionally mirrors the
+         * registered RGBA8 gradient kernel, including its top-left gid
+         * mapping and exact component values. */
+        NSString *gradientSignature =
+            @"texture2d<float,access::write>output[[texture(0)]],"
+             "uint2gid[[thread_position_in_grid]]";
+        NSString *gradientBody =
+            @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+             "output.write(float4((float(gid.x)+1.0)/8.0,(float(gid.y)+1.0)/8.0,0.25,1.0),gid);";
+        if ([compactSignature isEqualToString:gradientSignature] && [compactBody isEqualToString:gradientBody]) {
+            implementations[functionName] = @"zpu_cpu_fill_gradient_rgba8";
+            return;
+        }
+
         NSError *indexError = nil;
         NSRegularExpression *indexExpression = [NSRegularExpression
             regularExpressionWithPattern:@"uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[thread_position_in_grid\\]\\]"

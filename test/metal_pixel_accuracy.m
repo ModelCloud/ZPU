@@ -561,13 +561,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
          "kernel void zpu_source_mul_f32(device const float *left [[buffer(0)]], "
          "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
-         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n";
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
+         "(float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 2) {
+        adapter_library.functionNames.count != 3) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -663,6 +667,78 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
                             adapter_pipeline_error ?: native_pipeline_error);
             return 167 + (int)case_index;
         }
+    }
+
+    id<MTLFunction> native_gradient_function =
+        [native_library newFunctionWithName:@"zpu_source_gradient_rgba8"];
+    id<MTLFunction> adapter_gradient_function =
+        [adapter_library newFunctionWithName:@"zpu_source_gradient_rgba8"];
+    NSError *native_gradient_error = nil;
+    NSError *adapter_gradient_error = nil;
+    id<MTLComputePipelineState> native_gradient_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_gradient_function
+                                                       error:&native_gradient_error];
+    id<MTLComputePipelineState> adapter_gradient_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_gradient_function
+                                                       error:&adapter_gradient_error];
+    MTLTextureDescriptor *gradient_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:8 height:8 mipmapped:NO];
+    gradient_descriptor.storageMode = MTLStorageModeShared;
+    gradient_descriptor.usage = MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_gradient_texture = [native_device newTextureWithDescriptor:gradient_descriptor];
+    id<MTLTexture> adapter_gradient_texture = [adapter_device newTextureWithDescriptor:gradient_descriptor];
+    id<MTLCommandBuffer> native_gradient_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_gradient_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_gradient_encoder =
+        [native_gradient_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_gradient_encoder =
+        [adapter_gradient_command_buffer computeCommandEncoder];
+    if (native_gradient_pipeline != nil && adapter_gradient_pipeline != nil &&
+        native_gradient_texture != nil && adapter_gradient_texture != nil &&
+        native_gradient_encoder != nil && adapter_gradient_encoder != nil) {
+        [native_gradient_encoder setComputePipelineState:native_gradient_pipeline];
+        [native_gradient_encoder setTexture:native_gradient_texture atIndex:0];
+        [native_gradient_encoder dispatchThreads:MTLSizeMake(8, 8, 1)
+                             threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+        [native_gradient_encoder endEncoding];
+        [native_gradient_command_buffer commit];
+        [native_gradient_command_buffer waitUntilCompleted];
+        [adapter_gradient_encoder setComputePipelineState:adapter_gradient_pipeline];
+        [adapter_gradient_encoder setTexture:adapter_gradient_texture atIndex:0];
+        [adapter_gradient_encoder dispatchThreads:MTLSizeMake(8, 8, 1)
+                              threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+        [adapter_gradient_encoder endEncoding];
+        [adapter_gradient_command_buffer commit];
+        [adapter_gradient_command_buffer waitUntilCompleted];
+    }
+    uint8_t native_gradient_pixels[8 * 8 * 4] = {0};
+    uint8_t adapter_gradient_pixels[8 * 8 * 4] = {0};
+    if (native_gradient_texture != nil) {
+        [native_gradient_texture getBytes:native_gradient_pixels bytesPerRow:8 * 4
+                              fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    if (adapter_gradient_texture != nil) {
+        [adapter_gradient_texture getBytes:adapter_gradient_pixels bytesPerRow:8 * 4
+                               fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    BOOL gradient_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_gradient_rgba8"];
+        gradient_reflection_ok = reflection != nil && reflection.bindings.count == 1 &&
+            reflection.bindings[0].type == MTLBindingTypeTexture &&
+            reflection.bindings[0].index == 0;
+    }
+    if (native_gradient_function == nil || native_gradient_error != nil || native_gradient_pipeline == nil ||
+        native_gradient_texture == nil || native_gradient_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_gradient_function == nil || adapter_gradient_error != nil || adapter_gradient_pipeline == nil ||
+        adapter_gradient_texture == nil || adapter_gradient_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        !gradient_reflection_ok || memcmp(native_gradient_pixels, adapter_gradient_pixels,
+                                          sizeof(native_gradient_pixels)) != 0) {
+        fail_with_error("source-defined CPU texture lowering execution failed",
+                        adapter_gradient_error ?: native_gradient_error);
+        return 169;
     }
     return 0;
 }
