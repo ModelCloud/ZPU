@@ -461,13 +461,13 @@ canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 The Vulkan-facing submission boundary has a focused benchmark as well. It
 models a Vulkan-backed WezTerm terminal, a Dear ImGui Vulkan desktop
 application, a complex Khronos Vulkan sample scene, and game-shaped streams
-based on vkQuake, vkQuake2, VkDoom, a Vulkan voxel game, and a Vulkan
-platformer. It compares per-command dispatch, the old 256-command chunking,
-and the existing Vulkan ABI's adaptive private Mosaic executor. Large streams
-use immutable prepared geometry, static-geometry revision reuse, 256×256-pixel
-Morton supertiles, per-core queues, and same-LLC/NUMA stealing; small UI and
-scene streams remain on the already-tuned prepared batch kernel when that is
-faster:
+based on vkQuake, vkQuake2, VkDoom, a Vulkan voxel game, a Vulkan platformer,
+vkQuake3, Serious Sam Classic, Chewman, and Vulkan engine/editor demos. It
+compares per-command dispatch, the old 256-command chunking, and the existing
+Vulkan ABI's adaptive private Mosaic executor. Large streams use immutable
+prepared geometry, static-geometry revision reuse, 256×256-pixel Morton
+supertiles, per-core queues, and same-LLC/NUMA stealing; small UI and scene
+streams remain on the already-tuned prepared batch kernel when that is faster:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \

@@ -23,15 +23,21 @@ projects:
 | `vkdoom_fps` | [VkDoom](https://github.com/nashmuhandes/VkDoom) | 1,792 sector-wall-like quads, masked sprites, particles, sky, and HUD |
 | `vulkan_voxel_world` | [vulkan-voxel-game](https://github.com/pimpale/vulkan-voxel-game) | 1,024 chunk-face and atlas-material draws with a static chunk mesh |
 | `space_menace_platformer` | [Space Menace](https://github.com/amethyst/space-menace) | 768 Vulkan platformer-shaped tile, sprite, particle, and HUD draws |
+| `vkquake3_arena` | [vkQuake3](https://github.com/suijingfeng/vkQuake3) | 2,304 arena surfaces, lightmapped materials, effects, and HUD draws |
+| `serious_sam_vulkan` | [Serious Sam Classic: Vulkan](https://github.com/tx00100xt/SeriousSamClassic-VK) | 3,072 outdoor-sector surfaces, enemies, particles, and weapon HUD draws |
+| `chewman_vulkan_3d` | [Chewman Vulkan](https://github.com/RMDarth/Chewman-Vulkan) | 1,152 3D maze tiles, instanced characters, particles, and GUI draws |
+| `sascha_vulkan_pbr` | [Sascha Willems Vulkan examples](https://github.com/SaschaWillems/Vulkan) | 640 PBR/deferred sample-scene objects, lights, skybox, and UI draws |
+| `kaiju_vulkan_editor` | [Kaiju Engine](https://github.com/KaijuEngine/kaiju) | 896 mixed 2D/3D editor viewport, sprite, gizmo, scene, and panel draws |
 
 These are not external runtime dependencies and the suite does not claim to
 run those projects or implement general SPIR-V, blending, or alpha-compositor
 semantics. They provide realistic draw-count, static-versus-dynamic update,
 texture, depth, and command-boundary shapes for the narrow renderer that ZPU
 actually exposes. The repository search did not identify a maintained
-Vulkan-based project named `Penguin Run`; `space_menace_platformer` is the
-verified Vulkan platformer proxy, while the Quake/Doom profiles use actual
-open-source Vulkan source ports.
+Vulkan-based project named `Penguin Run`; `space_menace_platformer` remains a
+verified Vulkan platformer proxy. The Quake, Doom, Chewman, and Serious Sam
+profiles use actual open-source Vulkan source ports/games, while the remaining
+profiles cover engine, editor, and renderer-demo workloads.
 
 ## Run
 
@@ -141,7 +147,7 @@ remains gated until the broader game corpus is byte-identical.
 
 `src/benchmark_vulkan_abi.zig` requires the legacy-chunked, Mosaic-batched, and
 per-draw paths to produce byte-identical color and depth attachments for all
-eight profiles. The profiles intentionally fit under the 8,192-command Mosaic
-limit, keeping each complete frame in one bounded submission. Driver tests
-continue to cover the full Vulkan command executor and the existing serial
-raster oracle.
+thirteen profiles. The profiles intentionally fit under the 8,192-command
+Mosaic limit, keeping each complete frame in one bounded submission. Driver
+tests continue to cover the full Vulkan command executor and the existing
+serial raster oracle.
