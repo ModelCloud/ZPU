@@ -823,6 +823,8 @@ int main(void) {
         zpu_metal_render_encoder_set_tessellation_factor_buffer(
             patch_encoder, patch_factor_buffer, 0, sizeof(committed_patch_factors)) != 0 ||
         zpu_metal_render_encoder_set_tessellation_factor_scale(patch_encoder, 1.0f) != 0 ||
+        zpu_metal_render_encoder_set_tessellation_partition_mode(
+            patch_encoder, ZPU_METAL_TESSELLATION_PARTITION_INTEGER) != 0 ||
         zpu_metal_render_encoder_set_patch_max_tessellation_factor(patch_encoder, 2) != 0 ||
         zpu_metal_render_encoder_draw_patches(
             patch_encoder, ZPU_METAL_PATCH_TRIANGLE_RGBA8, 3, 0, 1, NULL, 0, 1, 0,
