@@ -5305,7 +5305,7 @@ pub const ComputeEncoder = struct {
     }
 
     pub fn setIntersectionFunctionProfile(self: *ComputeEncoder, profile: u32) Error!void {
-        if (!self.open() or profile > 1) return error.UnsupportedOperation;
+        if (!self.open() or profile > 2) return error.UnsupportedOperation;
         self.intersection_function_profile = @intCast(profile);
     }
 
@@ -5892,7 +5892,7 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
     const texture = command.texture orelse return error.InvalidResource;
     if (texture.format != .rgba8_unorm) return error.UnsupportedFormat;
     const acceleration_structure = command.acceleration_structure orelse return error.InvalidCommand;
-    if (command.intersection_function_profile > 1) return error.UnsupportedOperation;
+        if (command.intersection_function_profile > 2) return error.UnsupportedOperation;
     if (!validBuffer(acceleration_structure) or acceleration_structure.device != texture.device) return error.InvalidResource;
     if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
     if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or

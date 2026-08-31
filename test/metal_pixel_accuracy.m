@@ -590,6 +590,8 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     id<MTLFunction> function = ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
     id<MTLFunction> default_intersection_function =
         [library newFunctionWithName:@"zpu_cpu_intersection_triangle"];
+    id<MTLFunction> default_accept_intersection_function =
+        [library newFunctionWithName:@"zpu_cpu_intersection_triangle_accept"];
     MTLComputePipelineDescriptor *compute_descriptor = [MTLComputePipelineDescriptor new];
     compute_descriptor.computeFunction = function;
     id<MTLComputePipelineState> compute_pipeline =
@@ -626,7 +628,9 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     }
     if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
         library == nil || function == nil || default_intersection_function == nil ||
+        default_accept_intersection_function == nil ||
         default_intersection_function.functionType != MTLFunctionTypeIntersection ||
+        default_accept_intersection_function.functionType != MTLFunctionTypeIntersection ||
         compute_pipeline == nil || render_pipeline == nil ||
         sampler == nil || depth == nil || fence == nil || argument_encoder == nil ||
         compute_encoder == nil || blit_encoder == nil || render_encoder == nil || parallel_encoder == nil) {
@@ -4906,6 +4910,10 @@ static int test_cpu_intersection_function_against_native(
          "uint primitiveIndex [[primitive_id]], uint geometryIndex [[geometry_id]], "
          "float2 barycentricCoords [[barycentric_coord]]) { "
          "(void)primitiveIndex; (void)geometryIndex; (void)barycentricCoords; return false; }\n"
+         "[[intersection(triangle, triangle_data)]] bool zpu_cpu_intersection_triangle_accept("
+         "uint primitiveIndex [[primitive_id]], uint geometryIndex [[geometry_id]], "
+         "float2 barycentricCoords [[barycentric_coord]]) { "
+         "(void)primitiveIndex; (void)geometryIndex; (void)barycentricCoords; return true; }\n"
          "kernel void zpu_cpu_trace_triangles_rgba8("
          "primitive_acceleration_structure accelerationStructure [[buffer(0)]], "
          "intersection_function_table<triangle_data> intersectionFunctionTable [[buffer(1)]], "
@@ -4927,14 +4935,17 @@ static int test_cpu_intersection_function_against_native(
         [native_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
     id<MTLFunction> native_intersection_function =
         [native_library newFunctionWithName:@"zpu_cpu_intersection_triangle"];
-    if (native_library == nil || native_function == nil || native_intersection_function == nil) {
+    id<MTLFunction> native_accept_intersection_function =
+        [native_library newFunctionWithName:@"zpu_cpu_intersection_triangle_accept"];
+    if (native_library == nil || native_function == nil || native_intersection_function == nil ||
+        native_accept_intersection_function == nil) {
         fail_with_error("CPU custom intersection source compilation failed", native_error);
         return 159;
     }
     MTLComputePipelineDescriptor *native_pipeline_descriptor = [MTLComputePipelineDescriptor new];
     native_pipeline_descriptor.computeFunction = native_function;
     MTLLinkedFunctions *native_linked_functions = [MTLLinkedFunctions new];
-    native_linked_functions.functions = @[native_intersection_function];
+    native_linked_functions.functions = @[native_intersection_function, native_accept_intersection_function];
     native_pipeline_descriptor.linkedFunctions = native_linked_functions;
     id<MTLComputePipelineState> native_pipeline =
         [native_device newComputePipelineStateWithDescriptor:native_pipeline_descriptor
@@ -4946,6 +4957,8 @@ static int test_cpu_intersection_function_against_native(
         [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
     id<MTLFunction> adapter_intersection_function =
         ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_intersection_triangle");
+    id<MTLFunction> adapter_accept_intersection_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_intersection_triangle_accept");
     MTLTextureDescriptor *texture_descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                             width:width height:height mipmapped:NO];
@@ -5001,7 +5014,8 @@ static int test_cpu_intersection_function_against_native(
         [adapter_build_command_buffer accelerationStructureCommandEncoder];
     if (native_library == nil || native_function == nil || native_intersection_function == nil ||
         native_pipeline == nil || adapter_function == nil || adapter_pipeline == nil ||
-        adapter_intersection_function == nil || native_texture == nil || adapter_texture == nil ||
+        adapter_intersection_function == nil || adapter_accept_intersection_function == nil ||
+        native_texture == nil || adapter_texture == nil ||
         native_vertex_buffer == nil || adapter_vertex_buffer == nil ||
         native_acceleration_structure == nil || adapter_acceleration_structure == nil ||
         native_scratch == nil || adapter_scratch == nil || native_build_encoder == nil ||
@@ -5029,6 +5043,8 @@ static int test_cpu_intersection_function_against_native(
         [native_pipeline newIntersectionFunctionTableWithDescriptor:native_table_descriptor];
     id<MTLFunctionHandle> native_handle =
         [native_pipeline functionHandleWithFunction:native_intersection_function];
+    id<MTLFunctionHandle> native_accept_handle =
+        [native_pipeline functionHandleWithFunction:native_accept_intersection_function];
     if (native_table != nil && native_handle != nil) [native_table setFunction:native_handle atIndex:0];
     MTLIntersectionFunctionTableDescriptor *adapter_table_descriptor =
         [MTLIntersectionFunctionTableDescriptor new];
@@ -5037,6 +5053,8 @@ static int test_cpu_intersection_function_against_native(
         [adapter_pipeline newIntersectionFunctionTableWithDescriptor:adapter_table_descriptor];
     id<MTLFunctionHandle> adapter_handle =
         [adapter_device functionHandleWithFunction:adapter_intersection_function];
+    id<MTLFunctionHandle> adapter_accept_handle =
+        [adapter_device functionHandleWithFunction:adapter_accept_intersection_function];
     if (adapter_table != nil && adapter_handle != nil) [adapter_table setFunction:adapter_handle atIndex:0];
 
     id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
@@ -5069,11 +5087,63 @@ static int test_cpu_intersection_function_against_native(
                    fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
     BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
         adapter_command_buffer.status == MTLCommandBufferStatusCompleted &&
-        native_table != nil && native_handle != nil && adapter_table != nil && adapter_handle != nil &&
+        native_table != nil && native_handle != nil && native_accept_handle != nil &&
+        adapter_table != nil && adapter_handle != nil && adapter_accept_handle != nil &&
         memcmp(native_pixels, adapter_pixels, byte_count) == 0;
     for (NSUInteger index = 0; exact && index < width * height; ++index) {
         exact = native_pixels[index * 4 + 0] == 0 && native_pixels[index * 4 + 1] == 0 &&
             native_pixels[index * 4 + 2] == 0 && native_pixels[index * 4 + 3] == 255;
+    }
+    if (exact) {
+        MTLIntersectionFunctionTableDescriptor *native_accept_table_descriptor =
+            [MTLIntersectionFunctionTableDescriptor new];
+        native_accept_table_descriptor.functionCount = 1;
+        id<MTLIntersectionFunctionTable> native_accept_table =
+            [native_pipeline newIntersectionFunctionTableWithDescriptor:native_accept_table_descriptor];
+        if (native_accept_table != nil && native_accept_handle != nil) {
+            [native_accept_table setFunction:native_accept_handle atIndex:0];
+        }
+        MTLIntersectionFunctionTableDescriptor *adapter_accept_table_descriptor =
+            [MTLIntersectionFunctionTableDescriptor new];
+        adapter_accept_table_descriptor.functionCount = 1;
+        id<MTLIntersectionFunctionTable> adapter_accept_table =
+            [adapter_pipeline newIntersectionFunctionTableWithDescriptor:adapter_accept_table_descriptor];
+        if (adapter_accept_table != nil && adapter_accept_handle != nil) {
+            [adapter_accept_table setFunction:adapter_accept_handle atIndex:0];
+        }
+        id<MTLCommandBuffer> native_accept_command_buffer = [native_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_accept_encoder =
+            [native_accept_command_buffer computeCommandEncoder];
+        [native_accept_encoder setComputePipelineState:native_pipeline];
+        [native_accept_encoder setAccelerationStructure:native_acceleration_structure atBufferIndex:0];
+        [native_accept_encoder setIntersectionFunctionTable:native_accept_table atBufferIndex:1];
+        [native_accept_encoder setTexture:native_texture atIndex:0];
+        [native_accept_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+        [native_accept_encoder endEncoding];
+        id<MTLCommandBuffer> adapter_accept_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_accept_encoder =
+            [adapter_accept_command_buffer computeCommandEncoder];
+        [adapter_accept_encoder setComputePipelineState:adapter_pipeline];
+        [adapter_accept_encoder setAccelerationStructure:adapter_acceleration_structure atBufferIndex:0];
+        [adapter_accept_encoder setIntersectionFunctionTable:adapter_accept_table atBufferIndex:1];
+        [adapter_accept_encoder setTexture:adapter_texture atIndex:0];
+        [adapter_accept_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                           threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+        [adapter_accept_encoder endEncoding];
+        [native_accept_command_buffer commit];
+        [adapter_accept_command_buffer commit];
+        [native_accept_command_buffer waitUntilCompleted];
+        [adapter_accept_command_buffer waitUntilCompleted];
+        [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                      fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                       fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        exact = native_accept_table != nil && native_accept_handle != nil &&
+            adapter_accept_table != nil && adapter_accept_handle != nil &&
+            native_accept_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_accept_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_pixels, adapter_pixels, byte_count) == 0;
     }
     if (!exact) {
         size_t mismatch = 0;

@@ -670,9 +670,11 @@ triangle path:
   resource reflection and execute as
   deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary
   MSL remains fail-closed. The registered
-  `zpu_cpu_intersection_triangle` profile also preserves source-library
+  `zpu_cpu_intersection_triangle` and
+  `zpu_cpu_intersection_triangle_accept` profiles also preserve source-library
   intersection-function descriptors as CPU-owned metadata with
-  `MTLFunctionTypeIntersection`; arbitrary custom-intersection and ray-tracing
+  `MTLFunctionTypeIntersection`; those two bounded profiles execute in ZPU's
+  CPU ray traversal, while arbitrary custom-intersection and ray-tracing
   execution remains fail-closed.
   Legacy compute-pipeline creation also carries the same canonical CPU/source
   binding reflection onto the pipeline object on SDKs that expose the Metal 4
@@ -720,7 +722,8 @@ triangle path:
   acceleration-structure bindings on legacy compute encoders retain the same
   CPU resources and preserve command ordering. The fixed triangle trace
   profile consumes the table bound at buffer 1 and executes the registered
-  reject-all `zpu_cpu_intersection_triangle` profile in the CPU command stream;
+  reject-all `zpu_cpu_intersection_triangle` or accept-all
+  `zpu_cpu_intersection_triangle_accept` profile in the CPU command stream;
   arbitrary function-pointer dispatch, other custom intersection functions,
   and arbitrary ray tracing remain unsupported
 - CPU acceleration-structure resources expose deterministic ZPU-backed storage,
