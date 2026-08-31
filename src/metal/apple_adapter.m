@@ -7919,6 +7919,8 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
     if (hasTriangleMasks) {
         if (triangleCount > (SIZE_MAX - size) / sizeof(uint32_t)) return 0;
         size += triangleCount * sizeof(uint32_t);
+        if (aabbCount > (SIZE_MAX - size) / sizeof(uint32_t)) return 0;
+        size += aabbCount * sizeof(uint32_t);
     }
     if (aabbCount > (SIZE_MAX - size) / sizeof(zpu_metal_cpu_acceleration_aabb)) return 0;
     size += aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb);

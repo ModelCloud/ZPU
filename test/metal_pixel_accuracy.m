@@ -4980,6 +4980,11 @@ static int test_cpu_trace_aabbs_against_native(
     API_AVAILABLE(macos(26.0), ios(26.0)) {
     enum { width = 9, height = 7, byte_count = width * height * 4 };
     const float bounds[] = {-0.80f, -0.70f, -0.10f, 0.80f, 0.70f, 0.10f};
+    const NSUInteger aabb_count = 65;
+    NSMutableData *aabb_data = [NSMutableData dataWithLength:aabb_count * sizeof(bounds)];
+    for (NSUInteger index = 0; index < aabb_count; ++index) {
+        memcpy((uint8_t *)aabb_data.mutableBytes + index * sizeof(bounds), bounds, sizeof(bounds));
+    }
     NSString *source =
         @"#include <metal_stdlib>\nusing namespace metal;\n"
          "kernel void zpu_cpu_trace_aabbs_rgba8(device const float *bounds [[buffer(0)]], "
@@ -5011,7 +5016,7 @@ static int test_cpu_trace_aabbs_against_native(
     id<MTLBuffer> native_bounds =
         [native_device newBufferWithBytes:bounds length:sizeof(bounds) options:MTLResourceStorageModeShared];
     id<MTLBuffer> adapter_bounds =
-        [adapter_device newBufferWithBytes:bounds length:sizeof(bounds) options:MTLResourceStorageModeShared];
+        [adapter_device newBufferWithBytes:aabb_data.bytes length:aabb_data.length options:MTLResourceStorageModeShared];
     MTL4CommandAllocatorDescriptor *allocator_descriptor = [MTL4CommandAllocatorDescriptor new];
     id<MTL4CommandAllocator> allocator =
         [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&adapter_error];
@@ -5024,7 +5029,7 @@ static int test_cpu_trace_aabbs_against_native(
         [MTL4AccelerationStructureBoundingBoxGeometryDescriptor new];
     geometry.boundingBoxBuffer = MTL4BufferRangeMake(adapter_bounds.gpuAddress, UINT64_MAX);
     geometry.boundingBoxStride = 6 * sizeof(float);
-    geometry.boundingBoxCount = 1;
+    geometry.boundingBoxCount = aabb_count;
     acceleration_descriptor.geometryDescriptors = @[geometry];
     MTLAccelerationStructureSizes sizes =
         [adapter_device accelerationStructureSizesWithDescriptor:acceleration_descriptor];
