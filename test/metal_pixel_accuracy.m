@@ -37041,6 +37041,13 @@ int main(void) {
         adapter_metal4_origin_table_descriptor.supportAttributeStrides = YES;
         id<MTL4ArgumentTable> adapter_metal4_origin_table =
             [adapter_device newArgumentTableWithDescriptor:adapter_metal4_origin_table_descriptor error:&metal4_error];
+        /* Replacing a dynamic-stride binding with a plain address must clear
+         * the previous stride. Otherwise the CPU bridge can fetch the same
+         * ZPU-owned vertex buffer using stale layout state and shift pixels.
+         * The intentionally invalid 16-byte stride is never meant to reach
+         * the draw; the second setter restores the ordinary Metal binding. */
+        [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16
+                                attributeStride:16 atIndex:0];
         [adapter_metal4_origin_table setAddress:adapter_metal4_origin_vertex_buffer.gpuAddress + 16 atIndex:0];
         /* Nonzero render-table slots are retained by the CPU adapter as
          * stage metadata. They must be accepted and later cleared without

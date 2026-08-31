@@ -17311,6 +17311,10 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     if (bindingIndex >= _maxBufferBindCount) { _invalid = YES; return; }
     ((uint64_t *)_bufferAddresses.mutableBytes)[bindingIndex] = gpuAddress;
     ((uint64_t *)_bufferResources.mutableBytes)[bindingIndex] = 0;
+    /* A plain address binding has no dynamic vertex stride.  Clear a stride
+     * left by a previous setAddress:attributeStride: call so replacing a
+     * binding cannot silently retain the old render-fetch mode. */
+    ((uint64_t *)_bufferStrides.mutableBytes)[bindingIndex] = 0;
 }
 - (void)setAddress:(MTLGPUAddress)gpuAddress attributeStride:(NSUInteger)stride atIndex:(NSUInteger)bindingIndex {
     if (!_supportAttributeStrides || bindingIndex >= _maxBufferBindCount) { _invalid = YES; return; }
@@ -17321,6 +17325,7 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     if (bindingIndex >= _maxBufferBindCount) { _invalid = YES; return; }
     ((uint64_t *)_bufferAddresses.mutableBytes)[bindingIndex] = 0;
     ((uint64_t *)_bufferResources.mutableBytes)[bindingIndex] = resourceID._impl;
+    ((uint64_t *)_bufferStrides.mutableBytes)[bindingIndex] = 0;
 }
 - (void)setTexture:(MTLResourceID)resourceID atIndex:(NSUInteger)bindingIndex {
     if (bindingIndex >= _maxTextureBindCount) { _invalid = YES; return; }
