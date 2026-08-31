@@ -7157,7 +7157,7 @@ static int test_native_tessellation_patch_against_cpu(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_tessellated_vertex_function, id<MTLFunction> native_fragment_function,
     id<MTLFunction> adapter_patch_vertex_function, id<MTLFunction> adapter_patch_fragment_function,
-    uint16_t factor_half) {
+    uint16_t factor_half, float factor_scale) {
     enum { width = 9, height = 7, layers = 3, max_byte_count = width * height * 4 };
     const zpu_metal_vertex vertices[] = {
         {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
@@ -7182,7 +7182,7 @@ static int test_native_tessellation_patch_against_cpu(
         MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
     native_descriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
     native_descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
-    native_descriptor.tessellationFactorScaleEnabled = NO;
+    native_descriptor.tessellationFactorScaleEnabled = factor_scale != 1.0f;
     native_descriptor.maxTessellationFactor = 16.0f;
     native_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     MTLRenderPipelineDescriptor *adapter_descriptor = [native_descriptor copy];
@@ -7252,6 +7252,7 @@ static int test_native_tessellation_patch_against_cpu(
     [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
     [native_encoder setTessellationFactorBuffer:native_factor_buffer offset:0
                                   instanceStride:sizeof(uint16_t) * 4];
+    [native_encoder setTessellationFactorScale:factor_scale];
     [native_encoder drawPatches:3 patchStart:0 patchCount:1 patchIndexBuffer:nil
               patchIndexBufferOffset:0 instanceCount:layers - 1 baseInstance:1];
     [native_encoder endEncoding];
@@ -7261,6 +7262,7 @@ static int test_native_tessellation_patch_against_cpu(
     [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
     [adapter_encoder setTessellationFactorBuffer:adapter_factor_buffer offset:0
                                     instanceStride:sizeof(uint16_t) * 4];
+    [adapter_encoder setTessellationFactorScale:factor_scale];
     [adapter_encoder drawPatches:3 patchStart:0 patchCount:1 patchIndexBuffer:nil
                 patchIndexBufferOffset:0 instanceCount:layers - 1 baseInstance:1];
     [adapter_encoder endEncoding];
@@ -12119,12 +12121,16 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_tessellated_triangle_fragment");
         const int native_tessellation_result = test_native_tessellation_patch_against_cpu(
             device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
-            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4000);
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4000, 1.0f);
         if (native_tessellation_result != 0) return native_tessellation_result;
         const int native_tessellation_factor4_result = test_native_tessellation_patch_against_cpu(
             device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
-            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4400);
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4400, 1.0f);
         if (native_tessellation_factor4_result != 0) return native_tessellation_factor4_result;
+        const int native_tessellation_scaled_result = test_native_tessellation_patch_against_cpu(
+            device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x3c00, 2.0f);
+        if (native_tessellation_scaled_result != 0) return native_tessellation_scaled_result;
         const int layered_patch_result = test_layered_patch_against_native(
             device, adapter_device, layered_vertex_function, fragment_function,
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);

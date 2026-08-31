@@ -537,7 +537,8 @@ const PatchCommand = struct {
 // Integer triangle factors up to 16 cover the portable profile while keeping
 // the generated mesh on the command-buffer stack. Arbitrary tessellation
 // shaders, fractional factors, and non-uniform edge/inside factors remain
-// fail-closed at command commit.
+// fail-closed at command commit. A factor scale is supported when it produces
+// one positive integer factor for all four values in the registered profile.
 const cpu_patch_max_tessellation_factor: usize = 16;
 const cpu_patch_max_mesh_vertices: usize = cpu_patch_max_tessellation_factor * cpu_patch_max_tessellation_factor * 3;
 
@@ -2375,7 +2376,6 @@ pub const CommandBuffer = struct {
                 if (!validTexture(target_handle) or target_handle != resolved_patch.target or
                     resolved_patch.kernel != 1 or resolved_patch.control_point_count != 3 or
                     (target_handle.format != .rgba8_unorm and target_handle.format != .bgra8_unorm) or
-                    resolved_patch.factor_scale != 1.0 or
                     resolved_patch.max_tessellation_factor == 0 or
                     resolved_patch.max_tessellation_factor > cpu_patch_max_tessellation_factor)
                     return self.fail(error.InvalidArgument);
@@ -2592,12 +2592,19 @@ pub const CommandBuffer = struct {
                             const inside = readF16Little(factor_bytes_slice, factor_offset + 6);
                             if (!std.math.isFinite(edge0) or !std.math.isFinite(edge1) or !std.math.isFinite(edge2) or
                                 !std.math.isFinite(inside)) return self.fail(error.InvalidArgument);
-                            if (edge0 <= 0 or edge1 <= 0 or edge2 <= 0) continue;
-                            if (edge0 != edge1 or edge0 != edge2 or edge0 != inside or
-                                @floor(edge0) != edge0 or edge0 < 1.0 or
-                                edge0 > @as(f32, @floatFromInt(resolved_patch.max_tessellation_factor)))
+                            const scaled_edge0 = edge0 * resolved_patch.factor_scale;
+                            const scaled_edge1 = edge1 * resolved_patch.factor_scale;
+                            const scaled_edge2 = edge2 * resolved_patch.factor_scale;
+                            const scaled_inside = inside * resolved_patch.factor_scale;
+                            if (edge0 <= 0 or edge1 <= 0 or edge2 <= 0 or inside <= 0 or
+                                !std.math.isFinite(scaled_edge0) or !std.math.isFinite(scaled_edge1) or
+                                !std.math.isFinite(scaled_edge2) or !std.math.isFinite(scaled_inside)) continue;
+                            if (scaled_edge0 != scaled_edge1 or scaled_edge0 != scaled_edge2 or
+                                scaled_edge0 != scaled_inside or @floor(scaled_edge0) != scaled_edge0 or
+                                scaled_edge0 < 1.0 or
+                                scaled_edge0 > @as(f32, @floatFromInt(resolved_patch.max_tessellation_factor)))
                                 return self.fail(error.UnsupportedOperation);
-                            const tessellation_factor: usize = @intFromFloat(edge0);
+                            const tessellation_factor: usize = @intFromFloat(scaled_edge0);
 
                             const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
                                 readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
@@ -4669,7 +4676,8 @@ pub const RenderEncoder = struct {
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.?.bytes.len, indirect_buffer_offset, 4 * @sizeOf(u32)))) or
             self.tessellation_factor_buffer == null or
-            self.tessellation_factor_scale != 1.0)
+            !std.math.isFinite(self.tessellation_factor_scale) or
+            self.tessellation_factor_scale <= 0)
             return error.InvalidArgument;
         const target = switch (self.command_buffer.commands.items[self.begin_index]) {
             .begin_render => |begin_render| begin_render.target,
@@ -9628,6 +9636,58 @@ test "CPU uniform integer triangle patches preserve raster pixels" {
         try std.testing.expectEqual(CommandStatus.completed, patch_commands.status);
         try std.testing.expectEqualSlices(u8, patch_texture.bytes, primitive_texture.bytes);
     }
+}
+
+test "CPU triangle patches apply an enabled integer factor scale" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.86, -0.72, 0.5, 1 }, .color = .{ .red = 0.91, .green = 0.17, .blue = 0.63, .alpha = 0.81 } },
+        .{ .position = .{ 0.78, -0.43, 0.5, 1 }, .color = .{ .red = 0.23, .green = 0.87, .blue = 0.31, .alpha = 0.59 } },
+        .{ .position = .{ -0.21, 0.84, 0.5, 1 }, .color = .{ .red = 0.19, .green = 0.41, .blue = 0.97, .alpha = 0.73 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const factors = [_]u16{ 0x3c00, 0x3c00, 0x3c00, 0x3c00 };
+    const factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(factors)), @ptrCast(&factors));
+    defer destroyBuffer(factor_buffer);
+    const factor_two = [_]u16{ 0x4000, 0x4000, 0x4000, 0x4000 };
+    const factor_two_buffer = try createBuffer(device, @sizeOf(@TypeOf(factor_two)), @ptrCast(&factor_two));
+    defer destroyBuffer(factor_two_buffer);
+    const scaled_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(scaled_texture);
+    const reference_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(reference_texture);
+
+    var scaled_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(scaled_commands);
+    var scaled_encoder = try beginRender(scaled_commands, scaled_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try scaled_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try scaled_encoder.setPatchMaxTessellationFactor(2);
+    try scaled_encoder.setTessellationFactorBuffer(factor_buffer, 0, @sizeOf(@TypeOf(factors)));
+    try scaled_encoder.setTessellationFactorScale(2);
+    try scaled_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+    try scaled_encoder.endEncoding();
+    destroyRenderEncoder(scaled_encoder);
+
+    var reference_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(reference_commands);
+    var reference_encoder = try beginRender(reference_commands, reference_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try reference_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try reference_encoder.setPatchMaxTessellationFactor(2);
+    try reference_encoder.setTessellationFactorBuffer(factor_two_buffer, 0, @sizeOf(@TypeOf(factor_two)));
+    try reference_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+    try reference_encoder.endEncoding();
+    destroyRenderEncoder(reference_encoder);
+
+    // The reference uses a factor-two buffer while the scaled path uses a
+    // factor-one buffer with scale two; both must produce the same CPU mesh.
+    try scaled_commands.commit();
+    try reference_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, scaled_commands.status);
+    try std.testing.expectEqualSlices(u8, scaled_texture.bytes, reference_texture.bytes);
 }
 
 test "CPU line-filled integer triangle patches rasterize their generated grid" {

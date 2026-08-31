@@ -522,8 +522,10 @@ triangle path:
   and indirect argument buffers. All of those buffers are ZPU-owned and read at
   commit time; direct and indirect `baseInstance` values select layered
   color/depth/stencil targets using the same upper-left pixel grid as ordinary
-  draws. Fractional or non-uniform factors, factors above the pipeline maximum,
-  quad patches, and arbitrary tessellation shader profiles fail closed
+  draws. The CPU path also applies `setTessellationFactorScale:` when the
+  scaled four factors remain one equal positive integer within the pipeline
+  maximum. Fractional or non-uniform factors, factors above the pipeline
+  maximum, quad patches, and arbitrary tessellation shader profiles fail closed
 - compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
   and follow the same deferred lifetime rules
 - CPU command buffers expose host-clock `GPUStartTime`/`GPUEndTime` around

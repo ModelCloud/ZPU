@@ -962,6 +962,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSInteger _patchControlPointCount;
     MTLTessellationControlPointIndexType _tessellationControlPointIndexType;
     NSUInteger _patchMaxTessellationFactor;
+    BOOL _tessellationFactorScaleEnabled;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLRenderPipelineDescriptor *)descriptor;
 - (instancetype)initWithOwner:(ZPUDevice *)owner tileFunctionName:(NSString *)tileFunctionName
@@ -9228,6 +9229,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _patchControlPointCount = _isPatchPipeline ? 3 : -1;
         _tessellationControlPointIndexType = descriptor.tessellationControlPointIndexType;
         _patchMaxTessellationFactor = _isPatchPipeline ? (NSUInteger)descriptor.maxTessellationFactor : 1;
+        _tessellationFactorScaleEnabled = descriptor.tessellationFactorScaleEnabled;
         _blendingEnabled = attachment.blendingEnabled;
         _sourceRGBBlendFactor = attachment.sourceRGBBlendFactor;
         _destinationRGBBlendFactor = attachment.destinationRGBBlendFactor;
@@ -9410,6 +9412,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _patchControlPointCount = pipeline->_patchControlPointCount;
         _tessellationControlPointIndexType = pipeline->_tessellationControlPointIndexType;
         _patchMaxTessellationFactor = pipeline->_patchMaxTessellationFactor;
+        _tessellationFactorScaleEnabled = pipeline->_tessellationFactorScaleEnabled;
         _reflection = pipeline->_reflection;
         _legacyReflection = pipeline->_legacyReflection;
         _specializationDescriptor = [pipeline->_specializationDescriptor copy];
@@ -10752,7 +10755,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
           descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
           descriptor.tessellationFactorStepFunction != MTLTessellationFactorStepFunctionPerPatchAndPerInstance ||
           descriptor.tessellationOutputWindingOrder != MTLWindingClockwise ||
-          descriptor.tessellationFactorScaleEnabled || !isfinite(descriptor.maxTessellationFactor) ||
+          !isfinite(descriptor.maxTessellationFactor) ||
           descriptor.maxTessellationFactor < 1 || descriptor.maxTessellationFactor > 16 ||
           descriptor.rasterizationEnabled == NO))) {
         zpu_set_error(error, @"ZPU CPU Metal supports only the registered uniform integer triangle patch profile with factors up to 16");
@@ -20367,6 +20370,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         _owner = owner;
         _zpuEncoder = encoder;
         _vertexAmplificationCount = 1;
+        _tessellationFactorScale = 1.0f;
         _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
         _supportsColorAttachmentMapping = NO;
@@ -21301,6 +21305,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
         ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 ||
+        (_tessellationFactorScale != 1.0f && !state->_tessellationFactorScaleEnabled) ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] ||
                                      patchIndex->_owner != [_owner device]))) {
         [_owner markError];
@@ -21323,6 +21328,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
         ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 ||
+        (_tessellationFactorScale != 1.0f && !state->_tessellationFactorScaleEnabled) ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
         ![indirect isKindOfClass:[ZPUBuffer class]] || indirect->_owner != [_owner device]) {
         [_owner markError];
@@ -21345,6 +21351,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
         ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 || state->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone ||
+        (_tessellationFactorScale != 1.0f && !state->_tessellationFactorScaleEnabled) ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
         ![controlPointIndex isKindOfClass:[ZPUBuffer class]] || controlPointIndex->_owner != [_owner device]) {
         [_owner markError];
@@ -21368,6 +21375,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
         ![state->_vertexImplementationName isEqualToString:zpu_cpu_patch_triangle_vertex_name] ||
         ![state->_fragmentImplementationName isEqualToString:zpu_cpu_patch_triangle_fragment_name] ||
         numberOfPatchControlPoints != 3 || state->_tessellationControlPointIndexType == MTLTessellationControlPointIndexTypeNone ||
+        (_tessellationFactorScale != 1.0f && !state->_tessellationFactorScaleEnabled) ||
         (patchIndexBuffer != nil && (![patchIndex isKindOfClass:[ZPUBuffer class]] || patchIndex->_owner != [_owner device])) ||
         ![controlPointIndex isKindOfClass:[ZPUBuffer class]] || controlPointIndex->_owner != [_owner device] ||
         ![indirect isKindOfClass:[ZPUBuffer class]] || indirect->_owner != [_owner device]) {
