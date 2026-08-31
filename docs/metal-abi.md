@@ -105,7 +105,7 @@ triangle path:
   legacy vertex amplification is CPU-expanded into up to two ordered view
   draws; each view preserves the recorded viewport/scissor origin and applies
   its `renderTargetArrayIndexOffset` to the ZPU-owned array slice. The bounded
-  ABI records up to two viewport/scissor entries; each
+  ABI records up to sixteen viewport/scissor entries; each
   `viewportArrayIndexOffset` selects the corresponding recorded CPU state, and
   offsets beyond those entries fail closed rather than changing the pixel grid
   implicitly. The native oracle covers direct, indexed, and indirect amplified

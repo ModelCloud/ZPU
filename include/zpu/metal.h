@@ -580,7 +580,7 @@ int zpu_metal_render_encoder_set_vertex_buffer(zpu_metal_render_encoder *encoder
 int zpu_metal_render_encoder_set_vertex_buffer_stride(zpu_metal_render_encoder *encoder, size_t stride);
 int zpu_metal_render_encoder_set_vertex_bytes(zpu_metal_render_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_render_encoder_set_viewport(zpu_metal_render_encoder *encoder, zpu_metal_viewport viewport);
-/* The bounded CPU profile records one or two viewport entries. The array
+/* The CPU profile records up to Metal's sixteen viewport entries. The array
  * index selected by a vertex-amplification mapping is resolved at commit time
  * without changing Apple's attachment-global top-left pixel origin. */
 int zpu_metal_render_encoder_set_viewports(zpu_metal_render_encoder *encoder, const zpu_metal_viewport *viewports, size_t count);

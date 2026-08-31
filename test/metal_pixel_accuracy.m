@@ -30680,11 +30680,21 @@ int main(void) {
             return 153;
         }
 
-        /* The CPU profile records at most two top-left viewport/scissor
-         * entries. Never silently discard a third entry, since doing so could
-         * change either axis of the rendered pixel grid. */
-        MTLViewport invalid_viewports[3] = {origin_viewport, origin_viewport, origin_viewport};
-        MTLScissorRect invalid_scissors[3] = {origin_scissor, origin_scissor, origin_scissor};
+        /* The CPU profile records at most sixteen top-left viewport/scissor
+         * entries. Never silently discard a seventeenth entry, since doing so
+         * could change either axis of the rendered pixel grid. */
+        MTLViewport invalid_viewports[17] = {
+            origin_viewport, origin_viewport, origin_viewport, origin_viewport, origin_viewport,
+            origin_viewport, origin_viewport, origin_viewport, origin_viewport, origin_viewport,
+            origin_viewport, origin_viewport, origin_viewport, origin_viewport, origin_viewport,
+            origin_viewport, origin_viewport,
+        };
+        MTLScissorRect invalid_scissors[17] = {
+            origin_scissor, origin_scissor, origin_scissor, origin_scissor, origin_scissor,
+            origin_scissor, origin_scissor, origin_scissor, origin_scissor, origin_scissor,
+            origin_scissor, origin_scissor, origin_scissor, origin_scissor, origin_scissor,
+            origin_scissor, origin_scissor,
+        };
         MTLRenderPassDescriptor *invalid_grid_pass = [MTLRenderPassDescriptor renderPassDescriptor];
         invalid_grid_pass.colorAttachments[0].texture = adapter_metal4_origin_texture;
         invalid_grid_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -30692,8 +30702,8 @@ int main(void) {
         id<MTLCommandBuffer> invalid_grid_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderCommandEncoder> invalid_grid_encoder =
             [invalid_grid_command_buffer renderCommandEncoderWithDescriptor:invalid_grid_pass];
-        [invalid_grid_encoder setViewports:invalid_viewports count:3];
-        [invalid_grid_encoder setScissorRects:invalid_scissors count:3];
+        [invalid_grid_encoder setViewports:invalid_viewports count:17];
+        [invalid_grid_encoder setScissorRects:invalid_scissors count:17];
         [invalid_grid_encoder endEncoding];
         [invalid_grid_command_buffer commit];
         [invalid_grid_command_buffer waitUntilCompleted];

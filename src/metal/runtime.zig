@@ -32,6 +32,7 @@ const cpu_acceleration_structure_magic: u32 = 0x5a505541;
 const cpu_acceleration_structure_version: u32 = 1;
 const cpu_acceleration_structure_header_bytes: usize = 32;
 const cpu_acceleration_structure_triangle_bytes: usize = 9 * @sizeOf(f32);
+const max_viewport_count = 16;
 
 pub const TextureFormat = enum {
     a8_unorm,
@@ -462,9 +463,9 @@ const DrawCommand = struct {
     amplification_count: u8 = 1,
     amplification_viewport_offsets: [2]u32 = .{ 0, 0 },
     amplification_render_target_offsets: [2]u32 = .{ 0, 0 },
-    viewport_array: [2]raster3d.PreciseViewport = undefined,
+    viewport_array: [max_viewport_count]raster3d.PreciseViewport = undefined,
     viewport_array_count: u8 = 1,
-    scissor_array: [2]abi.ScissorRect = undefined,
+    scissor_array: [max_viewport_count]abi.ScissorRect = undefined,
     scissor_array_count: u8 = 1,
 };
 
@@ -2969,10 +2970,10 @@ pub const RenderEncoder = struct {
     vertex_stride: usize = @sizeOf(abi.Vertex),
     inline_vertices: std.ArrayList(abi.Vertex) = .empty,
     viewport: raster3d.PreciseViewport,
-    viewport_array: [2]raster3d.PreciseViewport = undefined,
+    viewport_array: [max_viewport_count]raster3d.PreciseViewport = undefined,
     viewport_array_count: u8 = 1,
     scissor: abi.ScissorRect,
-    scissor_array: [2]abi.ScissorRect = undefined,
+    scissor_array: [max_viewport_count]abi.ScissorRect = undefined,
     scissor_array_count: u8 = 1,
     cull_mode: abi.CullMode = .none,
     winding: abi.Winding = .clockwise,
@@ -3151,7 +3152,7 @@ pub const RenderEncoder = struct {
         mappings: ?[*]const abi.VertexAmplificationViewMapping,
     ) Error!void {
         // Apple Metal currently exposes a maximum of two amplified views.
-        // The bounded CPU profile records up to two viewport/scissor entries
+        // The CPU profile records up to the Metal viewport/scissor entry limit
         // and resolves the selected entry at commit time, preserving the
         // attachment-global top-left pixel coordinates.
         if (!self.open() or count == 0 or count > 2)
@@ -4192,8 +4193,8 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setViewports(self: *RenderEncoder, viewports: ?[*]const abi.Viewport, count: usize) Error!void {
-        if (!self.open() or viewports == null or count == 0 or count > 2) return error.InvalidArgument;
-        var precise: [2]raster3d.PreciseViewport = undefined;
+        if (!self.open() or viewports == null or count == 0 or count > max_viewport_count) return error.InvalidArgument;
+        var precise: [max_viewport_count]raster3d.PreciseViewport = undefined;
         for (viewports.?[0..count], 0..) |viewport, index| {
             precise[index] = .{
                 .origin_x = @floatCast(viewport.origin_x),
@@ -4215,8 +4216,8 @@ pub const RenderEncoder = struct {
         viewports: ?[*]const raster3d.PreciseViewport,
         count: usize,
     ) Error!void {
-        if (!self.open() or viewports == null or count == 0 or count > 2) return error.InvalidArgument;
-        var precise: [2]raster3d.PreciseViewport = undefined;
+        if (!self.open() or viewports == null or count == 0 or count > max_viewport_count) return error.InvalidArgument;
+        var precise: [max_viewport_count]raster3d.PreciseViewport = undefined;
         for (viewports.?[0..count], 0..) |viewport, index| {
             if (!finitePreciseViewport(viewport)) return error.InvalidArgument;
             precise[index] = viewport;
@@ -4234,8 +4235,8 @@ pub const RenderEncoder = struct {
     }
 
     pub fn setScissorRects(self: *RenderEncoder, scissors: ?[*]const abi.ScissorRect, count: usize) Error!void {
-        if (!self.open() or scissors == null or count == 0 or count > 2) return error.InvalidArgument;
-        var values: [2]abi.ScissorRect = undefined;
+        if (!self.open() or scissors == null or count == 0 or count > max_viewport_count) return error.InvalidArgument;
+        var values: [max_viewport_count]abi.ScissorRect = undefined;
         for (scissors.?[0..count], 0..) |scissor, index| values[index] = scissor;
         self.scissor_array = values;
         self.scissor_array_count = @intCast(count);
@@ -6361,9 +6362,9 @@ pub fn beginRender(command_buffer: *CommandBuffer, texture: *Texture, pass: abi.
         .command_buffer = command_buffer,
         .begin_index = begin_index,
         .viewport = initial_viewport,
-        .viewport_array = .{ initial_viewport, initial_viewport },
+        .viewport_array = .{initial_viewport} ** max_viewport_count,
         .scissor = initial_scissor,
-        .scissor_array = .{ initial_scissor, initial_scissor },
+        .scissor_array = .{initial_scissor} ** max_viewport_count,
     };
     return result;
 }
