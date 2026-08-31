@@ -42,5 +42,6 @@ build_target() {
 build_target x86_64-linux-gnu
 build_target aarch64-linux-gnu
 build_target aarch64-macos
+build_target aarch64-ios
 
 echo "cpu-ml-portability: standalone CPU ML ABI has no Metal/Foundation/PJRT dependency"

@@ -968,7 +968,7 @@ standalone package never links Metal, Foundation, PJRT, or an Apple SDK; it
 only uses the target C runtime for ordinary CPU support. The Apple adapter only
 stages ZPU-owned tensors into that ABI. The portability gate
 cross-compiles this package for x86_64 Linux, arm64 Linux, and arm64 macOS to
-keep that separation reviewable.
+arm64 iOS to keep that separation reviewable.
 
 The last command is a compile-only iOS arm64 check; an iOS device or simulator
 is still required for runtime execution.
