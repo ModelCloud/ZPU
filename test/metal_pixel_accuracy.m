@@ -5274,18 +5274,20 @@ static int test_cpu_trace_aabb_instances_against_native(
         return 162;
     }
 
+    MTLIndirectAccelerationStructureInstanceDescriptor indirect_instances[2] = {instance, instance};
     uint32_t indirect_instance_count = 1;
     id<MTLBuffer> indirect_instance_buffer =
-        [adapter_device newBufferWithBytes:&instance length:sizeof(instance) options:MTLResourceStorageModeShared];
+        [adapter_device newBufferWithBytes:indirect_instances length:sizeof(indirect_instances)
+                                   options:MTLResourceStorageModeShared];
     id<MTLBuffer> indirect_count_buffer =
         [adapter_device newBufferWithBytes:&indirect_instance_count length:sizeof(indirect_instance_count)
                                    options:MTLResourceStorageModeShared];
     MTL4IndirectInstanceAccelerationStructureDescriptor *indirect_descriptor =
         [MTL4IndirectInstanceAccelerationStructureDescriptor new];
     indirect_descriptor.instanceDescriptorBuffer =
-        MTL4BufferRangeMake(indirect_instance_buffer.gpuAddress, sizeof(instance));
+        MTL4BufferRangeMake(indirect_instance_buffer.gpuAddress, sizeof(indirect_instances));
     indirect_descriptor.instanceDescriptorStride = sizeof(instance);
-    indirect_descriptor.maxInstanceCount = 1;
+    indirect_descriptor.maxInstanceCount = 2;
     indirect_descriptor.instanceCountBuffer =
         MTL4BufferRangeMake(indirect_count_buffer.gpuAddress, sizeof(indirect_instance_count));
     indirect_descriptor.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
@@ -5304,6 +5306,11 @@ static int test_cpu_trace_aabb_instances_against_native(
                                                                        indirect_scratch.length)];
     [indirect_encoder endEncoding];
     [indirect_build endCommandBuffer];
+    /* The allocation query sees one active record, but Metal resolves the
+     * indirect count at command execution. Both records are valid and must
+     * fit in the CPU payload after this deferred count grows to two. */
+    indirect_instance_count = 2;
+    memcpy(indirect_count_buffer.contents, &indirect_instance_count, sizeof(indirect_instance_count));
     id<MTL4CommandBuffer> indirect_buffers[] = {indirect_build};
     MTL4CommitOptions *indirect_options = ZPUMetalCreateCPUCommitOptions();
     __block NSError *indirect_feedback_error = nil;
