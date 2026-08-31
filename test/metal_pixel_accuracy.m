@@ -37719,7 +37719,8 @@ int main(void) {
                                                                            offset:0 error:&adapter_pipeline_error];
             adapter_heap_tensor_properties_ok = adapter_heap_tensor != nil &&
                 adapter_heap_tensor.heap == adapter_heap &&
-                adapter_heap_tensor.heapOffset == adapter_heap_buffer.heapOffset;
+                adapter_heap_tensor.heapOffset == adapter_heap_buffer.heapOffset &&
+                adapter_heap_tensor.buffer == adapter_heap_buffer;
         }
         const uint8_t heap_pixels[] = {
             17, 18, 19, 20, 21, 22, 23, 24,

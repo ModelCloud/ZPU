@@ -6916,7 +6916,6 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
     ZPUBuffer *storage = _backingBuffer != nil ? _backingBuffer : _storageBuffer;
     if (storage != nil && _bufferOffset == 0 && _allocatedSize == storage.length) [storage makeAliasable];
 }
-- (id<MTLResource>)rootResource { return (id<MTLResource>)self; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
     (void)task_id_token;
