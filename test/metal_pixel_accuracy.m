@@ -718,13 +718,18 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceSingletonArrays { array<SourceStructArrayElement, 1> values [[id(0)]]; "
          "array<float, 1> scalarArray [[id(2)]]; };\n"
          "kernel void zpu_source_argument_buffer_singleton_arrays(constant SourceSingletonArrays &arguments [[buffer(14)]]) { "
+         "(void)arguments; }\n"
+         "struct SourcePointerStructElement { float value; float4 color; };\n"
+         "struct SourcePointerStructArguments { device const SourcePointerStructElement *items [[id(0)]]; "
+         "float scale [[id(1)]]; };\n"
+         "kernel void zpu_source_argument_buffer_pointer_struct(constant SourcePointerStructArguments &arguments [[buffer(15)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 44) {
+        adapter_library.functionNames.count != 45) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -2377,6 +2382,111 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_singleton_array_reflection_ok || !source_singleton_array_encoding_ok) {
         fail_with_error("source-defined singleton array argument layout lowering failed", adapter_error ?: native_error);
         return 186;
+    }
+
+    id<MTLFunction> native_source_pointer_struct_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_pointer_struct"];
+    id<MTLFunction> adapter_source_pointer_struct_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_pointer_struct"];
+    id<MTLArgumentEncoder> native_source_pointer_struct_encoder =
+        [native_source_pointer_struct_function newArgumentEncoderWithBufferIndex:15];
+    id<MTLArgumentEncoder> adapter_source_pointer_struct_encoder =
+        [adapter_source_pointer_struct_function newArgumentEncoderWithBufferIndex:15];
+    BOOL source_pointer_struct_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_pointer_struct"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_pointer_struct"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        MTLStructMember *native_items = native_struct.members.count == 2 ? native_struct.members[0] : nil;
+        MTLStructMember *adapter_items = adapter_struct.members.count == 2 ? adapter_struct.members[0] : nil;
+        MTLStructMember *native_scale = native_struct.members.count == 2 ? native_struct.members[1] : nil;
+        MTLStructMember *adapter_scale = adapter_struct.members.count == 2 ? adapter_struct.members[1] : nil;
+        MTLPointerType *native_pointer = native_items.pointerType;
+        MTLPointerType *adapter_pointer = adapter_items.pointerType;
+        MTLStructType *native_element_struct = native_pointer.elementStructType;
+        MTLStructType *adapter_element_struct = adapter_pointer.elementStructType;
+        source_pointer_struct_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 15 &&
+            adapter_binding.index == 15 && native_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_binding.bufferDataType == MTLDataTypeStruct &&
+            native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
+            native_binding.bufferDataSize == 16 && native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
+            native_binding.bufferAlignment == 8 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2 && native_items != nil &&
+            adapter_items != nil && [native_items.name isEqualToString:adapter_items.name] &&
+            [native_items.name isEqualToString:@"items"] && native_items.offset == adapter_items.offset &&
+            native_items.offset == 0 && native_items.dataType == MTLDataTypePointer &&
+            adapter_items.dataType == MTLDataTypePointer && native_items.argumentIndex == adapter_items.argumentIndex &&
+            native_items.argumentIndex == 0 && native_pointer != nil && adapter_pointer != nil &&
+            native_pointer.elementType == adapter_pointer.elementType &&
+            native_pointer.elementType == MTLDataTypeStruct && native_pointer.access == adapter_pointer.access &&
+            native_pointer.access == MTLBindingAccessReadOnly && native_pointer.alignment == adapter_pointer.alignment &&
+            native_pointer.alignment == 16 && native_pointer.dataSize == adapter_pointer.dataSize &&
+            native_pointer.dataSize == 32 && native_pointer.elementIsArgumentBuffer == adapter_pointer.elementIsArgumentBuffer &&
+            !native_pointer.elementIsArgumentBuffer && native_element_struct != nil &&
+            adapter_element_struct != nil && native_element_struct.members.count == 2 &&
+            adapter_element_struct.members.count == 2 && native_scale != nil && adapter_scale != nil &&
+            [native_scale.name isEqualToString:adapter_scale.name] && [native_scale.name isEqualToString:@"scale"] &&
+            native_scale.offset == adapter_scale.offset && native_scale.offset == 8 &&
+            native_scale.dataType == adapter_scale.dataType && native_scale.dataType == MTLDataTypeFloat &&
+            native_scale.argumentIndex == adapter_scale.argumentIndex && native_scale.argumentIndex == 1;
+        if (source_pointer_struct_reflection_ok) {
+            for (NSUInteger index = 0; index < native_element_struct.members.count; ++index) {
+                MTLStructMember *native_member = native_element_struct.members[index];
+                MTLStructMember *adapter_member = adapter_element_struct.members[index];
+                source_pointer_struct_reflection_ok = source_pointer_struct_reflection_ok &&
+                    [native_member.name isEqualToString:adapter_member.name] &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.dataType == adapter_member.dataType;
+            }
+            source_pointer_struct_reflection_ok = source_pointer_struct_reflection_ok &&
+                [native_element_struct.members[0].name isEqualToString:@"value"] &&
+                native_element_struct.members[0].offset == 0 &&
+                native_element_struct.members[0].dataType == MTLDataTypeFloat &&
+                [native_element_struct.members[1].name isEqualToString:@"color"] &&
+                native_element_struct.members[1].offset == 16 &&
+                native_element_struct.members[1].dataType == MTLDataTypeFloat4;
+        }
+    }
+    BOOL source_pointer_struct_encoding_ok = NO;
+    id<MTLBuffer> native_pointer_struct_buffer =
+        [native_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_pointer_struct_buffer =
+        [adapter_device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    if (native_source_pointer_struct_encoder != nil && adapter_source_pointer_struct_encoder != nil &&
+        native_pointer_struct_buffer != nil && adapter_pointer_struct_buffer != nil &&
+        native_source_pointer_struct_encoder.encodedLength == adapter_source_pointer_struct_encoder.encodedLength &&
+        native_source_pointer_struct_encoder.encodedLength == 16 &&
+        native_source_pointer_struct_encoder.alignment == adapter_source_pointer_struct_encoder.alignment &&
+        native_source_pointer_struct_encoder.alignment == 8) {
+        memset(native_pointer_struct_buffer.contents, 0, native_pointer_struct_buffer.length);
+        memset(adapter_pointer_struct_buffer.contents, 0, adapter_pointer_struct_buffer.length);
+        [native_source_pointer_struct_encoder setArgumentBuffer:native_pointer_struct_buffer offset:0];
+        [adapter_source_pointer_struct_encoder setArgumentBuffer:adapter_pointer_struct_buffer offset:0];
+        const float pointer_struct_scale = 41.5f;
+        void *native_scale_data = [native_source_pointer_struct_encoder constantDataAtIndex:1];
+        void *adapter_scale_data = [adapter_source_pointer_struct_encoder constantDataAtIndex:1];
+        if (native_scale_data != NULL && adapter_scale_data != NULL) {
+            memcpy(native_scale_data, &pointer_struct_scale, sizeof(pointer_struct_scale));
+            memcpy(adapter_scale_data, &pointer_struct_scale, sizeof(pointer_struct_scale));
+            source_pointer_struct_encoding_ok =
+                memcmp(native_pointer_struct_buffer.contents, adapter_pointer_struct_buffer.contents, 16) == 0 &&
+                (NSUInteger)((uint8_t *)native_scale_data - (uint8_t *)native_pointer_struct_buffer.contents) == 8 &&
+                (NSUInteger)((uint8_t *)adapter_scale_data - (uint8_t *)adapter_pointer_struct_buffer.contents) == 8;
+        }
+    }
+    if (native_source_pointer_struct_function == nil || adapter_source_pointer_struct_function == nil ||
+        native_source_pointer_struct_encoder == nil || adapter_source_pointer_struct_encoder == nil ||
+        !source_pointer_struct_reflection_ok || !source_pointer_struct_encoding_ok) {
+        fail_with_error("source-defined pointer-to-struct argument layout lowering failed", adapter_error ?: native_error);
+        return 187;
     }
     return 0;
 }

@@ -569,6 +569,8 @@ triangle path:
   nested native arrays recursively preserve each `__elems` level, including
   per-level element strides and argument-index spans. Singleton arrays retain
   their array reflection instead of collapsing to scalar or struct members.
+  Pointers to validated ordinary source structs also preserve pointee struct
+  members, Metal size/alignment, and read-only/read-write access metadata.
   It never compiles or executes arbitrary MSL
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
