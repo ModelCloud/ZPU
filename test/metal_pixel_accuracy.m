@@ -13981,19 +13981,23 @@ typedef struct {
     const char *name;
     const char *oracleName;
     MTLTensorDataType dataType;
+    BOOL multiply;
 } ZPUFloatElementwiseProfile;
 
-/* Half and bfloat16 subtraction are compared as raw tensor bytes. The input
- * values are powers of two, so both the native oracle and the CPU/ZPU path
- * produce exactly representable results without a tolerance-based escape. */
-static int test_metal4_cpu_float_subtract_profiles(
+/* Half and bfloat16 elementwise operations are compared as raw tensor bytes.
+ * The input values are powers of two, so both the native oracle and the
+ * CPU/ZPU path produce exactly representable results without a tolerance
+ * based escape. */
+static int test_metal4_cpu_float_elementwise_profiles(
     id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
     id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
     id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
     id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
     const ZPUFloatElementwiseProfile profiles[] = {
-        {"zpu_cpu_ml_sub_f16", "zpu_cpu_ml_sub_f16_oracle", MTLTensorDataTypeFloat16},
-        {"zpu_cpu_ml_sub_bf16", "zpu_cpu_ml_sub_bf16_oracle", MTLTensorDataTypeBFloat16},
+        {"zpu_cpu_ml_sub_f16", "zpu_cpu_ml_sub_f16_oracle", MTLTensorDataTypeFloat16, NO},
+        {"zpu_cpu_ml_sub_bf16", "zpu_cpu_ml_sub_bf16_oracle", MTLTensorDataTypeBFloat16, NO},
+        {"zpu_cpu_ml_mul_f16", "zpu_cpu_ml_mul_f16_oracle", MTLTensorDataTypeFloat16, YES},
+        {"zpu_cpu_ml_mul_bf16", "zpu_cpu_ml_mul_bf16_oracle", MTLTensorDataTypeBFloat16, YES},
     };
     const uint16_t leftValues[2][12] = {
         {0x3c00u, 0x4000u, 0x4400u, 0x4800u, 0x4c00u, 0x5000u,
@@ -14018,7 +14022,7 @@ static int test_metal4_cpu_float_subtract_profiles(
     for (NSUInteger profileIndex = 0;
          profileIndex < sizeof(profiles) / sizeof(profiles[0]); ++profileIndex) {
         const ZPUFloatElementwiseProfile profile = profiles[profileIndex];
-        const NSUInteger valueIndex = profileIndex;
+        const NSUInteger valueIndex = profileIndex & 1u;
         uint16_t initialLeft[12] = {0};
         uint16_t sentinel[12] = {0};
         for (NSUInteger index = 0; index < 12; ++index) {
@@ -30292,10 +30296,10 @@ int main(void) {
             metal4_queue, metal4_allocator, adapter_three_d_heap, YES);
         if (metal4_ml_integer_subtract_result != 0) return metal4_ml_integer_subtract_result;
 
-        const int metal4_ml_float_subtract_result = test_metal4_cpu_float_subtract_profiles(
+        const int metal4_ml_float_elementwise_result = test_metal4_cpu_float_elementwise_profiles(
             device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
             metal4_queue, metal4_allocator, adapter_three_d_heap);
-        if (metal4_ml_float_subtract_result != 0) return metal4_ml_float_subtract_result;
+        if (metal4_ml_float_elementwise_result != 0) return metal4_ml_float_elementwise_result;
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
