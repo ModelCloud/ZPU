@@ -141,8 +141,9 @@ pub const NamedOperationBackend = extern struct {
 pub const named_operation_backend_abi_version: u32 = 1;
 
 /// Optional discovery callback for the named provider. The returned name is
-/// borrowed until the callback returns; the caller copies it if it needs to
-/// retain it. Signatures are obtained through the provider query callback.
+/// borrowed until the next catalog callback or catalog replacement; the caller
+/// copies it if it needs to retain it. Signatures are obtained through the
+/// provider query callback.
 pub const NamedOperationNameFn = *const fn (
     context: ?*anyopaque,
     index: usize,
