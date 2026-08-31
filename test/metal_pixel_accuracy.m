@@ -5273,6 +5273,89 @@ static int test_cpu_trace_aabb_instances_against_native(
         fail_with_error("CPU AABB instance trace command failed", native_error ?: adapter_error);
         return 162;
     }
+
+    uint32_t indirect_instance_count = 1;
+    id<MTLBuffer> indirect_instance_buffer =
+        [adapter_device newBufferWithBytes:&instance length:sizeof(instance) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> indirect_count_buffer =
+        [adapter_device newBufferWithBytes:&indirect_instance_count length:sizeof(indirect_instance_count)
+                                   options:MTLResourceStorageModeShared];
+    MTL4IndirectInstanceAccelerationStructureDescriptor *indirect_descriptor =
+        [MTL4IndirectInstanceAccelerationStructureDescriptor new];
+    indirect_descriptor.instanceDescriptorBuffer =
+        MTL4BufferRangeMake(indirect_instance_buffer.gpuAddress, sizeof(instance));
+    indirect_descriptor.instanceDescriptorStride = sizeof(instance);
+    indirect_descriptor.maxInstanceCount = 1;
+    indirect_descriptor.instanceCountBuffer =
+        MTL4BufferRangeMake(indirect_count_buffer.gpuAddress, sizeof(indirect_instance_count));
+    indirect_descriptor.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+    MTLAccelerationStructureSizes indirect_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:indirect_descriptor];
+    id<MTLAccelerationStructure> indirect_structure = indirect_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:indirect_sizes.accelerationStructureSize];
+    id<MTLBuffer> indirect_scratch = [adapter_device
+        newBufferWithLength:indirect_sizes.buildScratchBufferSize == 0 ? 1 : indirect_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTL4CommandBuffer> indirect_build = [adapter_device newCommandBuffer];
+    [indirect_build beginCommandBufferWithAllocator:allocator];
+    id<MTL4ComputeCommandEncoder> indirect_encoder = [indirect_build computeCommandEncoder];
+    [indirect_encoder buildAccelerationStructure:indirect_structure descriptor:indirect_descriptor
+                                     scratchBuffer:MTL4BufferRangeMake(indirect_scratch.gpuAddress,
+                                                                       indirect_scratch.length)];
+    [indirect_encoder endEncoding];
+    [indirect_build endCommandBuffer];
+    id<MTL4CommandBuffer> indirect_buffers[] = {indirect_build};
+    MTL4CommitOptions *indirect_options = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *indirect_feedback_error = nil;
+    [indirect_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        indirect_feedback_error = feedback.error;
+    }];
+    if (metal4_queue != nil && indirect_build != nil) {
+        [metal4_queue commit:indirect_buffers count:1 options:indirect_options];
+    }
+
+    id<MTLCommandBuffer> indirect_native_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> indirect_native_encoder =
+        [indirect_native_command_buffer computeCommandEncoder];
+    [indirect_native_encoder setComputePipelineState:native_pipeline];
+    [indirect_native_encoder setBuffer:native_bounds offset:0 atIndex:0];
+    [indirect_native_encoder setTexture:native_texture atIndex:0];
+    [indirect_native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                         threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [indirect_native_encoder endEncoding];
+    id<MTLCommandBuffer> indirect_adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> indirect_adapter_encoder =
+        [indirect_adapter_command_buffer computeCommandEncoder];
+    [indirect_adapter_encoder setComputePipelineState:adapter_pipeline];
+    [indirect_adapter_encoder setAccelerationStructure:indirect_structure atBufferIndex:0];
+    [indirect_adapter_encoder setTexture:adapter_texture atIndex:0];
+    [indirect_adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [indirect_adapter_encoder endEncoding];
+    [indirect_native_command_buffer commit];
+    [indirect_adapter_command_buffer commit];
+    [indirect_native_command_buffer waitUntilCompleted];
+    [indirect_adapter_command_buffer waitUntilCompleted];
+    [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    const BOOL indirect_exact = indirect_instance_buffer != nil && indirect_count_buffer != nil &&
+        indirect_descriptor != nil && indirect_sizes.accelerationStructureSize != 0 &&
+        indirect_structure != nil && indirect_scratch != nil && indirect_build != nil &&
+        indirect_encoder != nil && indirect_options != nil && indirect_feedback_error == nil &&
+        indirect_native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        indirect_adapter_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        memcmp(native_pixels, adapter_pixels, byte_count) == 0;
+    if (!indirect_exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: CPU indirect AABB instance/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("CPU indirect AABB instance trace command failed", native_error ?: adapter_error);
+        return 164;
+    }
     return 0;
 }
 

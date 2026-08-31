@@ -361,11 +361,11 @@ triangle path:
   fail-closed. The registered Metal 4 AABB trace profile separately serializes
   finite `MTL4AccelerationStructureBoundingBoxGeometryDescriptor` ranges into
   ZPU-owned min/max records and traverses them with the same half-pixel,
-  upper-left primary-ray grid. Built Metal 4 indirect instance descriptors
-  flatten those AABB records through finite affine transforms and primitive
-  visibility masks. Exact RGBA8 output is checked against native Metal shader
-  oracles, while native acceleration structures are never used for adapter
-  execution
+  upper-left primary-ray grid. Built Metal 4 direct and GPU-addressed indirect
+  instance descriptors flatten those AABB records through finite affine
+  transforms, deferred active counts, and primitive visibility masks. Exact
+  RGBA8 output is checked against native Metal shader oracles, while native
+  acceleration structures are never used for adapter execution
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
