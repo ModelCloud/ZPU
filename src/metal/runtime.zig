@@ -1678,7 +1678,7 @@ pub const CommandBuffer = struct {
                             return self.fail(error.InvalidArgument);
                         if (amplified_base >= active_array_target_count or
                             (resolved_draw.indirect_buffer != null and
-                             instance_count > active_array_target_count - amplified_base))
+                                instance_count > active_array_target_count - amplified_base))
                             return self.fail(error.InvalidArgument);
                     }
                 } else {
@@ -1833,26 +1833,26 @@ pub const CommandBuffer = struct {
                                 std.math.add(usize, amplified_array_index, instance) catch return self.fail(error.InvalidArgument)
                             else
                                 amplified_array_index;
-                        if (active_array_target_count > 1 and resolved_draw.indirect_buffer != null) {
-                            const instance_target = active_array_color_attachments[0][instance_array_index] orelse
-                                return self.fail(error.InvalidResource);
-                            target = instance_target.asTarget();
-                            for (active_color_attachments[1..], 0..) |attachment, physical_index| {
-                                if (attachment != null) {
-                                    const instance_extra = active_array_color_attachments[physical_index + 1][instance_array_index] orelse
-                                        return self.fail(error.InvalidResource);
-                                    extra_targets_storage[physical_index] = instance_extra.asTarget();
+                            if (active_array_target_count > 1 and resolved_draw.indirect_buffer != null) {
+                                const instance_target = active_array_color_attachments[0][instance_array_index] orelse
+                                    return self.fail(error.InvalidResource);
+                                target = instance_target.asTarget();
+                                for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                                    if (attachment != null) {
+                                        const instance_extra = active_array_color_attachments[physical_index + 1][instance_array_index] orelse
+                                            return self.fail(error.InvalidResource);
+                                        extra_targets_storage[physical_index] = instance_extra.asTarget();
+                                    }
                                 }
                             }
-                        }
-                        const depth_values = if (active_array_target_count > 1)
-                            active_depth_array_values[instance_array_index]
-                        else
-                            active_depth;
-                        const stencil_values = if (active_array_target_count > 1)
-                            active_stencil_array_values[instance_array_index]
-                        else
-                            active_stencil;
+                            const depth_values = if (active_array_target_count > 1)
+                                active_depth_array_values[instance_array_index]
+                            else
+                                active_depth;
+                            const stencil_values = if (active_array_target_count > 1)
+                                active_stencil_array_values[instance_array_index]
+                            else
+                                active_stencil;
                             if (active_array_target_count > 1 and resolved_draw.indirect_buffer == null) {
                                 const instance_target = active_array_color_attachments[0][instance_array_index] orelse
                                     return self.fail(error.InvalidResource);
@@ -1902,45 +1902,45 @@ pub const CommandBuffer = struct {
                             if (instance_array_index >= active_array_target_count)
                                 return self.fail(error.InvalidArgument);
                             for (0..active_sample_count) |sample_index| {
-                            const sample = if (layered_samples)
-                                active_sample_array_color_attachments[0][instance_array_index][sample_index]
-                            else
-                                active_sample_targets[sample_index];
-                            var sample_target_value = (sample orelse return self.fail(error.InvalidResource)).asTarget();
-                            sample_extra_targets = [_]?*raster3d.Target{null} ** 7;
-                            var sample_extra_count: usize = 0;
-                            for (active_color_attachments[1..], 0..) |attachment, physical_index| {
-                                if (attachment) |_| {
-                                    const sample_texture = if (layered_samples)
-                                        active_sample_array_color_attachments[physical_index + 1][instance_array_index][sample_index]
-                                    else
-                                        active_sample_color_attachments[(physical_index + 1) * 4 + sample_index];
-                                    const resolved_sample_texture = sample_texture orelse return self.fail(error.InvalidResource);
-                                    sample_extra_targets_storage[physical_index] = resolved_sample_texture.asTarget();
-                                    sample_extra_targets[physical_index] = &sample_extra_targets_storage[physical_index];
-                                    sample_extra_count = @max(sample_extra_count, physical_index + 1);
+                                const sample = if (layered_samples)
+                                    active_sample_array_color_attachments[0][instance_array_index][sample_index]
+                                else
+                                    active_sample_targets[sample_index];
+                                var sample_target_value = (sample orelse return self.fail(error.InvalidResource)).asTarget();
+                                sample_extra_targets = [_]?*raster3d.Target{null} ** 7;
+                                var sample_extra_count: usize = 0;
+                                for (active_color_attachments[1..], 0..) |attachment, physical_index| {
+                                    if (attachment) |_| {
+                                        const sample_texture = if (layered_samples)
+                                            active_sample_array_color_attachments[physical_index + 1][instance_array_index][sample_index]
+                                        else
+                                            active_sample_color_attachments[(physical_index + 1) * 4 + sample_index];
+                                        const resolved_sample_texture = sample_texture orelse return self.fail(error.InvalidResource);
+                                        sample_extra_targets_storage[physical_index] = resolved_sample_texture.asTarget();
+                                        sample_extra_targets[physical_index] = &sample_extra_targets_storage[physical_index];
+                                        sample_extra_count = @max(sample_extra_count, physical_index + 1);
+                                    }
                                 }
-                            }
-                            amplification_options.sample_position = if (active_custom_sample_positions)
-                                .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
-                            else
-                                raster3d.defaultSamplePosition(active_sample_count, sample_index);
-                            const depth_values: ?[]f32 = if (layered_samples) blk: {
-                                if (active_depth_sample_array_values[instance_array_index]) |values|
-                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
-                                break :blk null;
-                            } else if (active_depth_values) |values|
-                                values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
-                            else
-                                null;
-                            const stencil_values: ?[]u8 = if (layered_samples) blk: {
-                                if (active_stencil_sample_array_values[instance_array_index]) |values|
-                                    break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
-                                break :blk null;
-                            } else if (active_stencil_values) |values|
-                                values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
-                            else
-                                null;
+                                amplification_options.sample_position = if (active_custom_sample_positions)
+                                    .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
+                                else
+                                    raster3d.defaultSamplePosition(active_sample_count, sample_index);
+                                const depth_values: ?[]f32 = if (layered_samples) blk: {
+                                    if (active_depth_sample_array_values[instance_array_index]) |values|
+                                        break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                                    break :blk null;
+                                } else if (active_depth_values) |values|
+                                    values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
+                                else
+                                    null;
+                                const stencil_values: ?[]u8 = if (layered_samples) blk: {
+                                    if (active_stencil_sample_array_values[instance_array_index]) |values|
+                                        break :blk values[sample_index * pixel_count .. (sample_index + 1) * pixel_count];
+                                    break :blk null;
+                                } else if (active_stencil_values) |values|
+                                    values[sample_index * pixel_count .. (sample_index + 1) * pixel_count]
+                                else
+                                    null;
                                 stats = addRasterStats(stats, raster3d.drawWithTargetMipmaps(
                                     &sample_target_value,
                                     sample_extra_targets[0..sample_extra_count],
