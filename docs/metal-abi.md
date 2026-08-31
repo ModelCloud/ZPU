@@ -376,6 +376,8 @@ triangle path:
   addition through the same ZPU-owned storage path; the registered
   `zpu_cpu_ml_sub_f32` profile performs deferred elementwise Float32 tensor
   subtraction through that same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_div_f32` profile performs deferred elementwise Float32 division
+  through the same ZPU-owned storage path for nonzero divisors; the registered
   `zpu_cpu_ml_sub_u8`, `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`,
   `zpu_cpu_ml_sub_i16`, `zpu_cpu_ml_sub_u32`, `zpu_cpu_ml_sub_i32`,
   `zpu_cpu_ml_sub_i4`, and `zpu_cpu_ml_sub_u4` profiles perform deferred
@@ -450,7 +452,8 @@ triangle path:
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
 - the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_add_u8`,
-  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_sub_f32`, `zpu_cpu_ml_sub_u8`,
+  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_sub_f32`, `zpu_cpu_ml_div_f32`,
+  `zpu_cpu_ml_sub_u8`,
   `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`, `zpu_cpu_ml_sub_i16`,
   `zpu_cpu_ml_sub_u32`, `zpu_cpu_ml_sub_i32`, `zpu_cpu_ml_sub_i4`,
   `zpu_cpu_ml_sub_u4`, `zpu_cpu_ml_sub_f16`, `zpu_cpu_ml_sub_bf16`,

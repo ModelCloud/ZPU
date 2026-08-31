@@ -354,6 +354,9 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_ml_sub_f32_oracle(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
+    "kernel void zpu_cpu_ml_div_f32_oracle(device const float *left [[buffer(0)]], "
+    "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] / right[gid]; }\n"
     "kernel void zpu_cpu_ml_sub_u8_oracle(device const uchar *left [[buffer(0)]], "
     "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = uchar(left[gid] - right[gid]); }\n"
@@ -13973,6 +13976,129 @@ static int test_adapter_packed_depth_stencil_blit_options(id<MTLDevice> adapter_
                     (unsigned long)formats[format_index].format);
             return 240;
         }
+    }
+    return 0;
+}
+
+/* Float32 tensor division is a registered CPU profile. The native kernel is
+ * only an arithmetic oracle; the adapter command buffer retains and reads
+ * ZPU-owned tensors at commit time. */
+static int test_metal4_cpu_float32_division_profile(
+    id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
+    id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
+    id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
+    id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
+    MTLTensorExtents *dimensions =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){4, 3}];
+    MTLTensorExtents *strides =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 4}];
+    const float leftInitial[] = {
+        100.0f, 100.0f, 100.0f, 100.0f, 100.0f, 100.0f,
+        100.0f, 100.0f, 100.0f, 100.0f, 100.0f, 100.0f,
+    };
+    const float leftCommitted[] = {
+        1.0f, 2.0f, 4.0f, 8.0f, 16.0f, 32.0f,
+        64.0f, 128.0f, 256.0f, 512.0f, 1024.0f, 2048.0f,
+    };
+    const float rightValues[] = {
+        1.0f, 1.0f, 2.0f, 2.0f, 4.0f, 4.0f,
+        8.0f, 8.0f, 16.0f, 16.0f, 32.0f, 32.0f,
+    };
+    const float sentinel[] = {
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+    };
+    float adapterValues[12] = {0};
+    id<MTLCommandQueue> nativeQueue = [nativeDevice newCommandQueue];
+    NSError *adapterError = nil;
+    MTL4LibraryFunctionDescriptor *functionDescriptor = [MTL4LibraryFunctionDescriptor new];
+    functionDescriptor.library = adapterLibrary;
+    functionDescriptor.name = @"zpu_cpu_ml_div_f32";
+    MTL4MachineLearningPipelineDescriptor *pipelineDescriptor =
+        [MTL4MachineLearningPipelineDescriptor new];
+    pipelineDescriptor.machineLearningFunctionDescriptor = functionDescriptor;
+    [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:0];
+    [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:1];
+    [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:2];
+    id<MTL4MachineLearningPipelineState> pipeline =
+        [adapterCompiler newMachineLearningPipelineStateWithDescriptor:pipelineDescriptor
+                                                                   error:&adapterError];
+    MTLTensorDescriptor *tensorDescriptor = [MTLTensorDescriptor new];
+    tensorDescriptor.dimensions = dimensions;
+    tensorDescriptor.dataType = MTLTensorDataTypeFloat32;
+    tensorDescriptor.usage = MTLTensorUsageMachineLearning;
+    tensorDescriptor.resourceOptions = MTLResourceStorageModeShared;
+    tensorDescriptor.storageMode = MTLStorageModeShared;
+    id<MTLTensor> left = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+    id<MTLTensor> right = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+    id<MTLTensor> output = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+    MTLTensorExtents *zero = [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}];
+    if (left != nil) [left replaceSliceOrigin:zero sliceDimensions:dimensions
+                                      withBytes:leftInitial strides:strides];
+    if (right != nil) [right replaceSliceOrigin:zero sliceDimensions:dimensions
+                                       withBytes:rightValues strides:strides];
+    if (output != nil) [output replaceSliceOrigin:zero sliceDimensions:dimensions
+                                        withBytes:sentinel strides:strides];
+    MTL4ArgumentTableDescriptor *tableDescriptor = [MTL4ArgumentTableDescriptor new];
+    tableDescriptor.maxBufferBindCount = 3;
+    id<MTL4ArgumentTable> table = [adapterDevice newArgumentTableWithDescriptor:tableDescriptor
+                                                                              error:&adapterError];
+    if (table != nil && left != nil && right != nil && output != nil) {
+        [table setResource:left.gpuResourceID atBufferIndex:0];
+        [table setResource:right.gpuResourceID atBufferIndex:1];
+        [table setResource:output.gpuResourceID atBufferIndex:2];
+    }
+    id<MTL4CommandBuffer> commandBuffer = [adapterDevice newCommandBuffer];
+    [commandBuffer beginCommandBufferWithAllocator:adapterAllocator];
+    id<MTL4MachineLearningCommandEncoder> encoder = [commandBuffer machineLearningCommandEncoder];
+    [encoder setPipelineState:pipeline];
+    [encoder setArgumentTable:table];
+    [encoder dispatchNetworkWithIntermediatesHeap:adapterHeap];
+    if (left != nil) [left replaceSliceOrigin:zero sliceDimensions:dimensions
+                                      withBytes:leftCommitted strides:strides];
+    [encoder endEncoding];
+    [commandBuffer endCommandBuffer];
+    id<MTL4CommandBuffer> commandBuffers[] = {commandBuffer};
+    MTL4CommitOptions *commitOptions = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *feedbackError = nil;
+    [commitOptions addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        feedbackError = feedback.error;
+    }];
+    [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+    if (output != nil) [output getBytes:adapterValues strides:strides
+                        fromSliceOrigin:zero sliceDimensions:dimensions];
+
+    NSError *nativeError = nil;
+    id<MTLFunction> nativeFunction = [nativeLibrary newFunctionWithName:@"zpu_cpu_ml_div_f32_oracle"];
+    id<MTLComputePipelineState> nativePipeline =
+        [nativeDevice newComputePipelineStateWithFunction:nativeFunction error:&nativeError];
+    id<MTLBuffer> nativeLeft = [nativeDevice newBufferWithBytes:leftCommitted
+                                                          length:sizeof(leftCommitted)
+                                                         options:MTLResourceStorageModeShared];
+    id<MTLBuffer> nativeRight = [nativeDevice newBufferWithBytes:rightValues
+                                                           length:sizeof(rightValues)
+                                                          options:MTLResourceStorageModeShared];
+    id<MTLBuffer> nativeOutput = [nativeDevice newBufferWithLength:sizeof(adapterValues)
+                                                             options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> nativeCommandBuffer = [nativeQueue commandBuffer];
+    id<MTLComputeCommandEncoder> nativeEncoder = [nativeCommandBuffer computeCommandEncoder];
+    [nativeEncoder setComputePipelineState:nativePipeline];
+    [nativeEncoder setBuffer:nativeLeft offset:0 atIndex:0];
+    [nativeEncoder setBuffer:nativeRight offset:0 atIndex:1];
+    [nativeEncoder setBuffer:nativeOutput offset:0 atIndex:2];
+    [nativeEncoder dispatchThreads:MTLSizeMake(12, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [nativeEncoder endEncoding];
+    [nativeCommandBuffer commit];
+    [nativeCommandBuffer waitUntilCompleted];
+    if (adapterError != nil || pipeline == nil || left == nil || right == nil || output == nil ||
+        table == nil || commandBuffer == nil || encoder == nil || feedbackError != nil ||
+        nativeQueue == nil || nativeFunction == nil || nativePipeline == nil || nativeError != nil ||
+        nativeCommandBuffer.status != MTLCommandBufferStatusCompleted || nativeOutput == nil ||
+        memcmp(adapterValues, nativeOutput.contents, sizeof(adapterValues)) != 0) {
+        fail_with_error("Metal 4 CPU ML Float32 division profile failed",
+                        adapterError ?: feedbackError ?: nativeError);
+        return 186;
     }
     return 0;
 }
@@ -30300,6 +30426,11 @@ int main(void) {
             device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
             metal4_queue, metal4_allocator, adapter_three_d_heap);
         if (metal4_ml_float_elementwise_result != 0) return metal4_ml_float_elementwise_result;
+
+        const int metal4_ml_float_division_result = test_metal4_cpu_float32_division_profile(
+            device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
+            metal4_queue, metal4_allocator, adapter_three_d_heap);
+        if (metal4_ml_float_division_result != 0) return metal4_ml_float_division_result;
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
