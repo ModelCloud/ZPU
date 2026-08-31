@@ -682,8 +682,8 @@ triangle path:
 - CPU indirect patch and indexed-patch command recording, copy, reset, and
   replay for the registered uniform integer/pow2/fractional triangle profile; patch buffers,
   tessellation-factor buffers, offsets, strides, and draw ranges are retained
-  in the CPU-owned ICB, while fractional/non-uniform factors and arbitrary
-  tessellation shader execution fail closed at replay
+  in the CPU-owned ICB, while fractional line-grid/non-uniform factors and
+  arbitrary tessellation shader execution fail closed at replay
 - CPU indirect render commands preserve the same one-slot executable constraint
   as the CPU raster ABI for vertex and fragment buffers; descriptor capacity
   beyond slot zero is accepted, retained as CPU-owned last-write-wins state,
