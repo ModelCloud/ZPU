@@ -113,6 +113,11 @@ static NSString *const zpu_cpu_argument_buffer_nested_function_name = @"zpu_cpu_
  * recursive layout is registered explicitly; arbitrary MSL remains outside
  * the CPU adapter's supported reflection surface. */
 static NSString *const zpu_cpu_argument_buffer_recursive_function_name = @"zpu_cpu_argument_buffer_recursive";
+/* Source-defined argument buffers use this implementation marker after the
+ * parser has produced a complete CPU-side descriptor tree.  The marker is
+ * deliberately not an executable shader profile: the source body is limited
+ * to a metadata-only reference to the argument buffer. */
+static NSString *const zpu_cpu_source_argument_buffer_function_name = @"zpu_cpu_source_argument_buffer";
 static NSString *const zpu_cpu_tensor_argument_buffer_function_name = @"zpu_cpu_tensor_argument_buffer";
 static NSString *const zpu_cpu_tensor_argument_buffer_array_function_name = @"zpu_cpu_tensor_argument_buffer_array";
 
@@ -1448,6 +1453,7 @@ static uint64_t zpu_next_cpu_drawable_id;
     uint64_t _pipelineIndependentResourceID;
     NSArray *_vertexAttributes;
     NSArray *_stageInputAttributes;
+    NSDictionary *_argumentBufferLayout;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
@@ -1511,6 +1517,7 @@ static uint64_t zpu_next_cpu_drawable_id;
     ZPUDevice *_owner;
     NSArray *_functionNames;
     NSDictionary *_functionImplementations;
+    NSDictionary *_functionArgumentBufferLayouts;
     NSSet *_visibleFunctionNames;
     NSString *_label;
     MTLLibraryType _type;
@@ -11588,6 +11595,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         }
         _vertexAttributes = @[];
         _stageInputAttributes = @[];
+        _argumentBufferLayout = nil;
         /* Descriptor specializedName changes the public symbol only.  The
          * registered implementation still owns its vertex/stage metadata;
          * looking at _name here would silently drop it for aliases. */
@@ -11638,6 +11646,16 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 - (NSDictionary *)functionConstantsDictionary API_AVAILABLE(macos(10.12), ios(10.0)) { return @{}; }
 - (MTLFunctionOptions)options API_AVAILABLE(macos(11.0), ios(14.0)) { return _optionsOverride; }
 - (id<MTLArgumentEncoder>)newArgumentEncoderWithBufferIndex:(NSUInteger)bufferIndex API_AVAILABLE(macos(10.13), ios(11.0)) {
+    if (_argumentBufferLayout != nil) {
+        NSNumber *layoutBufferIndex = _argumentBufferLayout[@"bufferIndex"];
+        NSArray *arguments = _argumentBufferLayout[@"arguments"];
+        NSDictionary *nestedArguments = _argumentBufferLayout[@"nestedArguments"];
+        if (layoutBufferIndex == nil || layoutBufferIndex.unsignedIntegerValue != bufferIndex ||
+            ![arguments isKindOfClass:[NSArray class]] ||
+            (nestedArguments != nil && ![nestedArguments isKindOfClass:[NSDictionary class]])) return nil;
+        return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc]
+            initWithOwner:_owner arguments:arguments nestedArguments:nestedArguments];
+    }
     const BOOL fixed_argument_buffer = [_implementationName isEqualToString:zpu_cpu_argument_buffer_function_name];
     const BOOL fixed_argument_buffer_array = [_implementationName isEqualToString:zpu_cpu_argument_buffer_array_function_name];
     const BOOL fixed_argument_buffer_nested = [_implementationName isEqualToString:zpu_cpu_argument_buffer_nested_function_name];
@@ -11963,6 +11981,295 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_argument_buffe
     return [implementations copy];
 }
 
+/* Parse the common scalar/vector spellings that may appear in an argument
+ * buffer.  This is a type parser for reflection/layout only; it is not an
+ * MSL compiler.  Keeping the accepted vocabulary explicit is important: an
+ * unknown type must not accidentally receive a guessed byte layout. */
+static BOOL zpu_source_data_type_for_name(NSString *name, MTLDataType *dataType) {
+    if (name == nil || dataType == NULL) return NO;
+    static NSDictionary<NSString *, NSNumber *> *types;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        types = @{
+            @"float": @(MTLDataTypeFloat), @"float2": @(MTLDataTypeFloat2),
+            @"float3": @(MTLDataTypeFloat3), @"float4": @(MTLDataTypeFloat4),
+            @"half": @(MTLDataTypeHalf), @"half2": @(MTLDataTypeHalf2),
+            @"half3": @(MTLDataTypeHalf3), @"half4": @(MTLDataTypeHalf4),
+            @"int": @(MTLDataTypeInt), @"int2": @(MTLDataTypeInt2),
+            @"int3": @(MTLDataTypeInt3), @"int4": @(MTLDataTypeInt4),
+            @"uint": @(MTLDataTypeUInt), @"uint2": @(MTLDataTypeUInt2),
+            @"uint3": @(MTLDataTypeUInt3), @"uint4": @(MTLDataTypeUInt4),
+            @"short": @(MTLDataTypeShort), @"short2": @(MTLDataTypeShort2),
+            @"short3": @(MTLDataTypeShort3), @"short4": @(MTLDataTypeShort4),
+            @"ushort": @(MTLDataTypeUShort), @"ushort2": @(MTLDataTypeUShort2),
+            @"ushort3": @(MTLDataTypeUShort3), @"ushort4": @(MTLDataTypeUShort4),
+            @"char": @(MTLDataTypeChar), @"char2": @(MTLDataTypeChar2),
+            @"char3": @(MTLDataTypeChar3), @"char4": @(MTLDataTypeChar4),
+            @"uchar": @(MTLDataTypeUChar), @"uchar2": @(MTLDataTypeUChar2),
+            @"uchar3": @(MTLDataTypeUChar3), @"uchar4": @(MTLDataTypeUChar4),
+            @"bool": @(MTLDataTypeBool), @"bool2": @(MTLDataTypeBool2),
+            @"bool3": @(MTLDataTypeBool3), @"bool4": @(MTLDataTypeBool4),
+            @"float2x2": @(MTLDataTypeFloat2x2), @"float2x3": @(MTLDataTypeFloat2x3),
+            @"float2x4": @(MTLDataTypeFloat2x4), @"float3x2": @(MTLDataTypeFloat3x2),
+            @"float3x3": @(MTLDataTypeFloat3x3), @"float3x4": @(MTLDataTypeFloat3x4),
+            @"float4x2": @(MTLDataTypeFloat4x2), @"float4x3": @(MTLDataTypeFloat4x3),
+            @"float4x4": @(MTLDataTypeFloat4x4), @"half2x2": @(MTLDataTypeHalf2x2),
+            @"half2x3": @(MTLDataTypeHalf2x3), @"half2x4": @(MTLDataTypeHalf2x4),
+            @"half3x2": @(MTLDataTypeHalf3x2), @"half3x3": @(MTLDataTypeHalf3x3),
+            @"half3x4": @(MTLDataTypeHalf3x4), @"half4x2": @(MTLDataTypeHalf4x2),
+            @"half4x3": @(MTLDataTypeHalf4x3), @"half4x4": @(MTLDataTypeHalf4x4),
+        };
+    });
+    NSNumber *value = types[name];
+    if (value == nil) return NO;
+    *dataType = (MTLDataType)value.unsignedIntegerValue;
+    return YES;
+}
+
+static BOOL zpu_source_texture_type_for_name(NSString *name, MTLTextureType *textureType,
+                                              MTLDataType *dataType, MTLBindingAccess *access) {
+    if (name == nil || textureType == NULL || dataType == NULL || access == NULL) return NO;
+    NSRange open = [name rangeOfString:@"<"];
+    NSRange close = [name rangeOfString:@">" options:NSBackwardsSearch];
+    if (open.location == NSNotFound || close.location == NSNotFound || close.location <= open.location) return NO;
+    NSString *kind = [name substringToIndex:open.location];
+    NSString *arguments = [name substringWithRange:NSMakeRange(open.location + 1, close.location - open.location - 1)];
+    NSArray<NSString *> *parts = [arguments componentsSeparatedByString:@","];
+    if (parts.count == 0 || !zpu_source_data_type_for_name(parts[0], dataType)) return NO;
+    NSDictionary<NSString *, NSNumber *> *textureTypes = @{
+        @"texture1d": @(MTLTextureType1D), @"texture1d_array": @(MTLTextureType1DArray),
+        @"texture2d": @(MTLTextureType2D), @"texture2d_array": @(MTLTextureType2DArray),
+        @"texture2d_ms": @(MTLTextureType2DMultisample),
+        @"texture2d_ms_array": @(MTLTextureType2DMultisampleArray),
+        @"texture3d": @(MTLTextureType3D), @"texturecube": @(MTLTextureTypeCube),
+        @"texturecube_array": @(MTLTextureTypeCubeArray),
+    };
+    NSNumber *textureValue = textureTypes[kind];
+    if (textureValue == nil) return NO;
+    *textureType = (MTLTextureType)textureValue.unsignedIntegerValue;
+    *access = MTLBindingAccessReadOnly;
+    if (parts.count > 1) {
+        NSString *qualifier = parts[1];
+        if ([qualifier isEqualToString:@"access::read"]) *access = MTLBindingAccessReadOnly;
+        else if ([qualifier isEqualToString:@"access::write"]) *access = MTLBindingAccessWriteOnly;
+        else if ([qualifier isEqualToString:@"access::read_write"]) *access = MTLBindingAccessReadWrite;
+        else return NO;
+    }
+    return close.location + 1 == name.length;
+}
+
+static NSString *zpu_source_match_string(NSString *source, NSTextCheckingResult *match, NSUInteger index) {
+    NSRange range = [match rangeAtIndex:index];
+    return range.location == NSNotFound ? @"" : [source substringWithRange:range];
+}
+
+/* Build one descriptor tree from source struct declarations.  The parser
+ * accepts resource members, constants, fixed-size member arrays, and
+ * recursively nested `constant Struct &member` fields.  Members are sorted
+ * in source order. Metal requires argument-buffer ids to increase through a
+ * declaration, so non-monotonic or overlapping ids are rejected instead of
+ * being reordered into a layout Apple would not accept. */
+static NSDictionary *zpu_source_argument_layout_for_struct(
+    NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
+    NSMutableSet<NSString *> *building) {
+    NSString *body = structBodies[structName];
+    if (body == nil || [building containsObject:structName]) return nil;
+    [building addObject:structName];
+    NSError *fieldError = nil;
+    NSRegularExpression *fieldExpression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"^\\s*(constant|device|threadgroup)?\\s*(const)?\\s*"
+             "([A-Za-z_][A-Za-z0-9_]*(?:<[^<>]+>)?)\\s*(\\*|&)?\\s*"
+             "([A-Za-z_][A-Za-z0-9_]*)(?:\\[([0-9]+)\\])?\\s*"
+             "\\[\\[id\\(([0-9]+)\\)\\]\\]\\s*$"
+                               options:0 error:&fieldError];
+    if (fieldExpression == nil || fieldError != nil) {
+        [building removeObject:structName];
+        return nil;
+    }
+    NSMutableArray<NSDictionary *> *fields = [NSMutableArray array];
+    for (NSString *rawField in [body componentsSeparatedByString:@";"]) {
+        if (zpu_source_compact(rawField).length == 0) continue;
+        NSTextCheckingResult *match = [fieldExpression firstMatchInString:rawField options:0
+                                                                      range:NSMakeRange(0, rawField.length)];
+        if (match == nil) {
+            [building removeObject:structName];
+            return nil;
+        }
+        NSUInteger index = zpu_source_match_string(rawField, match, 7).integerValue;
+        for (NSDictionary *field in fields) {
+            if ([field[@"index"] unsignedIntegerValue] == index) {
+                [building removeObject:structName];
+                return nil;
+            }
+        }
+        [fields addObject:@{
+            @"address": zpu_source_compact(zpu_source_match_string(rawField, match, 1)),
+            @"const": zpu_source_compact(zpu_source_match_string(rawField, match, 2)),
+            @"type": zpu_source_compact(zpu_source_match_string(rawField, match, 3)),
+            @"indirection": zpu_source_compact(zpu_source_match_string(rawField, match, 4)),
+            @"name": zpu_source_compact(zpu_source_match_string(rawField, match, 5)),
+            @"arrayLength": zpu_source_compact(zpu_source_match_string(rawField, match, 6)),
+            @"index": @(index),
+        }];
+    }
+    NSUInteger previousEnd = 0;
+    BOOL hasPreviousField = NO;
+    for (NSDictionary *field in fields) {
+        NSUInteger index = [field[@"index"] unsignedIntegerValue];
+        NSString *arrayLengthString = field[@"arrayLength"];
+        NSUInteger arrayLength = arrayLengthString.length == 0 ? 1 : (NSUInteger)arrayLengthString.integerValue;
+        if (arrayLength == 0 || (hasPreviousField && index < previousEnd) ||
+            index > NSUIntegerMax - arrayLength) {
+            [building removeObject:structName];
+            return nil;
+        }
+        previousEnd = index + arrayLength;
+        hasPreviousField = YES;
+    }
+
+    NSMutableArray<MTLArgumentDescriptor *> *arguments = [NSMutableArray array];
+    NSMutableDictionary<NSNumber *, id> *nestedArguments = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSNumber *, NSString *> *memberNames = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSNumber *, NSDictionary *> *memberMetadata = [NSMutableDictionary dictionary];
+    for (NSDictionary *field in fields) {
+        NSString *typeName = field[@"type"];
+        NSString *address = field[@"address"];
+        NSString *indirection = field[@"indirection"];
+        NSUInteger index = [field[@"index"] unsignedIntegerValue];
+        NSString *arrayLengthString = field[@"arrayLength"];
+        NSUInteger arrayLength = arrayLengthString.length == 0 ? 1 : (NSUInteger)arrayLengthString.integerValue;
+        if (arrayLength == 0 || (arrayLength > 1 && index > NSUIntegerMax - (arrayLength - 1))) {
+            [building removeObject:structName];
+            return nil;
+        }
+
+        MTLDataType dataType = MTLDataTypeNone;
+        MTLDataType elementDataType = MTLDataTypeNone;
+        MTLBindingAccess access = MTLBindingAccessReadOnly;
+        MTLTextureType textureType = MTLTextureType2D;
+        BOOL nested = [indirection isEqualToString:@"&"] && [address isEqualToString:@"constant"] &&
+            structBodies[typeName] != nil;
+        if (nested) {
+            dataType = MTLDataTypePointer;
+            elementDataType = MTLDataTypeStruct;
+            access = MTLBindingAccessReadOnly;
+        } else if ([indirection isEqualToString:@"*"]) {
+            if (!zpu_source_data_type_for_name(typeName, &dataType)) {
+                [building removeObject:structName];
+                return nil;
+            }
+            elementDataType = dataType;
+            dataType = MTLDataTypePointer;
+            access = [field[@"const"] isEqualToString:@"const"] ? MTLBindingAccessReadOnly :
+                MTLBindingAccessReadWrite;
+        } else if ([typeName hasPrefix:@"texture"]) {
+            if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access)) {
+                [building removeObject:structName];
+                return nil;
+            }
+            elementDataType = dataType;
+            dataType = MTLDataTypeTexture;
+        } else if ([typeName isEqualToString:@"sampler"]) {
+            dataType = MTLDataTypeSampler;
+            elementDataType = MTLDataTypeSampler;
+            access = MTLBindingAccessReadOnly;
+        } else if (!zpu_source_data_type_for_name(typeName, &dataType) || indirection.length != 0) {
+            [building removeObject:structName];
+            return nil;
+        }
+
+        MTLArgumentDescriptor *descriptor = [MTLArgumentDescriptor argumentDescriptor];
+        descriptor.dataType = dataType;
+        descriptor.index = index;
+        descriptor.arrayLength = arrayLength;
+        descriptor.access = access;
+        if (dataType == MTLDataTypeTexture) descriptor.textureType = textureType;
+        [arguments addObject:descriptor];
+        for (NSUInteger element = 0; element < arrayLength; ++element) {
+            NSUInteger elementIndex = index + element;
+            memberNames[@(elementIndex)] = field[@"name"];
+            memberMetadata[@(elementIndex)] = @{
+                @"kind": nested ? @"nested" :
+                    ([indirection isEqualToString:@"*"] ? @"pointer" :
+                     ([typeName hasPrefix:@"texture"] ? @"texture" :
+                      ([typeName isEqualToString:@"sampler"] ? @"sampler" : @"constant"))),
+                @"elementDataType": @(elementDataType),
+                @"access": @(access),
+                @"textureType": @(textureType),
+            };
+            if (nested) {
+                NSDictionary *childLayout = zpu_source_argument_layout_for_struct(
+                    typeName, structBodies, building);
+                if (childLayout == nil) {
+                    [building removeObject:structName];
+                    return nil;
+                }
+                nestedArguments[@(elementIndex)] = childLayout;
+            }
+        }
+    }
+    [building removeObject:structName];
+    return @{
+        @"arguments": [arguments copy],
+        @"nestedArguments": [nestedArguments copy],
+        @"memberNames": [memberNames copy],
+        @"memberMetadata": [memberMetadata copy],
+    };
+}
+
+static NSDictionary<NSString *, NSDictionary *> *zpu_source_lowerable_argument_buffer_layouts(NSString *source) {
+    NSString *compactSource = zpu_source_compact(source);
+    if (compactSource.length == 0) return @{};
+    NSError *structError = nil;
+    NSRegularExpression *structExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"struct[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\\{([^{}]*)\\}[[:space:]]*;"
+                               options:0 error:&structError];
+    if (structExpression == nil || structError != nil) return @{};
+    NSMutableDictionary<NSString *, NSString *> *structBodies = [NSMutableDictionary dictionary];
+    [structExpression enumerateMatchesInString:source options:0
+                                          range:NSMakeRange(0, source.length)
+                                     usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *name = zpu_source_match_string(source, match, 1);
+        NSString *body = zpu_source_match_string(source, match, 2);
+        if (structBodies[name] == nil) structBodies[name] = body;
+    }];
+    if (structBodies.count == 0) return @{};
+
+    NSError *kernelError = nil;
+    NSRegularExpression *kernelExpression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"kernelvoid([A-Za-z_][A-Za-z0-9_]*)\\(constant([A-Za-z_][A-Za-z0-9_]*)&"
+             "([A-Za-z_][A-Za-z0-9_]*)\\[\\[buffer\\(([0-9]+)\\)\\]\\]\\)\\{([^{}]*)\\}"
+                               options:0 error:&kernelError];
+    if (kernelExpression == nil || kernelError != nil) return @{};
+    NSMutableDictionary<NSString *, NSDictionary *> *layouts = [NSMutableDictionary dictionary];
+    [kernelExpression enumerateMatchesInString:compactSource options:0
+                                          range:NSMakeRange(0, compactSource.length)
+                                     usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *functionName = zpu_source_match_string(compactSource, match, 1);
+        NSString *structName = zpu_source_match_string(compactSource, match, 2);
+        NSString *argumentName = zpu_source_match_string(compactSource, match, 3);
+        NSString *body = zpu_source_match_string(compactSource, match, 5);
+        if (![body isEqualToString:[NSString stringWithFormat:@"(void)%@;", argumentName]]) return;
+        NSMutableSet<NSString *> *building = [NSMutableSet set];
+        NSDictionary *layout = zpu_source_argument_layout_for_struct(structName, structBodies, building);
+        if (layout == nil) return;
+        NSMutableDictionary *annotatedLayout = [layout mutableCopy];
+        annotatedLayout[@"bufferIndex"] = @([zpu_source_match_string(compactSource, match, 4) integerValue]);
+        annotatedLayout[@"structName"] = structName;
+        layouts[functionName] = [annotatedLayout copy];
+    }];
+    return [layouts copy];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLFunctionReflection *zpu_source_argument_buffer_function_reflection(NSDictionary *layout);
+
 /* The render lowering profile is equally narrow: only the canonical Vertex
  * passthrough and color-returning fragment can safely share the fixed ZPU
  * vertex/fragment implementations. */
@@ -12037,6 +12344,8 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
         _visibleFunctionNames = [NSSet set];
         NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
         NSMutableArray *names = [NSMutableArray array];
+        NSDictionary<NSString *, NSDictionary *> *sourceArgumentBufferLayouts =
+            zpu_source_lowerable_argument_buffer_layouts(source);
         for (NSString *name in @[
             @"zpu_test_vertex",
             zpu_cpu_vertex_name,
@@ -12166,6 +12475,15 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
                     implementations[name] = implementation;
                 }
             }];
+        [sourceArgumentBufferLayouts enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *name, NSDictionary *layout, BOOL *stop) {
+                (void)layout;
+                (void)stop;
+                if (![names containsObject:name]) {
+                    [names addObject:name];
+                    implementations[name] = zpu_cpu_source_argument_buffer_function_name;
+                }
+            }];
         [zpu_source_lowerable_render_functions(source) enumerateKeysAndObjectsUsingBlock:
             ^(NSString *name, NSString *implementation, BOOL *stop) {
                 (void)stop;
@@ -12176,6 +12494,7 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
             }];
         _functionNames = [names copy];
         _functionImplementations = [implementations copy];
+        _functionArgumentBufferLayouts = [sourceArgumentBufferLayouts copy];
     }
     return self;
 }
@@ -12196,11 +12515,13 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
     } else {
         functionType = [_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0;
     }
-    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner
-                                                               name:implementationName
-                                                     specializedName:sourceLowered ? functionName : nil
-                                                         functionType:functionType
-                                                              options:MTLFunctionOptionNone];
+    ZPUCPUFunction *function = [[ZPUCPUFunction alloc] initWithOwner:_owner
+                                                                 name:implementationName
+                                                       specializedName:sourceLowered ? functionName : nil
+                                                           functionType:functionType
+                                                                options:MTLFunctionOptionNone];
+    function->_argumentBufferLayout = _functionArgumentBufferLayouts[functionName];
+    return (id<MTLFunction>)function;
 }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)constantValues error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)constantValues;
@@ -12222,6 +12543,9 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
 - (MTLFunctionReflection *)reflectionForFunctionWithName:(NSString *)functionName API_AVAILABLE(macos(26.0), ios(26.0)) {
     if (_type != MTLLibraryTypeExecutable || ![_functionNames containsObject:functionName]) return nil;
     NSString *implementationName = _functionImplementations[functionName] ?: functionName;
+    if ([implementationName isEqualToString:zpu_cpu_source_argument_buffer_function_name]) {
+        return zpu_source_argument_buffer_function_reflection(_functionArgumentBufferLayouts[functionName]);
+    }
     return zpu_function_reflection(implementationName);
 }
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0)) {
@@ -12272,9 +12596,12 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
     if (error != NULL) *error = nil;
     NSString *implementationName = zpu_cpu_function_implementation_name(function);
     NSString *publicName = descriptor.specializedName.length != 0 ? descriptor.specializedName : function.name;
-    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:self->_owner name:implementationName
-                                                   specializedName:publicName
-                                                        functionType:function.functionType options:normalizedOptions];
+    ZPUCPUFunction *specialized = [[ZPUCPUFunction alloc] initWithOwner:self->_owner name:implementationName
+                                                           specializedName:publicName
+                                                                functionType:function.functionType
+                                                                     options:normalizedOptions];
+    specialized->_argumentBufferLayout = function->_argumentBufferLayout;
+    return (id<MTLFunction>)specialized;
 }
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor
                  completionHandler:(void (^)(id<MTLFunction> __nullable function, NSError * __nullable error))completionHandler API_AVAILABLE(macos(11.0), ios(14.0)) {
@@ -17841,6 +18168,119 @@ static BOOL zpu_argument_type_size_align(MTLDataType dataType, NSUInteger *size,
         default:
             return NO;
     }
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
+    if (![layout isKindOfClass:[NSDictionary class]]) return nil;
+    NSArray<MTLArgumentDescriptor *> *arguments = layout[@"arguments"];
+    NSDictionary<NSNumber *, id> *nestedArguments = layout[@"nestedArguments"];
+    NSDictionary<NSNumber *, NSString *> *memberNames = layout[@"memberNames"];
+    NSDictionary<NSNumber *, NSDictionary *> *memberMetadata = layout[@"memberMetadata"];
+    if (![arguments isKindOfClass:[NSArray class]] ||
+        (nestedArguments != nil && ![nestedArguments isKindOfClass:[NSDictionary class]]) ||
+        (memberNames != nil && ![memberNames isKindOfClass:[NSDictionary class]]) ||
+        (memberMetadata != nil && ![memberMetadata isKindOfClass:[NSDictionary class]])) return nil;
+    ZPUArgumentEncoder *encoder = [[ZPUArgumentEncoder alloc] initWithOwner:nil
+                                                                    arguments:arguments
+                                                             nestedArguments:nestedArguments];
+    if (encoder == nil) return nil;
+    NSMutableArray<MTLStructMember *> *members = [NSMutableArray array];
+    for (MTLArgumentDescriptor *descriptor in arguments) {
+        NSNumber *indexKey = @(descriptor.index);
+        NSNumber *offsetValue = encoder->_argumentOffsets[indexKey];
+        NSDictionary *metadata = memberMetadata[indexKey];
+        if (offsetValue == nil || metadata == nil) return nil;
+        const NSUInteger offset = offsetValue.unsignedIntegerValue;
+        const NSUInteger arrayLength = descriptor.arrayLength == 0 ? 1 : descriptor.arrayLength;
+        NSString *memberName = memberNames[indexKey] ?: [NSString stringWithFormat:@"argument%lu",
+                                                           (unsigned long)descriptor.index];
+        NSString *kind = metadata[@"kind"];
+        MTLDataType elementDataType = (MTLDataType)[metadata[@"elementDataType"] unsignedIntegerValue];
+        MTLBindingAccess access = (MTLBindingAccess)[metadata[@"access"] unsignedIntegerValue];
+        MTLTextureType textureType = (MTLTextureType)[metadata[@"textureType"] unsignedIntegerValue];
+        MTLDataType memberDataType = arrayLength > 1 ? MTLDataTypeArray : descriptor.dataType;
+        ZPUStructMember *member = [[ZPUStructMember alloc] initWithName:memberName
+                                                                    offset:offset
+                                                                 dataType:memberDataType
+                                                            argumentIndex:descriptor.index];
+        ZPUArrayType *arrayType = nil;
+        ZPUPointerType *pointerType = nil;
+        ZPUTextureReferenceType *textureReferenceType = nil;
+        if ([kind isEqualToString:@"nested"] || [kind isEqualToString:@"pointer"]) {
+            NSDictionary *childLayout = nestedArguments[@(descriptor.index)];
+            MTLStructType *childStruct = nil;
+            NSUInteger childSize = sizeof(uint64_t);
+            NSUInteger childAlignment = sizeof(uint64_t);
+            if ([kind isEqualToString:@"nested"]) {
+                if (childLayout == nil) return nil;
+                childStruct = zpu_source_argument_struct_type(childLayout);
+                ZPUArgumentEncoder *childEncoder = [[ZPUArgumentEncoder alloc]
+                    initWithOwner:nil arguments:childLayout[@"arguments"]
+                     nestedArguments:childLayout[@"nestedArguments"]];
+                if (childStruct == nil || childEncoder == nil) return nil;
+                childSize = childEncoder->_encodedLength;
+                childAlignment = childEncoder->_alignment;
+            }
+            pointerType = [[ZPUPointerType alloc] initWithElementType:
+                [kind isEqualToString:@"nested"] ? MTLDataTypeStruct : elementDataType
+                access:access alignment:childAlignment dataSize:childSize structType:childStruct];
+            if ([kind isEqualToString:@"nested"]) pointerType->_elementIsArgumentBuffer = YES;
+        } else if ([kind isEqualToString:@"texture"]) {
+            textureReferenceType = [[ZPUTextureReferenceType alloc]
+                initWithTextureType:textureType dataType:elementDataType access:access];
+        }
+        if (arrayLength > 1) {
+            NSUInteger elementSize = 0;
+            NSUInteger elementAlignment = 0;
+            if (!zpu_argument_type_size_align(descriptor.dataType == MTLDataTypeArray ?
+                                               ([kind isEqualToString:@"constant"] ? elementDataType :
+                                                ([kind isEqualToString:@"texture"] ? MTLDataTypeTexture :
+                                                 ([kind isEqualToString:@"sampler"] ? MTLDataTypeSampler :
+                                                  MTLDataTypePointer))) : descriptor.dataType,
+                                               &elementSize, &elementAlignment)) return nil;
+            NSUInteger stride = 0;
+            if (!zpu_argument_align_up(elementSize, elementAlignment, &stride)) return nil;
+            MTLDataType arrayElementType = [kind isEqualToString:@"constant"] ? elementDataType :
+                ([kind isEqualToString:@"texture"] ? MTLDataTypeTexture :
+                 ([kind isEqualToString:@"sampler"] ? MTLDataTypeSampler : MTLDataTypePointer));
+            arrayType = [[ZPUArrayType alloc] initWithElementType:arrayElementType
+                                                        arrayLength:arrayLength stride:stride
+                                          argumentIndexStride:1
+                                                        structType:nil arrayType:nil
+                                             textureReferenceType:textureReferenceType
+                                                    pointerType:pointerType tensorReferenceType:nil];
+            [member setStructType:nil arrayType:arrayType tensorReferenceType:nil];
+        } else if (pointerType != nil || textureReferenceType != nil) {
+            [member setPointerType:pointerType textureReferenceType:textureReferenceType];
+        }
+        [members addObject:member];
+    }
+    return [[ZPUStructType alloc] initWithMembers:members];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLFunctionReflection *zpu_source_argument_buffer_function_reflection(NSDictionary *layout) {
+    if (![layout isKindOfClass:[NSDictionary class]]) return nil;
+    NSArray *arguments = layout[@"arguments"];
+    NSNumber *bufferIndex = layout[@"bufferIndex"];
+    if (![arguments isKindOfClass:[NSArray class]] || bufferIndex == nil) return nil;
+    ZPUArgumentEncoder *encoder = [[ZPUArgumentEncoder alloc]
+        initWithOwner:nil arguments:arguments nestedArguments:layout[@"nestedArguments"]];
+    MTLStructType *structType = zpu_source_argument_struct_type(layout);
+    if (encoder == nil || structType == nil) return nil;
+    ZPUBinding *binding = zpu_reflection_binding(@"args", MTLBindingTypeBuffer,
+                                                  MTLBindingAccessReadOnly,
+                                                  bufferIndex.unsignedIntegerValue);
+    [binding setBufferDataSize:encoder->_encodedLength dataType:MTLDataTypeStruct];
+    binding->_bufferAlignment = encoder->_alignment;
+    binding->_bufferStructType = structType;
+    binding->_bufferPointerType = [[ZPUPointerType alloc]
+        initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                  alignment:encoder->_alignment dataSize:encoder->_encodedLength
+               structType:structType];
+    return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+        initWithBindings:@[binding] userAnnotation:nil];
 }
 
 static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,

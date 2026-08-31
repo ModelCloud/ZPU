@@ -552,8 +552,13 @@ triangle path:
   synthetic GPU address and the child independently encodes its pointer and
   texture slots. The `zpu_cpu_argument_buffer_recursive` profile extends that
   contract through two child levels, with each child retaining an independent
-  declaration-order layout. Arbitrary shader-specific struct and unregistered
-  nested layouts remain unsupported rather than being guessed
+  declaration-order layout. Strict source-defined metadata-only kernels can
+  now describe a complete argument-buffer tree at any buffer index, including
+  recursively nested structs, fixed-size arrays, pointers, textures, samplers,
+  scalar/vector/matrix constants, and their Metal reflection types. The parser
+  preserves source order, validates strictly increasing `[[id]]` locations,
+  every type and offset, and rejects unknown or cyclic declarations; it never
+  compiles or executes arbitrary MSL
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports
@@ -591,9 +596,13 @@ triangle path:
   uniform-color raster profile, preserving `setFragmentBytes:length:atIndex:`
   and its exact attachment bytes. A complete canonical nested argument-buffer
   declaration is also lowered to the CPU recursive argument encoder, with
-  native-matching parent/child layout metadata and resource slots. Those
-  functions execute through ZPU's
-  existing CPU kernels/raster profiles and never through Apple's compiler.
+  native-matching parent/child layout metadata and resource slots. Strict
+  metadata-only argument-buffer declarations additionally preserve arbitrary
+  supported member names, ids, buffer indices, arrays, and recursive child
+  reflection. Those executable functions execute through ZPU's
+  existing CPU kernels/raster profiles and never through Apple's compiler;
+  metadata-only argument-buffer functions expose layout/encoder state without
+  claiming executable arbitrary shader semantics.
   Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
   descriptor, so supported unspecialized blend state can be resolved through

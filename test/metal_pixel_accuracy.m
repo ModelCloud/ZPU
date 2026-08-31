@@ -597,13 +597,18 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceNestedInner { device float *data [[id(0)]]; texture2d<float> tex [[id(1)]]; };\n"
          "struct SourceNestedOuter { constant SourceNestedInner &inner [[id(0)]]; "
          "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
-         "kernel void zpu_source_argument_buffer_nested(constant SourceNestedOuter &args [[buffer(0)]]) { (void)args; }\n";
+         "kernel void zpu_source_argument_buffer_nested(constant SourceNestedOuter &args [[buffer(0)]]) { (void)args; }\n"
+         "struct SourceArbitraryLeaf { device const half *weights [[id(2)]]; "
+         "texture2d<uint, access::read> ids [[id(5)]]; half2 scale [[id(8)]]; };\n"
+         "struct SourceArbitraryOuter { constant SourceArbitraryLeaf &leaf [[id(1)]]; "
+         "sampler linearSampler [[id(4)]]; uint4 bias [[id(7)]]; };\n"
+         "kernel void zpu_source_argument_buffer_arbitrary(constant SourceArbitraryOuter &arguments [[buffer(3)]]) { (void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 13) {
+        adapter_library.functionNames.count != 14) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -617,6 +622,15 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     if (mismatched_guard_library != nil || mismatched_guard_error == nil) {
         fprintf(stderr, "metal-pixel: source lowering accepted a mismatched fixed CPU bound\n");
         return 168;
+    }
+    NSError *cyclic_argument_error = nil;
+    id<MTLLibrary> cyclic_argument_library = [adapter_device newLibraryWithSource:
+        @"struct CyclicArgument { constant CyclicArgument &next [[id(0)]]; }; "
+         "kernel void zpu_source_cyclic_argument(constant CyclicArgument &args [[buffer(0)]]) "
+         "{ (void)args; }" options:nil error:&cyclic_argument_error];
+    if (cyclic_argument_library != nil || cyclic_argument_error == nil) {
+        fprintf(stderr, "metal-pixel: source lowering accepted a cyclic argument-buffer layout\n");
+        return 169;
     }
 
     const struct {
@@ -1157,6 +1171,49 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_nested_reflection_ok) {
         fail_with_error("source-defined CPU nested argument lowering failed", adapter_error ?: native_error);
         return 172;
+    }
+
+    id<MTLFunction> native_source_arbitrary_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_arbitrary"];
+    id<MTLFunction> adapter_source_arbitrary_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_arbitrary"];
+    id<MTLArgumentEncoder> native_source_arbitrary_encoder =
+        [native_source_arbitrary_function newArgumentEncoderWithBufferIndex:3];
+    id<MTLArgumentEncoder> adapter_source_arbitrary_encoder =
+        [adapter_source_arbitrary_function newArgumentEncoderWithBufferIndex:3];
+    id<MTLArgumentEncoder> native_source_arbitrary_child =
+        [native_source_arbitrary_encoder newArgumentEncoderForBufferAtIndex:1];
+    id<MTLArgumentEncoder> adapter_source_arbitrary_child =
+        [adapter_source_arbitrary_encoder newArgumentEncoderForBufferAtIndex:1];
+    BOOL source_arbitrary_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_arbitrary"];
+        id<MTLBinding> binding = reflection.bindings.count == 1 ? reflection.bindings[0] : nil;
+        id<MTLBufferBinding> bufferBinding = (id<MTLBufferBinding>)binding;
+        MTLStructType *outer = bufferBinding.bufferStructType;
+        MTLStructMember *leaf = outer.members.count > 0 ? outer.members[0] : nil;
+        MTLStructMember *sampler = outer.members.count > 1 ? outer.members[1] : nil;
+        MTLStructMember *bias = outer.members.count > 2 ? outer.members[2] : nil;
+        source_arbitrary_reflection_ok = binding != nil && binding.type == MTLBindingTypeBuffer &&
+            binding.index == 3 && outer != nil && outer.members.count == 3 &&
+            [leaf.name isEqualToString:@"leaf"] && leaf.offset == 0 &&
+            leaf.dataType == MTLDataTypePointer && leaf.pointerType.elementIsArgumentBuffer &&
+            [sampler.name isEqualToString:@"linearSampler"] && sampler.offset == 8 &&
+            sampler.dataType == MTLDataTypeSampler && [bias.name isEqualToString:@"bias"] &&
+            bias.offset == 16 && bias.dataType == MTLDataTypeUInt4 &&
+            leaf.pointerType.elementStructType.members.count == 3;
+    }
+    if (native_source_arbitrary_function == nil || adapter_source_arbitrary_function == nil ||
+        native_source_arbitrary_encoder == nil || adapter_source_arbitrary_encoder == nil ||
+        native_source_arbitrary_child == nil || adapter_source_arbitrary_child == nil ||
+        native_source_arbitrary_encoder.encodedLength != adapter_source_arbitrary_encoder.encodedLength ||
+        native_source_arbitrary_encoder.alignment != adapter_source_arbitrary_encoder.alignment ||
+        native_source_arbitrary_child.encodedLength != adapter_source_arbitrary_child.encodedLength ||
+        native_source_arbitrary_child.alignment != adapter_source_arbitrary_child.alignment ||
+        !source_arbitrary_reflection_ok) {
+        fail_with_error("source-defined arbitrary nested argument lowering failed", adapter_error ?: native_error);
+        return 173;
     }
     return 0;
 }
