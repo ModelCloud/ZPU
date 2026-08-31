@@ -19387,6 +19387,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         }
     }
     [_owner->_legacyBuffer retainResource:zpuTexture];
+    _stages |= MTLStageBlit;
 }
 - (void)fillBuffer:(id<MTLBuffer>)buffer range:(NSRange)range value:(uint8_t)value {
     ZPUBuffer *zpuBuffer = (ZPUBuffer *)buffer;
