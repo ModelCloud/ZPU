@@ -376,7 +376,9 @@ triangle path:
   pre-submit allocator reuse contract. `MTL4CommandQueueDescriptor.feedbackQueue` routes
   commit feedback handlers onto the caller-supplied serial dispatch queue;
   with no queue, the bounded CPU adapter preserves its synchronous feedback
-  behavior
+  behavior. Render and compute argument tables are re-read at each draw,
+  dispatch, or indirect-command execution boundary, matching Metal's
+  encode-time snapshot rule even when a table is mutated between commands
 - CPU-owned Metal 4 compiler metadata for the registered ZPU kernel set:
   MTL4LibraryFunctionDescriptor objects resolve through ZPU libraries,
   compiler-created compute pipeline descriptors instantiate the existing ZPU
