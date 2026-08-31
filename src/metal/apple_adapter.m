@@ -12000,7 +12000,16 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         for (NSUInteger profileIndex = 0;
              profileIndex < sizeof(typedGradientProfiles) / sizeof(typedGradientProfiles[0]);
              ++profileIndex) {
-            if ([functionName isEqualToString:typedGradientProfiles[profileIndex].sourceName] &&
+            /* Metal's typed texture signature does not encode storage width:
+             * texture2d<int> can be R8Sint, R16Sint, or R32Sint.  Therefore a
+             * renamed profile must retain the canonical format suffix, while
+             * the exact signature and body continue to prove its operation. */
+            NSString *profileName = typedGradientProfiles[profileIndex].sourceName;
+            NSString *profileSuffix = [profileName hasPrefix:@"zpu_source_"] ?
+                [profileName substringFromIndex:[@"zpu_source_" length]] : profileName;
+            BOOL hasCanonicalSuffix = [functionName isEqualToString:profileName] ||
+                [functionName hasSuffix:[@"_" stringByAppendingString:profileSuffix]];
+            if (hasCanonicalSuffix &&
                 [compactSignature isEqualToString:typedGradientProfiles[profileIndex].signature] &&
                 [compactBody isEqualToString:typedGradientProfiles[profileIndex].body]) {
                 implementations[functionName] = typedGradientProfiles[profileIndex].implementation;

@@ -594,6 +594,10 @@ triangle path:
   color-returning fragment pair. The pair accepts any source struct identifier
   whose validated layout is `float4 position [[position]]; float4 color;`, so
   renaming the source record does not change the fixed CPU ABI. A canonical
+  typed integer gradient may likewise use a renamed function identifier when
+  it retains the canonical format suffix (for example `_rg16_sint`); because
+  `texture2d<int>` does not encode storage width, both that suffix and the
+  exact validated signature/body are required before lowering. A canonical
   source-named fragment that
   returns a `constant float4` buffer-0 color is lowered to the CPU
   uniform-color raster profile, preserving `setFragmentBytes:length:atIndex:`

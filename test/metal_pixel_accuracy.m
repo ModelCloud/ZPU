@@ -641,6 +641,9 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_rg16_sint(texture2d<int, access::write> output [[texture(0)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, 0, 0), gid); }\n"
+         "kernel void zpu_source_renamed_rg16_sint(texture2d<int, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(int4(int(gid.x) + 1, -int(gid.y) - 1, 0, 0), gid); }\n"
          "kernel void zpu_source_rgba16_uint(texture2d<uint, access::write> output [[texture(0)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(uint4(gid.x + 1u, gid.y + 1u, "
@@ -667,7 +670,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 32) {
+        adapter_library.functionNames.count != 33) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -955,6 +958,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         {@"zpu_source_r16_sint", MTLPixelFormatR16Sint, 2},
         {@"zpu_source_rg16_uint", MTLPixelFormatRG16Uint, 4},
         {@"zpu_source_rg16_sint", MTLPixelFormatRG16Sint, 4},
+        {@"zpu_source_renamed_rg16_sint", MTLPixelFormatRG16Sint, 4},
         {@"zpu_source_rgba16_uint", MTLPixelFormatRGBA16Uint, 8},
         {@"zpu_source_rgba16_sint", MTLPixelFormatRGBA16Sint, 8},
         {@"zpu_source_rgb10a2_uint", MTLPixelFormatRGB10A2Uint, 4},
