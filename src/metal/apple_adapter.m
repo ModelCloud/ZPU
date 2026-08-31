@@ -18118,6 +18118,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         if (buffer != nil) [buffer markError];
         return;
     }
+    [buffer retainResource:zpuEvent];
     [buffer commit];
 }
 - (void)waitForEvent:(id<MTLEvent>)event value:(uint64_t)value {
@@ -18132,6 +18133,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         if (buffer != nil) [buffer markError];
         return;
     }
+    [buffer retainResource:zpuEvent];
     [buffer commit];
 }
 - (void)signalDrawable:(id<MTLDrawable>)drawable {
