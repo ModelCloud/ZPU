@@ -428,6 +428,7 @@
     "MTLDevice.newBufferWithLengthOptionsPlacementSparsePageSize",
     "MTLLibrary.newFunctionWithName",
     "MTLLibrary.newFunctionWithDescriptor",
+    "MTLLibrary.newIntersectionFunctionWithDescriptor",
     "MTLLibrary.functionNames",
     "MTLLibrary.type",
     "MTLLibrary.installName",

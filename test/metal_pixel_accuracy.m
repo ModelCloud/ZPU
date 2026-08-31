@@ -698,6 +698,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     if (native_device == nil || adapter_device == nil || native_queue == nil || adapter_queue == nil) return 166;
     NSString *source =
         @"#include <metal_stdlib>\nusing namespace metal;\n"
+         "[[intersection(triangle)]] bool zpu_cpu_intersection_triangle() { return false; }\n"
          "kernel void zpu_source_add_f32(device const float *left [[buffer(0)]], "
          "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
@@ -956,9 +957,56 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 67) {
+        adapter_library.functionNames.count != 68) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
+    }
+    MTLIntersectionFunctionDescriptor *native_intersection_descriptor =
+        [MTLIntersectionFunctionDescriptor new];
+    native_intersection_descriptor.name = @"zpu_cpu_intersection_triangle";
+    MTLIntersectionFunctionDescriptor *adapter_intersection_descriptor =
+        [MTLIntersectionFunctionDescriptor new];
+    adapter_intersection_descriptor.name = @"zpu_cpu_intersection_triangle";
+    NSError *native_intersection_error = nil;
+    NSError *adapter_intersection_error = nil;
+    id<MTLFunction> native_intersection_function =
+        [native_library newIntersectionFunctionWithDescriptor:native_intersection_descriptor
+                                                         error:&native_intersection_error];
+    id<MTLFunction> adapter_intersection_function =
+        [adapter_library newIntersectionFunctionWithDescriptor:adapter_intersection_descriptor
+                                                          error:&adapter_intersection_error];
+    BOOL intersection_function_exact = native_intersection_function != nil &&
+        native_intersection_error == nil && adapter_intersection_function != nil &&
+        adapter_intersection_error == nil &&
+        native_intersection_function.functionType == MTLFunctionTypeIntersection &&
+        adapter_intersection_function.functionType == MTLFunctionTypeIntersection &&
+        [native_intersection_function.name isEqualToString:adapter_intersection_function.name];
+    if (!intersection_function_exact) {
+        fail_with_error("CPU intersection-function descriptor lowering failed",
+                        adapter_intersection_error ?: native_intersection_error);
+        return 183;
+    }
+    id<MTLFunction> factory_intersection_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_intersection_triangle");
+    __block BOOL intersection_completion_called = NO;
+    __block id<MTLFunction> completion_intersection_function = nil;
+    __block NSError *completion_intersection_error = nil;
+    [adapter_library newIntersectionFunctionWithDescriptor:adapter_intersection_descriptor
+                                           completionHandler:^(id<MTLFunction> function,
+                                                               NSError *error) {
+        intersection_completion_called = YES;
+        completion_intersection_function = function;
+        completion_intersection_error = error;
+    }];
+    if (factory_intersection_function == nil ||
+        factory_intersection_function.functionType != MTLFunctionTypeIntersection ||
+        ![factory_intersection_function.name isEqualToString:@"zpu_cpu_intersection_triangle"] ||
+        !intersection_completion_called || completion_intersection_function == nil ||
+        completion_intersection_error != nil ||
+        completion_intersection_function.functionType != MTLFunctionTypeIntersection) {
+        fail_with_error("CPU intersection-function factory/completion lowering failed",
+                        completion_intersection_error);
+        return 184;
     }
     id<MTLFunction> native_metadata_function =
         [native_library newFunctionWithName:@"zpu_source_metadata_direct"];

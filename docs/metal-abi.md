@@ -669,7 +669,11 @@ triangle path:
   expose native-matching buffer/texture/sampler/function-table/acceleration
   resource reflection and execute as
   deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary
-  MSL remains fail-closed.
+  MSL remains fail-closed. The registered
+  `zpu_cpu_intersection_triangle` profile also preserves source-library
+  intersection-function descriptors as CPU-owned metadata with
+  `MTLFunctionTypeIntersection`; arbitrary custom-intersection and ray-tracing
+  execution remains fail-closed.
   Legacy compute-pipeline creation also carries the same canonical CPU/source
   binding reflection onto the pipeline object on SDKs that expose the Metal 4
   reflection property; reflection therefore does not depend on selecting the

@@ -108,6 +108,7 @@ static NSString *const zpu_cpu_add_f32x3_function_name = @"zpu_cpu_add_f32x3";
 static NSString *const zpu_cpu_mul_f32x3_function_name = @"zpu_cpu_mul_f32x3";
 static NSString *const zpu_cpu_sub_f32x3_function_name = @"zpu_cpu_sub_f32x3";
 static NSString *const zpu_cpu_copy_rgba8_texture_to_texture_function_name = @"zpu_cpu_copy_rgba8_texture_to_texture";
+static NSString *const zpu_cpu_intersection_triangle_function_name = @"zpu_cpu_intersection_triangle";
 
 static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32 || kernel == ZPU_METAL_COMPUTE_MUL_F32 ||
@@ -9121,6 +9122,10 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
     }
+    if ([name isEqualToString:zpu_cpu_intersection_triangle_function_name]) {
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[] userAnnotation:nil];
+    }
     if ([name isEqualToString:zpu_cpu_tile_gradient_function_name]) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
@@ -9321,6 +9326,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_mul_f32x3_function_name,
         zpu_cpu_sub_f32x3_function_name,
         zpu_cpu_trace_triangles_function_name,
+        zpu_cpu_intersection_triangle_function_name,
         zpu_cpu_tile_gradient_function_name,
         zpu_cpu_mesh_gradient_function_name,
         zpu_cpu_mesh_gradient_fragment_name,
@@ -13970,6 +13976,7 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             zpu_cpu_mul_f32x3_function_name,
             zpu_cpu_sub_f32x3_function_name,
             zpu_cpu_trace_triangles_function_name,
+            zpu_cpu_intersection_triangle_function_name,
             zpu_cpu_tile_gradient_function_name,
             zpu_cpu_mesh_gradient_function_name,
             zpu_cpu_mesh_gradient_fragment_name,
@@ -14105,7 +14112,9 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
              [implementationName isEqualToString:@"zpu_cpu_uniform_color_fragment"] ? MTLFunctionTypeFragment :
              MTLFunctionTypeKernel);
     } else {
-        functionType = [_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0;
+        functionType = [implementationName isEqualToString:zpu_cpu_intersection_triangle_function_name] ?
+            MTLFunctionTypeIntersection :
+            ([_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0);
     }
     ZPUCPUFunction *function = [[ZPUCPUFunction alloc] initWithOwner:_owner
                                                                  name:implementationName
@@ -14212,16 +14221,23 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
     completionHandler(function, error);
 }
 - (id<MTLFunction>)newIntersectionFunctionWithDescriptor:(MTLIntersectionFunctionDescriptor *)descriptor error:(NSError **)error API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
-    zpu_set_error(error, @"ZPU CPU Metal has no intersection-function implementation");
-    return nil;
+    if (descriptor == nil || descriptor.name.length == 0) {
+        zpu_set_error(error, @"ZPU CPU Metal intersection-function descriptors require a registered function name");
+        return nil;
+    }
+    id<MTLFunction> function = [self newFunctionWithDescriptor:descriptor error:error];
+    if (function == nil || function.functionType != MTLFunctionTypeIntersection) {
+        zpu_set_error(error, @"ZPU CPU Metal intersection-function descriptors require the registered CPU intersection profile");
+        return nil;
+    }
+    if (error != NULL) *error = nil;
+    return function;
 }
 - (void)newIntersectionFunctionWithDescriptor:(MTLIntersectionFunctionDescriptor *)descriptor completionHandler:(void (^)(id<MTLFunction> __nullable function, NSError * __nullable error))completionHandler API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
-    (void)descriptor;
     if (completionHandler == nil) return;
     NSError *error = nil;
-    zpu_set_error(&error, @"ZPU CPU Metal has no intersection-function implementation");
-    completionHandler(nil, error);
+    id<MTLFunction> function = [self newIntersectionFunctionWithDescriptor:descriptor error:&error];
+    completionHandler(function, error);
 }
 @end
 
@@ -25299,7 +25315,10 @@ id<MTLDevice> ZPUMetalCreateSystemDefaultDevice(void) {
 
 id<MTLFunction> ZPUMetalCreateCPUFunction(id<MTLDevice> device, NSString *name) {
     if (![device isKindOfClass:[ZPUDevice class]] || !zpu_cpu_function_name_supported(name)) return nil;
-    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:(ZPUDevice *)device name:name];
+    const MTLFunctionType functionType = [name isEqualToString:zpu_cpu_intersection_triangle_function_name] ?
+        MTLFunctionTypeIntersection : 0;
+    return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:(ZPUDevice *)device name:name
+                                                       functionType:functionType];
 }
 
 id<MTLDrawable> ZPUMetalCreateCPUDrawable(id<MTLTexture> texture) {
