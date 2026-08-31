@@ -19101,7 +19101,6 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     _stages |= MTLStageBlit;
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)sourceSize toBuffer:(id<MTLBuffer>)destinationBuffer destinationOffset:(NSUInteger)destinationOffset destinationBytesPerRow:(NSUInteger)destinationBytesPerRow destinationBytesPerImage:(NSUInteger)destinationBytesPerImage {
-    (void)destinationBytesPerImage;
     ZPUTexture *source = (ZPUTexture *)sourceTexture;
     ZPUBuffer *destination = (ZPUBuffer *)destinationBuffer;
     zpu_metal_region sourceRegion;
@@ -19127,7 +19126,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
             return;
         }
         const NSUInteger imageStride = destinationBytesPerImage == 0 ? rowStride * sourceSize.height : destinationBytesPerImage;
-        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) {
+        if (sourceSize.depth > 1 &&
+            (imageStride < rowStride * sourceSize.height || imageStride > SIZE_MAX / (sourceSize.depth - 1))) {
             [_owner markError];
             return;
         }
@@ -19214,7 +19214,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
             return;
         }
         const NSUInteger imageStride = sourceBytesPerImage == 0 ? rowStride * sourceSize.height : sourceBytesPerImage;
-        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) {
+        if (sourceSize.depth > 1 &&
+            (imageStride < rowStride * sourceSize.height || imageStride > SIZE_MAX / (sourceSize.depth - 1))) {
             [_owner markError];
             return;
         }
@@ -21725,7 +21726,8 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
         const NSUInteger rowStride = sourceBytesPerRow == 0 ? rowBytes : sourceBytesPerRow;
         if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) { [_owner markError]; return; }
         const NSUInteger imageStride = sourceBytesPerImage == 0 ? rowStride * sourceSize.height : sourceBytesPerImage;
-        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) { [_owner markError]; return; }
+        if (sourceSize.depth > 1 &&
+            (imageStride < rowStride * sourceSize.height || imageStride > SIZE_MAX / (sourceSize.depth - 1))) { [_owner markError]; return; }
         for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
             zpu_metal_texture *destinationTextureAtLevel =
                 [destination zpuTextureAtLevel:destinationLevel slice:destinationOrigin.z + plane];
@@ -21779,7 +21781,8 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
         const NSUInteger rowStride = destinationBytesPerRow == 0 ? rowBytes : destinationBytesPerRow;
         if (rowStride < rowBytes || (sourceSize.height != 0 && rowStride > SIZE_MAX / sourceSize.height)) { [_owner markError]; return; }
         const NSUInteger imageStride = destinationBytesPerImage == 0 ? rowStride * sourceSize.height : destinationBytesPerImage;
-        if (sourceSize.depth > 1 && imageStride > SIZE_MAX / (sourceSize.depth - 1)) { [_owner markError]; return; }
+        if (sourceSize.depth > 1 &&
+            (imageStride < rowStride * sourceSize.height || imageStride > SIZE_MAX / (sourceSize.depth - 1))) { [_owner markError]; return; }
         for (NSUInteger plane = 0; plane < sourceSize.depth; ++plane) {
             zpu_metal_texture *sourceTextureAtLevel =
                 [source zpuTextureAtLevel:sourceLevel slice:sourceOrigin.z + plane];

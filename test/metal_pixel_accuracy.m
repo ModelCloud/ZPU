@@ -34167,6 +34167,45 @@ int main(void) {
             return 113;
         }
 
+        /* A 3D transfer's image stride cannot collapse the row span of a
+         * plane. Native Metal rejects this layout; the CPU adapter must fail
+         * the command before it can turn the invalid stride into a sequence
+         * of overlapping ZPU plane copies. */
+        id<MTL4CommandBuffer> metal4_bad_image_stride_command_buffer =
+            [adapter_device newCommandBuffer];
+        id<MTL4ComputeCommandEncoder> metal4_bad_image_stride_encoder = nil;
+        __block NSError *metal4_bad_image_stride_error = nil;
+        if (metal4_bad_image_stride_command_buffer != nil && metal4_allocator != nil &&
+            metal4_queue != nil && metal4_three_d_to_buffer != nil) {
+            [metal4_bad_image_stride_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+            metal4_bad_image_stride_encoder =
+                [metal4_bad_image_stride_command_buffer computeCommandEncoder];
+            [metal4_bad_image_stride_encoder copyFromTexture:adapter_three_d_texture
+                                                  sourceSlice:0 sourceLevel:0
+                                                 sourceOrigin:MTLOriginMake(1, 0, 1)
+                                                   sourceSize:three_d_copy_size
+                                                     toBuffer:metal4_three_d_to_buffer
+                                                destinationOffset:0
+                                           destinationBytesPerRow:three_d_copy_row_stride
+                                         destinationBytesPerImage:three_d_copy_row_stride];
+            [metal4_bad_image_stride_encoder endEncoding];
+            [metal4_bad_image_stride_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> metal4_bad_image_stride_buffers[] = {
+                metal4_bad_image_stride_command_buffer,
+            };
+            MTL4CommitOptions *metal4_bad_image_stride_options = ZPUMetalCreateCPUCommitOptions();
+            [metal4_bad_image_stride_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                metal4_bad_image_stride_error = feedback.error;
+            }];
+            [metal4_queue commit:metal4_bad_image_stride_buffers
+                            count:1 options:metal4_bad_image_stride_options];
+        }
+        if (metal4_bad_image_stride_command_buffer == nil ||
+            metal4_bad_image_stride_encoder == nil || metal4_bad_image_stride_error == nil) {
+            fail_with_error("Metal 4 CPU 3D image-stride validation failed", metal4_error);
+            return 114;
+        }
+
         if (@available(macOS 26.0, iOS 26.0, *)) {
             const NSInteger metal4_tensor_dimension_values[] = {3, 2};
             const NSInteger metal4_tensor_packed_stride_values[] = {1, 3};

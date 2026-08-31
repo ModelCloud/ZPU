@@ -105,7 +105,8 @@ triangle path:
   explicitly limited to one 2D level because their caller-supplied stride
   cannot describe a portable mip layout; 3D textures use one ZPU-owned 2D
   plane per z slice, including mip-level depth reduction, explicit
-  `bytesPerImage` transfers, 3D views, heap placement, and legacy/Metal 4
+  `bytesPerImage` transfers (including rejection of image strides smaller than
+  a plane's row span), 3D views, heap placement, and legacy/Metal 4
   texture and buffer copies plus center-sampled mipmap generation
 - CPU-owned direct layered color render passes for up to eight 2D-array slices.
   The expanded direct instance index selects the corresponding ZPU-owned
