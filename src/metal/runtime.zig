@@ -5228,12 +5228,8 @@ pub const ComputeEncoder = struct {
             output.device != left.device) return error.InvalidResource;
         _ = try self.command_buffer.append(.{ .compute_buffer_add = .{
             .kernel = self.kernel,
-            .elements_per_thread = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else
-                (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else
-                    (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 3 else 1)),
-            .element_stride = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else
-                (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else
-                    (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 4 else 1)),
+            .elements_per_thread = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 3 else 1)),
+            .element_stride = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 4 else 1)),
             .left = left,
             .left_offset = self.buffer_offsets[0],
             .right = right,
@@ -5495,8 +5491,7 @@ pub const ComputeEncoder = struct {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
-            return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 }, threads_per_threadgroup,
-                indirect_buffer, indirect_buffer_offset, false);
+            return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 }, threads_per_threadgroup, indirect_buffer, indirect_buffer_offset, false);
         }
         if (self.isBufferAddKernel()) {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
@@ -5540,8 +5535,7 @@ pub const ComputeEncoder = struct {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
-            return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 },
-                .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
+            return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
         }
         if (self.isBufferAddKernel()) {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
@@ -5927,7 +5921,8 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
         var triangle_index: usize = 0;
         while (triangle_index < triangle_count) : (triangle_index += 1) {
             if ((flags & cpu_acceleration_structure_flag_triangle_masks) != 0 and
-                (readU32Little(acceleration_structure.bytes, mask_offset + triangle_index * @sizeOf(u32)) & std.math.maxInt(u32)) == 0) {
+                (readU32Little(acceleration_structure.bytes, mask_offset + triangle_index * @sizeOf(u32)) & std.math.maxInt(u32)) == 0)
+            {
                 continue;
             }
             const base = triangle_offset + triangle_index * cpu_acceleration_structure_triangle_bytes;
@@ -5965,17 +5960,16 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
         command.kernel != 38 and command.kernel != 39 and command.kernel != 40 and
         command.kernel != 42 and command.kernel != 43 and command.kernel != 44) or
         (command.elements_per_thread != 1 and command.elements_per_thread != 2 and
-         command.elements_per_thread != 3 and command.elements_per_thread != 4) or
+            command.elements_per_thread != 3 and command.elements_per_thread != 4) or
         (command.element_stride != 1 and command.element_stride != 2 and
-         command.element_stride != 4) or
+            command.element_stride != 4) or
         !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
         command.threads_per_grid.depth != 1 or command.threads_per_threadgroup.width == 0 or
         command.threads_per_threadgroup.height != 1 or command.threads_per_threadgroup.depth != 1)
         return error.InvalidArgument;
-    const storage_count = std.math.mul(usize, command.threads_per_grid.width,
-        command.element_stride) catch return error.InvalidArgument;
+    const storage_count = std.math.mul(usize, command.threads_per_grid.width, command.element_stride) catch return error.InvalidArgument;
     const byte_count = std.math.mul(usize, storage_count, @sizeOf(f32)) catch return error.InvalidArgument;
     if (!rangeValid(command.left.bytes.len, command.left_offset, byte_count) or
         !rangeValid(command.right.bytes.len, command.right_offset, byte_count) or
@@ -9389,8 +9383,7 @@ test "CPU texture copy compute preserves the top-left pixel grid" {
     for (0..source.height) |y| for (0..source.width) |x| {
         const source_offset = y * source.stride + x * 4;
         const destination_offset = y * destination.stride + x * 4;
-        try std.testing.expectEqualSlices(u8,
-            source.bytes[source_offset..][0..4], destination.bytes[destination_offset..][0..4]);
+        try std.testing.expectEqualSlices(u8, source.bytes[source_offset..][0..4], destination.bytes[destination_offset..][0..4]);
     };
 }
 
