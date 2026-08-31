@@ -12466,7 +12466,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             }
             elementDataType = dataType;
             dataType = MTLDataTypePointer;
-            access = [pointeeConst isEqualToString:@"const"] ? MTLBindingAccessReadOnly :
+            access = ([pointeeConst isEqualToString:@"const"] ||
+                      [address isEqualToString:@"constant"]) ? MTLBindingAccessReadOnly :
                 MTLBindingAccessReadWrite;
         } else if ([typeName hasPrefix:@"texture"] || [typeName hasPrefix:@"depth"]) {
             if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access,

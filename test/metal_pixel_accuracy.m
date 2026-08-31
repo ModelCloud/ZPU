@@ -691,7 +691,9 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "array<sampler, 2> samplers [[id(2)]]; };\n"
          "kernel void zpu_source_argument_buffer_texture_sampler_arrays(constant SourceTextureSamplerArrays &arguments [[buffer(8)]]) { "
          "(void)arguments; }\n"
-         "struct SourcePointerArrays { array<device const half *, 2> weights [[id(0)]]; };\n"
+         "struct SourcePointerArrays { array<device const half *, 2> deviceConst [[id(0)]]; "
+         "array<device float *, 2> deviceMutable [[id(2)]]; "
+         "array<constant float *, 2> constantPointer [[id(4)]]; };\n"
          "kernel void zpu_source_argument_buffer_pointer_arrays(constant SourcePointerArrays &arguments [[buffer(9)]]) { "
          "(void)arguments; }\n"
          "struct SourceDepthArguments { depth2d<float> depth [[id(0)]]; "
@@ -1739,48 +1741,57 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
         MTLStructType *native_struct = native_binding.bufferStructType;
         MTLStructType *adapter_struct = adapter_binding.bufferStructType;
-        MTLStructMember *native_weights = native_struct.members.count == 1 ? native_struct.members[0] : nil;
-        MTLStructMember *adapter_weights = adapter_struct.members.count == 1 ? adapter_struct.members[0] : nil;
-        MTLStructType *native_member_struct = native_weights.structType;
-        MTLStructType *adapter_member_struct = adapter_weights.structType;
-        MTLStructMember *native_elements = native_member_struct.members.count == 1 ?
-            native_member_struct.members[0] : nil;
-        MTLStructMember *adapter_elements = adapter_member_struct.members.count == 1 ?
-            adapter_member_struct.members[0] : nil;
-        MTLArrayType *native_array = native_elements.arrayType;
-        MTLArrayType *adapter_array = adapter_elements.arrayType;
-        MTLPointerType *native_pointer = native_array.elementPointerType;
-        MTLPointerType *adapter_pointer = adapter_array.elementPointerType;
         source_pointer_array_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
             native_binding != nil && adapter_binding != nil && native_binding.index == 9 &&
             adapter_binding.index == 9 && native_binding.bufferDataType == MTLDataTypeStruct &&
             adapter_binding.bufferDataType == MTLDataTypeStruct &&
             native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
             native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
-            native_struct != nil && adapter_struct != nil && native_struct.members.count == 1 &&
-            adapter_struct.members.count == 1 && native_weights != nil && adapter_weights != nil &&
-            [native_weights.name isEqualToString:adapter_weights.name] &&
-            native_weights.name.length != 0 && native_weights.offset == adapter_weights.offset &&
-            native_weights.dataType == adapter_weights.dataType && native_weights.dataType == MTLDataTypeStruct &&
-            native_weights.argumentIndex == adapter_weights.argumentIndex &&
-            native_member_struct != nil && adapter_member_struct != nil &&
-            native_member_struct.members.count == 1 && adapter_member_struct.members.count == 1 &&
-            native_elements != nil && adapter_elements != nil &&
-            [native_elements.name isEqualToString:@"__elems"] &&
-            [adapter_elements.name isEqualToString:@"__elems"] &&
-            native_elements.dataType == adapter_elements.dataType &&
-            native_elements.dataType == MTLDataTypeArray && native_array != nil && adapter_array != nil &&
-            native_array.elementType == adapter_array.elementType && native_array.elementType == MTLDataTypePointer &&
-            native_array.arrayLength == adapter_array.arrayLength && native_array.arrayLength == 2 &&
-            native_array.stride == adapter_array.stride &&
-            native_array.argumentIndexStride == adapter_array.argumentIndexStride &&
-            native_array.argumentIndexStride == 1 && native_pointer != nil && adapter_pointer != nil &&
-            native_pointer.elementType == adapter_pointer.elementType &&
-            native_pointer.elementType == MTLDataTypeHalf &&
-            native_pointer.access == adapter_pointer.access &&
-            native_pointer.access == MTLBindingAccessReadOnly &&
-            native_pointer.alignment == adapter_pointer.alignment &&
-            native_pointer.dataSize == adapter_pointer.dataSize;
+            native_struct != nil && adapter_struct != nil && native_struct.members.count == 3 &&
+            adapter_struct.members.count == 3;
+        const MTLDataType expected_pointer_element_types[] = {
+            MTLDataTypeHalf, MTLDataTypeFloat, MTLDataTypeFloat,
+        };
+        const MTLBindingAccess expected_pointer_access[] = {
+            MTLBindingAccessReadOnly, MTLBindingAccessReadWrite, MTLBindingAccessReadOnly,
+        };
+        for (NSUInteger index = 0; source_pointer_array_reflection_ok && index < 3; ++index) {
+            MTLStructMember *native_member = native_struct.members[index];
+            MTLStructMember *adapter_member = adapter_struct.members[index];
+            MTLStructType *native_member_struct = native_member.structType;
+            MTLStructType *adapter_member_struct = adapter_member.structType;
+            MTLStructMember *native_elements = native_member_struct.members.count == 1 ?
+                native_member_struct.members[0] : nil;
+            MTLStructMember *adapter_elements = adapter_member_struct.members.count == 1 ?
+                adapter_member_struct.members[0] : nil;
+            MTLArrayType *native_array = native_elements.arrayType;
+            MTLArrayType *adapter_array = adapter_elements.arrayType;
+            MTLPointerType *native_pointer = native_array.elementPointerType;
+            MTLPointerType *adapter_pointer = adapter_array.elementPointerType;
+            source_pointer_array_reflection_ok = native_member != nil && adapter_member != nil &&
+                [native_member.name isEqualToString:adapter_member.name] && native_member.name.length != 0 &&
+                native_member.offset == adapter_member.offset &&
+                native_member.dataType == adapter_member.dataType && native_member.dataType == MTLDataTypeStruct &&
+                native_member.argumentIndex == adapter_member.argumentIndex &&
+                native_member_struct != nil && adapter_member_struct != nil &&
+                native_member_struct.members.count == 1 && adapter_member_struct.members.count == 1 &&
+                native_elements != nil && adapter_elements != nil &&
+                [native_elements.name isEqualToString:@"__elems"] &&
+                [adapter_elements.name isEqualToString:@"__elems"] &&
+                native_elements.dataType == adapter_elements.dataType &&
+                native_elements.dataType == MTLDataTypeArray && native_array != nil && adapter_array != nil &&
+                native_array.elementType == adapter_array.elementType && native_array.elementType == MTLDataTypePointer &&
+                native_array.arrayLength == adapter_array.arrayLength && native_array.arrayLength == 2 &&
+                native_array.stride == adapter_array.stride &&
+                native_array.argumentIndexStride == adapter_array.argumentIndexStride &&
+                native_array.argumentIndexStride == 1 && native_pointer != nil && adapter_pointer != nil &&
+                native_pointer.elementType == adapter_pointer.elementType &&
+                native_pointer.elementType == expected_pointer_element_types[index] &&
+                native_pointer.access == adapter_pointer.access &&
+                native_pointer.access == expected_pointer_access[index] &&
+                native_pointer.alignment == adapter_pointer.alignment &&
+                native_pointer.dataSize == adapter_pointer.dataSize;
+        }
     }
     if (native_source_pointer_array_function == nil || adapter_source_pointer_array_function == nil ||
         native_source_pointer_array_encoder == nil || adapter_source_pointer_array_encoder == nil ||
