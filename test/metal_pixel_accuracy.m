@@ -5097,6 +5097,116 @@ static int test_cpu_trace_aabbs_against_native(
     return 0;
 }
 
+static int test_cpu_legacy_trace_aabbs_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLCommandQueue> native_queue, id<MTLCommandQueue> adapter_queue)
+    API_AVAILABLE(macos(11.0), ios(14.0)) {
+    enum { width = 9, height = 7, byte_count = width * height * 4 };
+    const float bounds[] = {-0.80f, -0.70f, -0.10f, 0.80f, 0.70f, 0.10f};
+    NSString *source =
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+         "kernel void zpu_cpu_trace_aabbs_rgba8(device const float *bounds [[buffer(0)]], "
+         "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
+         "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+         "float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height()); "
+         "float3 origin = float3(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y, 1.0); "
+         "bool hit = origin.x >= bounds[0] && origin.x <= bounds[3] && "
+         "origin.y >= bounds[1] && origin.y <= bounds[4] && "
+         "bounds[2] <= origin.z && origin.z - bounds[2] >= 0.0; "
+         "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n";
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
+    id<MTLFunction> native_function = [native_library newFunctionWithName:@"zpu_cpu_trace_aabbs_rgba8"];
+    id<MTLComputePipelineState> native_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+    id<MTLFunction> adapter_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_trace_aabbs_rgba8");
+    id<MTLComputePipelineState> adapter_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLBuffer> native_bounds =
+        [native_device newBufferWithBytes:bounds length:sizeof(bounds) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_bounds =
+        [adapter_device newBufferWithBytes:bounds length:sizeof(bounds) options:MTLResourceStorageModeShared];
+    MTLAccelerationStructureBoundingBoxGeometryDescriptor *geometry =
+        [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+    geometry.boundingBoxBuffer = adapter_bounds;
+    geometry.boundingBoxBufferOffset = 0;
+    geometry.boundingBoxStride = 6 * sizeof(float);
+    geometry.boundingBoxCount = 1;
+    MTLPrimitiveAccelerationStructureDescriptor *acceleration_descriptor =
+        [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    acceleration_descriptor.geometryDescriptors = @[geometry];
+    MTLAccelerationStructureSizes sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:acceleration_descriptor];
+    id<MTLAccelerationStructure> acceleration_structure = sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:sizes.accelerationStructureSize];
+    id<MTLBuffer> scratch = [adapter_device
+        newBufferWithLength:sizes.buildScratchBufferSize == 0 ? 1 : sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> build_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> build_encoder =
+        [build_command_buffer accelerationStructureCommandEncoder];
+    [build_encoder buildAccelerationStructure:acceleration_structure descriptor:acceleration_descriptor
+                                scratchBuffer:scratch scratchBufferOffset:0];
+    [build_encoder endEncoding];
+    [build_command_buffer commit];
+    [build_command_buffer waitUntilCompleted];
+
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+    [native_encoder setComputePipelineState:native_pipeline];
+    [native_encoder setBuffer:native_bounds offset:0 atIndex:0];
+    [native_encoder setTexture:native_texture atIndex:0];
+    [native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+              threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [native_encoder endEncoding];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+    [adapter_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_encoder setAccelerationStructure:acceleration_structure atBufferIndex:0];
+    [adapter_encoder setTexture:adapter_texture atIndex:0];
+    [adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+               threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    const BOOL exact = native_library != nil && native_function != nil && native_pipeline != nil &&
+        adapter_function != nil && adapter_pipeline != nil && native_texture != nil && adapter_texture != nil &&
+        native_bounds != nil && adapter_bounds != nil && geometry != nil && acceleration_descriptor != nil &&
+        acceleration_structure != nil && scratch != nil && build_command_buffer != nil && build_encoder != nil &&
+        build_command_buffer.status == MTLCommandBufferStatusCompleted && native_command_buffer != nil &&
+        native_encoder != nil && native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_command_buffer != nil && adapter_encoder != nil &&
+        adapter_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        memcmp(native_pixels, adapter_pixels, byte_count) == 0;
+    if (!exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: legacy CPU AABB/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("legacy CPU AABB trace command failed", adapter_error ?: native_error);
+        return 164;
+    }
+    return 0;
+}
+
 /* The native path remains an oracle only. This test builds the child and
  * instance descriptors through the adapter, then verifies that the CPU/ZPU
  * instance flattening applies the same affine transform as a native shader
@@ -23343,6 +23453,9 @@ int main(void) {
             const int trace_oracle_result = test_cpu_trace_triangles_against_native(
                 device, adapter_device, library, adapter_library, queue, adapter_queue);
             if (trace_oracle_result != 0) return trace_oracle_result;
+            const int legacy_aabb_oracle_result = test_cpu_legacy_trace_aabbs_against_native(
+                device, adapter_device, queue, adapter_queue);
+            if (legacy_aabb_oracle_result != 0) return legacy_aabb_oracle_result;
             const int intersection_oracle_result = test_cpu_intersection_function_against_native(
                 device, adapter_device, queue, adapter_queue);
             if (intersection_oracle_result != 0) return intersection_oracle_result;
