@@ -1869,6 +1869,7 @@ const MosaicBatchDraw = struct {
     command_indices: []const usize = &.{},
     prepare: ?*ParallelBatchPrepare = null,
     prepare_completed: ?*std.atomic.Value(usize) = null,
+    plan_reuse_hint: bool = false,
     plan_ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     plan_failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     queues: [max_parallel_band_count]MosaicQueue = [_]MosaicQueue{.{}} ** max_parallel_band_count,
@@ -1911,7 +1912,8 @@ var mosaic_region_item_lookup: [max_mosaic_work_items]usize = undefined;
 var mosaic_command_write_offsets: [max_mosaic_work_items]usize = undefined;
 const max_mosaic_command_refs: usize = max_batch_commands * 64;
 var mosaic_command_indices: [max_mosaic_command_refs]usize = undefined;
-var mosaic_cached_bounds: [max_batch_commands]Rect = undefined;
+var mosaic_command_spans: [max_batch_commands]MosaicRegionSpan = undefined;
+var mosaic_cached_spans: [max_batch_commands]MosaicRegionSpan = undefined;
 var mosaic_cached_geometry_revisions: [max_batch_commands]u64 = undefined;
 const MosaicPlanCache = struct {
     valid: bool = false,
@@ -1923,6 +1925,7 @@ const MosaicPlanCache = struct {
     command_ref_count: usize = 0,
     key: u64 = 0,
     key_complete: bool = false,
+    eligible: bool = false,
 };
 var mosaic_plan_cache: MosaicPlanCache = .{};
 const BatchStaticReplayCache = struct {
@@ -2044,18 +2047,8 @@ fn mosaicRegionSpan(bounds: Rect, width: u32, height: u32, columns: usize, rows:
 
 const MosaicPlanKey = struct { value: u64, complete: bool };
 
-fn mosaicPlanKey(commands: []const DrawCommand) MosaicPlanKey {
-    // Geometry revisions are the command-stream contract for immutable
-    // prepared geometry. Include the command-buffer address so identical
-    // revision numbers from two live streams cannot alias the cached plan.
-    var value: u64 = 0xcbf29ce484222325 ^ @as(u64, @intFromPtr(commands.ptr));
-    var complete = true;
-    for (commands) |command| {
-        if (command.geometry_revision == 0) complete = false;
-        value ^= command.geometry_revision +% 0x9e3779b97f4a7c15;
-        value *%= 0x100000001b3;
-    }
-    return .{ .value = value, .complete = complete };
+fn mosaicRegionSpanEmpty(span: MosaicRegionSpan) bool {
+    return span.x0 >= span.x1 or span.y0 >= span.y1;
 }
 
 fn assignMosaicQueues(item_count: usize, queue_count: usize, queues: *[max_parallel_band_count]MosaicQueue) void {
@@ -2073,51 +2066,68 @@ fn assignMosaicQueues(item_count: usize, queue_count: usize, queues: *[max_paral
     }
 }
 
-fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []const PreparedDraw, commands: []const DrawCommand, command_count: usize, queues: *[max_parallel_band_count]MosaicQueue) ?struct { items: []const MosaicWorkItem, command_indices: []const usize } {
+fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []const PreparedDraw, commands: []const DrawCommand, command_count: usize, plan_reuse_hint: bool, queues: *[max_parallel_band_count]MosaicQueue) ?struct { items: []const MosaicWorkItem, command_indices: []const usize } {
     if (queue_count == 0 or queue_count > max_parallel_band_count or width > std.math.maxInt(i32) or height > std.math.maxInt(i32)) return null;
     const columns = (@as(usize, width) + mosaic_region_size - 1) / mosaic_region_size;
     const rows = (@as(usize, height) + mosaic_region_size - 1) / mosaic_region_size;
     const item_count = columns * rows;
     if (columns == 0 or rows == 0 or item_count > max_mosaic_work_items or prepared.len < command_count or commands.len < command_count) return null;
-    const plan_key = mosaicPlanKey(commands[0..command_count]);
-
-    // A large textured primitive split across supertiles can change the
-    // floating-point origin of the existing fast interpolator at the split.
-    // Keep the public Vulkan path exact until a segmented interpolator with a
-    // proven global origin exists; small glyph-like quads remain eligible and
-    // broad/global work is handled by the ordered batch fallback.
-    for (prepared[0..command_count], 0..) |command, command_index| {
-        if (command_index == 0) continue;
-        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
-        if (command.batch_fast and (span.x1 - span.x0 > 1 or span.y1 - span.y0 > 1) and (command.bounds.width > 32 or command.bounds.height > 32)) return null;
+    const cache_metadata_match = mosaic_plan_cache.valid and mosaic_plan_cache.commands_address == @intFromPtr(commands.ptr) and
+        mosaic_plan_cache.command_count == command_count and mosaic_plan_cache.width == width and mosaic_plan_cache.height == height and
+        mosaic_plan_cache.item_count == item_count;
+    // batchNeedsPreparation() has already proved every prepared command is
+    // unchanged. Reuse only a plan that was previously admitted by this
+    // function; a stale plan from a failed eligibility check must never turn
+    // into an accidental fast-path admission.
+    if (plan_reuse_hint and cache_metadata_match and mosaic_plan_cache.eligible) {
+        assignMosaicQueues(item_count, queue_count, queues);
+        return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
     }
+    var plan_key_value: u64 = 0xcbf29ce484222325 ^ @as(u64, @intFromPtr(commands.ptr));
+    var plan_key_complete = true;
+    var same_revisions = cache_metadata_match;
+    var same_spans = cache_metadata_match;
 
-    if (mosaic_plan_cache.valid and mosaic_plan_cache.commands_address == @intFromPtr(commands.ptr) and mosaic_plan_cache.command_count == command_count and mosaic_plan_cache.width == width and mosaic_plan_cache.height == height and
-        mosaic_plan_cache.item_count == item_count and mosaic_plan_cache.key_complete == plan_key.complete and mosaic_plan_cache.key == plan_key.value)
-    {
-        if (plan_key.complete) {
-            var same_revisions = true;
-            for (commands[0..command_count], 0..) |command, index| {
-                if (mosaic_cached_geometry_revisions[index] != command.geometry_revision) {
-                    same_revisions = false;
-                    break;
-                }
-            }
-            if (!same_revisions) return null;
-            assignMosaicQueues(item_count, queue_count, queues);
-            return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
+    // One pass supplies all planner-side validation: the revision digest,
+    // conservative broad-texture fallback check, cached-revision validation,
+    // and the region span used by both count and write passes. The previous
+    // implementation visited the entire command stream separately for each
+    // of these jobs, which was visible on animated game/editor workloads.
+    for (prepared[0..command_count], 0..) |prepared_command, command_index| {
+        const command = commands[command_index];
+        if (command.geometry_revision == 0) plan_key_complete = false;
+        plan_key_value ^= command.geometry_revision +% 0x9e3779b97f4a7c15;
+        plan_key_value *%= 0x100000001b3;
+
+        const span = mosaicRegionSpan(prepared_command.bounds, width, height, columns, rows) orelse MosaicRegionSpan{ .x0 = 0, .x1 = 0, .y0 = 0, .y1 = 0 };
+        mosaic_command_spans[command_index] = span;
+        if (command_index != 0 and !mosaicRegionSpanEmpty(span) and prepared_command.batch_fast and
+            (span.x1 - span.x0 > 1 or span.y1 - span.y0 > 1) and
+            (prepared_command.bounds.width > 32 or prepared_command.bounds.height > 32))
+        {
+            // A command can become ineligible after a previously cached
+            // Mosaic frame (for example when an animated broad texture is
+            // admitted). Invalidate that old plan before falling back so a
+            // later unchanged frame cannot use the stale fast-path hint.
+            mosaic_plan_cache.valid = false;
+            return null;
         }
-        var same_bounds = true;
-        for (prepared[0..command_count], 0..) |prepared_command, index| {
-            if (!std.meta.eql(mosaic_cached_bounds[index], prepared_command.bounds)) {
-                same_bounds = false;
-                break;
-            }
+        if (cache_metadata_match) {
+            same_revisions = same_revisions and mosaic_cached_geometry_revisions[command_index] == command.geometry_revision;
+            same_spans = same_spans and std.meta.eql(mosaic_cached_spans[command_index], span);
         }
-        if (same_bounds) {
-            assignMosaicQueues(item_count, queue_count, queues);
-            return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
-        }
+    }
+    const plan_key = MosaicPlanKey{ .value = plan_key_value, .complete = plan_key_complete };
+
+    // The spatial plan depends on the command order and conservative prepared
+    // region spans, not on the exact position inside a region. Reuse it when
+    // an animated primitive moves without crossing a region boundary.
+    // Exact revision/key matching remains the cheaper proof for immutable
+    // streams, while the span proof handles in-region animation safely.
+    const same_revision_plan = cache_metadata_match and mosaic_plan_cache.key_complete == plan_key.complete and same_revisions and mosaic_plan_cache.key == plan_key.value;
+    if (same_revision_plan or same_spans) {
+        assignMosaicQueues(item_count, queue_count, queues);
+        return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
     }
 
     var item_index: usize = 0;
@@ -2146,8 +2156,9 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
         const region_y = @as(usize, @intCast(item.rect.y)) / mosaic_region_size;
         mosaic_region_item_lookup[region_y * columns + region_x] = sorted_index;
     }
-    for (prepared[0..command_count]) |command| {
-        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+    for (0..command_count) |command_index| {
+        const span = mosaic_command_spans[command_index];
+        if (mosaicRegionSpanEmpty(span)) continue;
         for (span.y0..span.y1) |region_y| for (span.x0..span.x1) |region_x| {
             const region_item_index = mosaic_region_item_lookup[region_y * columns + region_x];
             mosaic_work_items[region_item_index].command_count += 1;
@@ -2160,8 +2171,9 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
         mosaic_command_write_offsets[sorted_index] = reference_count;
         reference_count += item.command_count;
     }
-    for (prepared[0..command_count], 0..) |command, command_index| {
-        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+    for (0..command_count) |command_index| {
+        const span = mosaic_command_spans[command_index];
+        if (mosaicRegionSpanEmpty(span)) continue;
         for (span.y0..span.y1) |region_y| for (span.x0..span.x1) |region_x| {
             const region_item_index = mosaic_region_item_lookup[region_y * columns + region_x];
             const output = mosaic_command_write_offsets[region_item_index];
@@ -2169,11 +2181,11 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
             mosaic_command_write_offsets[region_item_index] = output + 1;
         };
     }
-    for (prepared[0..command_count], 0..) |command, index| {
-        mosaic_cached_bounds[index] = command.bounds;
+    for (0..command_count) |index| {
+        mosaic_cached_spans[index] = mosaic_command_spans[index];
         mosaic_cached_geometry_revisions[index] = commands[index].geometry_revision;
     }
-    mosaic_plan_cache = .{ .valid = true, .commands_address = @intFromPtr(commands.ptr), .command_count = command_count, .width = width, .height = height, .item_count = item_count, .command_ref_count = reference_count, .key = plan_key.value, .key_complete = plan_key.complete };
+    mosaic_plan_cache = .{ .valid = true, .commands_address = @intFromPtr(commands.ptr), .command_count = command_count, .width = width, .height = height, .item_count = item_count, .command_ref_count = reference_count, .key = plan_key.value, .key_complete = plan_key.complete, .eligible = true };
     assignMosaicQueues(item_count, queue_count, queues);
     return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..reference_count] };
 }
@@ -2821,28 +2833,28 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
             // per-run division and look-ahead samples cost more than they
             // save on these short atlas spans.
             if (last_x - first_x <= 8) {
-                while (x + 4 <= last_x) : (x += 4) {
+                while (x + 8 <= last_x) : (x += 8) {
                     const pixel_index = row_offset + @as(usize, @intCast(x));
                     var lane_u = stepped_u_over_w;
-                    var colors: [4]u32 = undefined;
-                    inline for (0..4) |lane| {
+                    var colors: [8]u32 = undefined;
+                    inline for (0..8) |lane| {
                         colors[lane] = shadeUnitTexture16x16Row(lane_u * raster.flat_reciprocal_w, texture_y, prelit);
                         lane_u += raster.u_over_w_dx;
                     }
                     if (comptime depth_test) {
-                        const passes: @Vector(4, bool) = @as(@Vector(4, u32), @splat(raster.flat_depth_bits)) <= depth_words[pixel_index..][0..4].*;
+                        const passes: @Vector(8, bool) = @as(@Vector(8, u32), @splat(raster.flat_depth_bits)) <= depth_words[pixel_index..][0..8].*;
                         if (@reduce(.And, passes)) {
-                            depth_words[pixel_index..][0..4].* = @as(@Vector(4, u32), @splat(raster.flat_depth_bits));
-                            color_words[pixel_index..][0..4].* = colors;
-                            pixels_written += 4;
-                        } else inline for (0..4) |lane| if (passes[lane]) {
+                            depth_words[pixel_index..][0..8].* = @as(@Vector(8, u32), @splat(raster.flat_depth_bits));
+                            color_words[pixel_index..][0..8].* = colors;
+                            pixels_written += 8;
+                        } else inline for (0..8) |lane| if (passes[lane]) {
                             depth_words[pixel_index + lane] = raster.flat_depth_bits;
                             color_words[pixel_index + lane] = colors[lane];
                             pixels_written += 1;
                         };
                     } else {
-                        color_words[pixel_index..][0..4].* = colors;
-                        pixels_written += 4;
+                        color_words[pixel_index..][0..8].* = colors;
+                        pixels_written += 8;
                     }
                     stepped_u_over_w = lane_u;
                 }
@@ -3536,7 +3548,7 @@ fn runMosaicBatch(context: *MosaicBatchDraw, worker_index: usize, comptime count
         while (completed.load(.acquire) != context.queue_count) std.atomic.spinLoopHint();
     }
     if (worker_index == 0) {
-        if (buildMosaicWorkPlan(context.width, context.height, context.queue_count, context.prepared, context.commands, context.commands.len, &context.queues)) |plan| {
+        if (buildMosaicWorkPlan(context.width, context.height, context.queue_count, context.prepared, context.commands, context.commands.len, context.plan_reuse_hint, &context.queues)) |plan| {
             context.work_items = plan.items;
             context.command_indices = plan.command_indices;
         } else {
@@ -3552,9 +3564,15 @@ fn runMosaicBatch(context: *MosaicBatchDraw, worker_index: usize, comptime count
         for (context.command_indices[claim.item.command_first..command_end]) |command_index| {
             const command = context.commands[command_index];
             const prepared = &context.prepared[command_index];
-            const prepared_region = intersectRects(prepared.bounds, claim.item.rect);
-            if (prepared_region.width == 0 or prepared_region.height == 0) continue;
-            const region_scissor = intersectRects(command.scissor, claim.item.rect);
+            // Plan construction adds this command to the region only when its
+            // prepared bounds intersect the region. Keeping that invariant
+            // removes a second rectangle intersection from the hot command
+            // loop; scissor still needs a fresh intersection because it is a
+            // command-level execution constraint.
+            const region_scissor = if (command.scissor.x == 0 and command.scissor.y == 0 and command.scissor.width == context.width and command.scissor.height == context.height)
+                claim.item.rect
+            else
+                intersectRects(command.scissor, claim.item.rect);
             if (region_scissor.width == 0 or region_scissor.height == 0) continue;
             if (comptime !count_work) if (prepared.batch_fast) if (drawPreparedBatchFastRegion(context.target, context.depth, context.width, context.height, prepared, region_scissor)) |pixels_written| {
                 band.pixels_written += pixels_written;
@@ -3965,6 +3983,7 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
             .queue_count = parallelBandCount(),
             .prepare = if (needs_preparation) &prepare_context else null,
             .prepare_completed = if (needs_preparation) &prepare_completed else null,
+            .plan_reuse_hint = !needs_preparation,
         };
         if (!dispatchParallel(.{ .mosaic = &context })) return 0;
         if (context.plan_failed.load(.acquire)) return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, dirty_output);
@@ -4579,7 +4598,7 @@ test "Mosaic work plan keeps ordered region references and balanced owners" {
         .{ .bounds = .{ .x = 200, .y = 200, .width = 100, .height = 100 } },
     };
     var queues: [max_parallel_band_count]MosaicQueue = undefined;
-    const plan = buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, &queues) orelse return error.TestUnexpectedResult;
+    const plan = buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, false, &queues) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 4), plan.items.len);
     try std.testing.expectEqual(@as(usize, 5), plan.command_indices.len);
     var owned_items: usize = 0;
@@ -4595,6 +4614,25 @@ test "Mosaic work plan keeps ordered region references and balanced owners" {
             previous = command_index;
         }
     }
+}
+
+test "Mosaic ineligible admission invalidates cached plan reuse" {
+    mosaic_plan_cache.valid = false;
+    var commands = [_]DrawCommand{ std.mem.zeroes(DrawCommand), std.mem.zeroes(DrawCommand) };
+    commands[0].geometry_revision = 1;
+    commands[1].geometry_revision = 2;
+    var prepared = [_]PreparedDraw{
+        .{ .bounds = .{ .x = 0, .y = 0, .width = 100, .height = 100 } },
+        .{ .bounds = .{ .x = 200, .y = 200, .width = 100, .height = 100 } },
+    };
+    var queues: [max_parallel_band_count]MosaicQueue = undefined;
+    try std.testing.expect(buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, false, &queues) != null);
+
+    // This is the strict fallback case: a prepared textured command spans
+    // multiple regions and is too broad for the exact segmented fast path.
+    prepared[1].batch_fast = true;
+    try std.testing.expect(buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, false, &queues) == null);
+    try std.testing.expect(buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, true, &queues) == null);
 }
 
 test "prepared bounds conservatively cover transformed content" {
