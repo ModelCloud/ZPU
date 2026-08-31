@@ -11889,6 +11889,23 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
             implementations[name] = zpu_cpu_fragment_name;
         }];
     }
+    NSError *uniformFragmentError = nil;
+    NSRegularExpression *uniformFragmentExpression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"fragmentfloat4([A-Za-z_][A-Za-z0-9_]*)\\(Vertex([A-Za-z_][A-Za-z0-9_]*)"
+             "\\[\\[stage_in\\]\\],constantfloat4&([A-Za-z_][A-Za-z0-9_]*)"
+             "\\[\\[buffer\\(0\\)\\]\\]\\)\\{return\\3;\\}"
+                                   options:0 error:&uniformFragmentError];
+    if (uniformFragmentExpression != nil && uniformFragmentError == nil) {
+        [uniformFragmentExpression enumerateMatchesInString:compactSource options:0
+                                                       range:NSMakeRange(0, compactSource.length)
+                                                  usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+            (void)flags;
+            (void)stop;
+            NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+            implementations[name] = @"zpu_cpu_uniform_color_fragment";
+        }];
+    }
     return [implementations copy];
 }
 
@@ -12050,7 +12067,8 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
     MTLFunctionType functionType = 0;
     if (sourceLowered) {
         functionType = [implementationName isEqualToString:zpu_cpu_vertex_name] ? MTLFunctionTypeVertex :
-            ([implementationName isEqualToString:zpu_cpu_fragment_name] ? MTLFunctionTypeFragment :
+            ([implementationName isEqualToString:zpu_cpu_fragment_name] ||
+             [implementationName isEqualToString:@"zpu_cpu_uniform_color_fragment"] ? MTLFunctionTypeFragment :
              MTLFunctionTypeKernel);
     } else {
         functionType = [_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0;

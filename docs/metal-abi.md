@@ -586,7 +586,10 @@ triangle path:
   buffer slots and `thread_position_in_grid`, plus the source-named RGBA8
   texture gradient profile with a `texture2d<float, access::write>` slot and
   the top-left `uint2` grid, and the canonical source-named `Vertex` passthrough
-  plus color-returning fragment pair. Those functions execute through ZPU's
+  plus color-returning fragment pair. A canonical source-named fragment that
+  returns a `constant float4` buffer-0 color is lowered to the CPU
+  uniform-color raster profile, preserving `setFragmentBytes:length:atIndex:`
+  and its exact attachment bytes. Those functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler.
   Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization

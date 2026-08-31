@@ -569,13 +569,15 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct Vertex { float4 position [[position]]; float4 color; };\n"
          "vertex Vertex zpu_source_vertex(uint vertex_id [[vertex_id]], "
          "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
-         "fragment float4 zpu_source_fragment(Vertex input [[stage_in]]) { return input.color; }\n";
+         "fragment float4 zpu_source_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
+         "fragment float4 zpu_source_uniform_fragment(Vertex input [[stage_in]], "
+         "constant float4 &color [[buffer(0)]]) { return color; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 5) {
+        adapter_library.functionNames.count != 6) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -841,6 +843,87 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU render lowering execution failed",
                         adapter_render_error ?: native_render_error);
         return 170;
+    }
+
+    id<MTLFunction> native_uniform_fragment =
+        [native_library newFunctionWithName:@"zpu_source_uniform_fragment"];
+    id<MTLFunction> adapter_uniform_fragment =
+        [adapter_library newFunctionWithName:@"zpu_source_uniform_fragment"];
+    MTLRenderPipelineDescriptor *native_uniform_descriptor = [native_render_descriptor copy];
+    native_uniform_descriptor.fragmentFunction = native_uniform_fragment;
+    MTLRenderPipelineDescriptor *adapter_uniform_descriptor = [adapter_render_descriptor copy];
+    adapter_uniform_descriptor.fragmentFunction = adapter_uniform_fragment;
+    NSError *native_uniform_error = nil;
+    NSError *adapter_uniform_error = nil;
+    id<MTLRenderPipelineState> native_uniform_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_uniform_descriptor
+                                                       error:&native_uniform_error];
+    id<MTLRenderPipelineState> adapter_uniform_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_uniform_descriptor
+                                                        error:&adapter_uniform_error];
+    id<MTLTexture> native_uniform_texture = [native_device newTextureWithDescriptor:render_texture_descriptor];
+    id<MTLTexture> adapter_uniform_texture = [adapter_device newTextureWithDescriptor:render_texture_descriptor];
+    MTLRenderPassDescriptor *native_uniform_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_uniform_pass.colorAttachments[0].texture = native_uniform_texture;
+    native_uniform_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_uniform_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_uniform_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    MTLRenderPassDescriptor *adapter_uniform_pass = [native_uniform_pass copy];
+    adapter_uniform_pass.colorAttachments[0].texture = adapter_uniform_texture;
+    id<MTLCommandBuffer> native_uniform_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_uniform_command_buffer = [adapter_queue commandBuffer];
+    id<MTLRenderCommandEncoder> native_uniform_encoder =
+        [native_uniform_command_buffer renderCommandEncoderWithDescriptor:native_uniform_pass];
+    id<MTLRenderCommandEncoder> adapter_uniform_encoder =
+        [adapter_uniform_command_buffer renderCommandEncoderWithDescriptor:adapter_uniform_pass];
+    const float uniform_color[4] = {0.125f, 0.375f, 0.625f, 0.875f};
+    if (native_uniform_pipeline != nil && adapter_uniform_pipeline != nil &&
+        native_uniform_texture != nil && adapter_uniform_texture != nil &&
+        native_uniform_encoder != nil && adapter_uniform_encoder != nil) {
+        [native_uniform_encoder setRenderPipelineState:native_uniform_pipeline];
+        [native_uniform_encoder setVertexBuffer:native_render_vertices offset:0 atIndex:0];
+        [native_uniform_encoder setFragmentBytes:&uniform_color length:sizeof(uniform_color) atIndex:0];
+        [native_uniform_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_uniform_encoder endEncoding];
+        [native_uniform_command_buffer commit];
+        [native_uniform_command_buffer waitUntilCompleted];
+        [adapter_uniform_encoder setRenderPipelineState:adapter_uniform_pipeline];
+        [adapter_uniform_encoder setVertexBuffer:adapter_render_vertices offset:0 atIndex:0];
+        [adapter_uniform_encoder setFragmentBytes:&uniform_color length:sizeof(uniform_color) atIndex:0];
+        [adapter_uniform_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_uniform_encoder endEncoding];
+        [adapter_uniform_command_buffer commit];
+        [adapter_uniform_command_buffer waitUntilCompleted];
+    }
+    uint8_t native_uniform_pixels[8 * 8 * 4] = {0};
+    uint8_t adapter_uniform_pixels[8 * 8 * 4] = {0};
+    if (native_uniform_texture != nil) {
+        [native_uniform_texture getBytes:native_uniform_pixels bytesPerRow:8 * 4
+                              fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    if (adapter_uniform_texture != nil) {
+        [adapter_uniform_texture getBytes:adapter_uniform_pixels bytesPerRow:8 * 4
+                               fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    BOOL uniform_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_uniform_fragment"];
+        uniform_reflection_ok = reflection != nil && reflection.bindings.count == 1 &&
+            reflection.bindings[0].type == MTLBindingTypeBuffer &&
+            reflection.bindings[0].index == 0;
+    }
+    if (native_uniform_fragment == nil || adapter_uniform_fragment == nil ||
+        native_uniform_error != nil || adapter_uniform_error != nil ||
+        native_uniform_pipeline == nil || adapter_uniform_pipeline == nil ||
+        native_uniform_texture == nil || adapter_uniform_texture == nil ||
+        native_uniform_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_uniform_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        !uniform_reflection_ok || memcmp(native_uniform_pixels, adapter_uniform_pixels,
+                                         sizeof(native_uniform_pixels)) != 0) {
+        fail_with_error("source-defined CPU uniform fragment lowering execution failed",
+                        adapter_uniform_error ?: native_uniform_error);
+        return 171;
     }
     return 0;
 }
