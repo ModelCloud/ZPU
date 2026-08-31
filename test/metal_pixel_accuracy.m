@@ -20330,10 +20330,23 @@ int main(void) {
             [adapter_bad_scratch_encoder endEncoding];
             [adapter_bad_scratch_command_buffer commit];
             [adapter_bad_scratch_command_buffer waitUntilCompleted];
+            id<MTLCommandBuffer> adapter_bad_refit_scratch_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_bad_refit_scratch_encoder =
+                [adapter_bad_refit_scratch_command_buffer accelerationStructureCommandEncoder];
+            [adapter_bad_refit_scratch_encoder refitAccelerationStructure:adapter_as
+                                                                  descriptor:native_as_descriptor
+                                                                  destination:adapter_copy_as
+                                                               scratchBuffer:adapter_bad_scratch
+                                                         scratchBufferOffset:0];
+            [adapter_bad_refit_scratch_encoder endEncoding];
+            [adapter_bad_refit_scratch_command_buffer commit];
+            [adapter_bad_refit_scratch_command_buffer waitUntilCompleted];
             adapter_acceleration_scratch_validation_ok =
                 adapter_bad_scratch_as != nil && adapter_bad_scratch != nil &&
                 adapter_bad_scratch_encoder != nil &&
-                adapter_bad_scratch_command_buffer.status == MTLCommandBufferStatusError;
+                adapter_bad_scratch_command_buffer.status == MTLCommandBufferStatusError &&
+                adapter_bad_refit_scratch_encoder != nil &&
+                adapter_bad_refit_scratch_command_buffer.status == MTLCommandBufferStatusError;
             uint64_t adapter_compacted_size_value = 0;
             if (adapter_as_status_buffer != nil) {
                 memcpy(&adapter_compacted_size_value, adapter_as_status_buffer.contents, sizeof(adapter_compacted_size_value));
