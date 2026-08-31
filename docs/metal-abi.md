@@ -557,8 +557,11 @@ triangle path:
   recursively nested structs, fixed-size arrays, pointers, textures, samplers,
   scalar/vector/matrix constants, and their Metal reflection types. The parser
   preserves source order, validates strictly increasing `[[id]]` locations,
-  every type and offset, and rejects unknown or cyclic declarations; it never
-  compiles or executes arbitrary MSL
+  every type and offset, and rejects unknown or cyclic declarations. Pointer
+  arrays such as `array<device const half *, 2>` preserve the native encoder
+  span and are reflected as the native anonymous `__elems` array struct,
+  including pointee type, access, and stride metadata. It never compiles or
+  executes arbitrary MSL
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports
