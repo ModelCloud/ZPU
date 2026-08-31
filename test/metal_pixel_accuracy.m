@@ -14030,8 +14030,11 @@ static int zpu_test_cpu_ml_named_transpose_query(
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
     }
     ++probe->queryCalls;
-    if (functionNameLength != strlen("zml_cpu_transpose_f32") ||
-        memcmp(functionName, "zml_cpu_transpose_f32", functionNameLength) != 0) {
+    const BOOL zmlName = functionNameLength == strlen("zml_cpu_transpose_f32") &&
+        memcmp(functionName, "zml_cpu_transpose_f32", functionNameLength) == 0;
+    const BOOL canonicalName = functionNameLength == strlen("zpu_cpu_ml_transpose") &&
+        memcmp(functionName, "zpu_cpu_ml_transpose", functionNameLength) == 0;
+    if (!zmlName && !canonicalName) {
         return ZPU_CPU_ML_STATUS_UNSUPPORTED;
     }
     signature->input_count = 1;
@@ -14043,8 +14046,6 @@ static int zpu_test_cpu_ml_named_transpose_provider(
     void *context, const zpu_cpu_ml_named_operation_arguments *arguments) {
     ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
     if (probe == NULL || arguments == NULL || arguments->function_name == NULL ||
-        arguments->function_name_length != strlen("zml_cpu_transpose_f32") ||
-        memcmp(arguments->function_name, "zml_cpu_transpose_f32", arguments->function_name_length) != 0 ||
         arguments->input_count != 1 || arguments->element_type != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
         arguments->inputs[0].offset_bytes != 0 || arguments->destination.offset_bytes != 0 ||
         arguments->inputs[0].rank != 2 || arguments->destination.rank != 2 ||
@@ -14052,6 +14053,14 @@ static int zpu_test_cpu_ml_named_transpose_provider(
         arguments->destination.dimensions[0] != 3 || arguments->destination.dimensions[1] != 2 ||
         arguments->inputs[0].strides[0] != 1 || arguments->inputs[0].strides[1] != 2 ||
         arguments->destination.strides[0] != 1 || arguments->destination.strides[1] != 3) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    const BOOL zmlName = arguments->function_name_length == strlen("zml_cpu_transpose_f32") &&
+        memcmp(arguments->function_name, "zml_cpu_transpose_f32", arguments->function_name_length) == 0;
+    const BOOL canonicalName = arguments->function_name_length == strlen("zpu_cpu_ml_transpose") &&
+        memcmp(arguments->function_name, "zpu_cpu_ml_transpose", arguments->function_name_length) == 0;
+    if (!zmlName && !canonicalName) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    if (canonicalName && (arguments->permutation[0] != 1 || arguments->permutation[1] != 0)) {
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
     }
     const uint32_t *source = (const uint32_t *)arguments->inputs[0].data;
@@ -14476,7 +14485,16 @@ static int test_metal4_cpu_float32_transpose_profile(
     [commitOptions addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
         feedbackError = feedback.error;
     }];
+    ZPUCPUMLNamedProviderProbe providerProbe = {0};
+    const zpu_cpu_ml_named_operation_backend provider = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION,
+        .context = &providerProbe,
+        .query = zpu_test_cpu_ml_named_transpose_query,
+        .operation = zpu_test_cpu_ml_named_transpose_provider,
+    };
+    const int providerRegistration = zpu_cpu_ml_set_named_operation_backend(&provider);
     [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+    const int providerUnregistration = zpu_cpu_ml_set_named_operation_backend(NULL);
     if (destinationBuffer != nil && destinationBuffer.contents != NULL) {
         memcpy(adapterValues, destinationBuffer.contents, sizeof(adapterValues));
     }
@@ -14507,7 +14525,9 @@ static int test_metal4_cpu_float32_transpose_profile(
         (id<MTLTensorBinding>)pipeline.reflection.bindings[0] : nil;
     id<MTLTensorBinding> destinationBinding = pipeline.reflection.bindings.count > 1 ?
         (id<MTLTensorBinding>)pipeline.reflection.bindings[1] : nil;
-    if (adapterError != nil || pipeline == nil || source == nil || destination == nil ||
+    if (providerRegistration != ZPU_CPU_ML_STATUS_OK || providerUnregistration != ZPU_CPU_ML_STATUS_OK ||
+        providerProbe.operationCalls != 1 || providerProbe.queryCalls == 0 ||
+        adapterError != nil || pipeline == nil || source == nil || destination == nil ||
         table == nil || commandBuffer == nil || encoder == nil || commitOptions == nil ||
         feedbackError != nil || nativeQueue == nil || nativeFunction == nil ||
         nativePipeline == nil || nativeSource == nil || nativeDestination == nil ||

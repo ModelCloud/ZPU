@@ -5689,6 +5689,11 @@ static uint32_t zpu_cpu_ml_element_type(ZPUTensor *tensor) {
     }
 }
 
+static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
+                                                 ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
+                                                 ZPUTensor *destination, uint32_t elementType,
+                                                 const uint32_t *permutation);
+
 static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
                                            ZPUTensor *destination, uint32_t operation) {
     if (source == nil || destination == nil || source->_dataType != destination->_dataType) {
@@ -5708,13 +5713,22 @@ static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
     }
     if (operation == ZPU_CPU_ML_OPERATION_TRANSPOSE) {
-        if (source->_dimensions == nil || source->_dimensions.rank > ZPU_CPU_ML_MAX_RANK ||
+        if (source->_dimensions == nil || destination->_dimensions == nil ||
+            source->_dimensions.rank > ZPU_CPU_ML_MAX_RANK ||
             source->_dimensions.rank != destination->_dimensions.rank) {
             return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
         }
         for (NSUInteger outputAxis = 0; outputAxis < source->_dimensions.rank; ++outputAxis) {
             arguments.permutation[outputAxis] = (uint32_t)(source->_dimensions.rank - 1 - outputAxis);
         }
+        /* A ZML/cpu provider may advertise the canonical Metal-shaped
+         * transpose name. It receives the same dense staging contract as a
+         * named pipeline, while an unsupported provider still falls through
+         * to the versioned fixed-operation provider/reference path below. */
+        const int namedStatus = zpu_tensor_try_cpu_ml_named_operation(
+            zpu_cpu_ml_transpose_function_name, source, nil, 1, destination,
+            elementType, arguments.permutation);
+        if (namedStatus != ZPU_CPU_ML_STATUS_UNSUPPORTED) return namedStatus;
     }
     return zpu_cpu_ml_operation(&arguments);
 }
@@ -5730,7 +5744,8 @@ static BOOL zpu_cpu_ml_named_function_signature(NSString *functionName,
 
 static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
                                                  ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
-                                                 ZPUTensor *destination, uint32_t elementType) {
+                                                 ZPUTensor *destination, uint32_t elementType,
+                                                 const uint32_t *permutation) {
     if (functionName == nil || input0 == nil || inputCount == 0 ||
         inputCount > ZPU_CPU_ML_MAX_INPUTS || destination == nil) {
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
@@ -5744,6 +5759,9 @@ static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
     arguments.function_name_length = nameLength;
     arguments.input_count = (uint32_t)inputCount;
     arguments.element_type = elementType;
+    if (permutation != NULL) {
+        memcpy(arguments.permutation, permutation, sizeof(arguments.permutation));
+    }
     for (NSUInteger index = 0; index < inputCount; ++index) {
         ZPUTensor *input = index == 0 ? input0 : input1;
         if (!zpu_tensor_make_cpu_ml_view(input, &arguments.inputs[index])) {
@@ -17616,7 +17634,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         int providerStatus = ZPU_CPU_ML_STATUS_UNSUPPORTED;
         if (namedProvider) {
             providerStatus = zpu_tensor_try_cpu_ml_named_operation(functionName, source, right,
-                pipeline->_inputCount - 1, destination, pipeline->_namedElementType);
+                pipeline->_inputCount - 1, destination, pipeline->_namedElementType, NULL);
         } else {
             providerStatus = zpu_tensor_try_cpu_ml_operation(source, right, destination, cpuMlOperation);
         }
