@@ -7,7 +7,7 @@ const cube = @import("vulkan/cpu_cube.zig");
 // This benchmark measures the Vulkan command-to-Mosaic submission boundary.
 // The upstream projects below are workload references, not runtime
 // dependencies and not claims that this narrow renderer implements them.
-pub const schema_version: u32 = 3;
+pub const schema_version: u32 = 4;
 pub const width: u32 = 800;
 pub const height: u32 = 600;
 pub const target_cpu_cores: u8 = 2;
@@ -30,6 +30,11 @@ const Target = enum {
     vkdoom_fps,
     vulkan_voxel_world,
     space_menace_platformer,
+    vkquake3_arena,
+    serious_sam_vulkan,
+    chewman_vulkan_3d,
+    sascha_vulkan_pbr,
+    kaiju_vulkan_editor,
 };
 
 const TargetSpec = struct {
@@ -112,6 +117,51 @@ fn spec(target: Target) TargetSpec {
             .project = "https://github.com/amethyst/space-menace",
             .shape = "Vulkan 2D-platformer tiles, sprites, particles, and HUD",
             .draw_count = 768,
+            .vertices_per_draw = 6,
+            .texture_width = 16,
+            .texture_height = 16,
+        },
+        .vkquake3_arena => .{
+            .id = "vkquake3-arena-v1-800x600",
+            .project = "https://github.com/suijingfeng/vkQuake3",
+            .shape = "Quake III arena surfaces, lightmapped materials, effects, and HUD",
+            .draw_count = 2_304,
+            .vertices_per_draw = 6,
+            .texture_width = 16,
+            .texture_height = 16,
+        },
+        .serious_sam_vulkan => .{
+            .id = "serious-sam-classic-vulkan-v1-800x600",
+            .project = "https://github.com/tx00100xt/SeriousSamClassic-VK",
+            .shape = "large outdoor sector surfaces, enemies, particles, and weapon HUD",
+            .draw_count = 3_072,
+            .vertices_per_draw = 6,
+            .texture_width = 16,
+            .texture_height = 16,
+        },
+        .chewman_vulkan_3d => .{
+            .id = "chewman-vulkan-3d-v1-800x600",
+            .project = "https://github.com/RMDarth/Chewman-Vulkan",
+            .shape = "3D maze tiles, instanced characters, particles, shadows, and GUI",
+            .draw_count = 1_152,
+            .vertices_per_draw = 6,
+            .texture_width = 16,
+            .texture_height = 16,
+        },
+        .sascha_vulkan_pbr => .{
+            .id = "sascha-vulkan-pbr-v1-800x600",
+            .project = "https://github.com/SaschaWillems/Vulkan",
+            .shape = "PBR/deferred sample scene with meshes, lights, skybox, and UI",
+            .draw_count = 640,
+            .vertices_per_draw = 6,
+            .texture_width = 16,
+            .texture_height = 16,
+        },
+        .kaiju_vulkan_editor => .{
+            .id = "kaiju-vulkan-editor-v1-800x600",
+            .project = "https://github.com/KaijuEngine/kaiju",
+            .shape = "2D/3D editor viewport, sprites, gizmos, scene objects, and panels",
+            .draw_count = 896,
             .vertices_per_draw = 6,
             .texture_width = 16,
             .texture_height = 16,
@@ -418,6 +468,105 @@ fn writePlatformer(uniform: []u8, draw: usize, frame: usize) void {
     }
 }
 
+fn writeArena(uniform: []u8, draw: usize, frame: usize) void {
+    if (draw == 0) {
+        writeGameQuad(uniform, 0, 0, @floatFromInt(width), @floatFromInt(height), 0.997, 17);
+        return;
+    }
+    const surface = draw - 1;
+    const family = surface % 23;
+    const dynamic = family < 4;
+    const phase = f32From((surface * 19 + if (dynamic) frame * 9 else 0) % 127) * 0.009;
+    if (dynamic) {
+        const column = surface % 12;
+        const row = (surface / 12) % 7;
+        writeGameQuad(uniform, f32From(column) * 71.0 - 16.0 + @cos(phase) * 8.0, f32From(row) * 84.0 - 12.0 + @sin(phase) * 5.0, 38.0, 52.0, 0.19 + f32From(surface % 37) * 0.001, surface + 17);
+    } else {
+        const column = surface % 21;
+        const row = (surface / 21) % 12;
+        const layer = (surface / 252) % 8;
+        writeGameQuad(uniform, f32From(column) * 40.0 - 9.0, f32From(row) * 48.0 - 7.0, 46.0, 51.0, 0.07 + f32From(layer * 7 + surface % 5) * 0.001, surface + 3);
+    }
+}
+
+fn writeSeriousSam(uniform: []u8, draw: usize, frame: usize) void {
+    if (draw == 0) {
+        writeGameQuad(uniform, 0, 0, @floatFromInt(width), @floatFromInt(height), 0.996, 19);
+        return;
+    }
+    const surface = draw - 1;
+    const family = surface % 11;
+    const dynamic = family < 2;
+    const phase = f32From((surface * 23 + if (dynamic) frame * 7 else 0) % 131) * 0.007;
+    if (dynamic) {
+        const column = surface % 9;
+        const row = (surface / 9) % 6;
+        writeGameQuad(uniform, f32From(column) * 91.0 + @sin(phase) * 12.0, f32From(row) * 103.0 - 15.0, 64.0, 76.0, 0.24 + f32From(surface % 43) * 0.0007, surface + 19);
+    } else {
+        const column = surface % 14;
+        const row = (surface / 14) % 10;
+        const tier = (surface / 140) % 9;
+        writeGameQuad(uniform, f32From(column) * 59.0 - 14.0, f32From(row) * 63.0 - 9.0, 70.0, 68.0 + f32From(surface % 3) * 16.0, 0.05 + f32From(tier * 5 + surface % 7) * 0.002, surface + 5);
+    }
+}
+
+fn writeChewman(uniform: []u8, draw: usize, frame: usize) void {
+    if (draw == 0) {
+        writeGameQuad(uniform, 0, 0, @floatFromInt(width), @floatFromInt(height), 0.999, 21);
+        return;
+    }
+    const object = draw - 1;
+    const actor = object % 13 == 0;
+    const phase = f32From((object * 29 + if (actor) frame * 13 else 0) % 149) * 0.006;
+    if (actor) {
+        const column = object % 10;
+        const row = (object / 10) % 5;
+        writeGameQuad(uniform, f32From(column) * 79.0 + @cos(phase) * 5.0, f32From(row) * 98.0 + 8.0, 24.0, 35.0, 0.18 + f32From(object % 31) * 0.001, object + 21);
+    } else {
+        // Small maze blocks stay below the strict broad-texture threshold and
+        // exercise the actual spatial Mosaic path rather than only the
+        // ordered fallback used by large projected surfaces.
+        const tile = object % 240;
+        const column = tile % 20;
+        const row = tile / 20;
+        writeGameQuad(uniform, f32From(column) * 31.0 - 4.0, f32From(row) * 28.0 - 3.0, 27.0, 25.0, 0.08 + f32From((object / 240) % 8) * 0.003, object + 7);
+    }
+}
+
+fn writeSaschaPbr(uniform: []u8, draw: usize, frame: usize) void {
+    if (draw == 0) {
+        writeGameQuad(uniform, 0, 0, @floatFromInt(width), @floatFromInt(height), 0.998, 23);
+        return;
+    }
+    const object = draw - 1;
+    const animated = object % 5 == 0;
+    const phase = f32From((object * 31 + if (animated) frame * 5 else 0) % 157) * 0.005;
+    const column = object % 10;
+    const row = (object / 10) % 6;
+    const width_scale: f32 = if (animated) 52.0 else 74.0;
+    const height_scale: f32 = if (animated) 44.0 else 62.0;
+    writeGameQuad(uniform, f32From(column) * 79.0 - 9.0 + if (animated) @sin(phase) * 4.0 else 0, f32From(row) * 91.0 - 8.0 + if (animated) @cos(phase) * 3.0 else 0, width_scale, height_scale, 0.06 + f32From((object / 60) % 10) * 0.003, object + 23);
+}
+
+fn writeKaijuEditor(uniform: []u8, draw: usize, frame: usize) void {
+    if (draw == 0) {
+        writeGameQuad(uniform, 0, 0, @floatFromInt(width), @floatFromInt(height), 0.999, 25);
+        return;
+    }
+    const item = draw - 1;
+    const viewport_item = item % 5 != 0;
+    const animated = viewport_item and item % 29 == 0;
+    const phase = f32From((item * 37 + if (animated) frame * 3 else 0) % 163) * 0.004;
+    if (!viewport_item) {
+        const panel = item % 8;
+        writeGameQuad(uniform, f32From(panel % 2) * 690.0 + 8.0, f32From(panel / 2) * 104.0 + 18.0, 102.0, 76.0, 0.32, item + 25);
+    } else {
+        const column = item % 13;
+        const row = (item / 13) % 8;
+        writeGameQuad(uniform, f32From(column) * 57.0 - 8.0 + if (animated) @sin(phase) * 4.0 else 0, f32From(row) * 67.0 - 5.0, if (animated) 34.0 else 48.0, if (animated) 39.0 else 52.0, 0.09 + f32From((item / 104) % 7) * 0.004, item + 1);
+    }
+}
+
 fn buildWorkload(allocator: std.mem.Allocator, target: Target) !Workload {
     const target_spec = spec(target);
     var workload = Workload{
@@ -446,6 +595,11 @@ fn buildWorkload(allocator: std.mem.Allocator, target: Target) !Workload {
             .vkdoom_fps => writeVkdoom(draw.uniform, index, 0),
             .vulkan_voxel_world => writeVoxelWorld(draw.uniform, index, 0),
             .space_menace_platformer => writePlatformer(draw.uniform, index, 0),
+            .vkquake3_arena => writeArena(draw.uniform, index, 0),
+            .serious_sam_vulkan => writeSeriousSam(draw.uniform, index, 0),
+            .chewman_vulkan_3d => writeChewman(draw.uniform, index, 0),
+            .sascha_vulkan_pbr => writeSaschaPbr(draw.uniform, index, 0),
+            .kaiju_vulkan_editor => writeKaijuEditor(draw.uniform, index, 0),
         }
     }
     workload.commands = try allocator.alloc(cube.DrawCommand, target_spec.draw_count);
@@ -503,6 +657,36 @@ fn updateWorkload(workload: *Workload, frame: usize) void {
             writePlatformer(draw.uniform, index, frame);
             workload.commands[index].uniform_revision = revisionBase(.space_menace_platformer) + @as(u64, @intCast(frame + 2));
             workload.commands[index].geometry_revision = revisionBase(.space_menace_platformer) + @as(u64, @intCast(frame + 2));
+        },
+        .vkquake3_arena => for (workload.draws, 0..) |draw, index| {
+            if (index == 0 or (index - 1) % 23 >= 4) continue;
+            writeArena(draw.uniform, index, frame);
+            workload.commands[index].uniform_revision = revisionBase(.vkquake3_arena) + @as(u64, @intCast(frame + 2));
+            workload.commands[index].geometry_revision = revisionBase(.vkquake3_arena) + @as(u64, @intCast(frame + 2));
+        },
+        .serious_sam_vulkan => for (workload.draws, 0..) |draw, index| {
+            if (index == 0 or (index - 1) % 11 >= 2) continue;
+            writeSeriousSam(draw.uniform, index, frame);
+            workload.commands[index].uniform_revision = revisionBase(.serious_sam_vulkan) + @as(u64, @intCast(frame + 2));
+            workload.commands[index].geometry_revision = revisionBase(.serious_sam_vulkan) + @as(u64, @intCast(frame + 2));
+        },
+        .chewman_vulkan_3d => for (workload.draws, 0..) |draw, index| {
+            if (index == 0 or (index - 1) % 13 != 0) continue;
+            writeChewman(draw.uniform, index, frame);
+            workload.commands[index].uniform_revision = revisionBase(.chewman_vulkan_3d) + @as(u64, @intCast(frame + 2));
+            workload.commands[index].geometry_revision = revisionBase(.chewman_vulkan_3d) + @as(u64, @intCast(frame + 2));
+        },
+        .sascha_vulkan_pbr => for (workload.draws, 0..) |draw, index| {
+            if (index == 0 or (index - 1) % 5 != 0) continue;
+            writeSaschaPbr(draw.uniform, index, frame);
+            workload.commands[index].uniform_revision = revisionBase(.sascha_vulkan_pbr) + @as(u64, @intCast(frame + 2));
+            workload.commands[index].geometry_revision = revisionBase(.sascha_vulkan_pbr) + @as(u64, @intCast(frame + 2));
+        },
+        .kaiju_vulkan_editor => for (workload.draws, 0..) |draw, index| {
+            if (index == 0 or (index - 1) % 29 != 0) continue;
+            writeKaijuEditor(draw.uniform, index, frame);
+            workload.commands[index].uniform_revision = revisionBase(.kaiju_vulkan_editor) + @as(u64, @intCast(frame + 2));
+            workload.commands[index].geometry_revision = revisionBase(.kaiju_vulkan_editor) + @as(u64, @intCast(frame + 2));
         },
     }
 }
@@ -593,6 +777,11 @@ fn parseTarget(name: []const u8) ?Target {
     if (std.mem.eql(u8, name, "vkdoom_fps")) return .vkdoom_fps;
     if (std.mem.eql(u8, name, "vulkan_voxel_world")) return .vulkan_voxel_world;
     if (std.mem.eql(u8, name, "space_menace_platformer")) return .space_menace_platformer;
+    if (std.mem.eql(u8, name, "vkquake3_arena")) return .vkquake3_arena;
+    if (std.mem.eql(u8, name, "serious_sam_vulkan")) return .serious_sam_vulkan;
+    if (std.mem.eql(u8, name, "chewman_vulkan_3d")) return .chewman_vulkan_3d;
+    if (std.mem.eql(u8, name, "sascha_vulkan_pbr")) return .sascha_vulkan_pbr;
+    if (std.mem.eql(u8, name, "kaiju_vulkan_editor")) return .kaiju_vulkan_editor;
     return null;
 }
 
@@ -614,7 +803,7 @@ pub fn main(init: std.process.Init) !void {
             only = parseTarget(args[index]) orelse return error.UnknownScenario;
         } else return error.UnknownArgument;
     }
-    const targets = [_]Target{ .wezterm_terminal, .imgui_vulkan_app, .khronos_complex_demo, .vkquake_fps, .vkquake2_fps, .vkdoom_fps, .vulkan_voxel_world, .space_menace_platformer };
+    const targets = [_]Target{ .wezterm_terminal, .imgui_vulkan_app, .khronos_complex_demo, .vkquake_fps, .vkquake2_fps, .vkdoom_fps, .vulkan_voxel_world, .space_menace_platformer, .vkquake3_arena, .serious_sam_vulkan, .chewman_vulkan_3d, .sascha_vulkan_pbr, .kaiju_vulkan_editor };
     const metric_count: usize = if (only == null) targets.len else 1;
     const metrics = try allocator.alloc(Metric, metric_count);
     var metric_index: usize = 0;
@@ -683,6 +872,11 @@ test "Vulkan ABI targets freeze realistic stream shapes" {
     try std.testing.expectEqual(@as(usize, 1_792), spec(.vkdoom_fps).draw_count);
     try std.testing.expectEqual(@as(usize, 1_024), spec(.vulkan_voxel_world).draw_count);
     try std.testing.expectEqual(@as(usize, 768), spec(.space_menace_platformer).draw_count);
+    try std.testing.expectEqual(@as(usize, 2_304), spec(.vkquake3_arena).draw_count);
+    try std.testing.expectEqual(@as(usize, 3_072), spec(.serious_sam_vulkan).draw_count);
+    try std.testing.expectEqual(@as(usize, 1_152), spec(.chewman_vulkan_3d).draw_count);
+    try std.testing.expectEqual(@as(usize, 640), spec(.sascha_vulkan_pbr).draw_count);
+    try std.testing.expectEqual(@as(usize, 896), spec(.kaiju_vulkan_editor).draw_count);
     try std.testing.expectEqual(@as(usize, 19), (spec(.wezterm_terminal).draw_count + legacy_batch_limit - 1) / legacy_batch_limit);
     try std.testing.expectEqual(@as(usize, 1), (spec(.wezterm_terminal).draw_count + mosaic_batch_limit - 1) / mosaic_batch_limit);
     try std.testing.expect(mosaic_batch_limit == cube.max_batch_commands);
@@ -692,7 +886,7 @@ test "Vulkan ABI targets freeze realistic stream shapes" {
 test "Vulkan ABI batch stream matches per-draw oracle" {
     const allocator = std.testing.allocator;
     defer cube.shutdownParallelWorkers();
-    const targets = [_]Target{ .wezterm_terminal, .imgui_vulkan_app, .khronos_complex_demo, .vkquake_fps, .vkquake2_fps, .vkdoom_fps, .vulkan_voxel_world, .space_menace_platformer };
+    const targets = [_]Target{ .wezterm_terminal, .imgui_vulkan_app, .khronos_complex_demo, .vkquake_fps, .vkquake2_fps, .vkdoom_fps, .vulkan_voxel_world, .space_menace_platformer, .vkquake3_arena, .serious_sam_vulkan, .chewman_vulkan_3d, .sascha_vulkan_pbr, .kaiju_vulkan_editor };
     for (targets) |target| {
         var per_draw_workload = try buildWorkload(allocator, target);
         defer per_draw_workload.deinit(allocator);
