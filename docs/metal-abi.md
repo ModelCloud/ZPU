@@ -1,5 +1,14 @@
 # CPU Metal layer (WIP)
 
+The CPU ML seam is also shipped independently of this Apple-shaped layer.
+`cpu-ml-install` installs `libzpu_cpu_ml.a` and `zpu/cpu_ml.h`; it has no
+Metal, Foundation, PJRT, or operating-system dependency. A ZML integration
+must use ZML's CPU package explicitly and register its CPU callback through
+that ABI. The host OS is not a backend selector: running ZPU on macOS does
+not permit or select ZML's Metal/PJRT-GPU package. `metal-install` composes
+the same CPU library into the optional Objective-C adapter, while Apple
+Metal remains an oracle-only test dependency.
+
 This branch adds a native, Metal-shaped command layer in `src/metal`. Its
 portable core is a CPU implementation with a separate optional Apple
 Objective-C adapter. The public types are intentionally a new ZPU ABI where

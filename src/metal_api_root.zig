@@ -9,14 +9,12 @@
 
 const api = @import("metal/c_api.zig");
 const abi = @import("metal/abi.zig");
-const ml_cpu = @import("metal/ml_cpu.zig");
 const runtime = @import("metal/runtime.zig");
 
 comptime {
     // Keep the exported resource/encoder functions in the standalone C
     // library even though the one-shot entry point lives in c_api.zig.
     _ = runtime;
-    _ = ml_cpu;
 }
 
 pub const CSurface = api.CSurface;
