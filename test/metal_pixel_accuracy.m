@@ -37696,6 +37696,31 @@ int main(void) {
             [adapter_heap newBufferWithLength:16 options:MTLResourceStorageModeShared];
         id<MTLTexture> adapter_heap_texture =
             [adapter_heap newTextureWithDescriptor:adapter_heap_texture_descriptor];
+        id<MTLTexture> adapter_heap_texture_view =
+            [adapter_heap_texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+        MTLTextureDescriptor *adapter_heap_buffer_texture_descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                width:2 height:2 mipmapped:NO];
+        adapter_heap_buffer_texture_descriptor.storageMode = MTLStorageModeShared;
+        id<MTLTexture> adapter_heap_buffer_texture =
+            [adapter_heap_buffer newTextureWithDescriptor:adapter_heap_buffer_texture_descriptor
+                                                    offset:0 bytesPerRow:8];
+        id<MTLTensor> adapter_heap_tensor = nil;
+        BOOL adapter_heap_tensor_properties_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLTensorDescriptor *adapter_heap_tensor_descriptor = [MTLTensorDescriptor new];
+            adapter_heap_tensor_descriptor.dimensions =
+                [[MTLTensorExtents alloc] initWithRank:1 values:(const NSInteger[]){4}];
+            adapter_heap_tensor_descriptor.dataType = MTLTensorDataTypeFloat32;
+            adapter_heap_tensor_descriptor.usage = MTLTensorUsageCompute;
+            adapter_heap_tensor_descriptor.resourceOptions = MTLResourceStorageModeShared;
+            adapter_heap_tensor_descriptor.storageMode = MTLStorageModeShared;
+            adapter_heap_tensor = [adapter_heap_buffer newTensorWithDescriptor:adapter_heap_tensor_descriptor
+                                                                           offset:0 error:&adapter_pipeline_error];
+            adapter_heap_tensor_properties_ok = adapter_heap_tensor != nil &&
+                adapter_heap_tensor.heap == adapter_heap &&
+                adapter_heap_tensor.heapOffset == adapter_heap_buffer.heapOffset;
+        }
         const uint8_t heap_pixels[] = {
             17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
@@ -37704,6 +37729,11 @@ int main(void) {
         if (adapter_heap == nil || ![adapter_heap.label isEqualToString:@"zpu cpu heap"] ||
             adapter_heap_mismatched_buffer != nil ||
             adapter_heap_mismatched_texture != nil || adapter_heap_buffer == nil || adapter_heap_texture == nil ||
+            adapter_heap_texture_view == nil || adapter_heap_texture_view.heap != adapter_heap ||
+            adapter_heap_texture_view.heapOffset != adapter_heap_texture.heapOffset ||
+            adapter_heap_buffer_texture == nil || adapter_heap_buffer_texture.heap != adapter_heap ||
+            adapter_heap_buffer_texture.heapOffset != adapter_heap_buffer.heapOffset ||
+            !adapter_heap_tensor_properties_ok ||
             adapter_heap.size != 64 || adapter_heap.usedSize != 32 ||
             [adapter_heap maxAvailableSizeWithAlignment:4] != 32 ||
             adapter_heap_buffer.heapOffset != 0 || adapter_heap_texture.heapOffset != adapter_heap_buffer.length ||
@@ -37730,7 +37760,8 @@ int main(void) {
             41, 42, 43, 44, 45, 46, 47, 48,
         };
         uint8_t heap_texture_alias_copy[sizeof(heap_texture_alias_pixels)] = {0};
-        if (!adapter_heap_texture.isAliasable || adapter_heap_texture_alias_buffer == nil ||
+        if (!adapter_heap_texture.isAliasable || !adapter_heap_texture_view.isAliasable ||
+            adapter_heap_texture_alias_buffer == nil ||
             adapter_heap_texture_alias_buffer.heapOffset != 16 || adapter_heap.usedSize != 32) {
             fprintf(stderr, "metal-pixel: heap texture aliasable range was not reusable\n");
             return 41;

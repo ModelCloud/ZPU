@@ -6896,11 +6896,26 @@ static BOOL zpu_tensor_encode_copy_slice(ZPUTensor *source, MTLTensorExtents *so
 }
 - (MTLResourceOptions)resourceOptions { return _resourceOptions; }
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return zpu_cpu_purgeable_state(state); }
-- (id<MTLHeap>)heap { return nil; }
-- (NSUInteger)heapOffset { return 0; }
+- (id<MTLHeap>)heap {
+    ZPUBuffer *storage = _backingBuffer != nil ? _backingBuffer : _storageBuffer;
+    return storage == nil ? nil : storage.heap;
+}
+- (NSUInteger)heapOffset {
+    ZPUBuffer *storage = _backingBuffer != nil ? _backingBuffer : _storageBuffer;
+    if (storage == nil || storage.heap == nil) return 0;
+    const NSUInteger base = storage.heapOffset;
+    return _backingBuffer != nil && _bufferOffset <= NSUIntegerMax - base ? base + _bufferOffset : base;
+}
 - (NSUInteger)allocatedSize { return _allocatedSize; }
-- (BOOL)isAliasable { return _aliasable; }
-- (void)makeAliasable { _aliasable = YES; }
+- (BOOL)isAliasable {
+    ZPUBuffer *storage = _backingBuffer != nil ? _backingBuffer : _storageBuffer;
+    return _aliasable || (storage != nil && storage.isAliasable);
+}
+- (void)makeAliasable {
+    _aliasable = YES;
+    ZPUBuffer *storage = _backingBuffer != nil ? _backingBuffer : _storageBuffer;
+    if (storage != nil && _bufferOffset == 0 && _allocatedSize == storage.length) [storage makeAliasable];
+}
 - (id<MTLResource>)rootResource { return (id<MTLResource>)self; }
 - (MTLResourceID)gpuResourceID API_AVAILABLE(macos(13.0), ios(16.0)) { return (MTLResourceID){_resourceID}; }
 - (kern_return_t)setOwnerWithIdentity:(task_id_token_t)task_id_token API_AVAILABLE(ios(17.4), watchos(10.4), tvos(17.4), macos(14.4)) {
@@ -7320,8 +7335,19 @@ static NSArray *zpu_make_sample_texture_slice_views(ZPUTexture *source, MTLPixel
     }
     return total;
 }
-- (id<MTLHeap>)heap { return _backing != nil ? [_backing heap] : (id<MTLHeap>)_heap; }
-- (NSUInteger)heapOffset { return _backing != nil ? [_backing heapOffset] : _heapOffset; }
+- (id<MTLHeap>)heap {
+    if (_backing != nil) return [_backing heap];
+    if (_backingBuffer != nil) return [_backingBuffer heap];
+    return (id<MTLHeap>)_heap;
+}
+- (NSUInteger)heapOffset {
+    if (_backing != nil) return [_backing heapOffset];
+    if (_backingBuffer != nil) {
+        const NSUInteger base = _backingBuffer.heapOffset;
+        return _bufferOffset <= NSUIntegerMax - base ? base + _bufferOffset : base;
+    }
+    return _heapOffset;
+}
 - (NSUInteger)parentRelativeLevel { return _baseMipmapLevel; }
 - (NSUInteger)parentRelativeSlice { return _baseSlice; }
 - (IOSurfaceRef)iosurface API_AVAILABLE(macos(10.11), ios(11.0)) { return _iosurface; }
@@ -7335,10 +7361,22 @@ static NSArray *zpu_make_sample_texture_slice_views(ZPUTexture *source, MTLPixel
 - (BOOL)isSparse API_AVAILABLE(macos(11.0), ios(13.0)) {
     return _backing != nil ? [_backing isSparse] : _sparseMappings != nil;
 }
-- (BOOL)isAliasable { return _aliasable; }
+- (BOOL)isAliasable {
+    if (_backing != nil) return _aliasable || _backing.isAliasable;
+    if (_backingBuffer != nil) return _aliasable || _backingBuffer.isAliasable;
+    return _aliasable;
+}
 - (void)makeAliasable {
     _aliasable = YES;
-    if (_heap == nil || _backing != nil || _backingBuffer != nil) return;
+    if (_backing != nil) {
+        [_backing makeAliasable];
+        return;
+    }
+    if (_backingBuffer != nil) {
+        [_backingBuffer makeAliasable];
+        return;
+    }
+    if (_heap == nil) return;
     zpu_make_texture_array_aliasable(_sliceMipmapTextures);
     zpu_make_texture_array_aliasable(_sampleSliceTextures);
     for (id value in _sampleTextures) {
