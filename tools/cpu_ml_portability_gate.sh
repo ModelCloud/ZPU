@@ -31,6 +31,10 @@ build_target() {
     zig build --prefix "$prefix" -Dtarget="$target" -Dxcb=false cpu-ml-install
     test -f "$prefix/lib/libzpu_cpu_ml.a"
     test -f "$prefix/include/zpu/cpu_ml.h"
+    if nm -u "$prefix/lib/libzpu_cpu_ml.a" 2>/dev/null | rg -n -i '(Metal|Foundation|PJRT)' ; then
+        echo "cpu-ml-portability FAILED: standalone archive has an Apple/PJRT dependency for $target" >&2
+        exit 1
+    fi
 }
 
 # Keep the package generic across the two common CPU families. M4/Apple
