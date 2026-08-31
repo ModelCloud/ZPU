@@ -29088,15 +29088,22 @@ int main(void) {
             [adapter_device newArgumentTableWithDescriptor:metal4_snapshot_table_descriptor error:&metal4_error];
         id<MTL4CommandBuffer> metal4_snapshot_command_buffer = [adapter_device newCommandBuffer];
         id<MTL4ComputeCommandEncoder> metal4_snapshot_encoder = nil;
+        BOOL metal4_snapshot_stages_before_pipeline = NO;
+        BOOL metal4_snapshot_stages_after_pipeline = NO;
+        BOOL metal4_snapshot_stages_after_dispatch = NO;
         if (metal4_snapshot_table != nil && metal4_snapshot_first != nil &&
             metal4_snapshot_second != nil && metal4_snapshot_command_buffer != nil) {
             [metal4_snapshot_table setTexture:metal4_snapshot_first.gpuResourceID atIndex:0];
             [metal4_snapshot_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
             metal4_snapshot_encoder = [metal4_snapshot_command_buffer computeCommandEncoder];
+            metal4_snapshot_stages_before_pipeline = metal4_snapshot_encoder.stages == 0;
             [metal4_snapshot_encoder setComputePipelineState:adapter_compute_pipeline];
+            metal4_snapshot_stages_after_pipeline = metal4_snapshot_encoder.stages == 0;
             [metal4_snapshot_encoder setArgumentTable:metal4_snapshot_table];
             [metal4_snapshot_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+            metal4_snapshot_stages_after_dispatch =
+                (metal4_snapshot_encoder.stages & MTLStageDispatch) != 0;
             [metal4_snapshot_table setTexture:metal4_snapshot_second.gpuResourceID atIndex:0];
             [metal4_snapshot_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                                   threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
@@ -29117,6 +29124,8 @@ int main(void) {
         }
         if (metal4_snapshot_table == nil || metal4_snapshot_command_buffer == nil ||
             metal4_snapshot_encoder == nil ||
+            !metal4_snapshot_stages_before_pipeline || !metal4_snapshot_stages_after_pipeline ||
+            !metal4_snapshot_stages_after_dispatch ||
             memcmp(native_compute_pixels, metal4_snapshot_first_pixels, byte_count) != 0 ||
             memcmp(native_compute_pixels, metal4_snapshot_second_pixels, byte_count) != 0) {
             fail_with_error("Metal 4 CPU compute argument-table snapshot failed", metal4_error);

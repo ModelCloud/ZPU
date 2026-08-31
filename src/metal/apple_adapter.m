@@ -18749,7 +18749,6 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
 - (MTLStages)stages { return _stages; }
 - (void)setComputePipelineState:(id<MTLComputePipelineState>)state {
     [_legacy setComputePipelineState:state];
-    _stages |= MTLStageDispatch;
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index { [_legacy setThreadgroupMemoryLength:length atIndex:index]; }
 - (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height { [_legacy setImageblockWidth:width height:height]; }
