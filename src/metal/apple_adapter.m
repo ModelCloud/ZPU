@@ -1460,6 +1460,10 @@ static uint64_t zpu_next_cpu_drawable_id;
     NSArray *_vertexAttributes;
     NSArray *_stageInputAttributes;
     NSDictionary *_argumentBufferLayout;
+    /* MTL4 pipeline reflection is derived from the CPU-owned source
+     * metadata. Keep this as an untyped object so the adapter still builds
+     * against deployment SDKs predating MTLFunctionReflection. */
+    id _functionReflection;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
@@ -8637,6 +8641,46 @@ static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_c
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLComputePipelineReflection *zpu_source_compute_pipeline_reflection(
+    MTLFunctionReflection *functionReflection) {
+    if (functionReflection == nil) return nil;
+    NSMutableArray *arguments = [NSMutableArray array];
+    NSArray<id<MTLBinding>> *bindings = functionReflection.bindings ?: @[];
+    for (id<MTLBinding> binding in bindings) {
+        const MTLBindingType bindingType = binding.type;
+        if (bindingType != MTLBindingTypeBuffer && bindingType != MTLBindingTypeTexture &&
+            bindingType != MTLBindingTypeSampler &&
+            bindingType != MTLBindingTypeVisibleFunctionTable &&
+            bindingType != MTLBindingTypePrimitiveAccelerationStructure &&
+            bindingType != MTLBindingTypeInstanceAccelerationStructure &&
+            bindingType != MTLBindingTypeIntersectionFunctionTable) {
+            continue;
+        }
+        ZPUArgument *argument = [[ZPUArgument alloc]
+            initWithName:binding.name type:(MTLArgumentType)bindingType
+                  access:binding.access index:binding.index];
+        argument->_active = binding.isUsed;
+        if (bindingType == MTLBindingTypeBuffer &&
+            [binding conformsToProtocol:@protocol(MTLBufferBinding)]) {
+            id<MTLBufferBinding> buffer = (id<MTLBufferBinding>)binding;
+            [argument setBufferDataSize:buffer.bufferDataSize dataType:buffer.bufferDataType];
+            argument->_bufferAlignment = buffer.bufferAlignment;
+            argument->_bufferStructType = buffer.bufferStructType;
+            argument->_bufferPointerType = buffer.bufferPointerType;
+        } else if (bindingType == MTLBindingTypeTexture &&
+                   [binding conformsToProtocol:@protocol(MTLTextureBinding)]) {
+            id<MTLTextureBinding> texture = (id<MTLTextureBinding>)binding;
+            [argument setTextureType:texture.textureType dataType:texture.textureDataType
+                         arrayLength:texture.arrayLength];
+            argument->_depthTexture = texture.isDepthTexture;
+        }
+        [arguments addObject:argument];
+    }
+    return (MTLComputePipelineReflection *)[[ZPUComputePipelineReflection alloc]
+        initWithArguments:arguments bindings:bindings];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLRenderPipelineReflection *zpu_render_pipeline_reflection(NSString *vertexName,
                                                                      NSString *fragmentName) {
     NSMutableArray *vertexArguments = [NSMutableArray array];
@@ -11612,6 +11656,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         _vertexAttributes = @[];
         _stageInputAttributes = @[];
         _argumentBufferLayout = nil;
+        _functionReflection = nil;
         /* Descriptor specializedName changes the public symbol only.  The
          * registered implementation still owns its vertex/stage metadata;
          * looking at _name here would silently drop it for aliases. */
@@ -13501,6 +13546,11 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                                                            functionType:functionType
                                                                 options:MTLFunctionOptionNone];
     function->_argumentBufferLayout = _functionArgumentBufferLayouts[functionName];
+    if (sourceLowered) {
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            function->_functionReflection = _sourceFunctionReflections[functionName];
+        }
+    }
     return (id<MTLFunction>)function;
 }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)constantValues error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
@@ -13584,6 +13634,7 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                                                                 functionType:function.functionType
                                                                      options:normalizedOptions];
     specialized->_argumentBufferLayout = function->_argumentBufferLayout;
+    specialized->_functionReflection = function->_functionReflection;
     return (id<MTLFunction>)specialized;
 }
 - (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor
@@ -14530,7 +14581,13 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (pipeline != nil && !zpu_mtl4_apply_compute_descriptor(
             (ZPUComputePipelineState *)pipeline, descriptor, error)) return nil;
     if (pipeline != nil) {
-        ((ZPUComputePipelineState *)pipeline)->_reflection =
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        MTLComputePipelineReflection *reflection = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            reflection = zpu_source_compute_pipeline_reflection(
+                (MTLFunctionReflection *)cpuFunction->_functionReflection);
+        }
+        ((ZPUComputePipelineState *)pipeline)->_reflection = reflection != nil ? reflection :
             zpu_compute_pipeline_reflection(((ZPUComputePipelineState *)pipeline)->_kernel);
     }
     if (pipeline != nil && [_pipelineDataSetSerializer respondsToSelector:@selector(recordFunctionName:)]) {
@@ -14925,7 +14982,13 @@ static id<MTL4CompilerTask> zpu_mtl4_finished_task(id<MTL4Compiler> compiler) {
     if (pipeline != nil && !zpu_mtl4_apply_compute_descriptor(
             (ZPUComputePipelineState *)pipeline, descriptor, error)) return nil;
     if (pipeline != nil) {
-        ((ZPUComputePipelineState *)pipeline)->_reflection =
+        ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
+        MTLComputePipelineReflection *reflection = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            reflection = zpu_source_compute_pipeline_reflection(
+                (MTLFunctionReflection *)cpuFunction->_functionReflection);
+        }
+        ((ZPUComputePipelineState *)pipeline)->_reflection = reflection != nil ? reflection :
             zpu_compute_pipeline_reflection(((ZPUComputePipelineState *)pipeline)->_kernel);
     }
     return pipeline;

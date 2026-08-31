@@ -827,6 +827,102 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined resource binding reflection lowering failed", adapter_error ?: native_error);
         return 177;
     }
+    BOOL mtl4_pipeline_reflection_exact = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        NSError *native_mtl4_error = nil;
+        NSError *adapter_mtl4_error = nil;
+        id<MTL4Compiler> native_mtl4_compiler =
+            [native_device newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&native_mtl4_error];
+        id<MTL4Compiler> adapter_mtl4_compiler =
+            [adapter_device newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&adapter_mtl4_error];
+        MTL4LibraryDescriptor *native_mtl4_library_descriptor = [MTL4LibraryDescriptor new];
+        native_mtl4_library_descriptor.source = source;
+        id<MTLLibrary> native_mtl4_library =
+            [native_mtl4_compiler newLibraryWithDescriptor:native_mtl4_library_descriptor error:&native_mtl4_error];
+        MTL4LibraryDescriptor *adapter_mtl4_library_descriptor = [MTL4LibraryDescriptor new];
+        adapter_mtl4_library_descriptor.source = source;
+        id<MTLLibrary> adapter_mtl4_library =
+            [adapter_mtl4_compiler newLibraryWithDescriptor:adapter_mtl4_library_descriptor error:&adapter_mtl4_error];
+        MTL4LibraryFunctionDescriptor *native_mtl4_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+        native_mtl4_function_descriptor.name = @"zpu_source_metadata_direct";
+        native_mtl4_function_descriptor.library = native_mtl4_library;
+        MTL4LibraryFunctionDescriptor *adapter_mtl4_function_descriptor = [MTL4LibraryFunctionDescriptor new];
+        adapter_mtl4_function_descriptor.name = @"zpu_source_metadata_direct";
+        adapter_mtl4_function_descriptor.library = adapter_mtl4_library;
+        MTL4ComputePipelineDescriptor *native_mtl4_pipeline_descriptor = [MTL4ComputePipelineDescriptor new];
+        native_mtl4_pipeline_descriptor.computeFunctionDescriptor = native_mtl4_function_descriptor;
+        MTL4PipelineOptions *native_mtl4_pipeline_options = [MTL4PipelineOptions new];
+        native_mtl4_pipeline_options.shaderReflection =
+            MTL4ShaderReflectionBindingInfo | MTL4ShaderReflectionBufferTypeInfo;
+        native_mtl4_pipeline_descriptor.options = native_mtl4_pipeline_options;
+        MTL4ComputePipelineDescriptor *adapter_mtl4_pipeline_descriptor = [MTL4ComputePipelineDescriptor new];
+        adapter_mtl4_pipeline_descriptor.computeFunctionDescriptor = adapter_mtl4_function_descriptor;
+        MTL4PipelineOptions *adapter_mtl4_pipeline_options = [MTL4PipelineOptions new];
+        adapter_mtl4_pipeline_options.shaderReflection =
+            MTL4ShaderReflectionBindingInfo | MTL4ShaderReflectionBufferTypeInfo;
+        adapter_mtl4_pipeline_descriptor.options = adapter_mtl4_pipeline_options;
+        id<MTLFunction> native_mtl4_function =
+            [native_mtl4_library newFunctionWithName:native_mtl4_function_descriptor.name];
+        id<MTLFunction> adapter_mtl4_function =
+            [adapter_mtl4_library newFunctionWithName:adapter_mtl4_function_descriptor.name];
+        id<MTLComputePipelineState> native_mtl4_pipeline = nil;
+        id<MTLComputePipelineState> adapter_mtl4_pipeline = nil;
+        if (native_mtl4_compiler != nil && native_mtl4_library != nil && native_mtl4_function != nil) {
+            native_mtl4_pipeline =
+                [native_mtl4_compiler newComputePipelineStateWithDescriptor:
+                    native_mtl4_pipeline_descriptor compilerTaskOptions:nil error:&native_mtl4_error];
+        }
+        if (adapter_mtl4_compiler != nil && adapter_mtl4_library != nil && adapter_mtl4_function != nil) {
+            adapter_mtl4_pipeline =
+                [adapter_mtl4_compiler newComputePipelineStateWithDescriptor:
+                    adapter_mtl4_pipeline_descriptor compilerTaskOptions:nil error:&adapter_mtl4_error];
+        }
+        MTLComputePipelineReflection *native_mtl4_reflection = native_mtl4_pipeline.reflection;
+        MTLComputePipelineReflection *adapter_mtl4_reflection = adapter_mtl4_pipeline.reflection;
+        mtl4_pipeline_reflection_exact = native_mtl4_compiler != nil && adapter_mtl4_compiler != nil &&
+            native_mtl4_library != nil && adapter_mtl4_library != nil &&
+            native_mtl4_function != nil && adapter_mtl4_function != nil &&
+            native_mtl4_pipeline != nil && adapter_mtl4_pipeline != nil &&
+            native_mtl4_reflection != nil && adapter_mtl4_reflection != nil &&
+            native_mtl4_reflection.bindings.count == 4 &&
+            adapter_mtl4_reflection.bindings.count == native_mtl4_reflection.bindings.count;
+        if (mtl4_pipeline_reflection_exact) {
+            for (NSUInteger index = 0; index < native_mtl4_reflection.bindings.count; ++index) {
+                id<MTLBinding> native_binding = native_mtl4_reflection.bindings[index];
+                id<MTLBinding> adapter_binding = adapter_mtl4_reflection.bindings[index];
+                mtl4_pipeline_reflection_exact = mtl4_pipeline_reflection_exact &&
+                    [native_binding.name isEqualToString:adapter_binding.name] &&
+                    native_binding.type == adapter_binding.type &&
+                    native_binding.access == adapter_binding.access &&
+                    native_binding.index == adapter_binding.index &&
+                    native_binding.isUsed == adapter_binding.isUsed;
+                if (mtl4_pipeline_reflection_exact && native_binding.type == MTLBindingTypeBuffer) {
+                    id<MTLBufferBinding> native_buffer = (id<MTLBufferBinding>)native_binding;
+                    id<MTLBufferBinding> adapter_buffer = (id<MTLBufferBinding>)adapter_binding;
+                    mtl4_pipeline_reflection_exact =
+                        native_buffer.bufferAlignment == adapter_buffer.bufferAlignment &&
+                        native_buffer.bufferDataSize == adapter_buffer.bufferDataSize &&
+                        native_buffer.bufferDataType == adapter_buffer.bufferDataType &&
+                        native_buffer.bufferPointerType.elementType == adapter_buffer.bufferPointerType.elementType &&
+                        native_buffer.bufferPointerType.dataSize == adapter_buffer.bufferPointerType.dataSize &&
+                        native_buffer.bufferPointerType.alignment == adapter_buffer.bufferPointerType.alignment;
+                } else if (mtl4_pipeline_reflection_exact && native_binding.type == MTLBindingTypeTexture) {
+                    id<MTLTextureBinding> native_texture = (id<MTLTextureBinding>)native_binding;
+                    id<MTLTextureBinding> adapter_texture = (id<MTLTextureBinding>)adapter_binding;
+                    mtl4_pipeline_reflection_exact =
+                        native_texture.textureType == adapter_texture.textureType &&
+                        native_texture.textureDataType == adapter_texture.textureDataType &&
+                        native_texture.arrayLength == adapter_texture.arrayLength &&
+                        native_texture.isDepthTexture == adapter_texture.isDepthTexture;
+                }
+            }
+        }
+        if (!mtl4_pipeline_reflection_exact) {
+            fail_with_error("source-defined Metal 4 pipeline reflection lowering failed",
+                            adapter_mtl4_error ?: native_mtl4_error);
+            return 178;
+        }
+    }
     const uint8_t source_noop_seed[32] = {
         0x03, 0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7a,
         0x8b, 0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2,
