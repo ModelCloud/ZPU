@@ -643,6 +643,8 @@ triangle path:
   metadata-only argument-buffer declarations additionally preserve arbitrary
   supported member names, ids, buffer indices, native `array<T,N>` members,
   recursive child
+  aliases, including finite `using` and `typedef` chains that resolve to the
+  validated scalar/vector, resource, array, or named-struct vocabulary,
   reflection, and scalar/vector types including 64-bit `long`/`ulong` and
   `bfloat`, plus validated function-table, Metal 4 command-resource, and
   primitive/instance acceleration structure argument-buffer metadata. Depth

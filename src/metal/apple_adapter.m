@@ -12403,6 +12403,10 @@ static MTLArgumentDescriptor *zpu_source_argument_descriptor_for_data_type(MTLDa
     return [MTLArgumentDescriptor argumentDescriptor];
 }
 
+static NSString *zpu_source_resolve_type_alias(NSString *name,
+                                                NSDictionary<NSString *, NSString *> *aliases);
+static NSDictionary<NSString *, NSString *> *zpu_source_type_aliases(NSString *source);
+
 /* Parse the validated Metal tensor-reference spelling used in argument
  * buffers. This is metadata-only: the adapter keeps tensor resources in ZPU
  * and never asks Apple's compiler or command encoder to execute the source
@@ -12558,10 +12562,12 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
                                             NSUInteger *arrayLength, BOOL *resource,
                                             NSString **addressSpace, BOOL *pointer,
                                             BOOL *pointeeConst,
-                                            NSDictionary<NSString *, NSString *> *structBodies) {
+                                            NSDictionary<NSString *, NSString *> *structBodies,
+                                            NSDictionary<NSString *, NSString *> *typeAliases) {
     if (name == nil || elementName == NULL || arrayLength == NULL || resource == NULL ||
         addressSpace == NULL || pointer == NULL || pointeeConst == NULL) return NO;
-    NSString *compactName = zpu_source_compact(name);
+    NSString *compactName = zpu_source_resolve_type_alias(name, typeAliases ?: @{});
+    if (compactName == nil) return NO;
     if (![compactName hasPrefix:@"array<"] || ![compactName hasSuffix:@">"]) return NO;
     NSString *arguments = [compactName substringWithRange:NSMakeRange(6, compactName.length - 7)];
     NSUInteger angleDepth = 0;
@@ -12583,8 +12589,10 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
         commaLocation + 1 >= arguments.length) {
         return NO;
     }
-    NSString *candidateElement = [arguments substringToIndex:commaLocation];
+    NSString *candidateElement = zpu_source_resolve_type_alias(
+        [arguments substringToIndex:commaLocation], typeAliases ?: @{});
     NSString *candidateLength = [arguments substringFromIndex:commaLocation + 1];
+    if (candidateElement == nil) return NO;
     NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
     if (candidateLength.length == 0 || [candidateLength rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
         return NO;
@@ -12633,7 +12641,7 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
         BOOL nestedPointeeConst = NO;
         nestedArray = zpu_source_array_type_for_name(candidateElement, &nestedElementName, &nestedLength,
                                                       &nestedArrayResource, &nestedAddressSpace, &nestedPointer,
-                                                      &nestedPointeeConst, structBodies);
+                                                      &nestedPointeeConst, structBodies, typeAliases);
     }
     if (!candidatePointer && !isResource && !zpu_source_data_type_for_name(candidateElement, &dataType) &&
         ![candidateElement isEqualToString:@"sampler"] && !isTexture &&
@@ -12650,11 +12658,13 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
 
 static NSDictionary *zpu_source_argument_layout_for_struct(
     NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
-    NSMutableSet<NSString *> *building);
+    NSMutableSet<NSString *> *building,
+    NSDictionary<NSString *, NSString *> *typeAliases);
 
 static NSDictionary *zpu_source_data_struct_layout_for_struct(
     NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
-    NSMutableSet<NSString *> *building);
+    NSMutableSet<NSString *> *building,
+    NSDictionary<NSString *, NSString *> *typeAliases);
 
 /* Construct a synthetic one-member struct for an array element that is itself
  * an array. Native Metal exposes every array level through an anonymous
@@ -12662,7 +12672,8 @@ static NSDictionary *zpu_source_data_struct_layout_for_struct(
  * and the flattened argument-index span at each level. */
 static NSDictionary *zpu_source_argument_layout_for_array_type(
     NSString *arrayType, NSDictionary<NSString *, NSString *> *structBodies,
-    NSMutableSet<NSString *> *building) {
+    NSMutableSet<NSString *> *building,
+    NSDictionary<NSString *, NSString *> *typeAliases) {
     NSString *elementName = nil;
     NSUInteger arrayLength = 0;
     BOOL resource = NO;
@@ -12670,7 +12681,8 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
     BOOL pointer = NO;
     BOOL pointeeConst = NO;
     if (!zpu_source_array_type_for_name(arrayType, &elementName, &arrayLength, &resource,
-                                        &addressSpace, &pointer, &pointeeConst, structBodies)) return nil;
+                                        &addressSpace, &pointer, &pointeeConst, structBodies,
+                                        typeAliases)) return nil;
 
     MTLDataType dataType = MTLDataTypeNone;
     MTLDataType elementDataType = MTLDataTypeNone;
@@ -12685,7 +12697,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
     NSUInteger argumentIndexSpan = arrayLength;
     NSString *kind = @"constant";
     if ([elementName hasPrefix:@"array<"]) {
-        childLayout = zpu_source_argument_layout_for_array_type(elementName, structBodies, building);
+        childLayout = zpu_source_argument_layout_for_array_type(elementName, structBodies, building, typeAliases);
         elementDataType = MTLDataTypeStruct;
         dataType = MTLDataTypeStruct;
         argumentIndexSpan = [childLayout[@"argumentIndexSpan"] unsignedIntegerValue];
@@ -12693,7 +12705,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
             arrayLength > NSUIntegerMax / argumentIndexSpan) return nil;
         argumentIndexSpan *= arrayLength;
     } else if (!pointer && structBodies[elementName] != nil) {
-        childLayout = zpu_source_argument_layout_for_struct(elementName, structBodies, building);
+        childLayout = zpu_source_argument_layout_for_struct(elementName, structBodies, building, typeAliases);
         elementDataType = MTLDataTypeStruct;
         dataType = MTLDataTypeStruct;
         argumentIndexSpan = [childLayout[@"argumentIndexSpan"] unsignedIntegerValue];
@@ -12702,7 +12714,7 @@ static NSDictionary *zpu_source_argument_layout_for_array_type(
         argumentIndexSpan *= arrayLength;
     } else if (pointer) {
         if (structBodies[elementName] != nil) {
-            pointerStructLayout = zpu_source_data_struct_layout_for_struct(elementName, structBodies, building);
+            pointerStructLayout = zpu_source_data_struct_layout_for_struct(elementName, structBodies, building, typeAliases);
             if (pointerStructLayout == nil) return nil;
             elementDataType = MTLDataTypeStruct;
         } else if (!zpu_source_data_type_for_name(elementName, &elementDataType)) {
@@ -12789,17 +12801,20 @@ static BOOL zpu_argument_type_size_align(MTLDataType dataType, NSUInteger *size,
  * resources, arrays, or malformed declarations. */
 static NSDictionary *zpu_source_data_struct_layout_for_struct(
     NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
-    NSMutableSet<NSString *> *building) {
-    NSString *body = structBodies[structName];
-    if (body == nil || [building containsObject:structName]) return nil;
-    [building addObject:structName];
+    NSMutableSet<NSString *> *building,
+    NSDictionary<NSString *, NSString *> *typeAliases) {
+    NSString *resolvedStructName = zpu_source_resolve_type_alias(structName, typeAliases ?: @{});
+    NSString *body = structBodies[resolvedStructName];
+    if (resolvedStructName == nil) return nil;
+    if (body == nil || [building containsObject:resolvedStructName]) return nil;
+    [building addObject:resolvedStructName];
     NSError *fieldError = nil;
     NSRegularExpression *fieldExpression = [NSRegularExpression
         regularExpressionWithPattern:
             @"^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*$"
                                options:0 error:&fieldError];
     if (fieldExpression == nil || fieldError != nil) {
-        [building removeObject:structName];
+        [building removeObject:resolvedStructName];
         return nil;
     }
     NSMutableArray<NSDictionary *> *members = [NSMutableArray array];
@@ -12810,37 +12825,42 @@ static NSDictionary *zpu_source_data_struct_layout_for_struct(
         NSTextCheckingResult *match = [fieldExpression firstMatchInString:rawField options:0
                                                                       range:NSMakeRange(0, rawField.length)];
         if (match == nil) {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
-        NSString *fieldTypeName = zpu_source_compact(zpu_source_match_string(rawField, match, 1));
+        NSString *fieldTypeName = zpu_source_resolve_type_alias(
+            zpu_source_match_string(rawField, match, 1), typeAliases ?: @{});
         NSString *fieldName = zpu_source_compact(zpu_source_match_string(rawField, match, 2));
+        if (fieldTypeName == nil) {
+            [building removeObject:resolvedStructName];
+            return nil;
+        }
         MTLDataType dataType = MTLDataTypeNone;
         NSUInteger memberSize = 0;
         NSUInteger memberAlignment = 0;
         NSDictionary *nestedLayout = nil;
         if (zpu_source_data_type_for_name(fieldTypeName, &dataType)) {
             if (!zpu_argument_type_size_align(dataType, &memberSize, &memberAlignment)) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
         } else if (structBodies[fieldTypeName] != nil) {
-            nestedLayout = zpu_source_data_struct_layout_for_struct(fieldTypeName, structBodies, building);
+            nestedLayout = zpu_source_data_struct_layout_for_struct(fieldTypeName, structBodies, building, typeAliases);
             if (nestedLayout == nil) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
             memberSize = [nestedLayout[@"size"] unsignedIntegerValue];
             memberAlignment = [nestedLayout[@"alignment"] unsignedIntegerValue];
             dataType = MTLDataTypeStruct;
         } else {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
         NSUInteger offset = 0;
         if (!zpu_argument_align_up(cursor, memberAlignment, &offset) ||
             offset > NSUIntegerMax - memberSize) {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
         cursor = offset + memberSize;
@@ -12856,10 +12876,10 @@ static NSDictionary *zpu_source_data_struct_layout_for_struct(
     }
     NSUInteger size = 0;
     if (!zpu_argument_align_up(cursor, maximumAlignment, &size)) {
-        [building removeObject:structName];
+        [building removeObject:resolvedStructName];
         return nil;
     }
-    [building removeObject:structName];
+    [building removeObject:resolvedStructName];
     return @{
         @"members": [members copy],
         @"size": @(size),
@@ -12875,10 +12895,12 @@ static NSDictionary *zpu_source_data_struct_layout_for_struct(
  * being reordered into a layout Apple would not accept. */
 static NSDictionary *zpu_source_argument_layout_for_struct(
     NSString *structName, NSDictionary<NSString *, NSString *> *structBodies,
-    NSMutableSet<NSString *> *building) {
-    NSString *body = structBodies[structName];
-    if (body == nil || [building containsObject:structName]) return nil;
-    [building addObject:structName];
+    NSMutableSet<NSString *> *building,
+    NSDictionary<NSString *, NSString *> *typeAliases) {
+    NSString *resolvedStructName = zpu_source_resolve_type_alias(structName, typeAliases ?: @{});
+    NSString *body = structBodies[resolvedStructName];
+    if (resolvedStructName == nil || body == nil || [building containsObject:resolvedStructName]) return nil;
+    [building addObject:resolvedStructName];
     NSError *fieldError = nil;
     NSRegularExpression *fieldExpression = [NSRegularExpression
         regularExpressionWithPattern:
@@ -12888,7 +12910,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
              "\\[\\[id\\(([0-9]+)\\)\\]\\]\\s*$"
                                options:0 error:&fieldError];
     if (fieldExpression == nil || fieldError != nil) {
-        [building removeObject:structName];
+        [building removeObject:resolvedStructName];
         return nil;
     }
     NSMutableArray<NSDictionary *> *fields = [NSMutableArray array];
@@ -12897,17 +12919,22 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         NSTextCheckingResult *match = [fieldExpression firstMatchInString:rawField options:0
                                                                       range:NSMakeRange(0, rawField.length)];
         if (match == nil) {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
         NSString *declaratorArrayLength = zpu_source_compact(zpu_source_match_string(rawField, match, 6));
         if (declaratorArrayLength.length != 0) {
             /* `T[N] [[id]]` is not an argument-buffer member spelling in
              * native Metal; array<T,N> is the validated representation. */
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
-        NSString *fieldTypeName = zpu_source_compact(zpu_source_match_string(rawField, match, 3));
+        NSString *fieldTypeName = zpu_source_resolve_type_alias(
+            zpu_source_match_string(rawField, match, 3), typeAliases ?: @{});
+        if (fieldTypeName == nil) {
+            [building removeObject:resolvedStructName];
+            return nil;
+        }
         NSUInteger typeArrayLength = 1;
         NSString *typeArrayElementName = nil;
         BOOL typeArrayResource = NO;
@@ -12918,8 +12945,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             !zpu_source_array_type_for_name(fieldTypeName, &typeArrayElementName,
                                              &typeArrayLength, &typeArrayResource,
                                              &typeArrayAddressSpace, &typeArrayPointer,
-                                             &typeArrayPointeeConst, structBodies)) {
-            [building removeObject:structName];
+                                             &typeArrayPointeeConst, structBodies, typeAliases)) {
+            [building removeObject:resolvedStructName];
             return nil;
         }
         NSDictionary *typeArrayElementLayout = nil;
@@ -12928,24 +12955,24 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         if ([fieldTypeName hasPrefix:@"array<"] && typeArrayPointer &&
             structBodies[typeArrayElementName] != nil) {
             typeArrayPointerStructLayout = zpu_source_data_struct_layout_for_struct(
-                typeArrayElementName, structBodies, building);
+                typeArrayElementName, structBodies, building, typeAliases);
             if (typeArrayPointerStructLayout == nil) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
         }
         if ([fieldTypeName hasPrefix:@"array<"] && !typeArrayPointer &&
             (structBodies[typeArrayElementName] != nil || [typeArrayElementName hasPrefix:@"array<"])) {
             typeArrayElementLayout = [typeArrayElementName hasPrefix:@"array<"] ?
-                zpu_source_argument_layout_for_array_type(typeArrayElementName, structBodies, building) :
-                zpu_source_argument_layout_for_struct(typeArrayElementName, structBodies, building);
+                zpu_source_argument_layout_for_array_type(typeArrayElementName, structBodies, building, typeAliases) :
+                zpu_source_argument_layout_for_struct(typeArrayElementName, structBodies, building, typeAliases);
             typeArrayArgumentSpan = [typeArrayElementLayout[@"argumentIndexSpan"] unsignedIntegerValue];
             if (typeArrayElementLayout == nil || typeArrayArgumentSpan == 0) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
             if (typeArrayLength > NSUIntegerMax / typeArrayArgumentSpan) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
             typeArrayArgumentSpan *= typeArrayLength;
@@ -12957,32 +12984,32 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         NSString *fieldIndirection = zpu_source_compact(zpu_source_match_string(rawField, match, 4));
         if (![fieldTypeName hasPrefix:@"array<"] && fieldAddress.length == 0 &&
             fieldIndirection.length == 0 && structBodies[fieldTypeName] != nil) {
-            typeStructLayout = zpu_source_argument_layout_for_struct(fieldTypeName, structBodies, building);
+            typeStructLayout = zpu_source_argument_layout_for_struct(fieldTypeName, structBodies, building, typeAliases);
             typeStructArgumentSpan = [typeStructLayout[@"argumentIndexSpan"] unsignedIntegerValue];
             if (typeStructLayout == nil || typeStructArgumentSpan == 0) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
         }
         if (![fieldTypeName hasPrefix:@"array<"] && [fieldIndirection isEqualToString:@"*"] &&
             structBodies[fieldTypeName] != nil) {
-            pointerStructLayout = zpu_source_data_struct_layout_for_struct(fieldTypeName, structBodies, building);
+            pointerStructLayout = zpu_source_data_struct_layout_for_struct(fieldTypeName, structBodies, building, typeAliases);
             if (pointerStructLayout == nil) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
         }
         NSUInteger index = zpu_source_match_string(rawField, match, 7).integerValue;
         for (NSDictionary *field in fields) {
             if ([field[@"index"] unsignedIntegerValue] == index) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
         }
         [fields addObject:@{
             @"address": zpu_source_compact(zpu_source_match_string(rawField, match, 1)),
             @"const": zpu_source_compact(zpu_source_match_string(rawField, match, 2)),
-            @"type": zpu_source_compact(zpu_source_match_string(rawField, match, 3)),
+            @"type": fieldTypeName,
             @"indirection": zpu_source_compact(zpu_source_match_string(rawField, match, 4)),
             @"name": zpu_source_compact(zpu_source_match_string(rawField, match, 5)),
             @"arrayLength": declaratorArrayLength,
@@ -13010,7 +13037,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             MAX((NSUInteger)1, [field[@"typeStructArgumentSpan"] unsignedIntegerValue]);
         if (arrayLength == 0 || argumentSpan == 0 || (hasPreviousField && index < previousEnd) ||
             index > NSUIntegerMax - argumentSpan) {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
         previousEnd = index + argumentSpan;
@@ -13047,8 +13074,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             if (arrayLengthString.length != 0 || address.length != 0 || indirection.length != 0 ||
                 !zpu_source_array_type_for_name(typeName, &arrayElementName, &arrayLength, &arrayResource,
                                                  &arrayAddressSpace, &arrayPointer, &arrayPointeeConst,
-                                                 structBodies)) {
-                [building removeObject:structName];
+                                                 structBodies, typeAliases)) {
+                [building removeObject:resolvedStructName];
                 return nil;
             }
             typeName = arrayElementName;
@@ -13063,7 +13090,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             }
         }
         if (arrayLength == 0 || (arrayLength > 1 && index > NSUIntegerMax - (arrayLength - 1))) {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         }
 
@@ -13085,7 +13112,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             access = MTLBindingAccessReadOnly;
         } else if (arrayStruct || arrayComposite) {
             if (!arrayComposite) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
             dataType = MTLDataTypeStruct;
@@ -13101,7 +13128,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
                 dataType = MTLDataTypePointer;
                 elementDataType = MTLDataTypeStruct;
             } else if (!zpu_source_data_type_for_name(typeName, &dataType)) {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             } else {
                 elementDataType = dataType;
@@ -13114,7 +13141,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
                    ([typeName hasPrefix:@"depth"] && [typeName rangeOfString:@"<"].location != NSNotFound)) {
             if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access,
                                                   &depthTexture)) {
-                [building removeObject:structName];
+            [building removeObject:resolvedStructName];
                 return nil;
             }
             elementDataType = dataType;
@@ -13127,11 +13154,11 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             if (@available(macOS 26.0, iOS 26.0, *)) {
                 if (!zpu_source_tensor_type_for_name(typeName, &tensorDataType, &tensorIndexType,
                                                       &tensorDimensions, &access)) {
-                    [building removeObject:structName];
+                    [building removeObject:resolvedStructName];
                     return nil;
                 }
             } else {
-                [building removeObject:structName];
+                [building removeObject:resolvedStructName];
                 return nil;
             }
             dataType = (MTLDataType)140;
@@ -13142,7 +13169,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             access = MTLBindingAccessReadOnly;
             resource = YES;
         } else if (!zpu_source_data_type_for_name(typeName, &dataType) || indirection.length != 0) {
-            [building removeObject:structName];
+            [building removeObject:resolvedStructName];
             return nil;
         } else {
             elementDataType = dataType;
@@ -13183,9 +13210,9 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             };
             if (nested) {
                 NSDictionary *childLayout = zpu_source_argument_layout_for_struct(
-                    typeName, structBodies, building);
+                    typeName, structBodies, building, typeAliases);
                 if (childLayout == nil) {
-                    [building removeObject:structName];
+                    [building removeObject:resolvedStructName];
                     return nil;
                 }
                 nestedArguments[@(elementIndex)] = childLayout;
@@ -13196,7 +13223,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             }
         }
     }
-    [building removeObject:structName];
+    [building removeObject:resolvedStructName];
     return @{
         @"arguments": [arguments copy],
         @"nestedArguments": [nestedArguments copy],
@@ -13226,6 +13253,7 @@ static NSDictionary<NSString *, NSDictionary *> *zpu_source_lowerable_argument_b
         if (structBodies[name] == nil) structBodies[name] = body;
     }];
     if (structBodies.count == 0) return @{};
+    NSDictionary<NSString *, NSString *> *typeAliases = zpu_source_type_aliases(source);
 
     NSError *kernelError = nil;
     NSRegularExpression *kernelExpression = [NSRegularExpression
@@ -13246,7 +13274,8 @@ static NSDictionary<NSString *, NSDictionary *> *zpu_source_lowerable_argument_b
         NSString *body = zpu_source_match_string(compactSource, match, 5);
         if (![body isEqualToString:[NSString stringWithFormat:@"(void)%@;", argumentName]]) return;
         NSMutableSet<NSString *> *building = [NSMutableSet set];
-        NSDictionary *layout = zpu_source_argument_layout_for_struct(structName, structBodies, building);
+        NSDictionary *layout = zpu_source_argument_layout_for_struct(
+            structName, structBodies, building, typeAliases);
         if (layout == nil) return;
         NSMutableDictionary *annotatedLayout = [layout mutableCopy];
         annotatedLayout[@"bufferIndex"] = @([zpu_source_match_string(compactSource, match, 4) integerValue]);
@@ -13426,6 +13455,69 @@ static NSDictionary<NSString *, NSString *> *zpu_source_struct_bodies(NSString *
     return [result copy];
 }
 
+/* Metal accepts C++-style `using` aliases and C-style `typedef` aliases in
+ * shader source.  They are a type spelling only: they do not change the
+ * argument-buffer ABI.  Resolve aliases before the descriptor-tree parser
+ * examines a member, while keeping the chain finite and cycle-safe.  The
+ * parser still validates the resolved spelling against its explicit type
+ * vocabulary; an alias never turns arbitrary MSL into an accepted layout. */
+static NSDictionary<NSString *, NSString *> *zpu_source_type_aliases(NSString *source) {
+    if (source.length == 0) return @{};
+    NSError *error = nil;
+    NSRegularExpression *usingExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"\\busing\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*([^;]+);"
+                               options:NSRegularExpressionDotMatchesLineSeparators error:&error];
+    if (usingExpression == nil || error != nil) return @{};
+    NSMutableDictionary<NSString *, NSString *> *aliases = [NSMutableDictionary dictionary];
+    [usingExpression enumerateMatchesInString:source options:0 range:NSMakeRange(0, source.length)
+                                    usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *name = zpu_source_match_string(source, match, 1);
+        NSString *replacement = zpu_source_compact(zpu_source_match_string(source, match, 2));
+        if (name.length != 0 && replacement.length != 0 && aliases[name] == nil) aliases[name] = replacement;
+    }];
+
+    error = nil;
+    NSRegularExpression *typedefExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"\\btypedef\\s+([^;]+?)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*;"
+                               options:NSRegularExpressionDotMatchesLineSeparators error:&error];
+    if (typedefExpression == nil || error != nil) return [aliases copy];
+    [typedefExpression enumerateMatchesInString:source options:0 range:NSMakeRange(0, source.length)
+                                      usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *replacement = zpu_source_compact(zpu_source_match_string(source, match, 1));
+        NSString *name = zpu_source_match_string(source, match, 2);
+        /* `typedef struct Foo Alias;` is equivalent to `using Alias = Foo`
+         * for the finite named-struct vocabulary understood below. */
+        if ([replacement hasPrefix:@"struct"] && replacement.length > 6) {
+            unichar next = [replacement characterAtIndex:6];
+            if ([[NSCharacterSet alphanumericCharacterSet] characterIsMember:next] || next == '_') {
+                replacement = [replacement substringFromIndex:6];
+            }
+        }
+        if (name.length != 0 && replacement.length != 0 && aliases[name] == nil) aliases[name] = replacement;
+    }];
+    return [aliases copy];
+}
+
+static NSString *zpu_source_resolve_type_alias(NSString *name,
+                                                NSDictionary<NSString *, NSString *> *aliases) {
+    NSString *current = zpu_source_compact(name);
+    if (current.length == 0) return nil;
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSUInteger depth = 0; depth < 64; ++depth) {
+        if ([seen containsObject:current]) return nil;
+        [seen addObject:current];
+        NSString *replacement = aliases[current];
+        if (![replacement isKindOfClass:[NSString class]]) return current;
+        current = zpu_source_compact(replacement);
+        if (current.length == 0) return nil;
+    }
+    return nil;
+}
+
 /* Defined later with the argument-buffer reflection builder. Direct source
  * bindings may use the same validated ordinary-struct representation. */
 static MTLStructType *zpu_source_data_struct_type(NSDictionary *layout);
@@ -13491,7 +13583,8 @@ static BOOL zpu_source_empty_kernel_builtin_parameter(NSString *parameter) {
 API_AVAILABLE(macos(26.0), ios(26.0))
 static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
                                              NSDictionary<NSString *, NSString *> *structBodies,
-                                             NSString *body) {
+                                             NSString *body,
+                                             NSDictionary<NSString *, NSString *> *typeAliases) {
     if (parameter == nil || structBodies == nil) return nil;
     NSError *attributeError = nil;
     NSRegularExpression *attributeExpression = [NSRegularExpression
@@ -13545,7 +13638,7 @@ static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
     if (isConst) declaration = [declaration substringFromIndex:5];
     BOOL indirection = [declaration hasSuffix:@"*"] || [declaration hasSuffix:@"&"];
     if (indirection) declaration = [declaration substringToIndex:declaration.length - 1];
-    NSString *typeName = declaration;
+    NSString *typeName = zpu_source_resolve_type_alias(declaration, typeAliases ?: @{});
     if (typeName.length == 0) return nil;
     if ([attributeName isEqualToString:@"buffer"]) {
         MTLDataType resourceDataType = MTLDataTypeNone;
@@ -13565,7 +13658,8 @@ static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
             if (!zpu_argument_type_size_align(dataType, &dataSize, &alignment)) return nil;
         } else if (structBodies[typeName] != nil) {
             NSMutableSet<NSString *> *building = [NSMutableSet set];
-            NSDictionary *layout = zpu_source_data_struct_layout_for_struct(typeName, structBodies, building);
+            NSDictionary *layout = zpu_source_data_struct_layout_for_struct(
+                typeName, structBodies, building, typeAliases);
             if (layout == nil) return nil;
             dataType = MTLDataTypeStruct;
             dataSize = [layout[@"size"] unsignedIntegerValue];
@@ -13611,6 +13705,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_function_reflections(NSString *source) {
     NSString *compactSource = zpu_source_compact(source);
     NSDictionary<NSString *, NSString *> *structBodies = zpu_source_struct_bodies(compactSource);
+    NSDictionary<NSString *, NSString *> *typeAliases = zpu_source_type_aliases(source);
     if (compactSource.length == 0) return @{};
     NSError *error = nil;
     NSRegularExpression *kernelExpression = [NSRegularExpression
@@ -13660,7 +13755,8 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                 if (!zpu_source_empty_kernel_builtin_parameter(compactParameter)) valid = NO;
                 continue;
             }
-            ZPUBinding *binding = zpu_source_direct_binding(compactParameter, structBodies, body);
+            ZPUBinding *binding = zpu_source_direct_binding(
+                compactParameter, structBodies, body, typeAliases);
             if (binding == nil || [indices containsObject:@(binding.index)]) {
                 valid = NO;
                 break;
