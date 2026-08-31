@@ -120,8 +120,8 @@ with Keyboard() as k:
 | Emulated Linux input devices | ✅ zmouse / zkeyboard build + `zpu` PyPI package | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; the `zpu` package (and `tools/zinput.py`) exposes them to Python via `libzinput.so`. Install with `pip install zpu`; see `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
-| Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
-| Mosaic renderer | 🧪 Scalar packet parity foundation | The hierarchy-first packetized tile renderer has validated hierarchy/HZB planning, physical packet streams, prepared primitives, and a scalar differential gate. See [`design/mosaic-renderer.md`](design/mosaic-renderer.md). |
+| Complex 3D locality | 🧪 Intra-NUMA Mosaic scaling | The vkcube path can sweep selected physical cores; the active gate reports NUMA and LLC placement rather than assuming every core shares one cache. |
+| Mosaic renderer | 🧪 Scalar packet parity foundation | The hierarchy-first packetized tile renderer has validated hierarchy/HZB planning, physical packet streams, prepared primitives, and a scalar differential gate. See [`design/mosaic-renderer.md`](design/mosaic-renderer.md) and the [Mosaic scalability contract](design/mosaic-scalability.md). |
 | 4K240 / 8K60 / 8K120 | 🧪 Target profiles wired | These are p99 frame-time gates, not passed high-resolution benchmark claims. |
 | 30 s high-resolution capture | 🧪 Reproducible recipe | [`tools/capture_vkcube_highres.sh`](tools/capture_vkcube_highres.sh) captures VP9 WebM when the selected gate is green. |
 
