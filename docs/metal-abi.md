@@ -635,7 +635,8 @@ triangle path:
   profiles also expose their native-matching buffer reflection: the layered
   vertex reports its input vertex buffer, while the layered fragment reports no
   resource bindings. Direct source kernels with an empty body additionally
-  expose native-matching buffer/texture/sampler reflection and execute as
+  expose native-matching buffer/texture/sampler/function-table/acceleration
+  resource reflection and execute as
   deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary
   MSL remains fail-closed.
   Unsupported arbitrary MSL and stitched libraries still fail closed

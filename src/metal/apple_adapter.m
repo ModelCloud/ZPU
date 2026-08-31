@@ -13135,9 +13135,15 @@ static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
      * delimiter between its type and identifier after whitespace is
      * compacted. Handle that one-token prefix before the general suffix
      * matcher below. */
-    if ([prefix hasPrefix:@"sampler"] && prefix.length > [@"sampler" length]) {
-        name = [prefix substringFromIndex:[@"sampler" length]];
-        declaration = @"sampler";
+    for (NSString *simpleType in @[
+        @"sampler", @"command_buffer", @"render_pipeline_state", @"compute_pipeline_state",
+        @"primitive_acceleration_structure", @"instance_acceleration_structure",
+    ]) {
+        if ([prefix hasPrefix:simpleType] && prefix.length > simpleType.length) {
+            name = [prefix substringFromIndex:simpleType.length];
+            declaration = simpleType;
+            break;
+        }
     }
     NSError *nameError = nil;
     NSRegularExpression *nameExpression = [NSRegularExpression
@@ -13165,7 +13171,6 @@ static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
     if (indirection) declaration = [declaration substringToIndex:declaration.length - 1];
     NSString *typeName = declaration;
     if (typeName.length == 0) return nil;
-
     if ([attributeName isEqualToString:@"buffer"]) {
         MTLDataType resourceDataType = MTLDataTypeNone;
         MTLBindingType resourceBindingType = MTLBindingTypeBuffer;

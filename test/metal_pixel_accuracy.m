@@ -731,13 +731,19 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_metadata_direct(device const float *input [[buffer(0)]], "
          "device float4 *output [[buffer(1)]], "
          "texture2d<float, access::read> sourceTexture [[texture(2)]], "
-         "sampler sourceSampler [[sampler(3)]]) {}\n";
+         "sampler sourceSampler [[sampler(3)]]) {}\n"
+         "using namespace metal::raytracing;\n"
+         "kernel void zpu_source_metadata_resources("
+         "visible_function_table<float(float)> visibleTable [[buffer(4)]], "
+         "intersection_function_table<triangle_data> intersectionTable [[buffer(5)]], "
+         "primitive_acceleration_structure primitiveStructure [[buffer(6)]], "
+         "instance_acceleration_structure instanceStructure [[buffer(7)]]) {}\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 47) {
+        adapter_library.functionNames.count != 48) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -788,6 +794,38 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         adapter_metadata_function.functionType != MTLFunctionTypeKernel || !metadata_reflection_exact) {
         fail_with_error("source-defined direct binding reflection lowering failed", adapter_error ?: native_error);
         return 175;
+    }
+    id<MTLFunction> native_metadata_resources_function =
+        [native_library newFunctionWithName:@"zpu_source_metadata_resources"];
+    id<MTLFunction> adapter_metadata_resources_function =
+        [adapter_library newFunctionWithName:@"zpu_source_metadata_resources"];
+    BOOL metadata_resources_reflection_exact = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_metadata_resources_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_metadata_resources"];
+        MTLFunctionReflection *adapter_metadata_resources_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_metadata_resources"];
+        metadata_resources_reflection_exact = native_metadata_resources_reflection != nil &&
+            adapter_metadata_resources_reflection != nil && native_metadata_resources_reflection.bindings.count == 4 &&
+            adapter_metadata_resources_reflection.bindings.count == native_metadata_resources_reflection.bindings.count;
+        if (metadata_resources_reflection_exact) {
+            for (NSUInteger index = 0; index < native_metadata_resources_reflection.bindings.count; ++index) {
+                id<MTLBinding> native_binding = native_metadata_resources_reflection.bindings[index];
+                id<MTLBinding> adapter_binding = adapter_metadata_resources_reflection.bindings[index];
+                metadata_resources_reflection_exact = metadata_resources_reflection_exact &&
+                    [native_binding.name isEqualToString:adapter_binding.name] &&
+                    native_binding.type == adapter_binding.type &&
+                    native_binding.access == adapter_binding.access &&
+                    native_binding.index == adapter_binding.index &&
+                    native_binding.isUsed == adapter_binding.isUsed;
+            }
+        }
+    }
+    if (native_metadata_resources_function == nil || adapter_metadata_resources_function == nil ||
+        adapter_metadata_resources_function.functionType != MTLFunctionTypeKernel ||
+        !metadata_resources_reflection_exact) {
+        fail_with_error("source-defined resource binding reflection lowering failed", adapter_error ?: native_error);
+        return 177;
     }
     const uint8_t source_noop_seed[32] = {
         0x03, 0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7a,
