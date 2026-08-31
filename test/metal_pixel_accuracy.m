@@ -5204,6 +5204,103 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         fail_with_error("legacy CPU AABB trace command failed", adapter_error ?: native_error);
         return 164;
     }
+
+    const float translated_bounds[] = {-0.30f, -0.70f, -0.10f, 1.30f, 0.70f, 0.10f};
+    id<MTLBuffer> native_instance_bounds =
+        [native_device newBufferWithBytes:translated_bounds length:sizeof(translated_bounds)
+                                  options:MTLResourceStorageModeShared];
+    MTLPackedFloat4x3 instance_matrix = {
+        .columns = {
+            MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 1.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 0.0f, 1.0f),
+            MTLPackedFloat3Make(0.50f, 0.0f, 0.0f),
+        },
+    };
+    MTLAccelerationStructureInstanceDescriptor instance = {
+        .transformationMatrix = instance_matrix,
+        .options = MTLAccelerationStructureInstanceOptionNone,
+        .mask = UINT32_MAX,
+        .intersectionFunctionTableOffset = 0,
+        .accelerationStructureIndex = 0,
+    };
+    id<MTLBuffer> instance_buffer =
+        [adapter_device newBufferWithBytes:&instance length:sizeof(instance)
+                                   options:MTLResourceStorageModeShared];
+    MTLInstanceAccelerationStructureDescriptor *instance_descriptor =
+        [MTLInstanceAccelerationStructureDescriptor descriptor];
+    instance_descriptor.instanceDescriptorBuffer = instance_buffer;
+    instance_descriptor.instanceDescriptorBufferOffset = 0;
+    instance_descriptor.instanceDescriptorStride = sizeof(instance);
+    instance_descriptor.instanceCount = 1;
+    instance_descriptor.instancedAccelerationStructures = @[acceleration_structure];
+    MTLAccelerationStructureSizes instance_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:instance_descriptor];
+    id<MTLAccelerationStructure> instance_acceleration_structure =
+        instance_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:instance_sizes.accelerationStructureSize];
+    id<MTLBuffer> instance_scratch = [adapter_device
+        newBufferWithLength:instance_sizes.buildScratchBufferSize == 0 ? 1 : instance_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> instance_build_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> instance_build_encoder =
+        [instance_build_command_buffer accelerationStructureCommandEncoder];
+    [instance_build_encoder buildAccelerationStructure:instance_acceleration_structure
+                                             descriptor:instance_descriptor
+                                          scratchBuffer:instance_scratch scratchBufferOffset:0];
+    [instance_build_encoder endEncoding];
+    [instance_build_command_buffer commit];
+    [instance_build_command_buffer waitUntilCompleted];
+
+    id<MTLTexture> native_instance_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_instance_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLCommandBuffer> native_instance_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_instance_encoder =
+        [native_instance_command_buffer computeCommandEncoder];
+    [native_instance_encoder setComputePipelineState:native_pipeline];
+    [native_instance_encoder setBuffer:native_instance_bounds offset:0 atIndex:0];
+    [native_instance_encoder setTexture:native_instance_texture atIndex:0];
+    [native_instance_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                      threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [native_instance_encoder endEncoding];
+    id<MTLCommandBuffer> adapter_instance_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> adapter_instance_encoder =
+        [adapter_instance_command_buffer computeCommandEncoder];
+    [adapter_instance_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_instance_encoder setAccelerationStructure:instance_acceleration_structure atBufferIndex:0];
+    [adapter_instance_encoder setTexture:adapter_instance_texture atIndex:0];
+    [adapter_instance_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                       threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [adapter_instance_encoder endEncoding];
+    [native_instance_command_buffer commit];
+    [adapter_instance_command_buffer commit];
+    [native_instance_command_buffer waitUntilCompleted];
+    [adapter_instance_command_buffer waitUntilCompleted];
+    uint8_t native_instance_pixels[byte_count] = {0};
+    uint8_t adapter_instance_pixels[byte_count] = {0};
+    [native_instance_texture getBytes:native_instance_pixels bytesPerRow:width * 4
+                           fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_instance_texture getBytes:adapter_instance_pixels bytesPerRow:width * 4
+                            fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    const BOOL instance_exact = native_instance_bounds != nil && instance_buffer != nil &&
+        instance_descriptor != nil && instance_acceleration_structure != nil && instance_scratch != nil &&
+        instance_build_command_buffer != nil && instance_build_encoder != nil &&
+        instance_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        native_instance_texture != nil && adapter_instance_texture != nil &&
+        native_instance_command_buffer != nil && native_instance_encoder != nil &&
+        native_instance_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_instance_command_buffer != nil && adapter_instance_encoder != nil &&
+        adapter_instance_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        memcmp(native_instance_pixels, adapter_instance_pixels, byte_count) == 0;
+    if (!instance_exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_instance_pixels[mismatch] == adapter_instance_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: legacy CPU AABB instance/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_instance_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_instance_pixels[mismatch] : 0);
+        fail_with_error("legacy CPU AABB instance trace command failed", adapter_error ?: native_error);
+        return 165;
+    }
     return 0;
 }
 

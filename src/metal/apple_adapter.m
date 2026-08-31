@@ -7749,6 +7749,9 @@ static NSArray *zpu_make_sample_texture_slice_views(ZPUTexture *source, MTLPixel
 static BOOL zpu_cpu_acceleration_instance_triangle_count(
     MTLInstanceAccelerationStructureDescriptor *descriptor, NSUInteger *triangleCount);
 
+static BOOL zpu_cpu_acceleration_instance_aabb_count(
+    MTLInstanceAccelerationStructureDescriptor *descriptor, NSUInteger *aabbCount);
+
 API_AVAILABLE(macos(14.0), ios(17.0))
 static BOOL zpu_cpu_acceleration_indirect_instance_triangle_count(
     MTLIndirectInstanceAccelerationStructureDescriptor *descriptor, NSUInteger *triangleCount);
@@ -7840,10 +7843,16 @@ static NSUInteger zpu_acceleration_structure_size_for_descriptor(
         }
     }
     if ([descriptor isKindOfClass:[MTLInstanceAccelerationStructureDescriptor class]]) {
-        NSUInteger instanceTriangleCount = 0;
-        if (zpu_cpu_acceleration_instance_triangle_count(
-                (MTLInstanceAccelerationStructureDescriptor *)descriptor, &instanceTriangleCount)) {
-            triangleCount = instanceTriangleCount;
+        NSUInteger instanceAabbCount = 0;
+        if (zpu_cpu_acceleration_instance_aabb_count(
+                (MTLInstanceAccelerationStructureDescriptor *)descriptor, &instanceAabbCount)) {
+            aabbCount = instanceAabbCount;
+        } else {
+            NSUInteger instanceTriangleCount = 0;
+            if (zpu_cpu_acceleration_instance_triangle_count(
+                    (MTLInstanceAccelerationStructureDescriptor *)descriptor, &instanceTriangleCount)) {
+                triangleCount = instanceTriangleCount;
+            }
         }
     }
     if (@available(macOS 26.0, iOS 26.0, *)) {
@@ -22292,6 +22301,8 @@ static BOOL zpu_cpu_acceleration_aabb_payload_info(ZPUAccelerationStructure *str
     if (header.magic != ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC ||
         header.version != ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION ||
         (header.flags & ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS) == 0 ||
+        (header.triangle_count != 0 &&
+         (header.flags & ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLES) == 0) ||
         header.triangle_offset < ZPU_METAL_CPU_ACCELERATION_STRUCTURE_HEADER_BYTES ||
         header.reserved[1] < header.triangle_offset ||
         header.reserved[2] == 0) return NO;
@@ -22410,6 +22421,26 @@ static BOOL zpu_cpu_acceleration_instance_triangle_count(
     return YES;
 }
 
+static BOOL zpu_cpu_acceleration_instance_aabb_count(
+    MTLInstanceAccelerationStructureDescriptor *descriptor, NSUInteger *aabbCount) {
+    if (descriptor == nil || aabbCount == NULL) return NO;
+    NSArray *children = descriptor.instancedAccelerationStructures;
+    if (descriptor.instanceCount > 0 && descriptor.instanceCount > children.count) return NO;
+    NSUInteger total = 0;
+    for (NSUInteger index = 0; index < descriptor.instanceCount; ++index) {
+        ZPUAccelerationStructure *child = (ZPUAccelerationStructure *)children[index];
+        NSUInteger childCount = 0;
+        NSUInteger childOffset = 0;
+        if (![child isKindOfClass:[ZPUAccelerationStructure class]] || child->_owner == nil || !child->_built ||
+            !zpu_cpu_acceleration_aabb_payload_info(child, &childCount, &childOffset) ||
+            childCount > NSUIntegerMax - total) return NO;
+        (void)childOffset;
+        total += childCount;
+    }
+    *aabbCount = total;
+    return YES;
+}
+
 static BOOL zpu_cpu_acceleration_transform_position(const MTLPackedFloat4x3 *matrix,
                                                      const float input[3], float output[3]) {
     if (matrix == NULL || input == NULL || output == NULL) return NO;
@@ -22481,6 +22512,67 @@ static BOOL zpu_cpu_acceleration_write_instance_payload(
     NSUInteger descriptorSize = 0;
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 ||
         !zpu_cpu_acceleration_instance_descriptor_size(descriptor, &descriptorSize)) return NO;
+    NSUInteger aabbCount = 0;
+    if (zpu_cpu_acceleration_instance_aabb_count(descriptor, &aabbCount) && aabbCount != 0) {
+        if (aabbCount > UINT32_MAX ||
+            aabbCount > (target->_size - 256) / sizeof(zpu_metal_cpu_acceleration_aabb) ||
+            aabbCount > (target->_size - (256 + aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb))) /
+                sizeof(uint32_t)) return NO;
+        const NSUInteger aabbOffset = 256;
+        const NSUInteger maskOffset = aabbOffset + aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb);
+        memset(target->_storage.contents, 0, target->_size);
+        zpu_metal_cpu_acceleration_structure_header header = {
+            .magic = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
+            .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
+            .triangle_count = 0,
+            .flags = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS |
+                ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS,
+            .triangle_offset = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET,
+            .reserved = {(uint32_t)maskOffset, (uint32_t)aabbOffset, (uint32_t)aabbCount},
+        };
+        memcpy(target->_storage.contents, &header, sizeof(header));
+        NSArray *children = descriptor.instancedAccelerationStructures;
+        ZPUBuffer *instanceBuffer = (ZPUBuffer *)descriptor.instanceDescriptorBuffer;
+        const NSUInteger instanceOffset = descriptor.instanceDescriptorBufferOffset;
+        const NSUInteger instanceStride = descriptor.instanceDescriptorStride == 0 ? descriptorSize :
+            descriptor.instanceDescriptorStride;
+        if (descriptor.instanceCount > 0 &&
+            (!zpu_buffer_belongs_to_device(target->_owner, instanceBuffer) || instanceBuffer.contents == NULL ||
+             instanceOffset % 64 != 0 || instanceStride < descriptorSize || instanceStride % 4 != 0 ||
+             instanceOffset > instanceBuffer.length ||
+             descriptor.instanceCount > (instanceBuffer.length - instanceOffset) / instanceStride)) return NO;
+        NSUInteger destinationIndex = 0;
+        for (NSUInteger index = 0; index < descriptor.instanceCount; ++index) {
+            const uint8_t *instanceBytes = (const uint8_t *)instanceBuffer.contents + instanceOffset +
+                index * instanceStride;
+            MTLAccelerationStructureInstanceDescriptor instance;
+            memcpy(&instance, instanceBytes, sizeof(instance));
+            if (instance.options != MTLAccelerationStructureInstanceOptionNone ||
+                instance.intersectionFunctionTableOffset != 0 ||
+                instance.accelerationStructureIndex >= children.count) return NO;
+            ZPUAccelerationStructure *child = (ZPUAccelerationStructure *)children[instance.accelerationStructureIndex];
+            NSUInteger childCount = 0;
+            NSUInteger childOffset = 0;
+            if (![child isKindOfClass:[ZPUAccelerationStructure class]] || child->_owner != target->_owner ||
+                !child->_built || !zpu_cpu_acceleration_aabb_payload_info(child, &childCount, &childOffset)) return NO;
+            for (NSUInteger childIndex = 0; childIndex < childCount; ++childIndex) {
+                zpu_metal_cpu_acceleration_aabb source;
+                zpu_metal_cpu_acceleration_aabb transformed;
+                uint32_t childMask = UINT32_MAX;
+                if (!zpu_cpu_acceleration_read_aabb(&source, child->_storage, childOffset,
+                                                    sizeof(source), child->_size, childIndex) ||
+                    !zpu_cpu_acceleration_transform_aabb(&source, &instance.transformationMatrix, &transformed) ||
+                    !zpu_cpu_acceleration_aabb_mask(child, childCount, childOffset, childIndex, &childMask)) return NO;
+                memcpy((uint8_t *)target->_storage.contents + aabbOffset +
+                           destinationIndex * sizeof(transformed), &transformed, sizeof(transformed));
+                const uint32_t mask = instance.mask & childMask;
+                memcpy((uint8_t *)target->_storage.contents + maskOffset +
+                           destinationIndex * sizeof(mask), &mask, sizeof(mask));
+                destinationIndex += 1;
+            }
+        }
+        return destinationIndex == aabbCount;
+    }
     NSArray *children = descriptor.instancedAccelerationStructures;
     if (descriptor.instanceCount > 0 && descriptor.instanceCount > children.count) return NO;
     ZPUBuffer *instanceBuffer = (ZPUBuffer *)descriptor.instanceDescriptorBuffer;
