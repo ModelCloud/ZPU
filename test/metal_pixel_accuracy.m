@@ -738,7 +738,8 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "intersection_function_table<triangle_data> intersectionTable [[buffer(5)]], "
          "primitive_acceleration_structure primitiveStructure [[buffer(6)]], "
          "instance_acceleration_structure instanceStructure [[buffer(7)]]) {}\n"
-         "kernel void zpu_source_empty_noop(uint3 tid [[thread_position_in_grid]]) {}\n";
+         "kernel void zpu_source_empty_noop(uint3 tid [[thread_position_in_grid]], "
+         "uint lane [[thread_index_in_threadgroup]]) {}\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
@@ -1037,6 +1038,13 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined empty CPU kernel direct dispatch failed",
                         adapter_noop_pipeline_error ?: native_noop_pipeline_error);
         return 176;
+    }
+    NSError *plain_input_error = nil;
+    id<MTLLibrary> plain_input_library = [adapter_device newLibraryWithSource:
+        @"kernel void zpu_source_plain_input(uint id) {}" options:nil error:&plain_input_error];
+    if (plain_input_library != nil || plain_input_error == nil) {
+        fprintf(stderr, "metal-pixel: source no-op lowering accepted an unannotated kernel parameter\n");
+        return 180;
     }
     NSError *mismatched_guard_error = nil;
     id<MTLLibrary> mismatched_guard_library = [adapter_device newLibraryWithSource:

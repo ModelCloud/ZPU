@@ -13152,6 +13152,39 @@ static BOOL zpu_source_resource_binding_type(MTLDataType dataType, MTLBindingTyp
     }
 }
 
+/* Empty source kernels are admitted only as deferred CPU/ZPU no-ops.  A
+ * parameter without a resource attribute is therefore safe only when Metal
+ * itself treats it as a kernel built-in.  Keep the accepted vocabulary
+ * explicit so an ordinary unannotated argument cannot accidentally become a
+ * callable adapter function merely because its body is empty. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+static BOOL zpu_source_empty_kernel_builtin_parameter(NSString *parameter) {
+    if (parameter == nil || parameter.length == 0) return NO;
+    NSError *error = nil;
+    NSRegularExpression *expression = [NSRegularExpression
+        regularExpressionWithPattern:@"^(uint|uint2|uint3)([A-Za-z_][A-Za-z0-9_]*)\\[\\[([A-Za-z_][A-Za-z0-9_]*)\\]\\]$"
+                               options:0 error:&error];
+    if (expression == nil || error != nil) return NO;
+    NSTextCheckingResult *match = [expression firstMatchInString:parameter options:0
+                                                            range:NSMakeRange(0, parameter.length)];
+    if (match == nil) return NO;
+    NSString *type = zpu_source_match_string(parameter, match, 1);
+    NSString *attribute = zpu_source_match_string(parameter, match, 3);
+    NSSet<NSString *> *vectorBuiltins = [NSSet setWithObjects:
+        @"thread_position_in_grid", @"thread_position_in_threadgroup",
+        @"threadgroup_position_in_grid", @"threads_per_grid",
+        @"threads_per_threadgroup", nil];
+    NSSet<NSString *> *scalarBuiltins = [NSSet setWithObjects:
+        @"thread_index_in_threadgroup", @"simdgroup_index_in_threadgroup",
+        @"simd_lane_id", @"simdgroup_lane_id", @"thread_execution_width",
+        @"quadgroup_index_in_threadgroup", @"simdgroup_threads_per_threadgroup", nil];
+    if ([vectorBuiltins containsObject:attribute]) {
+        return [type isEqualToString:@"uint"] || [type isEqualToString:@"uint2"] ||
+            [type isEqualToString:@"uint3"];
+    }
+    return [scalarBuiltins containsObject:attribute] && [type isEqualToString:@"uint"];
+}
+
 /* Parse one direct kernel resource parameter for metadata reflection. This
  * deliberately excludes arbitrary MSL execution: it only creates the same
  * CPU-owned binding objects for scalar/vector/struct buffers, textures,
@@ -13317,12 +13350,18 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
         BOOL valid = YES;
         for (NSString *parameter in parameterList) {
             NSString *compactParameter = zpu_source_compact(parameter);
-            if (compactParameter.length == 0) continue;
+            if (compactParameter.length == 0) {
+                if (parameters.length != 0) valid = NO;
+                continue;
+            }
             const BOOL declaresBinding =
                 [compactParameter rangeOfString:@"[[buffer"].location != NSNotFound ||
                 [compactParameter rangeOfString:@"[[texture"].location != NSNotFound ||
                 [compactParameter rangeOfString:@"[[sampler"].location != NSNotFound;
-            if (!declaresBinding) continue;
+            if (!declaresBinding) {
+                if (!zpu_source_empty_kernel_builtin_parameter(compactParameter)) valid = NO;
+                continue;
+            }
             ZPUBinding *binding = zpu_source_direct_binding(compactParameter, structBodies, body);
             if (binding == nil || [indices containsObject:@(binding.index)]) {
                 valid = NO;
