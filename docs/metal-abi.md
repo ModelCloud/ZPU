@@ -626,7 +626,11 @@ triangle path:
   the top-left `uint2` grid, plus a source-named RGBA8 texture-to-texture copy
   profile with read binding 0 and write binding 1. The copy profile preserves
   raw texel bytes and admits only its exact bounded body. The same source
-  lowering set includes a strict source-named passthrough vertex plus
+  lowering set also admits the canonical RGBA8 gradient bodies for
+  `texture2d_array<float>` and `texture3d<float>`; array slices and volume
+  depth preserve the same top-left X/Y grid and are executed by the existing
+  CPU/ZPU array and 3D profiles. The lowering set includes a strict
+  source-named passthrough vertex plus
   color-returning fragment pair. The pair accepts any source struct identifier
   whose validated layout is `float4 position [[position]]; float4 color;`, so
   renaming the source record does not change the fixed CPU ABI. A canonical

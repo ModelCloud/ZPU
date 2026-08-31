@@ -12019,6 +12019,29 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             return;
         }
 
+        NSString *arrayGradientSignature =
+            @"texture2d_array<float,access::write>output[[texture(0)]],uint3gid[[thread_position_in_grid]]";
+        NSString *arrayGradientBody =
+            @"if(gid.x>=output.get_width()||gid.y>=output.get_height()||gid.z>=output.get_array_size())return;"
+             "output.write(float4((float(gid.x)+1.0)/8.0,(float(gid.y)+1.0)/8.0,0.25,1.0),gid.xy,gid.z);";
+        if ([compactSignature isEqualToString:arrayGradientSignature] &&
+            [compactBody isEqualToString:arrayGradientBody]) {
+            implementations[functionName] = @"zpu_cpu_fill_gradient_rgba8_array";
+            return;
+        }
+
+        NSString *volumeGradientSignature =
+            @"texture3d<float,access::write>output[[texture(0)]],uint3gid[[thread_position_in_grid]]";
+        NSString *volumeGradientBody =
+            @"if(gid.x>=output.get_width()||gid.y>=output.get_height()||gid.z>=output.get_depth())return;"
+             "output.write(float4((float(gid.x)+1.0)/8.0,(float(gid.y)+1.0)/8.0,"
+             "(float(gid.z)+1.0)/8.0,1.0),gid);";
+        if ([compactSignature isEqualToString:volumeGradientSignature] &&
+            [compactBody isEqualToString:volumeGradientBody]) {
+            implementations[functionName] = @"zpu_cpu_fill_gradient_rgba8_3d";
+            return;
+        }
+
         NSString *copySignature =
             @"deviceconstuchar4*source[[buffer(0)]],texture2d<float,access::write>output[[texture(1)]],"
              "uint2gid[[thread_position_in_grid]]";

@@ -398,6 +398,118 @@ static void fail_with_error(const char *message, NSError *error) {
     }
 }
 
+static int test_source_gradient_texture_shape(id<MTLDevice> native_device,
+                                              id<MTLDevice> adapter_device,
+                                              id<MTLLibrary> native_library,
+                                              id<MTLLibrary> adapter_library,
+                                              id<MTLCommandQueue> native_queue,
+                                              id<MTLCommandQueue> adapter_queue,
+                                              NSString *function_name,
+                                              MTLTextureDescriptor *descriptor,
+                                              MTLTextureType expected_texture_type,
+                                              NSUInteger plane_count,
+                                              MTLSize grid,
+                                              NSUInteger bytes_per_row,
+                                              NSUInteger bytes_per_plane) {
+    id<MTLFunction> native_function = [native_library newFunctionWithName:function_name];
+    id<MTLFunction> adapter_function = [adapter_library newFunctionWithName:function_name];
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLComputePipelineState> native_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+    id<MTLComputePipelineState> adapter_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:descriptor];
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+    if (native_encoder != nil && adapter_encoder != nil && native_pipeline != nil &&
+        adapter_pipeline != nil && native_texture != nil && adapter_texture != nil) {
+        [native_encoder setComputePipelineState:native_pipeline];
+        [native_encoder setTexture:native_texture atIndex:0];
+        [native_encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [native_encoder endEncoding];
+        [native_command_buffer commit];
+        [native_command_buffer waitUntilCompleted];
+        [adapter_encoder setComputePipelineState:adapter_pipeline];
+        [adapter_encoder setTexture:adapter_texture atIndex:0];
+        [adapter_encoder dispatchThreads:grid threadsPerThreadgroup:MTLSizeMake(2, 2, 1)];
+        [adapter_encoder endEncoding];
+        [adapter_command_buffer commit];
+        [adapter_command_buffer waitUntilCompleted];
+    }
+
+    const NSUInteger byte_count = bytes_per_plane * plane_count;
+    uint8_t *native_bytes = byte_count == 0 ? NULL : calloc(1, byte_count);
+    uint8_t *adapter_bytes = byte_count == 0 ? NULL : calloc(1, byte_count);
+    BOOL exact = native_bytes != NULL && adapter_bytes != NULL &&
+        native_function != nil && adapter_function != nil && native_error == nil &&
+        adapter_error == nil && native_pipeline != nil && adapter_pipeline != nil &&
+        native_texture != nil && adapter_texture != nil && native_command_buffer != nil &&
+        adapter_command_buffer != nil && native_encoder != nil && adapter_encoder != nil &&
+        native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_command_buffer.status == MTLCommandBufferStatusCompleted;
+    if (exact) {
+        if (expected_texture_type == MTLTextureType2DArray) {
+            for (NSUInteger slice = 0; slice < plane_count; ++slice) {
+                MTLRegion region = MTLRegionMake3D(0, 0, 0,
+                                                   descriptor.width, descriptor.height, 1);
+                [native_texture getBytes:native_bytes + slice * bytes_per_plane
+                             bytesPerRow:bytes_per_row bytesPerImage:bytes_per_plane
+                              fromRegion:region mipmapLevel:0 slice:slice];
+                [adapter_texture getBytes:adapter_bytes + slice * bytes_per_plane
+                              bytesPerRow:bytes_per_row bytesPerImage:bytes_per_plane
+                               fromRegion:region mipmapLevel:0 slice:slice];
+            }
+        } else {
+            MTLRegion region = MTLRegionMake3D(0, 0, 0,
+                                               descriptor.width, descriptor.height, plane_count);
+            [native_texture getBytes:native_bytes bytesPerRow:bytes_per_row
+                         bytesPerImage:bytes_per_plane fromRegion:region mipmapLevel:0 slice:0];
+            [adapter_texture getBytes:adapter_bytes bytesPerRow:bytes_per_row
+                          bytesPerImage:bytes_per_plane fromRegion:region mipmapLevel:0 slice:0];
+        }
+        exact = memcmp(native_bytes, adapter_bytes, byte_count) == 0;
+    }
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:function_name];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:function_name];
+        exact = exact && native_reflection != nil && adapter_reflection != nil &&
+            native_reflection.bindings.count == 1 && adapter_reflection.bindings.count == 1;
+        if (exact) {
+            id<MTLBinding> native_binding = native_reflection.bindings[0];
+            id<MTLBinding> adapter_binding = adapter_reflection.bindings[0];
+            exact = [native_binding.name isEqualToString:adapter_binding.name] &&
+                native_binding.type == MTLBindingTypeTexture &&
+                adapter_binding.type == native_binding.type &&
+                native_binding.access == adapter_binding.access &&
+                native_binding.index == adapter_binding.index &&
+                [native_binding conformsToProtocol:@protocol(MTLTextureBinding)] &&
+                [adapter_binding conformsToProtocol:@protocol(MTLTextureBinding)];
+            if (exact) {
+                exact = ((id<MTLTextureBinding>)native_binding).textureType == expected_texture_type &&
+                    ((id<MTLTextureBinding>)adapter_binding).textureType == expected_texture_type &&
+                    ((id<MTLTextureBinding>)native_binding).textureType ==
+                        ((id<MTLTextureBinding>)adapter_binding).textureType &&
+                    ((id<MTLTextureBinding>)native_binding).textureDataType ==
+                        ((id<MTLTextureBinding>)adapter_binding).textureDataType;
+            }
+        }
+    }
+    free(native_bytes);
+    free(adapter_bytes);
+    if (!exact) {
+        fail_with_error("source-defined array/3D gradient lowering failed",
+                        adapter_error ?: native_error);
+        return expected_texture_type == MTLTextureType2DArray ? 181 : 182;
+    }
+    return 0;
+}
+
 static void collect_protocol_selectors(Protocol *protocol, NSMutableSet<NSString *> *selectors,
                                        NSMutableSet<NSValue *> *visited) {
     if (protocol == NULL || selectors == nil || visited == nil) return;
@@ -626,6 +738,16 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
          "(float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+         "kernel void zpu_source_gradient_rgba8_array(texture2d_array<float, access::write> output [[texture(0)]], "
+         "uint3 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height() || gid.z >= output.get_array_size()) return; "
+         "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, "
+         "0.25, 1.0), gid.xy, gid.z); }\n"
+         "kernel void zpu_source_gradient_rgba8_3d(texture3d<float, access::write> output [[texture(0)]], "
+         "uint3 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height() || gid.z >= output.get_depth()) return; "
+         "output.write(float4((float(gid.x) + 1.0) / 8.0, (float(gid.y) + 1.0) / 8.0, "
+         "(float(gid.z) + 1.0) / 8.0, 1.0), gid); }\n"
          "kernel void zpu_source_copy_texture_rgba8(texture2d<float, access::read> input [[texture(0)]], "
          "texture2d<float, access::write> output [[texture(1)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
@@ -834,7 +956,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 65) {
+        adapter_library.functionNames.count != 67) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1411,6 +1533,38 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
                         adapter_gradient_error ?: native_gradient_error);
         return 169;
     }
+
+    MTLTextureDescriptor *source_array_descriptor = [MTLTextureDescriptor new];
+    source_array_descriptor.textureType = MTLTextureType2DArray;
+    source_array_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    source_array_descriptor.width = 5;
+    source_array_descriptor.height = 3;
+    source_array_descriptor.arrayLength = 3;
+    source_array_descriptor.mipmapLevelCount = 1;
+    source_array_descriptor.sampleCount = 1;
+    source_array_descriptor.storageMode = MTLStorageModeShared;
+    source_array_descriptor.usage = MTLTextureUsageShaderWrite;
+    int source_array_result = test_source_gradient_texture_shape(
+        native_device, adapter_device, native_library, adapter_library, native_queue, adapter_queue,
+        @"zpu_source_gradient_rgba8_array", source_array_descriptor, MTLTextureType2DArray, 3,
+        MTLSizeMake(7, 5, 4), 5 * 4, 5 * 3 * 4);
+    if (source_array_result != 0) return source_array_result;
+
+    MTLTextureDescriptor *source_volume_descriptor = [MTLTextureDescriptor new];
+    source_volume_descriptor.textureType = MTLTextureType3D;
+    source_volume_descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    source_volume_descriptor.width = 5;
+    source_volume_descriptor.height = 3;
+    source_volume_descriptor.depth = 3;
+    source_volume_descriptor.mipmapLevelCount = 1;
+    source_volume_descriptor.sampleCount = 1;
+    source_volume_descriptor.storageMode = MTLStorageModeShared;
+    source_volume_descriptor.usage = MTLTextureUsageShaderWrite;
+    int source_volume_result = test_source_gradient_texture_shape(
+        native_device, adapter_device, native_library, adapter_library, native_queue, adapter_queue,
+        @"zpu_source_gradient_rgba8_3d", source_volume_descriptor, MTLTextureType3D, 3,
+        MTLSizeMake(7, 5, 4), 5 * 4, 5 * 3 * 4);
+    if (source_volume_result != 0) return source_volume_result;
 
     enum { copy_width = 7, copy_height = 5, copy_bytes = copy_width * copy_height * 4 };
     uint8_t copy_source[copy_bytes];
