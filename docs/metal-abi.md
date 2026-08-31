@@ -617,10 +617,11 @@ triangle path:
   CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
   default bundle query. Source text also supports a strict CPU-lowered profile
   for source-named F32 buffer add/multiply kernels with the standard three
-  buffer slots and `thread_position_in_grid`, plus source-named `float2` and
-  `float4` variants and registered scalar/vector add/multiply/subtract profiles
-  whose vector dispatch consumes one packed element per `gid.x` while preserving
-  exact lane order, plus the source-named RGBA8
+  buffer slots and `thread_position_in_grid`, plus source-named `float2`,
+  `float3`, and `float4` variants and registered scalar/vector
+  add/multiply/subtract profiles whose vector dispatch consumes one element per
+  `gid.x` while preserving exact lane order. `float3` retains Metal's 16-byte
+  element stride and padding lane in CPU-owned buffers, plus the source-named RGBA8
   texture gradient profile with a `texture2d<float, access::write>` slot and
   the top-left `uint2` grid, plus a source-named RGBA8 texture-to-texture copy
   profile with read binding 0 and write binding 1. The copy profile preserves

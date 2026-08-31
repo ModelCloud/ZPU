@@ -435,6 +435,12 @@ enum {
     ZPU_METAL_COMPUTE_ADD_F32X2 = 35,
     ZPU_METAL_COMPUTE_MUL_F32X2 = 36,
     ZPU_METAL_COMPUTE_SUB_F32X2 = 37,
+    /* Fixed CPU vector buffer arithmetic profiles for Metal's float3
+     * elements. Each element has a 16-byte buffer stride with one padding
+     * lane, matching Metal's natural vector alignment. */
+    ZPU_METAL_COMPUTE_ADD_F32X3 = 38,
+    ZPU_METAL_COMPUTE_MUL_F32X3 = 39,
+    ZPU_METAL_COMPUTE_SUB_F32X3 = 40,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

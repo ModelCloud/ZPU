@@ -845,6 +845,7 @@ const ComputeCommand = struct {
 const ComputeBufferAddCommand = struct {
     kernel: u8,
     elements_per_thread: usize = 1,
+    element_stride: usize = 1,
     left: *Buffer,
     left_offset: usize,
     right: *Buffer,
@@ -5193,14 +5194,15 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 37) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 40) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
     fn isBufferAddKernel(self: *const ComputeEncoder) bool {
         return self.kernel == 8 or self.kernel == 9 or self.kernel == 30 or
             self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or
-            self.kernel == 35 or self.kernel == 36 or self.kernel == 37;
+            self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or
+            self.kernel == 38 or self.kernel == 39 or self.kernel == 40;
     }
 
     fn appendBufferAdd(
@@ -5223,7 +5225,11 @@ pub const ComputeEncoder = struct {
         _ = try self.command_buffer.append(.{ .compute_buffer_add = .{
             .kernel = self.kernel,
             .elements_per_thread = if (self.kernel >= 32 and self.kernel <= 34) 4 else
-                (if (self.kernel >= 35 and self.kernel <= 37) 2 else 1),
+                (if (self.kernel >= 35 and self.kernel <= 37) 2 else
+                    (if (self.kernel >= 38 and self.kernel <= 40) 3 else 1)),
+            .element_stride = if (self.kernel >= 32 and self.kernel <= 34) 4 else
+                (if (self.kernel >= 35 and self.kernel <= 37) 2 else
+                    (if (self.kernel >= 38 and self.kernel <= 40) 4 else 1)),
             .left = left,
             .left_offset = self.buffer_offsets[0],
             .right = right,
@@ -5926,33 +5932,36 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
     if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and
         command.kernel != 32 and command.kernel != 33 and command.kernel != 34 and
-        command.kernel != 35 and command.kernel != 36 and command.kernel != 37) or
+        command.kernel != 35 and command.kernel != 36 and command.kernel != 37 and
+        command.kernel != 38 and command.kernel != 39 and command.kernel != 40) or
         (command.elements_per_thread != 1 and command.elements_per_thread != 2 and
-         command.elements_per_thread != 4) or
+         command.elements_per_thread != 3 and command.elements_per_thread != 4) or
+        (command.element_stride != 1 and command.element_stride != 2 and
+         command.element_stride != 4) or
         !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
         command.threads_per_grid.depth != 1 or command.threads_per_threadgroup.width == 0 or
         command.threads_per_threadgroup.height != 1 or command.threads_per_threadgroup.depth != 1)
         return error.InvalidArgument;
-    const element_count = std.math.mul(usize, command.threads_per_grid.width,
-        command.elements_per_thread) catch return error.InvalidArgument;
-    const byte_count = std.math.mul(usize, element_count, @sizeOf(f32)) catch return error.InvalidArgument;
+    const storage_count = std.math.mul(usize, command.threads_per_grid.width,
+        command.element_stride) catch return error.InvalidArgument;
+    const byte_count = std.math.mul(usize, storage_count, @sizeOf(f32)) catch return error.InvalidArgument;
     if (!rangeValid(command.left.bytes.len, command.left_offset, byte_count) or
         !rangeValid(command.right.bytes.len, command.right_offset, byte_count) or
         !rangeValid(command.output.bytes.len, command.output_offset, byte_count)) return error.InvalidArgument;
     for (0..command.threads_per_grid.width) |index| {
         for (0..command.elements_per_thread) |lane| {
-            const scalar_index = index * command.elements_per_thread + lane;
+            const scalar_index = index * command.element_stride + lane;
             const left_offset = command.left_offset + scalar_index * @sizeOf(f32);
             const right_offset = command.right_offset + scalar_index * @sizeOf(f32);
             const output_offset = command.output_offset + scalar_index * @sizeOf(f32);
             const left = readF32Little(command.left.bytes, left_offset);
             const right = readF32Little(command.right.bytes, right_offset);
             const result = switch (command.kernel) {
-                8, 32, 35 => left + right,
-                9, 33, 36 => left * right,
-                30, 34, 37 => left - right,
+                8, 32, 35, 38 => left + right,
+                9, 33, 36, 39 => left * right,
+                30, 34, 37, 40 => left - right,
                 else => unreachable,
             };
             std.mem.writeInt(u32, command.output.bytes[output_offset..][0..@sizeOf(f32)], @bitCast(result), .little);
