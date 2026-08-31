@@ -22314,8 +22314,7 @@ static BOOL zpu_cpu_acceleration_aabb_payload_info(ZPUAccelerationStructure *str
         (header.triangle_count != 0 &&
          (header.flags & ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLES) == 0) ||
         header.triangle_offset < ZPU_METAL_CPU_ACCELERATION_STRUCTURE_HEADER_BYTES ||
-        header.reserved[1] < header.triangle_offset ||
-        header.reserved[2] == 0) return NO;
+        header.reserved[1] < header.triangle_offset) return NO;
     const NSUInteger triangleOffset = header.triangle_offset;
     const NSUInteger triangleCount = header.triangle_count;
     if (triangleOffset > structure->_size ||
@@ -23022,9 +23021,9 @@ static BOOL zpu_cpu_acceleration_metal4_indirect_instance_aabb_count(
 API_AVAILABLE(macos(26.0), ios(26.0))
 static BOOL zpu_cpu_acceleration_write_metal4_indirect_aabb_instance_payload(
     ZPUAccelerationStructure *target, MTL4IndirectInstanceAccelerationStructureDescriptor *descriptor,
-    NSUInteger aabbCount) {
+    NSUInteger aabbCapacity) {
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 ||
-        descriptor == nil || aabbCount == 0 || aabbCount > UINT32_MAX) return NO;
+        descriptor == nil || aabbCapacity > UINT32_MAX) return NO;
     ZPUBuffer *instanceBuffer = nil;
     NSUInteger instanceOffset = 0;
     NSUInteger instanceRangeLength = 0;
@@ -23033,6 +23032,22 @@ static BOOL zpu_cpu_acceleration_write_metal4_indirect_aabb_instance_payload(
     if (!zpu_cpu_acceleration_metal4_indirect_instance_buffer(
             descriptor, target->_owner, &instanceBuffer, &instanceOffset, &instanceRangeLength,
             &instanceStride, &instanceCount)) return NO;
+    NSUInteger aabbCount = 0;
+    for (NSUInteger index = 0; index < instanceCount; ++index) {
+        MTLIndirectAccelerationStructureInstanceDescriptor instance;
+        memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
+               sizeof(instance));
+        if (instance.options != MTLAccelerationStructureInstanceOptionNone ||
+            instance.intersectionFunctionTableOffset != 0) return NO;
+        ZPUAccelerationStructure *child = zpu_cpu_acceleration_metal4_instance_child(&instance, target->_owner);
+        NSUInteger childCount = 0;
+        NSUInteger childOffset = 0;
+        if (child == nil || !child->_built ||
+            !zpu_cpu_acceleration_aabb_payload_info(child, &childCount, &childOffset) ||
+            childCount > aabbCapacity - aabbCount) return NO;
+        (void)childOffset;
+        aabbCount += childCount;
+    }
     const NSUInteger aabbOffset = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET;
     if (aabbCount > (target->_size - aabbOffset) / sizeof(zpu_metal_cpu_acceleration_aabb)) return NO;
     const NSUInteger aabbBytes = aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb);
@@ -23046,7 +23061,7 @@ static BOOL zpu_cpu_acceleration_write_metal4_indirect_aabb_instance_payload(
         .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
         .triangle_count = 0,
         .flags = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS |
-            ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS,
+            (aabbCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS),
         .triangle_offset = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET,
         .reserved = {(uint32_t)maskOffset, (uint32_t)aabbOffset, (uint32_t)aabbCount},
     };
@@ -23074,8 +23089,10 @@ static BOOL zpu_cpu_acceleration_write_metal4_indirect_aabb_instance_payload(
             memcpy((uint8_t *)target->_storage.contents + aabbOffset +
                        destinationIndex * sizeof(transformed), &transformed, sizeof(transformed));
             const uint32_t mask = instance.mask & childMask;
-            memcpy((uint8_t *)target->_storage.contents + maskOffset +
-                       destinationIndex * sizeof(mask), &mask, sizeof(mask));
+            if (aabbCount != 0) {
+                memcpy((uint8_t *)target->_storage.contents + maskOffset +
+                           destinationIndex * sizeof(mask), &mask, sizeof(mask));
+            }
             destinationIndex += 1;
         }
     }
@@ -23089,7 +23106,7 @@ static BOOL zpu_cpu_acceleration_write_metal4_indirect_instance_payload(
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 || descriptor == nil ||
         descriptor.instanceDescriptorBuffer.bufferAddress == 0 || descriptor.instanceCountBuffer.bufferAddress == 0) return NO;
     NSUInteger aabbCount = 0;
-    if (zpu_cpu_acceleration_metal4_indirect_instance_aabb_count(descriptor, &aabbCount) && aabbCount != 0) {
+    if (zpu_cpu_acceleration_metal4_indirect_instance_aabb_count(descriptor, &aabbCount)) {
         return zpu_cpu_acceleration_write_metal4_indirect_aabb_instance_payload(target, descriptor, aabbCount);
     }
     ZPUBuffer *instanceBuffer = nil;
@@ -23415,9 +23432,9 @@ static BOOL zpu_cpu_acceleration_indirect_instance_aabb_count(
 API_AVAILABLE(macos(14.0), ios(17.0))
 static BOOL zpu_cpu_acceleration_write_indirect_aabb_instance_payload(
     ZPUAccelerationStructure *target, MTLIndirectInstanceAccelerationStructureDescriptor *descriptor,
-    NSUInteger aabbCount) {
+    NSUInteger aabbCapacity) {
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 ||
-        descriptor == nil || aabbCount == 0 || aabbCount > UINT32_MAX) return NO;
+        descriptor == nil || aabbCapacity > UINT32_MAX) return NO;
     ZPUBuffer *instanceBuffer = nil;
     NSUInteger instanceOffset = 0;
     NSUInteger instanceRangeLength = 0;
@@ -23426,6 +23443,22 @@ static BOOL zpu_cpu_acceleration_write_indirect_aabb_instance_payload(
     if (!zpu_cpu_acceleration_indirect_instance_buffer(
             descriptor, target->_owner, &instanceBuffer, &instanceOffset, &instanceRangeLength,
             &instanceStride, &instanceCount)) return NO;
+    NSUInteger aabbCount = 0;
+    for (NSUInteger index = 0; index < instanceCount; ++index) {
+        MTLIndirectAccelerationStructureInstanceDescriptor instance;
+        memcpy(&instance, (const uint8_t *)instanceBuffer.contents + instanceOffset + index * instanceStride,
+               sizeof(instance));
+        if (instance.options != MTLAccelerationStructureInstanceOptionNone ||
+            instance.intersectionFunctionTableOffset != 0) return NO;
+        ZPUAccelerationStructure *child = zpu_cpu_acceleration_indirect_instance_child(&instance, target->_owner);
+        NSUInteger childCount = 0;
+        NSUInteger childOffset = 0;
+        if (child == nil || !child->_built ||
+            !zpu_cpu_acceleration_aabb_payload_info(child, &childCount, &childOffset) ||
+            childCount > aabbCapacity - aabbCount) return NO;
+        (void)childOffset;
+        aabbCount += childCount;
+    }
     const NSUInteger aabbOffset = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET;
     if (aabbCount > (target->_size - aabbOffset) / sizeof(zpu_metal_cpu_acceleration_aabb)) return NO;
     const NSUInteger aabbBytes = aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb);
@@ -23439,7 +23472,7 @@ static BOOL zpu_cpu_acceleration_write_indirect_aabb_instance_payload(
         .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
         .triangle_count = 0,
         .flags = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS |
-            ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS,
+            (aabbCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS),
         .triangle_offset = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET,
         .reserved = {(uint32_t)maskOffset, (uint32_t)aabbOffset, (uint32_t)aabbCount},
     };
@@ -23467,8 +23500,10 @@ static BOOL zpu_cpu_acceleration_write_indirect_aabb_instance_payload(
             memcpy((uint8_t *)target->_storage.contents + aabbOffset +
                        destinationIndex * sizeof(transformed), &transformed, sizeof(transformed));
             const uint32_t mask = instance.mask & childMask;
-            memcpy((uint8_t *)target->_storage.contents + maskOffset +
-                       destinationIndex * sizeof(mask), &mask, sizeof(mask));
+            if (aabbCount != 0) {
+                memcpy((uint8_t *)target->_storage.contents + maskOffset +
+                           destinationIndex * sizeof(mask), &mask, sizeof(mask));
+            }
             destinationIndex += 1;
         }
     }
@@ -23482,7 +23517,7 @@ static BOOL zpu_cpu_acceleration_write_indirect_instance_payload(
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 || descriptor == nil ||
         descriptor.instanceDescriptorBuffer == nil || descriptor.instanceCountBuffer == nil) return NO;
     NSUInteger aabbCount = 0;
-    if (zpu_cpu_acceleration_indirect_instance_aabb_count(descriptor, &aabbCount) && aabbCount != 0) {
+    if (zpu_cpu_acceleration_indirect_instance_aabb_count(descriptor, &aabbCount)) {
         return zpu_cpu_acceleration_write_indirect_aabb_instance_payload(target, descriptor, aabbCount);
     }
     ZPUBuffer *instanceBuffer = nil;

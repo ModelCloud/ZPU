@@ -6009,7 +6009,7 @@ fn executeTraceAabbs(command: ComputeCommand) Error!void {
     const aabb_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 24));
     const aabb_count: usize = @intCast(readU32Little(acceleration_structure.bytes, 28));
     const aabb_bytes = std.math.mul(usize, aabb_count, cpu_acceleration_structure_aabb_bytes) catch return error.InvalidArgument;
-    if (aabb_count == 0 or aabb_offset < triangle_end or
+    if (aabb_offset < triangle_end or
         !rangeValid(acceleration_structure.bytes.len, aabb_offset, aabb_bytes)) return error.InvalidArgument;
     const mask_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 20));
     if ((flags & cpu_acceleration_structure_flag_triangle_masks) != 0) {
