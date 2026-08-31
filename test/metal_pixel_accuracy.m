@@ -30305,6 +30305,24 @@ int main(void) {
             {256, 256, 8, 6, MTLTextureUsageShaderRead, MTLSparsePageSize256},
         };
         BOOL sparse_3d_tail_properties_exact = YES;
+        /* A single mip can itself be the tail. Do not special-case the
+         * mip-count: native Metal reports firstMipmapInTail == 0 when that
+         * mip is smaller than the sparse tile, and == 1 when it is not. */
+        MTLTextureDescriptor *native_sparse_single_mip_descriptor = [native_sparse_texture_3d_descriptor copy];
+        native_sparse_single_mip_descriptor.width = 128;
+        native_sparse_single_mip_descriptor.height = 64;
+        native_sparse_single_mip_descriptor.depth = 4;
+        native_sparse_single_mip_descriptor.mipmapLevelCount = 1;
+        native_sparse_single_mip_descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> native_sparse_single_mip = [device newTextureWithDescriptor:native_sparse_single_mip_descriptor];
+        id<MTLTexture> adapter_sparse_single_mip =
+            [adapter_device newTextureWithDescriptor:native_sparse_single_mip_descriptor];
+        sparse_3d_tail_properties_exact = sparse_3d_tail_properties_exact &&
+            native_sparse_single_mip != nil && adapter_sparse_single_mip != nil &&
+            native_sparse_single_mip.firstMipmapInTail == adapter_sparse_single_mip.firstMipmapInTail &&
+            native_sparse_single_mip.tailSizeInBytes == adapter_sparse_single_mip.tailSizeInBytes &&
+            native_sparse_single_mip.firstMipmapInTail == 0 &&
+            native_sparse_single_mip.tailSizeInBytes == sparse_page_bytes * 4;
         for (NSUInteger probe_index = 0;
              probe_index < sizeof(sparse_3d_tail_probe_shapes) / sizeof(sparse_3d_tail_probe_shapes[0]);
              ++probe_index) {

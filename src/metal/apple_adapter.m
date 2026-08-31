@@ -3651,7 +3651,6 @@ static NSUInteger zpu_sparse_first_mipmap_in_tail(MTLTextureType textureType,
                                                   NSUInteger depth, NSUInteger mipmapLevelCount,
                                                   MTLSize tileSize) {
     if (mipmapLevelCount == 0 || tileSize.width == 0 || tileSize.height == 0 || tileSize.depth == 0) return 0;
-    if (mipmapLevelCount == 1) return 1;
     for (NSUInteger level = 0; level < mipmapLevelCount; ++level) {
         if (width < tileSize.width ||
             (!zpu_texture_type_is_1d(textureType) && height < tileSize.height) ||
