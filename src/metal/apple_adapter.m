@@ -12184,6 +12184,8 @@ static BOOL zpu_source_texture_type_for_name(NSString *name, MTLTextureType *tex
         @"texture3d": @(MTLTextureType3D), @"texturecube": @(MTLTextureTypeCube),
         @"texturecube_array": @(MTLTextureTypeCubeArray),
         @"depth2d": @(MTLTextureType2D), @"depth2d_array": @(MTLTextureType2DArray),
+        @"depth2d_ms": @(MTLTextureType2DMultisample),
+        @"depth2d_ms_array": @(MTLTextureType2DMultisampleArray),
         @"depthcube": @(MTLTextureTypeCube), @"depthcube_array": @(MTLTextureTypeCubeArray),
     };
     NSNumber *textureValue = textureTypes[kind];

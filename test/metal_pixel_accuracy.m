@@ -696,7 +696,8 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "(void)arguments; }\n"
          "struct SourceDepthArguments { depth2d<float> depth [[id(0)]]; "
          "depth2d_array<float> depthArray [[id(1)]]; depthcube<float> cube [[id(2)]]; "
-         "depthcube_array<float> cubeArray [[id(3)]]; };\n"
+         "depthcube_array<float> cubeArray [[id(3)]]; depth2d_ms<float> msDepth [[id(4)]]; "
+         "depth2d_ms_array<float> msDepthArray [[id(5)]]; };\n"
          "kernel void zpu_source_argument_buffer_depth(constant SourceDepthArguments &arguments [[buffer(10)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
@@ -1816,12 +1817,13 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             adapter_binding.bufferDataType == MTLDataTypeStruct &&
             native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
             native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
-            native_struct != nil && adapter_struct != nil && native_struct.members.count == 4 &&
-            adapter_struct.members.count == 4;
+            native_struct != nil && adapter_struct != nil && native_struct.members.count == 6 &&
+            adapter_struct.members.count == 6;
         const MTLTextureType expected_texture_types[] = {
             MTLTextureType2D, MTLTextureType2DArray, MTLTextureTypeCube, MTLTextureTypeCubeArray,
+            MTLTextureType2DMultisample, MTLTextureType2DMultisampleArray,
         };
-        for (NSUInteger index = 0; source_depth_reflection_ok && index < 4; ++index) {
+        for (NSUInteger index = 0; source_depth_reflection_ok && index < 6; ++index) {
             MTLStructMember *native_member = native_struct.members[index];
             MTLStructMember *adapter_member = adapter_struct.members[index];
             MTLTextureReferenceType *native_reference = native_member.textureReferenceType;
