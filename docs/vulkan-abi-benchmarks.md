@@ -5,10 +5,10 @@
 
 `benchmark-vulkan-abi` measures the command-stream boundary used by the
 `cpu_cube_v1` Vulkan bridge. It compares one CPU-raster dispatch per recorded
-draw, the pre-Mosaic 256-command chunking, and the private Mosaic 8,192-command
-batch bridge. The current optimization target is command-stream fragmentation:
-long application streams should reach Mosaic as one ordered batch where Vulkan
-semantics allow it.
+draw, the legacy 256-command chunking, and the existing Vulkan ABI's adaptive
+private Mosaic executor. Large streams use immutable prepared geometry and
+spatial supertile ownership; small streams stay on the tuned prepared batch
+kernel when that is faster.
 
 The profiles are deterministic usage-shape references drawn from open-source
 projects:
@@ -58,11 +58,12 @@ for cores in 2 3 4; do
 done
 ```
 
-The Mosaic raster scheduler now creates one bounded band per selected physical
-core (up to eight), keeps the render thread on the first selected CPU, and
-pins worker `i` through the existing locality mapping. Without the explicit
-`physical-core-v1` harness marker, generic callers retain the two-band
-compatibility profile.
+The Mosaic raster scheduler now creates bounded 256×256-pixel Morton
+supertiles, partitions them into per-core queues, keeps the render thread on
+the first selected CPU, and pins worker `i` through the existing locality
+mapping. Workers drain own work, then same-LLC and same-NUMA queues. Without
+the explicit `physical-core-v1` harness marker, generic callers retain the
+two-band compatibility profile.
 
 The driver-side Mosaic bridge only accepts adjacent commands with the exact
 opaque `cpu_cube_v1` contract: single-layer, non-indexed, one instance,
@@ -85,38 +86,36 @@ retirement path used when a command buffer is destroyed while a queue submit
 still pins it. Unsupported commands remain hard Mosaic barriers, so stream
 coalescing does not reorder observable Vulkan work.
 
-On the validation host, the smoke probe measured the 4,801-draw WezTerm-shaped
-stream at 30.17 ms p50 with 256-command chunking and 3.00 ms p50 through Mosaic
-(10.05×). The ImGui-shaped 192-draw and Khronos-shaped 128-object streams
-remain one batch in both modes: 0.997× and 1.002× respectively. These are
-workload-specific measurements; the byte-identical color/depth oracle is the
-correctness gate.
+On a representative latest ReleaseFast probe, the 4,801-draw WezTerm-shaped
+stream measured 57.12 ms p50 with 256-command chunking and 3.82 ms p50 through
+Mosaic at two selected cores (14.94×). At four same-NUMA selected cores it
+measured 24.35 ms versus 3.60 ms (6.76×). The ImGui-shaped 192-draw and
+Khronos-shaped 128-object streams remain one batch in both modes and therefore
+stay approximately 1.00×, with no regression. These are workload-specific
+measurements; the byte-identical color/depth oracle is the correctness gate.
 
 ## Core-width scaling result
 
-After removing the hidden two-band ceiling, a six-sample ReleaseFast sweep on
-the same 800×600 host measured the WezTerm-shaped Mosaic batch at 2.67 ms p50
-with two cores, 2.10 ms with three cores, and 1.86 ms with four cores. That is
-1.27× and 1.43× relative to two cores—not linear scaling. The long stream is
-now using all selected bands, but preparation, synchronization, cache traffic,
-and uneven glyph-row work remain serial or shared costs. The ImGui and Khronos
-profiles intentionally stay on their already-cheaper one-batch serial path and
-therefore remained approximately 1.00× over legacy at all widths.
+The spatial bridge now uses all selected workers for the long stream. The
+latest four-core run improves the WezTerm-shaped path from 2.91× to 3.10×
+versus per-draw dispatch as the host width changes from two to four cores; the
+absolute p50 is sensitive to CPU placement and background load. The short
+ImGui and Khronos profiles intentionally stay on their already-cheaper
+prepared batch path and remain approximately 1.00× over legacy at all widths.
 
-This establishes the next 4× target: route eligible one-batch Vulkan draws
-through Mosaic's physical `LOCAL`/`MACRO`/`GLOBAL` packet executor, then
-parallelize packet preparation and tile work rather than only widening the
-existing CPU raster bands. The scalar packet path must first remain
-byte-identical to `cpu_cube`; SIMD and visibility/deferred paths follow that
-gate.
+The next 4× target is to route eligible one-batch Vulkan draws through
+Mosaic's physical `LOCAL`/`MACRO`/`GLOBAL` packet executor, then parallelize
+packet preparation and tile work rather than only widening the existing CPU
+raster bands. The scalar packet path must first remain byte-identical to
+`cpu_cube`; SIMD and visibility/deferred paths follow that gate.
 
 ## Next 4× target
 
-The long-stream submission problem is no longer the highest-value target.
-Short and medium streams already pay only one dispatch, so increasing the
-Mosaic batch limit cannot improve them. A Mosaic-only attempt to force those
-batches through the parallel scheduler regressed the ImGui-shaped frame by
-about 19% and was discarded.
+The long-stream submission problem is no longer the only target. Short and
+medium streams already pay only one dispatch, so increasing the Mosaic batch
+limit cannot improve them. The adaptive policy keeps those streams on the
+prepared batch kernel instead of forcing them through a more expensive spatial
+plan.
 
 The next target is the one-batch raster path used by both short workloads:
 execute prepared geometry through tile-local physical packets, first with the
