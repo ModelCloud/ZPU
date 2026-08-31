@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 37u
+#define ZPU_METAL_ABI_VERSION 38u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -580,7 +580,12 @@ int zpu_metal_render_encoder_set_vertex_buffer(zpu_metal_render_encoder *encoder
 int zpu_metal_render_encoder_set_vertex_buffer_stride(zpu_metal_render_encoder *encoder, size_t stride);
 int zpu_metal_render_encoder_set_vertex_bytes(zpu_metal_render_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_render_encoder_set_viewport(zpu_metal_render_encoder *encoder, zpu_metal_viewport viewport);
+/* The bounded CPU profile records one or two viewport entries. The array
+ * index selected by a vertex-amplification mapping is resolved at commit time
+ * without changing Apple's attachment-global top-left pixel origin. */
+int zpu_metal_render_encoder_set_viewports(zpu_metal_render_encoder *encoder, const zpu_metal_viewport *viewports, size_t count);
 int zpu_metal_render_encoder_set_scissor_rect(zpu_metal_render_encoder *encoder, zpu_metal_scissor_rect scissor);
+int zpu_metal_render_encoder_set_scissor_rects(zpu_metal_render_encoder *encoder, const zpu_metal_scissor_rect *scissors, size_t count);
 int zpu_metal_render_encoder_set_cull_mode(zpu_metal_render_encoder *encoder, zpu_metal_cull_mode cull_mode);
 int zpu_metal_render_encoder_set_front_facing(zpu_metal_render_encoder *encoder, zpu_metal_winding winding);
 int zpu_metal_render_encoder_set_triangle_fill_mode(zpu_metal_render_encoder *encoder, zpu_metal_triangle_fill_mode fill_mode);
@@ -595,8 +600,8 @@ int zpu_metal_render_encoder_set_raster_sample_count(zpu_metal_render_encoder *e
 int zpu_metal_render_encoder_set_sample_positions(zpu_metal_render_encoder *encoder, const zpu_metal_sample_position *positions, size_t count);
 /* Vertex amplification is CPU-expanded into ordered per-view draws. The
  * bounded profile supports Apple's two-view maximum and preserves the
- * top-left viewport grid; non-zero viewport-array offsets are rejected until
- * the portable ABI exposes multiple viewport state. */
+ * top-left viewport grid; viewport/render-target array offsets select the
+ * corresponding recorded CPU state and ZPU-owned slice. */
 int zpu_metal_render_encoder_set_vertex_amplification_count(zpu_metal_render_encoder *encoder, size_t count, const zpu_metal_vertex_amplification_view_mapping *view_mappings);
 /* Installs CPU-owned sample planes for a 2x/4x render target. The first
  * sample must be the color attachment passed to the render-encoder factory;

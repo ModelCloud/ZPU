@@ -43,6 +43,10 @@ typedef struct zpu_metal_precise_viewport {
 } zpu_metal_precise_viewport;
 extern int zpu_metal_render_encoder_set_viewport_precise(
     zpu_metal_render_encoder *encoder, zpu_metal_precise_viewport viewport);
+extern int zpu_metal_render_encoder_set_viewports_precise(
+    zpu_metal_render_encoder *encoder, const zpu_metal_precise_viewport *viewports, size_t count);
+extern int zpu_metal_render_encoder_set_scissor_rects(
+    zpu_metal_render_encoder *encoder, const zpu_metal_scissor_rect *scissors, size_t count);
 
 /* These enum members are introduced after the adapter's iOS 15 deployment
  * target. Their Metal ABI bit positions are stable, so keep the internal
@@ -15177,17 +15181,10 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
 }
 - (void)setViewport:(MTLViewport)viewport { [(id)_legacy setViewport:viewport]; }
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count {
-    if (viewports == NULL || count != 1) { [_owner markError]; return; }
     [(id)_legacy setViewports:viewports count:count];
 }
 - (void)setVertexAmplificationCount:(NSUInteger)count viewMappings:(const MTLVertexAmplificationViewMapping * __nullable)viewMappings API_AVAILABLE(macos(10.15.4), ios(13.0), macCatalyst(13.4), tvos(16.0)) {
-    BOOL invalidMapping = NO;
-    if (viewMappings != NULL) {
-        for (NSUInteger index = 0; index < count && index < 2; ++index) {
-            if (viewMappings[index].viewportArrayIndexOffset != 0) invalidMapping = YES;
-        }
-    }
-    if (count == 0 || count > 2 || invalidMapping) {
+    if (count == 0 || count > 2) {
         [_owner markError];
         return;
     }
@@ -15203,7 +15200,6 @@ static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *righ
 }
 - (void)setScissorRect:(MTLScissorRect)rect { [(id)_legacy setScissorRect:rect]; }
 - (void)setScissorRects:(const MTLScissorRect [__nonnull])rects count:(NSUInteger)count {
-    if (rects == NULL || count != 1) { [_owner markError]; return; }
     [(id)_legacy setScissorRects:rects count:count];
 }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)fillMode { [(id)_legacy setTriangleFillMode:fillMode]; }
@@ -20916,8 +20912,16 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     _vertexAmplificationCount = count;
 }
 - (void)setViewports:(const MTLViewport [__nonnull])viewports count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
-    if (viewports == NULL || count != 1) { [_owner markError]; return; }
-    [self setViewport:viewports[0]];
+    if (viewports == NULL || count == 0 || count > 2) { [_owner markError]; return; }
+    zpu_metal_precise_viewport precise[2];
+    for (NSUInteger index = 0; index < count; ++index) {
+        precise[index] = (zpu_metal_precise_viewport){
+            viewports[index].originX, viewports[index].originY,
+            viewports[index].width, viewports[index].height,
+            viewports[index].znear, viewports[index].zfar,
+        };
+    }
+    if (zpu_metal_render_encoder_set_viewports_precise(_zpuEncoder, precise, count) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setScissorRect:(MTLScissorRect)scissorRect {
     uint32_t x, y, width, height;
@@ -20928,8 +20932,18 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     if (zpu_metal_render_encoder_set_scissor_rect(_zpuEncoder, (zpu_metal_scissor_rect){x, y, width, height}) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setScissorRects:(const MTLScissorRect [__nonnull])scissorRects count:(NSUInteger)count API_AVAILABLE(macos(10.13), ios(12.0), tvos(14.5)) {
-    if (scissorRects == NULL || count != 1) { [_owner markError]; return; }
-    [self setScissorRect:scissorRects[0]];
+    if (scissorRects == NULL || count == 0 || count > 2) { [_owner markError]; return; }
+    zpu_metal_scissor_rect scissors[2];
+    for (NSUInteger index = 0; index < count; ++index) {
+        if (!zpu_u32(scissorRects[index].x, &scissors[index].x) ||
+            !zpu_u32(scissorRects[index].y, &scissors[index].y) ||
+            !zpu_u32(scissorRects[index].width, &scissors[index].width) ||
+            !zpu_u32(scissorRects[index].height, &scissors[index].height)) {
+            [_owner markError];
+            return;
+        }
+    }
+    if (zpu_metal_render_encoder_set_scissor_rects(_zpuEncoder, scissors, count) != ZPU_METAL_OK) [_owner markError];
 }
 - (void)setCullMode:(MTLCullMode)cullMode {
     if (zpu_metal_render_encoder_set_cull_mode(_zpuEncoder, (zpu_metal_cull_mode)cullMode) != ZPU_METAL_OK) [_owner markError];

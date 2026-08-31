@@ -23,18 +23,18 @@ static const char *const kShaderSource =
     "vertex Vertex zpu_test_vertex(uint vertex_id [[vertex_id]], "
     "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
     "vertex void zpu_cpu_vertex() {}\n"
-    "struct LayeredVertex { float4 position [[position]]; float4 color; uint layer [[render_target_array_index]]; };\n"
+    "struct LayeredVertex { float4 position [[position]]; float4 color; uint layer [[render_target_array_index]]; uint viewport [[viewport_array_index]]; };\n"
     "vertex LayeredVertex zpu_cpu_layered_vertex(uint vertex_id [[vertex_id]], "
     "uint instance_id [[instance_id]], device const Vertex *vertices [[buffer(0)]]) { "
     "LayeredVertex output; output.position = vertices[vertex_id].position; "
-    "output.color = vertices[vertex_id].color; output.layer = instance_id; return output; }\n"
+    "output.color = vertices[vertex_id].color; output.layer = instance_id; output.viewport = 0; return output; }\n"
     "[[patch(triangle, 3)]]\n"
     "vertex LayeredVertex zpu_test_native_tessellated_vertex(float3 position_in_patch [[position_in_patch]], "
     "uint instance_id [[instance_id]], device const Vertex *vertices [[buffer(0)]]) { "
     "LayeredVertex output; output.position = vertices[0].position * position_in_patch.x + "
     "vertices[1].position * position_in_patch.y + vertices[2].position * position_in_patch.z; "
     "output.color = vertices[0].color * position_in_patch.x + vertices[1].color * position_in_patch.y + "
-    "vertices[2].color * position_in_patch.z; output.layer = instance_id; return output; }\n"
+    "vertices[2].color * position_in_patch.z; output.layer = instance_id; output.viewport = 0; return output; }\n"
     "fragment float4 zpu_cpu_layered_fragment(LayeredVertex input [[stage_in]]) { return input.color; }\n"
     "fragment float4 zpu_test_layered_position_gradient(LayeredVertex input [[stage_in]]) { "
     "return float4((input.position.x + 0.5) / 8.0, (input.position.y + 0.5) / 8.0, 0.25, 1.0); }\n"
@@ -6317,7 +6317,7 @@ static int test_vertex_amplification_against_native(
     const uint16_t indices[] = {0, 1, 2};
     const MTLVertexAmplificationViewMapping mappings[] = {
         {0, 0},
-        {0, 1},
+        {1, 1},
     };
 
     MTLRenderPipelineDescriptor *native_pipeline_descriptor = [MTLRenderPipelineDescriptor new];
@@ -6364,8 +6364,14 @@ static int test_vertex_amplification_against_native(
         fprintf(stderr, "metal-pixel: vertex amplification command queue allocation failed\n");
         return 243;
     }
-    const MTLViewport viewport = {1.25, 0.75, 6.0, 5.0, 0.0, 1.0};
-    const MTLScissorRect scissor = {1, 0, 7, 6};
+    const MTLViewport viewports[] = {
+        {1.25, 0.75, 6.0, 5.0, 0.0, 1.0},
+        {0.25, 1.75, 6.0, 4.0, 0.0, 1.0},
+    };
+    const MTLScissorRect scissors[] = {
+        {1, 0, 7, 6},
+        {0, 1, 8, 5},
+    };
     for (NSUInteger draw_kind = 0; draw_kind < 3; ++draw_kind) {
         MTLTextureDescriptor *texture_descriptor =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -6396,13 +6402,13 @@ static int test_vertex_amplification_against_native(
                     (unsigned long)draw_kind);
             return 244;
         }
-        [native_encoder setViewport:viewport];
-        [native_encoder setScissorRect:scissor];
+        [native_encoder setViewports:viewports count:2];
+        [native_encoder setScissorRects:scissors count:2];
         [native_encoder setRenderPipelineState:native_pipeline];
         [native_encoder setVertexBuffer:native_vertex_buffer offset:0 atIndex:0];
         [native_encoder setVertexAmplificationCount:2 viewMappings:mappings];
-        [adapter_encoder setViewport:viewport];
-        [adapter_encoder setScissorRect:scissor];
+        [adapter_encoder setViewports:viewports count:2];
+        [adapter_encoder setScissorRects:scissors count:2];
         [adapter_encoder setRenderPipelineState:adapter_pipeline];
         [adapter_encoder setVertexBuffer:adapter_vertex_buffer offset:0 atIndex:0];
         [adapter_encoder setVertexAmplificationCount:2 viewMappings:mappings];
@@ -6459,8 +6465,8 @@ static int test_vertex_amplification_against_native(
         }
         if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
             adapter_command_buffer.status != MTLCommandBufferStatusCompleted ||
-            memcmp(native_pixels[0], native_pixels[1], max_byte_count) != 0) {
-            fprintf(stderr, "metal-pixel: vertex amplification draw kind %lu did not route both views identically\n",
+            memcmp(native_pixels[0], native_pixels[1], max_byte_count) == 0) {
+            fprintf(stderr, "metal-pixel: vertex amplification draw kind %lu did not preserve mapped view grids\n",
                     (unsigned long)draw_kind);
             fail_with_error("native vertex amplification completion error", native_command_buffer.error);
             fail_with_error("adapter vertex amplification completion error", adapter_command_buffer.error);
@@ -8231,7 +8237,7 @@ static int test_metal4_vertex_amplification_against_native(
     };
     const MTLVertexAmplificationViewMapping mappings[] = {
         {0, 0},
-        {0, 1},
+        {1, 1},
     };
     if (adapter_compiler == nil || adapter_base_pipeline_descriptor == nil ||
         adapter_allocator == nil || adapter_queue == nil || ![native_device supportsVertexAmplificationCount:2] ||
@@ -8314,17 +8320,23 @@ static int test_metal4_vertex_amplification_against_native(
         fail_with_error("Metal 4 vertex amplification encoder allocation", table_error ?: native_error);
         return 249;
     }
-    const MTLViewport viewport = {1.25, 0.75, 6.0, 5.0, 0.0, 1.0};
-    const MTLScissorRect scissor = {1, 0, 7, 6};
-    [native_encoder setViewport:viewport];
-    [native_encoder setScissorRect:scissor];
+    const MTLViewport viewports[] = {
+        {1.25, 0.75, 6.0, 5.0, 0.0, 1.0},
+        {0.25, 1.75, 6.0, 4.0, 0.0, 1.0},
+    };
+    const MTLScissorRect scissors[] = {
+        {1, 0, 7, 6},
+        {0, 1, 8, 5},
+    };
+    [native_encoder setViewports:viewports count:2];
+    [native_encoder setScissorRects:scissors count:2];
     [native_encoder setRenderPipelineState:native_pipeline];
     [native_encoder setVertexBuffer:native_buffer offset:0 atIndex:0];
     [native_encoder setVertexAmplificationCount:2 viewMappings:mappings];
     [native_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 instanceCount:1 baseInstance:0];
     [native_encoder endEncoding];
-    [adapter_encoder setViewport:viewport];
-    [adapter_encoder setScissorRect:scissor];
+    [adapter_encoder setViewports:viewports count:2];
+    [adapter_encoder setScissorRects:scissors count:2];
     [adapter_encoder setRenderPipelineState:adapter_pipeline];
     [adapter_encoder setArgumentTable:table atStages:MTLRenderStageVertex];
     [adapter_encoder setVertexAmplificationCount:2 viewMappings:mappings];
@@ -8356,8 +8368,8 @@ static int test_metal4_vertex_amplification_against_native(
         }
     }
     if (native_command_buffer.status != MTLCommandBufferStatusCompleted ||
-        memcmp(native_pixels[0], native_pixels[1], max_byte_count) != 0) {
-        fprintf(stderr, "metal-pixel: Metal 4 vertex amplification did not route both views identically\n");
+        memcmp(native_pixels[0], native_pixels[1], max_byte_count) == 0) {
+        fprintf(stderr, "metal-pixel: Metal 4 vertex amplification did not preserve mapped view grids\n");
         fail_with_error("native Metal 4 vertex amplification completion error", native_command_buffer.error);
         fail_with_error("adapter Metal 4 vertex amplification completion error", table_error);
         return 251;
@@ -30668,11 +30680,11 @@ int main(void) {
             return 153;
         }
 
-        /* ZPU has one top-left viewport and scissor state. Never silently
-         * discard additional entries, since doing so could change either
-         * axis of the rendered pixel grid. */
-        MTLViewport invalid_viewports[2] = {origin_viewport, origin_viewport};
-        MTLScissorRect invalid_scissors[2] = {origin_scissor, origin_scissor};
+        /* The CPU profile records at most two top-left viewport/scissor
+         * entries. Never silently discard a third entry, since doing so could
+         * change either axis of the rendered pixel grid. */
+        MTLViewport invalid_viewports[3] = {origin_viewport, origin_viewport, origin_viewport};
+        MTLScissorRect invalid_scissors[3] = {origin_scissor, origin_scissor, origin_scissor};
         MTLRenderPassDescriptor *invalid_grid_pass = [MTLRenderPassDescriptor renderPassDescriptor];
         invalid_grid_pass.colorAttachments[0].texture = adapter_metal4_origin_texture;
         invalid_grid_pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
@@ -30680,8 +30692,8 @@ int main(void) {
         id<MTLCommandBuffer> invalid_grid_command_buffer = [adapter_queue commandBuffer];
         id<MTLRenderCommandEncoder> invalid_grid_encoder =
             [invalid_grid_command_buffer renderCommandEncoderWithDescriptor:invalid_grid_pass];
-        [invalid_grid_encoder setViewports:invalid_viewports count:2];
-        [invalid_grid_encoder setScissorRects:invalid_scissors count:2];
+        [invalid_grid_encoder setViewports:invalid_viewports count:3];
+        [invalid_grid_encoder setScissorRects:invalid_scissors count:3];
         [invalid_grid_encoder endEncoding];
         [invalid_grid_command_buffer commit];
         [invalid_grid_command_buffer waitUntilCompleted];

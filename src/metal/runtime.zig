@@ -460,7 +460,12 @@ const DrawCommand = struct {
     array_index: usize = 0,
     base_instance: usize = 0,
     amplification_count: u8 = 1,
+    amplification_viewport_offsets: [2]u32 = .{ 0, 0 },
     amplification_render_target_offsets: [2]u32 = .{ 0, 0 },
+    viewport_array: [2]raster3d.PreciseViewport = undefined,
+    viewport_array_count: u8 = 1,
+    scissor_array: [2]abi.ScissorRect = undefined,
+    scissor_array_count: u8 = 1,
 };
 
 const TileCommand = struct {
@@ -1651,6 +1656,12 @@ pub const CommandBuffer = struct {
                 if (instance_count == 0 or resolved_draw.vertex_count == 0) continue;
                 if (resolved_draw.amplification_count == 0 or resolved_draw.amplification_count > 2)
                     return self.fail(error.InvalidArgument);
+                for (resolved_draw.amplification_viewport_offsets[0..resolved_draw.amplification_count]) |offset| {
+                    const viewport_index = @as(usize, offset);
+                    if (viewport_index >= resolved_draw.viewport_array_count or
+                        viewport_index >= resolved_draw.scissor_array_count)
+                        return self.fail(error.InvalidArgument);
+                }
                 const base_array_index = if (active_array_target_count > 1)
                     std.math.add(usize, resolved_draw.array_index, resolved_draw.base_instance) catch return self.fail(error.InvalidArgument)
                 else
@@ -1808,6 +1819,10 @@ pub const CommandBuffer = struct {
                 var stats: raster3d.Stats = .{};
                 if (active_sample_count == 1) {
                     for (0..resolved_draw.amplification_count) |amplification| {
+                        const viewport_index = @as(usize, resolved_draw.amplification_viewport_offsets[amplification]);
+                        var amplification_options = draw_options;
+                        amplification_options.viewport = resolved_draw.viewport_array[viewport_index];
+                        amplification_options.scissor = resolved_draw.scissor_array[viewport_index];
                         const amplified_array_index = if (active_array_target_count > 1)
                             std.math.add(usize, base_array_index, resolved_draw.amplification_render_target_offsets[amplification]) catch
                                 return self.fail(error.InvalidArgument)
@@ -1859,7 +1874,7 @@ pub const CommandBuffer = struct {
                                 stencil_values,
                                 draw_vertices,
                                 resolved_draw.primitive,
-                                draw_options,
+                                amplification_options,
                             ));
                         }
                     }
@@ -1867,6 +1882,10 @@ pub const CommandBuffer = struct {
                     const pixel_count = std.math.mul(usize, target_handle.width, target_handle.height) catch return self.fail(error.InvalidArgument);
                     const layered_samples = active_sample_array_color_attachments[0][0][0] != null;
                     for (0..resolved_draw.amplification_count) |amplification| {
+                        const viewport_index = @as(usize, resolved_draw.amplification_viewport_offsets[amplification]);
+                        var amplification_options = draw_options;
+                        amplification_options.viewport = resolved_draw.viewport_array[viewport_index];
+                        amplification_options.scissor = resolved_draw.scissor_array[viewport_index];
                         const amplified_array_index = if (active_array_target_count > 1)
                             std.math.add(usize, base_array_index, resolved_draw.amplification_render_target_offsets[amplification]) catch
                                 return self.fail(error.InvalidArgument)
@@ -1902,7 +1921,7 @@ pub const CommandBuffer = struct {
                                     sample_extra_count = @max(sample_extra_count, physical_index + 1);
                                 }
                             }
-                            draw_options.sample_position = if (active_custom_sample_positions)
+                            amplification_options.sample_position = if (active_custom_sample_positions)
                                 .{ active_sample_positions[sample_index].x, active_sample_positions[sample_index].y }
                             else
                                 raster3d.defaultSamplePosition(active_sample_count, sample_index);
@@ -1931,7 +1950,7 @@ pub const CommandBuffer = struct {
                                     stencil_values,
                                     draw_vertices,
                                     resolved_draw.primitive,
-                                    draw_options,
+                                    amplification_options,
                                 ));
                             }
                         }
@@ -2943,13 +2962,18 @@ pub const RenderEncoder = struct {
     begin_index: usize,
     pipeline_sample_count: u8 = 1,
     vertex_amplification_count: u8 = 1,
+    vertex_amplification_viewport_offsets: [2]u32 = .{ 0, 0 },
     vertex_amplification_render_target_offsets: [2]u32 = .{ 0, 0 },
     vertex_buffer: ?*Buffer = null,
     vertex_offset: usize = 0,
     vertex_stride: usize = @sizeOf(abi.Vertex),
     inline_vertices: std.ArrayList(abi.Vertex) = .empty,
     viewport: raster3d.PreciseViewport,
+    viewport_array: [2]raster3d.PreciseViewport = undefined,
+    viewport_array_count: u8 = 1,
     scissor: abi.ScissorRect,
+    scissor_array: [2]abi.ScissorRect = undefined,
+    scissor_array_count: u8 = 1,
     cull_mode: abi.CullMode = .none,
     winding: abi.Winding = .clockwise,
     fill_mode: abi.TriangleFillMode = .fill,
@@ -3127,19 +3151,21 @@ pub const RenderEncoder = struct {
         mappings: ?[*]const abi.VertexAmplificationViewMapping,
     ) Error!void {
         // Apple Metal currently exposes a maximum of two amplified views.
-        // The CPU profile has one viewport, so a non-zero viewport-array
-        // offset cannot be represented without inventing a second viewport;
-        // reject that case rather than silently changing pixel coordinates.
+        // The bounded CPU profile records up to two viewport/scissor entries
+        // and resolves the selected entry at commit time, preserving the
+        // attachment-global top-left pixel coordinates.
         if (!self.open() or count == 0 or count > 2)
             return error.InvalidArgument;
         var offsets: [2]u32 = .{ 0, 0 };
+        var viewport_offsets: [2]u32 = .{ 0, 0 };
         if (mappings) |values| {
             for (values[0..count], 0..) |mapping, index| {
-                if (mapping.viewport_array_index_offset != 0) return error.UnsupportedOperation;
+                viewport_offsets[index] = mapping.viewport_array_index_offset;
                 offsets[index] = mapping.render_target_array_index_offset;
             }
         }
         self.vertex_amplification_count = @intCast(count);
+        self.vertex_amplification_viewport_offsets = viewport_offsets;
         self.vertex_amplification_render_target_offsets = offsets;
     }
 
@@ -4161,11 +4187,59 @@ pub const RenderEncoder = struct {
     pub fn setViewportPrecise(self: *RenderEncoder, viewport: raster3d.PreciseViewport) Error!void {
         if (!self.open() or !finitePreciseViewport(viewport)) return error.InvalidArgument;
         self.viewport = viewport;
+        self.viewport_array[0] = viewport;
+        self.viewport_array_count = 1;
+    }
+
+    pub fn setViewports(self: *RenderEncoder, viewports: ?[*]const abi.Viewport, count: usize) Error!void {
+        if (!self.open() or viewports == null or count == 0 or count > 2) return error.InvalidArgument;
+        var precise: [2]raster3d.PreciseViewport = undefined;
+        for (viewports.?[0..count], 0..) |viewport, index| {
+            precise[index] = .{
+                .origin_x = @floatCast(viewport.origin_x),
+                .origin_y = @floatCast(viewport.origin_y),
+                .width = @floatCast(viewport.width),
+                .height = @floatCast(viewport.height),
+                .znear = @floatCast(viewport.znear),
+                .zfar = @floatCast(viewport.zfar),
+            };
+            if (!finitePreciseViewport(precise[index])) return error.InvalidArgument;
+        }
+        self.viewport_array = precise;
+        self.viewport_array_count = @intCast(count);
+        self.viewport = precise[0];
+    }
+
+    pub fn setViewportsPrecise(
+        self: *RenderEncoder,
+        viewports: ?[*]const raster3d.PreciseViewport,
+        count: usize,
+    ) Error!void {
+        if (!self.open() or viewports == null or count == 0 or count > 2) return error.InvalidArgument;
+        var precise: [2]raster3d.PreciseViewport = undefined;
+        for (viewports.?[0..count], 0..) |viewport, index| {
+            if (!finitePreciseViewport(viewport)) return error.InvalidArgument;
+            precise[index] = viewport;
+        }
+        self.viewport_array = precise;
+        self.viewport_array_count = @intCast(count);
+        self.viewport = precise[0];
     }
 
     pub fn setScissorRect(self: *RenderEncoder, scissor: abi.ScissorRect) Error!void {
         if (!self.open()) return error.InvalidCommand;
         self.scissor = scissor;
+        self.scissor_array[0] = scissor;
+        self.scissor_array_count = 1;
+    }
+
+    pub fn setScissorRects(self: *RenderEncoder, scissors: ?[*]const abi.ScissorRect, count: usize) Error!void {
+        if (!self.open() or scissors == null or count == 0 or count > 2) return error.InvalidArgument;
+        var values: [2]abi.ScissorRect = undefined;
+        for (scissors.?[0..count], 0..) |scissor, index| values[index] = scissor;
+        self.scissor_array = values;
+        self.scissor_array_count = @intCast(count);
+        self.scissor = values[0];
     }
 
     pub fn setCullMode(self: *RenderEncoder, cull_mode: abi.CullMode) Error!void {
@@ -4261,7 +4335,12 @@ pub const RenderEncoder = struct {
                 else
                     0,
                 .amplification_count = self.vertex_amplification_count,
+                .amplification_viewport_offsets = self.vertex_amplification_viewport_offsets,
                 .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
+                .viewport_array = self.viewport_array,
+                .viewport_array_count = self.viewport_array_count,
+                .scissor_array = self.scissor_array,
+                .scissor_array_count = self.scissor_array_count,
             } });
         }
     }
@@ -4297,7 +4376,12 @@ pub const RenderEncoder = struct {
             .visibility_offset = self.visibility_offset,
             .visibility_result_type = self.visibility_result_type,
             .amplification_count = self.vertex_amplification_count,
+            .amplification_viewport_offsets = self.vertex_amplification_viewport_offsets,
             .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
+            .viewport_array = self.viewport_array,
+            .viewport_array_count = self.viewport_array_count,
+            .scissor_array = self.scissor_array,
+            .scissor_array_count = self.scissor_array_count,
         } });
     }
 
@@ -4361,7 +4445,12 @@ pub const RenderEncoder = struct {
                 else
                     0,
                 .amplification_count = self.vertex_amplification_count,
+                .amplification_viewport_offsets = self.vertex_amplification_viewport_offsets,
                 .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
+                .viewport_array = self.viewport_array,
+                .viewport_array_count = self.viewport_array_count,
+                .scissor_array = self.scissor_array,
+                .scissor_array_count = self.scissor_array_count,
             } });
         }
     }
@@ -4401,7 +4490,12 @@ pub const RenderEncoder = struct {
             .visibility_offset = self.visibility_offset,
             .visibility_result_type = self.visibility_result_type,
             .amplification_count = self.vertex_amplification_count,
+            .amplification_viewport_offsets = self.vertex_amplification_viewport_offsets,
             .amplification_render_target_offsets = self.vertex_amplification_render_target_offsets,
+            .viewport_array = self.viewport_array,
+            .viewport_array_count = self.viewport_array_count,
+            .scissor_array = self.scissor_array,
+            .scissor_array_count = self.scissor_array_count,
         } });
     }
 
@@ -6254,11 +6348,22 @@ pub fn beginRender(command_buffer: *CommandBuffer, texture: *Texture, pass: abi.
         else => return error.InvalidCommand,
     }
     const result = allocator.create(RenderEncoder) catch return error.OutOfMemory;
+    const initial_viewport = raster3d.PreciseViewport{
+        .origin_x = 0,
+        .origin_y = 0,
+        .width = @floatFromInt(texture.width),
+        .height = @floatFromInt(texture.height),
+        .znear = 0,
+        .zfar = 1,
+    };
+    const initial_scissor = abi.ScissorRect{ .x = 0, .y = 0, .width = texture.width, .height = texture.height };
     result.* = .{
         .command_buffer = command_buffer,
         .begin_index = begin_index,
-        .viewport = .{ .origin_x = 0, .origin_y = 0, .width = @floatFromInt(texture.width), .height = @floatFromInt(texture.height), .znear = 0, .zfar = 1 },
-        .scissor = .{ .x = 0, .y = 0, .width = texture.width, .height = texture.height },
+        .viewport = initial_viewport,
+        .viewport_array = .{ initial_viewport, initial_viewport },
+        .scissor = initial_scissor,
+        .scissor_array = .{ initial_scissor, initial_scissor },
     };
     return result;
 }
@@ -10793,7 +10898,7 @@ test "CPU render encoder expands vertex amplification on the top-left grid" {
     };
     const mappings = [_]abi.VertexAmplificationViewMapping{
         .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 0 },
-        .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 1 },
+        .{ .viewport_array_index_offset = 1, .render_target_array_index_offset = 1 },
     };
     var layers: [2]*Texture = undefined;
     var references: [2]*Texture = undefined;
@@ -10808,15 +10913,21 @@ test "CPU render encoder expands vertex amplification on the top-left grid" {
     const pass = abi.RenderPassDescriptor{
         .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0.13, .green = 0.21, .blue = 0.31, .alpha = 1 } },
     };
-    const viewport = raster3d.PreciseViewport{ .origin_x = 1.25, .origin_y = 0.75, .width = 5, .height = 4, .znear = 0, .zfar = 1 };
-    const scissor = abi.ScissorRect{ .x = 1, .y = 0, .width = 6, .height = 5 };
+    const viewports = [_]raster3d.PreciseViewport{
+        .{ .origin_x = 1.25, .origin_y = 0.75, .width = 5, .height = 4, .znear = 0, .zfar = 1 },
+        .{ .origin_x = 0.25, .origin_y = 1.75, .width = 5, .height = 3, .znear = 0, .zfar = 1 },
+    };
+    const scissors = [_]abi.ScissorRect{
+        .{ .x = 1, .y = 0, .width = 6, .height = 5 },
+        .{ .x = 0, .y = 1, .width = 7, .height = 4 },
+    };
 
     var amplified_commands = try createCommandBuffer(queue);
     defer destroyCommandBuffer(amplified_commands);
     var amplified_encoder = try beginRender(amplified_commands, layers[0], pass);
     try amplified_encoder.setRenderTargetArray(&layers, layers.len);
-    try amplified_encoder.setViewportPrecise(viewport);
-    try amplified_encoder.setScissorRect(scissor);
+    try amplified_encoder.setViewportsPrecise(&viewports, viewports.len);
+    try amplified_encoder.setScissorRects(&scissors, scissors.len);
     try amplified_encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
     try amplified_encoder.setVertexAmplificationCount(2, &mappings);
     try amplified_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
@@ -10825,10 +10936,10 @@ test "CPU render encoder expands vertex amplification on the top-left grid" {
 
     var reference_commands = try createCommandBuffer(queue);
     defer destroyCommandBuffer(reference_commands);
-    for (references) |reference| {
+    for (references, 0..) |reference, index| {
         var reference_encoder = try beginRender(reference_commands, reference, pass);
-        try reference_encoder.setViewportPrecise(viewport);
-        try reference_encoder.setScissorRect(scissor);
+        try reference_encoder.setViewportPrecise(viewports[index]);
+        try reference_encoder.setScissorRect(scissors[index]);
         try reference_encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
         try reference_encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
         try reference_encoder.endEncoding();
@@ -10843,7 +10954,7 @@ test "CPU render encoder expands vertex amplification on the top-left grid" {
     }
 }
 
-test "CPU render encoder rejects unsupported amplified viewport offsets" {
+test "CPU render encoder fails closed for an unrecorded amplified viewport" {
     const device = try createDevice();
     defer destroyDevice(device);
     const queue = try createQueue(device);
@@ -10855,11 +10966,19 @@ test "CPU render encoder rejects unsupported amplified viewport offsets" {
     var encoder = try beginRender(command_buffer, color, .{ .color = .{ .load_action = .clear, .store_action = .store } });
     const mappings = [_]abi.VertexAmplificationViewMapping{
         .{ .viewport_array_index_offset = 1, .render_target_array_index_offset = 0 },
-        .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 1 },
+        .{ .viewport_array_index_offset = 0, .render_target_array_index_offset = 0 },
     };
-    try std.testing.expectError(error.UnsupportedOperation, encoder.setVertexAmplificationCount(2, &mappings));
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -1, -1, 0.5, 1 }, .color = .{ .red = 1, .green = 0, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 1, -1, 0.5, 1 }, .color = .{ .red = 0, .green = 1, .blue = 0, .alpha = 1 } },
+        .{ .position = .{ 0, 1, 0.5, 1 }, .color = .{ .red = 0, .green = 0, .blue = 1, .alpha = 1 } },
+    };
+    try encoder.setVertexBytes(@ptrCast(&vertices), @sizeOf(@TypeOf(vertices)), 0);
+    try encoder.setVertexAmplificationCount(2, &mappings);
+    try encoder.drawPrimitives(.triangle, 0, vertices.len, 1);
     try encoder.endEncoding();
     destroyRenderEncoder(encoder);
+    try std.testing.expectError(error.InvalidArgument, command_buffer.commit());
 }
 
 test "CPU layered triangle patches map base instances on the top-left grid" {
@@ -11955,8 +12074,36 @@ pub export fn zpu_metal_render_encoder_set_viewport_precise(
     return 0;
 }
 
+pub export fn zpu_metal_render_encoder_set_viewports(
+    encoder: ?*RenderEncoder,
+    viewports: ?[*]const abi.Viewport,
+    count: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setViewports(viewports, count) catch |err| return errorCode(err);
+    return 0;
+}
+
+/// Adapter-private precise bridge for an Apple MTLViewport array.
+pub export fn zpu_metal_render_encoder_set_viewports_precise(
+    encoder: ?*RenderEncoder,
+    viewports: ?[*]const raster3d.PreciseViewport,
+    count: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setViewportsPrecise(viewports, count) catch |err| return errorCode(err);
+    return 0;
+}
+
 pub export fn zpu_metal_render_encoder_set_scissor_rect(encoder: ?*RenderEncoder, scissor: abi.ScissorRect) callconv(.c) c_int {
     (encoder orelse return -1).setScissorRect(scissor) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_scissor_rects(
+    encoder: ?*RenderEncoder,
+    scissors: ?[*]const abi.ScissorRect,
+    count: usize,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setScissorRects(scissors, count) catch |err| return errorCode(err);
     return 0;
 }
 
