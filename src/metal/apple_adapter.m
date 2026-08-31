@@ -1410,6 +1410,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _ended;
 }
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner legacy:(ZPUComputeEncoder *)legacy;
+- (BOOL)applyArgumentTable;
 - (BOOL)refreshArgumentTable;
 @end
 
@@ -18740,8 +18741,11 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
 - (BOOL)refreshArgumentTable {
     if (_owner == nil || _owner->_failed || _owner->_legacyBuffer == nil) return NO;
     if (_argumentTable == nil) return YES;
-    [self setArgumentTable:(id<MTL4ArgumentTable>)_argumentTable];
-    return !_owner->_failed;
+    if (![self applyArgumentTable]) {
+        [_owner markError];
+        return NO;
+    }
+    return YES;
 }
 - (id<MTL4CommandBuffer>)commandBuffer { return (id<MTL4CommandBuffer>)_owner; }
 - (NSString *)label { return _label; }
@@ -18876,8 +18880,14 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     _argumentTable = (ZPUMTL4ArgumentTable *)argumentTable;
     if (_argumentTable == nil) return;
     if (_argumentTable->_invalid) { [_owner markError]; return; }
-    for (NSUInteger index = 0; index < _argumentTable->_maxBufferBindCount; ++index) {
-        if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(_argumentTable, index)) {
+}
+- (BOOL)applyArgumentTable {
+    if (_owner == nil || _owner->_failed || _owner->_legacyBuffer == nil) return NO;
+    ZPUMTL4ArgumentTable *table = _argumentTable;
+    if (table == nil) return YES;
+    if (table->_invalid) return NO;
+    for (NSUInteger index = 0; index < table->_maxBufferBindCount; ++index) {
+        if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(table, index)) {
             if (zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel) && index <= 2) {
                 [(id<MTLComputeCommandEncoder>)_legacy setBuffer:nil offset:0 atIndex:index];
             }
@@ -18889,10 +18899,9 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         id resource = nil;
         ZPUBuffer *buffer = nil;
         NSUInteger bufferOffset = 0;
-        if (!zpu_metal4_argument_table_compute_resource(_argumentTable, _owner->_owner, index,
+        if (!zpu_metal4_argument_table_compute_resource(table, _owner->_owner, index,
                                                          &resource, &buffer, &bufferOffset)) {
-            [_owner markError];
-            return;
+            return NO;
         }
         if ([resource isKindOfClass:[ZPUAccelerationStructure class]]) {
             [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:
@@ -18906,10 +18915,9 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         } else if (index == 0 ||
                    (index <= 2 && zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel))) {
             if (zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel) && buffer == nil) {
-                [_owner markError];
-                return;
+                return NO;
             }
-            const uint64_t *strides = (const uint64_t *)_argumentTable->_bufferStrides.bytes;
+            const uint64_t *strides = (const uint64_t *)table->_bufferStrides.bytes;
             [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
             [(id<MTLComputeCommandEncoder>)_legacy setVisibleFunctionTable:nil atBufferIndex:index];
             [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:nil atBufferIndex:index];
@@ -18919,33 +18927,31 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
                     attributeStride:(NSUInteger)strides[index] atIndex:index];
             }
         } else {
-            [_owner markError];
-            return;
+            return NO;
         }
     }
-    const uint64_t *textureIDs = (const uint64_t *)_argumentTable->_textureResources.bytes;
-    for (NSUInteger index = 0; index < _argumentTable->_maxTextureBindCount; ++index) {
+    const uint64_t *textureIDs = (const uint64_t *)table->_textureResources.bytes;
+    for (NSUInteger index = 0; index < table->_maxTextureBindCount; ++index) {
         if (textureIDs[index] == 0) {
             [(id<MTLComputeCommandEncoder>)_legacy setTexture:nil atIndex:index];
             continue;
         }
         id resource = zpu_resource_for_id(textureIDs[index]);
         if (![resource isKindOfClass:[ZPUTexture class]] || ((ZPUTexture *)resource)->_owner != _owner->_owner) {
-            [_owner markError];
-            return;
+            return NO;
         }
         [_legacy setTexture:(id<MTLTexture>)resource atIndex:index];
     }
-    const uint64_t *samplerIDs = (const uint64_t *)_argumentTable->_samplerResources.bytes;
-    for (NSUInteger index = 0; index < _argumentTable->_maxSamplerStateBindCount; ++index) {
+    const uint64_t *samplerIDs = (const uint64_t *)table->_samplerResources.bytes;
+    for (NSUInteger index = 0; index < table->_maxSamplerStateBindCount; ++index) {
         id resource = zpu_resource_for_id(samplerIDs[index]);
         if (samplerIDs[index] != 0 &&
             (![resource isKindOfClass:[ZPUSamplerState class]] || ((ZPUSamplerState *)resource)->_owner != _owner->_owner)) {
-            [_owner markError];
-            return;
+            return NO;
         }
         [_legacy setSamplerState:(id<MTLSamplerState>)resource atIndex:index];
     }
+    return YES;
 }
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture toTexture:(id<MTLTexture>)destinationTexture {
     ZPUTexture *source = (ZPUTexture *)sourceTexture;

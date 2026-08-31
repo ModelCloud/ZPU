@@ -29149,8 +29149,11 @@ int main(void) {
         id<MTL4ComputeCommandEncoder> metal4_buffer_add_encoder =
             [metal4_buffer_add_command_buffer computeCommandEncoder];
         [metal4_buffer_add_table setAddress:metal4_buffer_add_output.gpuAddress atIndex:2];
-        [metal4_buffer_add_encoder setComputePipelineState:adapter_buffer_add_pipeline];
         [metal4_buffer_add_encoder setArgumentTable:metal4_buffer_add_table];
+        /* Metal 4 tables are snapshots at dispatch, so binding a table before
+         * selecting the pipeline is valid and must not make the CPU bridge
+         * resolve kernel-specific slots prematurely. */
+        [metal4_buffer_add_encoder setComputePipelineState:adapter_buffer_add_pipeline];
         [metal4_buffer_add_encoder dispatchThreads:MTLSizeMake(buffer_add_count, 1, 1)
                                   threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
         [metal4_buffer_add_encoder endEncoding];
