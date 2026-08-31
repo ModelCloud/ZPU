@@ -590,8 +590,11 @@ triangle path:
   for source-named F32 buffer add/multiply kernels with the standard three
   buffer slots and `thread_position_in_grid`, plus the source-named RGBA8
   texture gradient profile with a `texture2d<float, access::write>` slot and
-  the top-left `uint2` grid, and the canonical source-named `Vertex` passthrough
-  plus color-returning fragment pair. A canonical source-named fragment that
+  the top-left `uint2` grid, and a strict source-named passthrough vertex plus
+  color-returning fragment pair. The pair accepts any source struct identifier
+  whose validated layout is `float4 position [[position]]; float4 color;`, so
+  renaming the source record does not change the fixed CPU ABI. A canonical
+  source-named fragment that
   returns a `constant float4` buffer-0 color is lowered to the CPU
   uniform-color raster profile, preserving `setFragmentBytes:length:atIndex:`
   and its exact attachment bytes. A complete canonical nested argument-buffer

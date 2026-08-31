@@ -12389,63 +12389,91 @@ static NSDictionary<NSString *, NSDictionary *> *zpu_source_lowerable_argument_b
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_source_argument_buffer_function_reflection(NSDictionary *layout);
 
-/* The render lowering profile is equally narrow: only the canonical Vertex
- * passthrough and color-returning fragment can safely share the fixed ZPU
- * vertex/fragment implementations. */
+/* The render lowering profile is equally narrow: only a canonical two-field
+ * vertex record (a float4 position marked [[position]] followed by a float4
+ * color) and passthrough/color-returning entry points can safely share the
+ * fixed ZPU vertex/fragment implementations.  The record's source name is
+ * deliberately not part of the ABI: MSL callers commonly rename it, while
+ * its field types and order still make the CPU layout unambiguous. */
 static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functions(NSString *source) {
     NSString *compactSource = zpu_source_compact(source);
-    if ([compactSource rangeOfString:
-            @"structVertex{float4position[[position]];float4color;};"].location == NSNotFound) return @{};
     NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
-    NSError *vertexError = nil;
-    NSRegularExpression *vertexExpression = [NSRegularExpression
+
+    NSError *structError = nil;
+    NSRegularExpression *structExpression = [NSRegularExpression
         regularExpressionWithPattern:
-            @"vertexVertex([A-Za-z_][A-Za-z0-9_]*)\\(uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[vertex_id\\]\\],"
-             "deviceconstVertex\\*([A-Za-z_][A-Za-z0-9_]*)\\[\\[buffer\\(0\\)\\]\\]\\)"
-             "\\{return\\3\\[\\2\\];\\}"
-                                   options:0 error:&vertexError];
-    if (vertexExpression != nil && vertexError == nil) {
-        [vertexExpression enumerateMatchesInString:compactSource options:0
-                                              range:NSMakeRange(0, compactSource.length)
-                                         usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
-            (void)flags;
-            (void)stop;
-            NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
-            implementations[name] = zpu_cpu_vertex_name;
-        }];
-    }
-    NSError *fragmentError = nil;
-    NSRegularExpression *fragmentExpression = [NSRegularExpression
-        regularExpressionWithPattern:
-            @"fragmentfloat4([A-Za-z_][A-Za-z0-9_]*)\\(Vertex([A-Za-z_][A-Za-z0-9_]*)"
-             "\\[\\[stage_in\\]\\]\\)\\{return\\2\\.color;\\}"
-                                   options:0 error:&fragmentError];
-    if (fragmentExpression != nil && fragmentError == nil) {
-        [fragmentExpression enumerateMatchesInString:compactSource options:0
-                                                range:NSMakeRange(0, compactSource.length)
-                                           usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
-            (void)flags;
-            (void)stop;
-            NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
-            implementations[name] = zpu_cpu_fragment_name;
-        }];
-    }
-    NSError *uniformFragmentError = nil;
-    NSRegularExpression *uniformFragmentExpression = [NSRegularExpression
-        regularExpressionWithPattern:
-            @"fragmentfloat4([A-Za-z_][A-Za-z0-9_]*)\\(Vertex([A-Za-z_][A-Za-z0-9_]*)"
+            @"struct([A-Za-z_][A-Za-z0-9_]*)\\{float4position\\[\\[position\\]\\];float4color;\\};"
+                                   options:0 error:&structError];
+    if (structExpression == nil || structError != nil) return @{};
+
+    NSMutableSet<NSString *> *vertexTypes = [NSMutableSet set];
+    [structExpression enumerateMatchesInString:compactSource options:0
+                                          range:NSMakeRange(0, compactSource.length)
+                                     usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        [vertexTypes addObject:[compactSource substringWithRange:[match rangeAtIndex:1]]];
+    }];
+    if (vertexTypes.count == 0) return @{};
+
+    for (NSString *vertexType in vertexTypes) {
+        /* The type is obtained from a validated struct declaration above and
+         * therefore remains an identifier when inserted into these strict
+         * patterns.  Requiring the same captured type at both positions
+         * prevents a source function from being lowered across incompatible
+         * records. */
+        NSError *vertexError = nil;
+        NSString *vertexPattern = [NSString stringWithFormat:
+             @"vertex%@([A-Za-z_][A-Za-z0-9_]*)\\(uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[vertex_id\\]\\],"
+             "deviceconst%@\\*([A-Za-z_][A-Za-z0-9_]*)\\[\\[buffer\\(0\\)\\]\\]\\)"
+             "\\{return\\3\\[\\2\\];\\}", vertexType, vertexType];
+        NSRegularExpression *vertexExpression = [NSRegularExpression
+            regularExpressionWithPattern:vertexPattern options:0 error:&vertexError];
+        if (vertexExpression != nil && vertexError == nil) {
+            [vertexExpression enumerateMatchesInString:compactSource options:0
+                                                  range:NSMakeRange(0, compactSource.length)
+                                             usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+                (void)flags;
+                (void)stop;
+                NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+                implementations[name] = zpu_cpu_vertex_name;
+            }];
+        }
+
+        NSError *fragmentError = nil;
+        NSString *fragmentPattern = [NSString stringWithFormat:
+            @"fragmentfloat4([A-Za-z_][A-Za-z0-9_]*)\\(%@([A-Za-z_][A-Za-z0-9_]*)"
+             "\\[\\[stage_in\\]\\]\\)\\{return\\2\\.color;\\}", vertexType];
+        NSRegularExpression *fragmentExpression = [NSRegularExpression
+            regularExpressionWithPattern:fragmentPattern options:0 error:&fragmentError];
+        if (fragmentExpression != nil && fragmentError == nil) {
+            [fragmentExpression enumerateMatchesInString:compactSource options:0
+                                                    range:NSMakeRange(0, compactSource.length)
+                                               usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+                (void)flags;
+                (void)stop;
+                NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+                implementations[name] = zpu_cpu_fragment_name;
+            }];
+        }
+
+        NSError *uniformFragmentError = nil;
+        NSString *uniformFragmentPattern = [NSString stringWithFormat:
+            @"fragmentfloat4([A-Za-z_][A-Za-z0-9_]*)\\(%@([A-Za-z_][A-Za-z0-9_]*)"
              "\\[\\[stage_in\\]\\],constantfloat4&([A-Za-z_][A-Za-z0-9_]*)"
-             "\\[\\[buffer\\(0\\)\\]\\]\\)\\{return\\3;\\}"
-                                   options:0 error:&uniformFragmentError];
-    if (uniformFragmentExpression != nil && uniformFragmentError == nil) {
-        [uniformFragmentExpression enumerateMatchesInString:compactSource options:0
-                                                       range:NSMakeRange(0, compactSource.length)
-                                                  usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
-            (void)flags;
-            (void)stop;
-            NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
-            implementations[name] = @"zpu_cpu_uniform_color_fragment";
-        }];
+             "\\[\\[buffer\\(0\\)\\]\\]\\)\\{return\\3;\\}", vertexType];
+        NSRegularExpression *uniformFragmentExpression = [NSRegularExpression
+            regularExpressionWithPattern:uniformFragmentPattern options:0 error:&uniformFragmentError];
+        if (uniformFragmentExpression != nil && uniformFragmentError == nil) {
+            [uniformFragmentExpression enumerateMatchesInString:compactSource options:0
+                                                           range:NSMakeRange(0, compactSource.length)
+                                                      usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+                (void)flags;
+                (void)stop;
+                NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+                implementations[name] = @"zpu_cpu_uniform_color_fragment";
+            }];
+        }
     }
     return [implementations copy];
 }

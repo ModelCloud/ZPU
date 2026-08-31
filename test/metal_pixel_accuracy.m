@@ -572,6 +572,11 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "fragment float4 zpu_source_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
          "fragment float4 zpu_source_uniform_fragment(Vertex input [[stage_in]], "
          "constant float4 &color [[buffer(0)]]) { return color; }\n"
+         "struct RenamedVertex { float4 position [[position]]; float4 color; };\n"
+         "vertex RenamedVertex zpu_source_renamed_vertex(uint vertex_id [[vertex_id]], "
+         "device const RenamedVertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
+         "fragment float4 zpu_source_renamed_fragment(RenamedVertex input [[stage_in]]) "
+         "{ return input.color; }\n"
          "kernel void zpu_source_copy_rgba8(device const uchar4 *source [[buffer(0)]], "
          "texture2d<float, access::write> output [[texture(1)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
@@ -662,7 +667,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 30) {
+        adapter_library.functionNames.count != 32) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1129,6 +1134,99 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU render lowering execution failed",
                         adapter_render_error ?: native_render_error);
         return 170;
+    }
+
+    /* The fixed CPU ABI is about the validated record layout, not the
+     * spelling of the source struct. Exercise a renamed source record and
+     * entry points through the same native oracle to keep that distinction
+     * explicit. */
+    id<MTLFunction> native_renamed_vertex =
+        [native_library newFunctionWithName:@"zpu_source_renamed_vertex"];
+    id<MTLFunction> native_renamed_fragment =
+        [native_library newFunctionWithName:@"zpu_source_renamed_fragment"];
+    id<MTLFunction> adapter_renamed_vertex =
+        [adapter_library newFunctionWithName:@"zpu_source_renamed_vertex"];
+    id<MTLFunction> adapter_renamed_fragment =
+        [adapter_library newFunctionWithName:@"zpu_source_renamed_fragment"];
+    MTLRenderPipelineDescriptor *native_renamed_descriptor = [native_render_descriptor copy];
+    native_renamed_descriptor.vertexFunction = native_renamed_vertex;
+    native_renamed_descriptor.fragmentFunction = native_renamed_fragment;
+    MTLRenderPipelineDescriptor *adapter_renamed_descriptor = [adapter_render_descriptor copy];
+    adapter_renamed_descriptor.vertexFunction = adapter_renamed_vertex;
+    adapter_renamed_descriptor.fragmentFunction = adapter_renamed_fragment;
+    NSError *native_renamed_error = nil;
+    NSError *adapter_renamed_error = nil;
+    id<MTLRenderPipelineState> native_renamed_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_renamed_descriptor
+                                                       error:&native_renamed_error];
+    id<MTLRenderPipelineState> adapter_renamed_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_renamed_descriptor
+                                                        error:&adapter_renamed_error];
+    id<MTLTexture> native_renamed_texture =
+        [native_device newTextureWithDescriptor:render_texture_descriptor];
+    id<MTLTexture> adapter_renamed_texture =
+        [adapter_device newTextureWithDescriptor:render_texture_descriptor];
+    MTLRenderPassDescriptor *native_renamed_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_renamed_pass.colorAttachments[0].texture = native_renamed_texture;
+    native_renamed_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_renamed_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_renamed_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    MTLRenderPassDescriptor *adapter_renamed_pass = [native_renamed_pass copy];
+    adapter_renamed_pass.colorAttachments[0].texture = adapter_renamed_texture;
+    id<MTLCommandBuffer> native_renamed_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_renamed_command_buffer = [adapter_queue commandBuffer];
+    id<MTLRenderCommandEncoder> native_renamed_encoder =
+        [native_renamed_command_buffer renderCommandEncoderWithDescriptor:native_renamed_pass];
+    id<MTLRenderCommandEncoder> adapter_renamed_encoder =
+        [adapter_renamed_command_buffer renderCommandEncoderWithDescriptor:adapter_renamed_pass];
+    if (native_renamed_pipeline != nil && adapter_renamed_pipeline != nil &&
+        native_renamed_texture != nil && adapter_renamed_texture != nil &&
+        native_renamed_encoder != nil && adapter_renamed_encoder != nil) {
+        [native_renamed_encoder setRenderPipelineState:native_renamed_pipeline];
+        [native_renamed_encoder setVertexBuffer:native_render_vertices offset:0 atIndex:0];
+        [native_renamed_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_renamed_encoder endEncoding];
+        [native_renamed_command_buffer commit];
+        [native_renamed_command_buffer waitUntilCompleted];
+        [adapter_renamed_encoder setRenderPipelineState:adapter_renamed_pipeline];
+        [adapter_renamed_encoder setVertexBuffer:adapter_render_vertices offset:0 atIndex:0];
+        [adapter_renamed_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_renamed_encoder endEncoding];
+        [adapter_renamed_command_buffer commit];
+        [adapter_renamed_command_buffer waitUntilCompleted];
+    }
+    uint8_t native_renamed_pixels[8 * 8 * 4] = {0};
+    uint8_t adapter_renamed_pixels[8 * 8 * 4] = {0};
+    if (native_renamed_texture != nil) {
+        [native_renamed_texture getBytes:native_renamed_pixels bytesPerRow:8 * 4
+                              fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    if (adapter_renamed_texture != nil) {
+        [adapter_renamed_texture getBytes:adapter_renamed_pixels bytesPerRow:8 * 4
+                               fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    BOOL renamed_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *renamed_vertex_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_renamed_vertex"];
+        MTLFunctionReflection *renamed_fragment_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_renamed_fragment"];
+        renamed_reflection_ok = renamed_vertex_reflection != nil &&
+            renamed_vertex_reflection.bindings.count == 1 && renamed_fragment_reflection != nil &&
+            renamed_fragment_reflection.bindings.count == 0;
+    }
+    if (native_renamed_vertex == nil || native_renamed_fragment == nil ||
+        native_renamed_error != nil || native_renamed_pipeline == nil ||
+        adapter_renamed_vertex == nil || adapter_renamed_fragment == nil ||
+        adapter_renamed_error != nil || adapter_renamed_pipeline == nil ||
+        native_renamed_texture == nil || adapter_renamed_texture == nil ||
+        native_renamed_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_renamed_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        !renamed_reflection_ok || memcmp(native_renamed_pixels, adapter_renamed_pixels,
+                                         sizeof(native_renamed_pixels)) != 0) {
+        fail_with_error("source-defined CPU renamed render lowering execution failed",
+                        adapter_renamed_error ?: native_renamed_error);
+        return 172;
     }
 
     id<MTLFunction> native_uniform_fragment =
