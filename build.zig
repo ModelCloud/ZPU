@@ -260,6 +260,17 @@ pub fn build(b: *std.Build) void {
     run_benchmark_vulkan_abi.step.dependOn(&require_limited.step);
     const benchmark_vulkan_abi_step = b.step("benchmark-vulkan-abi", "Measure Vulkan cpu_cube_v1 per-draw versus batched submission for terminal, app, and complex-demo streams");
     benchmark_vulkan_abi_step.dependOn(&run_benchmark_vulkan_abi.step);
+    const benchmark_mosaic_scaling = b.addExecutable(.{
+        .name = "zpu-benchmark-mosaic-scaling",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_mosaic_scaling.zig"), .target = target, .optimize = optimize }),
+    });
+    benchmark_mosaic_scaling.root_module.link_libc = true;
+    b.installArtifact(benchmark_mosaic_scaling);
+    const run_benchmark_mosaic_scaling = b.addRunArtifact(benchmark_mosaic_scaling);
+    if (b.args) |args| run_benchmark_mosaic_scaling.addArgs(args);
+    run_benchmark_mosaic_scaling.step.dependOn(&require_limited.step);
+    const benchmark_mosaic_scaling_step = b.step("benchmark-mosaic-scaling", "Measure same-NUMA Mosaic physical packet scaling on realistic terminal, UI, and complex-demo geometry");
+    benchmark_mosaic_scaling_step.dependOn(&run_benchmark_mosaic_scaling.step);
     const benchmark_vulkan_transfer = b.addExecutable(.{
         .name = "zpu-benchmark-vulkan-transfer",
         .root_module = b.createModule(.{ .root_source_file = b.path("src/benchmark_vulkan_transfer.zig"), .target = target, .optimize = optimize }),
