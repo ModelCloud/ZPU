@@ -26,7 +26,10 @@ command-boundary shapes for the narrow renderer that ZPU actually exposes.
 
 ## Run
 
-Use the same two-physical-core gate as the 3D renderer benchmarks:
+The benchmark accepts the existing physical-core gate at widths 1 through 8.
+Two cores remains the historical evidence profile; use a different
+`ZPU_MAX_THREADS` value to measure scaling without changing the workload or
+affinity policy:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
@@ -45,6 +48,21 @@ frames per mode. The report includes p50/p95/p99 frame time, FPS,
 legacy/Mosaic batch counts, checksums, and both per-draw and legacy-to-Mosaic
 speedups. Clear and checksum work is kept identical between modes; the
 comparison isolates draw submission and raster execution.
+
+For a controlled core-width sweep:
+
+```sh
+for cores in 2 3 4; do
+  ZPU_MAX_THREADS=$cores tools/limited-cpus.sh zig build benchmark-vulkan-abi \
+    -Doptimize=ReleaseFast -- --json > "mosaic-${cores}c.json"
+done
+```
+
+The Mosaic raster scheduler now creates one bounded band per selected physical
+core (up to eight), keeps the render thread on the first selected CPU, and
+pins worker `i` through the existing locality mapping. Without the explicit
+`physical-core-v1` harness marker, generic callers retain the two-band
+compatibility profile.
 
 The driver-side Mosaic bridge only accepts adjacent commands with the exact
 opaque `cpu_cube_v1` contract: single-layer, non-indexed, one instance,
@@ -73,6 +91,24 @@ stream at 30.17 ms p50 with 256-command chunking and 3.00 ms p50 through Mosaic
 remain one batch in both modes: 0.997× and 1.002× respectively. These are
 workload-specific measurements; the byte-identical color/depth oracle is the
 correctness gate.
+
+## Core-width scaling result
+
+After removing the hidden two-band ceiling, a six-sample ReleaseFast sweep on
+the same 800×600 host measured the WezTerm-shaped Mosaic batch at 2.67 ms p50
+with two cores, 2.10 ms with three cores, and 1.86 ms with four cores. That is
+1.27× and 1.43× relative to two cores—not linear scaling. The long stream is
+now using all selected bands, but preparation, synchronization, cache traffic,
+and uneven glyph-row work remain serial or shared costs. The ImGui and Khronos
+profiles intentionally stay on their already-cheaper one-batch serial path and
+therefore remained approximately 1.00× over legacy at all widths.
+
+This establishes the next 4× target: route eligible one-batch Vulkan draws
+through Mosaic's physical `LOCAL`/`MACRO`/`GLOBAL` packet executor, then
+parallelize packet preparation and tile work rather than only widening the
+existing CPU raster bands. The scalar packet path must first remain
+byte-identical to `cpu_cube`; SIMD and visibility/deferred paths follow that
+gate.
 
 ## Next 4× target
 

@@ -469,8 +469,10 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
 ```
 
 See [`docs/vulkan-abi-benchmarks.md`](docs/vulkan-abi-benchmarks.md) for the
-open-source references, stream sizes, ABI eligibility contract, and oracle
-tests.
+open-source references, stream sizes, ABI eligibility contract, oracle tests,
+and the 2/3/4-core scaling sweep. The sweep removed the renderer's hidden
+two-band ceiling; its next 4× target is physical Mosaic packet execution for
+one-batch Vulkan draws, not simply adding more worker threads.
 
 Vulkan image transfers have a focused benchmark too. It models four
 1920×1080 RGBA layers uploaded from a 2048-texel row-pitch buffer and a
