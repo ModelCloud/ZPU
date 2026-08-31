@@ -13001,6 +13001,24 @@ pub export fn zpu_metal_command_buffer_encode_wait_for_event(command_buffer: ?*C
     return 0;
 }
 
+pub export fn zpu_metal_command_buffer_encode_update_fence(command_buffer: ?*CommandBuffer, fence: ?*Fence) callconv(.c) c_int {
+    const value = command_buffer orelse return -1;
+    const target = fence orelse return -1;
+    if (value.magic != command_buffer_magic or value.status != .created or
+        !validFence(target) or target.device != value.queue.device) return errorCode(error.InvalidArgument);
+    _ = value.append(.{ .update_fence = target }) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_command_buffer_encode_wait_for_fence(command_buffer: ?*CommandBuffer, fence: ?*Fence) callconv(.c) c_int {
+    const value = command_buffer orelse return -1;
+    const target = fence orelse return -1;
+    if (value.magic != command_buffer_magic or value.status != .created or
+        !validFence(target) or target.device != value.queue.device) return errorCode(error.InvalidArgument);
+    _ = value.append(.{ .wait_fence = target }) catch |err| return errorCode(err);
+    return 0;
+}
+
 /// Append an adapter-private CPU callback at the current command-stream
 /// position. The caller owns the context lifetime until command completion.
 /// This hook is intentionally not part of the portable Metal ABI; it exists

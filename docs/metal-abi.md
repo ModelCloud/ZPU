@@ -641,10 +641,15 @@ triangle path:
   references and depth/stencil handles remain ZPU-owned and are never passed
   to a native Metal encoder.
   It never compiles or executes arbitrary MSL
-- CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
-  from the adapter's CPU clock domain, resolve into ZPU buffers, and support
-  immediate CPU-range invalidation. `queryTimestampFrequency` reports
-  nanoseconds for this CPU clock domain; no hardware GPU timestamp is exposed
+- CPU-owned Metal 4 timestamp counter heaps; timestamp writes and resolves are
+  recorded as ordered CPU/ZPU command operations and therefore observe the
+  same deferred commit ordering as neighboring encoders. Resolves write
+  directly into ZPU-owned buffers, including private-storage resources, and
+  optional wait/update fences surround the recorded resolve. CPU-range
+  invalidation remains immediate, so recording an operation and invalidating
+  before commit exercises the command-time semantics. `queryTimestampFrequency`
+  reports nanoseconds for this CPU clock domain; no hardware GPU timestamp is
+  exposed
 - CPU-owned legacy timestamp counter sets/sample buffers; draw, dispatch, and
   blit sample points resolve to `MTLCounterResultTimestamp` records in shared
   ZPU buffers. Unsupported hardware-only counters remain unavailable rather

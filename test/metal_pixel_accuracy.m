@@ -34526,7 +34526,9 @@ int main(void) {
          * portable adapter exposes a monotonic CPU clock domain, while the
          * native path is used only as the pixel oracle above. Exercise the
          * command-buffer, compute, and render encoder write paths,
-         * GPU-address resolution, CPU resolution, and immediate invalidation. */
+         * GPU-address resolution, command-time CPU resolution, and
+         * invalidation. Counter writes and resolves must observe command
+         * ordering rather than the Objective-C encoding-time state. */
         MTL4CounterHeapDescriptor *adapter_counter_descriptor = [MTL4CounterHeapDescriptor new];
         adapter_counter_descriptor.type = MTL4CounterHeapTypeTimestamp;
         adapter_counter_descriptor.count = 4;
@@ -34535,6 +34537,7 @@ int main(void) {
         id<MTLBuffer> adapter_counter_buffer =
             [adapter_device newBufferWithLength:4 * sizeof(MTL4TimestampHeapEntry)
                                         options:MTLResourceStorageModeShared];
+        id<MTLFence> adapter_counter_fence = [adapter_device newFence];
         id<MTL4CommandBuffer> adapter_counter_command_buffer = [adapter_device newCommandBuffer];
         [adapter_counter_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
         [adapter_counter_command_buffer writeTimestampIntoHeap:adapter_counter_heap atIndex:0];
@@ -34544,12 +34547,16 @@ int main(void) {
                                                                intoHeap:adapter_counter_heap atIndex:1];
         [adapter_counter_compute_encoder endEncoding];
         [adapter_counter_command_buffer endCommandBuffer];
+        /* The encoded timestamp writes have not executed yet. Invalidation
+         * here proves both writes and the later resolve run at commit time:
+         * an encoding-time implementation would copy two zero entries. */
+        [adapter_counter_heap invalidateCounterRange:NSMakeRange(0, 2)];
         [adapter_counter_command_buffer resolveCounterHeap:adapter_counter_heap
                                                  withRange:NSMakeRange(0, 2)
                                                 intoBuffer:MTL4BufferRangeMake(adapter_counter_buffer.gpuAddress,
                                                                                 2 * sizeof(MTL4TimestampHeapEntry))
                                                  waitFence:nil
-                                               updateFence:nil];
+                                               updateFence:adapter_counter_fence];
         id<MTL4CommandBuffer> adapter_counter_command_buffers[] = {adapter_counter_command_buffer};
         [metal4_queue commit:adapter_counter_command_buffers count:1];
         const MTL4TimestampHeapEntry *adapter_counter_entries =
@@ -34561,6 +34568,7 @@ int main(void) {
             [adapter_device queryTimestampFrequency] != 1000000000ULL ||
             adapter_counter_buffer == nil || adapter_counter_command_buffer == nil ||
             adapter_counter_compute_encoder == nil ||
+            adapter_counter_fence == nil ||
             adapter_counter_resolved.length != 2 * sizeof(MTL4TimestampHeapEntry) ||
             adapter_counter_entries[0].timestamp == 0 || adapter_counter_entries[1].timestamp == 0 ||
             adapter_counter_entries[0].timestamp >= adapter_counter_entries[1].timestamp) {
@@ -34577,6 +34585,32 @@ int main(void) {
             adapter_counter_invalidated_entries[1].timestamp != preserved_counter_timestamp) {
             fail_with_error("Metal 4 CPU timestamp counter invalidation failed", metal4_error);
             return 65;
+        }
+
+        /* A valid fence must be ordered around the deferred CPU resolve too.
+         * Resolve a second range only after waiting on the first command's
+         * update, exercising the command-buffer fence ABI rather than merely
+         * retaining the Objective-C fence object. */
+        id<MTL4CommandBuffer> adapter_counter_wait_command_buffer = [adapter_device newCommandBuffer];
+        [adapter_counter_wait_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        [adapter_counter_wait_command_buffer endCommandBuffer];
+        [adapter_counter_wait_command_buffer resolveCounterHeap:adapter_counter_heap
+                                                        withRange:NSMakeRange(1, 1)
+                                                       intoBuffer:MTL4BufferRangeMake(
+                                                           adapter_counter_buffer.gpuAddress + sizeof(MTL4TimestampHeapEntry),
+                                                           sizeof(MTL4TimestampHeapEntry))
+                                                        waitFence:adapter_counter_fence
+                                                      updateFence:nil];
+        id<MTL4CommandBuffer> adapter_counter_wait_command_buffers[] = {
+            adapter_counter_wait_command_buffer,
+        };
+        [metal4_queue commit:adapter_counter_wait_command_buffers count:1];
+        const MTL4TimestampHeapEntry *adapter_counter_wait_entries =
+            (const MTL4TimestampHeapEntry *)adapter_counter_buffer.contents;
+        if (adapter_counter_wait_command_buffer == nil ||
+            adapter_counter_wait_entries[1].timestamp != preserved_counter_timestamp) {
+            fail_with_error("Metal 4 CPU timestamp counter fence ordering failed", metal4_error);
+            return 67;
         }
 
         /* Metal 4 counter resolution accepts optional fences, but a fence

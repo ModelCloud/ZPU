@@ -35,6 +35,10 @@ typedef int (*zpu_metal_command_callback)(void *context);
 extern int zpu_metal_command_buffer_append_callback(zpu_metal_command_buffer *command_buffer,
                                                      zpu_metal_command_callback callback,
                                                      void *context);
+extern int zpu_metal_command_buffer_encode_update_fence(zpu_metal_command_buffer *command_buffer,
+                                                         zpu_metal_fence *fence);
+extern int zpu_metal_command_buffer_encode_wait_for_fence(zpu_metal_command_buffer *command_buffer,
+                                                           zpu_metal_fence *fence);
 /* Apple exposes MTLViewport as six doubles. Keep the stable portable ABI's
  * float viewport intact, but pass Objective-C encoder state through this
  * adapter-private precise bridge so CPU rasterization does not narrow the
@@ -17534,11 +17538,18 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
 - (void)writeTimestampIntoHeap:(id<MTL4CounterHeap>)counterHeap atIndex:(NSUInteger)index {
     ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
     if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner || _legacyBuffer == nil ||
-        ![heap writeTimestampAtIndex:index]) {
+        heap->_type != MTL4CounterHeapTypeTimestamp || index >= heap->_count) {
         [self markError];
         return;
     }
-    if (_legacyBuffer != nil) [_legacyBuffer retainResource:heap];
+    ZPUMTL4CounterHeap *retainedHeap = heap;
+    if (!zpu_defer_operation(_legacyBuffer, ^BOOL {
+        return [retainedHeap writeTimestampAtIndex:index];
+    })) {
+        [self markError];
+        return;
+    }
+    [_legacyBuffer retainResource:heap];
 }
 - (void)resolveCounterHeap:(id<MTL4CounterHeap>)counterHeap withRange:(NSRange)range intoBuffer:(MTL4BufferRange)bufferRange waitFence:(id<MTLFence>)fenceToWait updateFence:(id<MTLFence>)fenceToUpdate {
     ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
@@ -17561,7 +17572,29 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
         [self markError];
         return;
     }
-    if (resolved.length != 0) memcpy((uint8_t *)buffer.contents + bufferOffset, resolved.bytes, resolved.length);
+    if (fenceToWait != nil && zpu_metal_command_buffer_encode_wait_for_fence(
+            _legacyBuffer->_zpuCommandBuffer, ((ZPUFence *)fenceToWait)->_zpuFence) != ZPU_METAL_OK) {
+        [self markError];
+        return;
+    }
+    ZPUMTL4CounterHeap *retainedHeap = heap;
+    ZPUBuffer *retainedBuffer = buffer;
+    if (!zpu_defer_operation(_legacyBuffer, ^BOOL {
+        NSData *commandResolved = [retainedHeap resolveCounterRange:range];
+        if (commandResolved == nil || commandResolved.length > retainedBuffer.length - bufferOffset ||
+            (commandResolved.length != 0 && zpu_metal_buffer_write(
+                retainedBuffer->_zpuBuffer, bufferOffset, commandResolved.bytes,
+                commandResolved.length) != ZPU_METAL_OK)) return NO;
+        return YES;
+    })) {
+        [self markError];
+        return;
+    }
+    if (fenceToUpdate != nil && zpu_metal_command_buffer_encode_update_fence(
+            _legacyBuffer->_zpuCommandBuffer, ((ZPUFence *)fenceToUpdate)->_zpuFence) != ZPU_METAL_OK) {
+        [self markError];
+        return;
+    }
     [_legacyBuffer retainResource:heap];
     [_legacyBuffer retainResource:buffer];
     if (fenceToWait != nil) [_legacyBuffer retainResource:fenceToWait];
@@ -18669,7 +18702,14 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     (void)stage;
     ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
     if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner->_owner ||
-        ![heap writeTimestampAtIndex:index]) {
+        heap->_type != MTL4CounterHeapTypeTimestamp || index >= heap->_count) {
+        [_owner markError];
+        return;
+    }
+    ZPUMTL4CounterHeap *retainedHeap = heap;
+    if (!zpu_defer_operation(_owner->_legacyBuffer, ^BOOL {
+        return [retainedHeap writeTimestampAtIndex:index];
+    })) {
         [_owner markError];
         return;
     }
@@ -19468,7 +19508,14 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     (void)granularity;
     ZPUMTL4CounterHeap *heap = (ZPUMTL4CounterHeap *)counterHeap;
     if (![heap isKindOfClass:[ZPUMTL4CounterHeap class]] || heap->_owner != _owner->_owner ||
-        ![heap writeTimestampAtIndex:index]) {
+        heap->_type != MTL4CounterHeapTypeTimestamp || index >= heap->_count) {
+        [_owner markError];
+        return;
+    }
+    ZPUMTL4CounterHeap *retainedHeap = heap;
+    if (!zpu_defer_operation(_owner->_legacyBuffer, ^BOOL {
+        return [retainedHeap writeTimestampAtIndex:index];
+    })) {
         [_owner markError];
         return;
     }
