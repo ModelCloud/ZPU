@@ -12139,6 +12139,16 @@ int main(void) {
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
             MTLTessellationPartitionModePow2, 0x4200, 1.0f);
         if (native_tessellation_pow2_result != 0) return native_tessellation_pow2_result;
+        const int native_tessellation_fractional_odd_result = test_native_tessellation_patch_against_cpu(
+            device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
+            MTLTessellationPartitionModeFractionalOdd, 0x4100, 1.0f);
+        if (native_tessellation_fractional_odd_result != 0) return native_tessellation_fractional_odd_result;
+        const int native_tessellation_fractional_even_result = test_native_tessellation_patch_against_cpu(
+            device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
+            MTLTessellationPartitionModeFractionalEven, 0x4100, 1.0f);
+        if (native_tessellation_fractional_even_result != 0) return native_tessellation_fractional_even_result;
         const int layered_patch_result = test_layered_patch_against_native(
             device, adapter_device, layered_vertex_function, fragment_function,
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);

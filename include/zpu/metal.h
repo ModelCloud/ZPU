@@ -705,7 +705,8 @@ int zpu_metal_render_encoder_set_visibility_result_type(zpu_metal_render_encoder
 int zpu_metal_render_encoder_set_tessellation_factor_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t instance_stride);
 int zpu_metal_render_encoder_set_tessellation_factor_scale(zpu_metal_render_encoder *encoder, float scale);
 /* Sets the fixed-function partition rule used by the registered CPU patch
- * profile. The current portable implementation supports POW2 and INTEGER. */
+ * profile. Filled patches support all four Metal partition enum values when
+ * the resulting uniform partition is within the configured CPU limit. */
 int zpu_metal_render_encoder_set_tessellation_partition_mode(zpu_metal_render_encoder *encoder, zpu_metal_tessellation_partition_mode mode);
 /* Sets the maximum factor enforced by the registered CPU triangle-patch
  * profile. The adapter supplies the value from the pipeline descriptor. */

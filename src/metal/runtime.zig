@@ -535,15 +535,18 @@ const PatchCommand = struct {
 };
 
 // The registered patch profile deliberately has a bounded CPU tessellator.
-// Integer and power-of-two triangle factors up to 16 cover the portable profile while keeping
+// Integer, power-of-two, and uniform fractional triangle factors up to 16 cover the portable profile while keeping
 // the generated mesh on the command-buffer stack. Arbitrary tessellation
-// shaders, fractional factors, and non-uniform edge/inside factors remain
-// fail-closed at command commit. A factor scale is supported when it produces
+// shaders and non-uniform edge/inside factors remain fail-closed at command
+// commit; fractional line-grid rasterization is also rejected. A factor scale
+// is supported when it produces
 // one positive partition factor for all four values in the registered profile.
 const cpu_patch_max_tessellation_factor: usize = 16;
 const cpu_patch_max_mesh_vertices: usize = cpu_patch_max_tessellation_factor * cpu_patch_max_tessellation_factor * 3;
 const cpu_tessellation_partition_pow2: u8 = 0;
 const cpu_tessellation_partition_integer: u8 = 1;
+const cpu_tessellation_partition_fractional_odd: u8 = 2;
+const cpu_tessellation_partition_fractional_even: u8 = 3;
 
 fn interpolatePatchVertex(control: [3]abi.Vertex, weights: [3]usize, factor: usize) abi.Vertex {
     const denominator: f32 = @floatFromInt(factor);
@@ -611,8 +614,26 @@ fn partitionTessellationFactor(value: f32, mode: u8, max_factor: usize) ?usize {
             }
             break :blk if (factor <= max_factor) factor else null;
         },
+        cpu_tessellation_partition_fractional_odd => blk: {
+            var factor: usize = @intFromFloat(@ceil(value));
+            if (factor % 2 == 0) factor += 1;
+            break :blk if (factor <= max_factor) factor else null;
+        },
+        cpu_tessellation_partition_fractional_even => blk: {
+            var factor: usize = @intFromFloat(@ceil(value));
+            if (factor % 2 != 0) factor += 1;
+            break :blk if (factor >= 2 and factor <= max_factor) factor else null;
+        },
         else => null,
     };
+}
+
+test "CPU tessellation partition rules match Metal factor classes" {
+    try std.testing.expectEqual(@as(?usize, 4), partitionTessellationFactor(3.0, cpu_tessellation_partition_pow2, 16));
+    try std.testing.expectEqual(@as(?usize, 3), partitionTessellationFactor(2.5, cpu_tessellation_partition_fractional_odd, 16));
+    try std.testing.expectEqual(@as(?usize, 4), partitionTessellationFactor(2.5, cpu_tessellation_partition_fractional_even, 16));
+    try std.testing.expectEqual(@as(?usize, null), partitionTessellationFactor(2.5, cpu_tessellation_partition_fractional_odd, 2));
+    try std.testing.expectEqual(@as(?usize, null), partitionTessellationFactor(1.5, cpu_tessellation_partition_fractional_even, 1));
 }
 
 const VisibilitySlot = struct {
@@ -2627,6 +2648,10 @@ pub const CommandBuffer = struct {
                                 resolved_patch.partition_mode,
                                 resolved_patch.max_tessellation_factor,
                             ) orelse return self.fail(error.UnsupportedOperation);
+                            if ((resolved_patch.partition_mode == cpu_tessellation_partition_fractional_odd or
+                                resolved_patch.partition_mode == cpu_tessellation_partition_fractional_even) and
+                                draw_options.fill_mode == .lines)
+                                return self.fail(error.UnsupportedOperation);
 
                             const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
                                 readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
@@ -4138,7 +4163,9 @@ pub const RenderEncoder = struct {
 
     pub fn setTessellationPartitionMode(self: *RenderEncoder, mode: u8) Error!void {
         if (!self.open() or (mode != cpu_tessellation_partition_pow2 and
-            mode != cpu_tessellation_partition_integer)) return error.InvalidArgument;
+            mode != cpu_tessellation_partition_integer and
+            mode != cpu_tessellation_partition_fractional_odd and
+            mode != cpu_tessellation_partition_fractional_even)) return error.InvalidArgument;
         self.tessellation_partition_mode = mode;
     }
 

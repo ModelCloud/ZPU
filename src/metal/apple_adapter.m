@@ -10754,15 +10754,17 @@ static BOOL zpu_apply_legacy_compute_descriptor(
              isEqualToString:zpu_cpu_patch_triangle_fragment_name] != patchPipeline ||
         (patchPipeline &&
          (vertexFunction.patchType != MTLPatchTypeTriangle || vertexFunction.patchControlPointCount != 3 ||
-          (descriptor.tessellationPartitionMode != MTLTessellationPartitionModeInteger &&
-           descriptor.tessellationPartitionMode != MTLTessellationPartitionModePow2) ||
+          (descriptor.tessellationPartitionMode != MTLTessellationPartitionModePow2 &&
+           descriptor.tessellationPartitionMode != MTLTessellationPartitionModeInteger &&
+           descriptor.tessellationPartitionMode != MTLTessellationPartitionModeFractionalOdd &&
+           descriptor.tessellationPartitionMode != MTLTessellationPartitionModeFractionalEven) ||
           descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
           descriptor.tessellationFactorStepFunction != MTLTessellationFactorStepFunctionPerPatchAndPerInstance ||
           descriptor.tessellationOutputWindingOrder != MTLWindingClockwise ||
           !isfinite(descriptor.maxTessellationFactor) ||
           descriptor.maxTessellationFactor < 1 || descriptor.maxTessellationFactor > 16 ||
           descriptor.rasterizationEnabled == NO))) {
-        zpu_set_error(error, @"ZPU CPU Metal supports only the registered uniform integer or pow2 triangle patch profile with factors up to 16");
+        zpu_set_error(error, @"ZPU CPU Metal supports only the registered uniform triangle patch profile with factors up to 16");
         return nil;
     }
     NSString *fragmentImplementationName = zpu_cpu_function_implementation_name(fragmentFunction);
