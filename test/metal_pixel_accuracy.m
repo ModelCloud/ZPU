@@ -34314,6 +34314,40 @@ int main(void) {
             return 82;
         }
 
+        /* A non-3D texture transfer has one texel plane. Do not reinterpret a
+         * depth value greater than one as repeated copies of the same 2D
+         * slice, since that would silently produce the wrong CPU pixel data. */
+        id<MTL4CommandBuffer> metal4_bad_2d_depth_command_buffer = [adapter_device newCommandBuffer];
+        id<MTL4ComputeCommandEncoder> metal4_bad_2d_depth_encoder = nil;
+        __block NSError *metal4_bad_2d_depth_error = nil;
+        if (metal4_bad_2d_depth_command_buffer != nil && metal4_allocator != nil &&
+            metal4_queue != nil && metal4_three_d_to_buffer != nil) {
+            [metal4_bad_2d_depth_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+            metal4_bad_2d_depth_encoder = [metal4_bad_2d_depth_command_buffer computeCommandEncoder];
+            [metal4_bad_2d_depth_encoder copyFromTexture:adapter_mip_texture
+                                              sourceSlice:0 sourceLevel:0
+                                             sourceOrigin:MTLOriginMake(0, 0, 0)
+                                               sourceSize:MTLSizeMake(2, 2, 2)
+                                                toBuffer:metal4_three_d_to_buffer
+                                         destinationOffset:0
+                                    destinationBytesPerRow:2 * 4
+                                  destinationBytesPerImage:2 * 2 * 4];
+            [metal4_bad_2d_depth_encoder endEncoding];
+            [metal4_bad_2d_depth_command_buffer endCommandBuffer];
+            id<MTL4CommandBuffer> metal4_bad_2d_depth_buffers[] = {
+                metal4_bad_2d_depth_command_buffer};
+            MTL4CommitOptions *metal4_bad_2d_depth_options = ZPUMetalCreateCPUCommitOptions();
+            [metal4_bad_2d_depth_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                metal4_bad_2d_depth_error = feedback.error;
+            }];
+            [metal4_queue commit:metal4_bad_2d_depth_buffers count:1 options:metal4_bad_2d_depth_options];
+        }
+        if (metal4_bad_2d_depth_command_buffer == nil || metal4_bad_2d_depth_encoder == nil ||
+            metal4_bad_2d_depth_error == nil) {
+            fail_with_error("Metal 4 CPU 2D transfer depth validation failed", metal4_error);
+            return 115;
+        }
+
         id<MTLTexture> metal4_f16_upload_texture =
             [adapter_device newTextureWithDescriptor:f16_three_d_descriptor];
         id<MTLBuffer> metal4_f16_to_buffer =

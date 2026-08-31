@@ -19082,7 +19082,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     }
     zpu_metal_texture *sourceTextureAtLevel = [source zpuTextureAtLevel:sourceLevel slice:sourceSlice];
     zpu_metal_texture *destinationTextureAtLevel = [destination zpuTextureAtLevel:destinationLevel slice:destinationSlice];
-    if (sourceTextureAtLevel == NULL || destinationTextureAtLevel == NULL ||
+    if (sourceSize.depth != 1 || sourceOrigin.z != 0 || destinationOrigin.z != 0 ||
+        sourceTextureAtLevel == NULL || destinationTextureAtLevel == NULL ||
         zpu_metal_compute_encoder_copy_texture_to_texture(_legacy->_zpuEncoder, sourceTextureAtLevel, sourceRegion,
             destinationTextureAtLevel, destinationRegion) != ZPU_METAL_OK) { [_owner markError]; return; }
     [_owner->_legacyBuffer retainResource:source];
@@ -19140,7 +19141,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         return;
     }
     zpu_metal_texture *sourceTextureAtLevel = [source zpuTextureAtLevel:sourceLevel slice:sourceSlice];
-    if (sourceTextureAtLevel == NULL ||
+    if (sourceSize.depth != 1 || sourceOrigin.z != 0 || sourceTextureAtLevel == NULL ||
         zpu_metal_compute_encoder_copy_texture_to_buffer(_legacy->_zpuEncoder, sourceTextureAtLevel, sourceRegion,
             destination->_zpuBuffer, destinationOffset, destinationBytesPerRow) != ZPU_METAL_OK) { [_owner markError]; return; }
     [_owner->_legacyBuffer retainResource:source];
@@ -19229,6 +19230,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         return;
     }
     (void)sourceBytesPerImage;
+    if (sourceSize.depth != 1 || destinationOrigin.z != 0) { [_owner markError]; return; }
     zpu_metal_texture *destinationTextureAtLevel = [destination zpuTextureAtLevel:destinationLevel slice:destinationSlice];
     if (destinationTextureAtLevel == NULL ||
         zpu_metal_compute_encoder_copy_buffer_to_texture(_legacy->_zpuEncoder, source->_zpuBuffer, sourceOffset,
