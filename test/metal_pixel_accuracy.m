@@ -5301,6 +5301,125 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         fail_with_error("legacy CPU AABB instance trace command failed", adapter_error ?: native_error);
         return 165;
     }
+
+    if (@available(macOS 14.0, iOS 17.0, *)) {
+        uint32_t indirect_instance_count = 1;
+        id<MTLBuffer> indirect_instance_count_buffer =
+            [adapter_device newBufferWithBytes:&indirect_instance_count length:sizeof(indirect_instance_count)
+                                       options:MTLResourceStorageModeShared];
+        MTLIndirectAccelerationStructureInstanceDescriptor indirect_instances[2] = {
+            {
+                .transformationMatrix = {
+                    .columns = {
+                        MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
+                        MTLPackedFloat3Make(0.0f, 1.0f, 0.0f),
+                        MTLPackedFloat3Make(0.0f, 0.0f, 1.0f),
+                        MTLPackedFloat3Make(0.0f, 0.0f, 0.0f),
+                    },
+                },
+                .options = MTLAccelerationStructureInstanceOptionNone,
+                .mask = UINT32_MAX,
+                .intersectionFunctionTableOffset = 0,
+                .userID = 0,
+                .accelerationStructureID = [acceleration_structure gpuResourceID],
+            },
+            {0},
+        };
+        indirect_instances[1] = indirect_instances[0];
+        /* The second record is translated into the visible grid but masked
+         * out. This proves that the CPU payload both transforms every active
+         * AABB and preserves the instance visibility mask. */
+        indirect_instances[1].transformationMatrix.columns[3] = MTLPackedFloat3Make(1.0f, 0.0f, 0.0f);
+        indirect_instances[1].mask = 0;
+        id<MTLBuffer> indirect_instance_descriptor_buffer =
+            [adapter_device newBufferWithBytes:indirect_instances length:sizeof(indirect_instances)
+                                       options:MTLResourceStorageModeShared];
+        MTLIndirectInstanceAccelerationStructureDescriptor *indirect_descriptor =
+            [MTLIndirectInstanceAccelerationStructureDescriptor descriptor];
+        indirect_descriptor.instanceDescriptorBuffer = indirect_instance_descriptor_buffer;
+        indirect_descriptor.instanceDescriptorBufferOffset = 0;
+        indirect_descriptor.instanceDescriptorStride = sizeof(indirect_instances[0]);
+        indirect_descriptor.maxInstanceCount = 2;
+        indirect_descriptor.instanceCountBuffer = indirect_instance_count_buffer;
+        indirect_descriptor.instanceCountBufferOffset = 0;
+        indirect_descriptor.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+        MTLAccelerationStructureSizes indirect_sizes =
+            [adapter_device accelerationStructureSizesWithDescriptor:indirect_descriptor];
+        id<MTLAccelerationStructure> indirect_acceleration_structure =
+            indirect_sizes.accelerationStructureSize == 0 ? nil :
+            [adapter_device newAccelerationStructureWithSize:indirect_sizes.accelerationStructureSize];
+        id<MTLBuffer> indirect_scratch = [adapter_device
+            newBufferWithLength:indirect_sizes.buildScratchBufferSize == 0 ? 1 : indirect_sizes.buildScratchBufferSize
+                        options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> indirect_build_command_buffer = [adapter_queue commandBuffer];
+        id<MTLAccelerationStructureCommandEncoder> indirect_build_encoder =
+            [indirect_build_command_buffer accelerationStructureCommandEncoder];
+        if (indirect_instance_count_buffer == nil || indirect_instance_descriptor_buffer == nil ||
+            indirect_descriptor == nil || indirect_acceleration_structure == nil || indirect_scratch == nil ||
+            indirect_build_command_buffer == nil || indirect_build_encoder == nil) {
+            fail_with_error("legacy CPU indirect AABB allocation failed", adapter_error);
+            return 166;
+        }
+        [indirect_build_encoder buildAccelerationStructure:indirect_acceleration_structure
+                                                 descriptor:indirect_descriptor
+                                              scratchBuffer:indirect_scratch scratchBufferOffset:0];
+        [indirect_build_encoder endEncoding];
+        /* Sizing observes one active record, but the CPU adapter reserves the
+         * valid max-instance payload so this deferred count can increase
+         * before commit, matching the indirect descriptor contract. */
+        indirect_instance_count = 2;
+        memcpy(indirect_instance_count_buffer.contents, &indirect_instance_count,
+               sizeof(indirect_instance_count));
+        [indirect_build_command_buffer commit];
+        [indirect_build_command_buffer waitUntilCompleted];
+
+        id<MTLTexture> native_indirect_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+        id<MTLTexture> adapter_indirect_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+        id<MTLCommandBuffer> native_indirect_command_buffer = [native_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_indirect_encoder =
+            [native_indirect_command_buffer computeCommandEncoder];
+        [native_indirect_encoder setComputePipelineState:native_pipeline];
+        [native_indirect_encoder setBuffer:native_bounds offset:0 atIndex:0];
+        [native_indirect_encoder setTexture:native_indirect_texture atIndex:0];
+        [native_indirect_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+        [native_indirect_encoder endEncoding];
+        id<MTLCommandBuffer> adapter_indirect_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_indirect_encoder =
+            [adapter_indirect_command_buffer computeCommandEncoder];
+        [adapter_indirect_encoder setComputePipelineState:adapter_pipeline];
+        [adapter_indirect_encoder setAccelerationStructure:indirect_acceleration_structure atBufferIndex:0];
+        [adapter_indirect_encoder setTexture:adapter_indirect_texture atIndex:0];
+        [adapter_indirect_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                           threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+        [adapter_indirect_encoder endEncoding];
+        [native_indirect_command_buffer commit];
+        [adapter_indirect_command_buffer commit];
+        [native_indirect_command_buffer waitUntilCompleted];
+        [adapter_indirect_command_buffer waitUntilCompleted];
+        uint8_t native_indirect_pixels[byte_count] = {0};
+        uint8_t adapter_indirect_pixels[byte_count] = {0};
+        [native_indirect_texture getBytes:native_indirect_pixels bytesPerRow:width * 4
+                              fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        [adapter_indirect_texture getBytes:adapter_indirect_pixels bytesPerRow:width * 4
+                               fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+        const BOOL indirect_exact = indirect_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            native_indirect_texture != nil && adapter_indirect_texture != nil &&
+            native_indirect_command_buffer != nil && native_indirect_encoder != nil &&
+            native_indirect_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_indirect_command_buffer != nil && adapter_indirect_encoder != nil &&
+            adapter_indirect_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_indirect_pixels, adapter_indirect_pixels, byte_count) == 0;
+        if (!indirect_exact) {
+            size_t mismatch = 0;
+            while (mismatch < byte_count && native_indirect_pixels[mismatch] == adapter_indirect_pixels[mismatch]) mismatch += 1;
+            fprintf(stderr, "metal-pixel: legacy CPU indirect AABB/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                    mismatch, mismatch < byte_count ? native_indirect_pixels[mismatch] : 0,
+                    mismatch < byte_count ? adapter_indirect_pixels[mismatch] : 0);
+            fail_with_error("legacy CPU indirect AABB trace command failed", adapter_error ?: native_error);
+            return 167;
+        }
+    }
     return 0;
 }
 
