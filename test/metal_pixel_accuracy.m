@@ -20252,6 +20252,7 @@ int main(void) {
          * native object is created only as an oracle for availability/shape;
          * no native build or ray-tracing command is submitted here. */
         BOOL adapter_acceleration_resources_ok = YES;
+        BOOL adapter_acceleration_scratch_validation_ok = YES;
         BOOL adapter_acceleration_pass_counter_ok = YES;
         id<MTLAccelerationStructureCommandEncoder> adapter_acceleration_encoder = nil;
         if (@available(macOS 13.0, iOS 16.0, *)) {
@@ -20315,6 +20316,24 @@ int main(void) {
             [adapter_acceleration_encoder endEncoding];
             [adapter_as_command_buffer commit];
             [adapter_as_command_buffer waitUntilCompleted];
+            id<MTLAccelerationStructure> adapter_bad_scratch_as =
+                [adapter_device newAccelerationStructureWithSize:adapter_as_allocation_size];
+            id<MTLBuffer> adapter_bad_scratch =
+                [adapter_device newBufferWithLength:1 options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> adapter_bad_scratch_command_buffer = [adapter_queue commandBuffer];
+            id<MTLAccelerationStructureCommandEncoder> adapter_bad_scratch_encoder =
+                [adapter_bad_scratch_command_buffer accelerationStructureCommandEncoder];
+            [adapter_bad_scratch_encoder buildAccelerationStructure:adapter_bad_scratch_as
+                                                           descriptor:native_as_descriptor
+                                                        scratchBuffer:adapter_bad_scratch
+                                                  scratchBufferOffset:0];
+            [adapter_bad_scratch_encoder endEncoding];
+            [adapter_bad_scratch_command_buffer commit];
+            [adapter_bad_scratch_command_buffer waitUntilCompleted];
+            adapter_acceleration_scratch_validation_ok =
+                adapter_bad_scratch_as != nil && adapter_bad_scratch != nil &&
+                adapter_bad_scratch_encoder != nil &&
+                adapter_bad_scratch_command_buffer.status == MTLCommandBufferStatusError;
             uint64_t adapter_compacted_size_value = 0;
             if (adapter_as_status_buffer != nil) {
                 memcpy(&adapter_compacted_size_value, adapter_as_status_buffer.contents, sizeof(adapter_compacted_size_value));
@@ -20352,6 +20371,7 @@ int main(void) {
                 adapter_as_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 adapter_as_copy_command_buffer.status == MTLCommandBufferStatusCompleted &&
                 adapter_as_compact_command_buffer.status == MTLCommandBufferStatusCompleted &&
+                adapter_acceleration_scratch_validation_ok &&
                 (native_as == nil || (native_as.device == device && native_as.size >= native_as_allocation_size));
 
             /* Acceleration pass descriptors use the same CPU-owned timestamp

@@ -22219,6 +22219,20 @@ static BOOL zpu_acceleration_storage_range_valid(ZPUAccelerationStructure *struc
         structure->_storage.contents != NULL && length <= structure->_size;
 }
 
+/* Scratch storage is an ordering/size contract even though the CPU profile
+ * does not write temporary BVH data into it. Match Metal's descriptor query:
+ * a nonzero reported requirement needs a device-owned buffer with that many
+ * bytes after the requested offset; a zero requirement permits nil. Private
+ * buffers remain valid scratch resources even when their public contents
+ * pointer is unavailable on a native implementation. */
+static BOOL zpu_acceleration_scratch_range_valid(ZPUDevice *owner, ZPUBuffer *scratch,
+                                                  NSUInteger offset, NSUInteger required) {
+    if (required == 0) return scratch == nil ||
+        (zpu_buffer_belongs_to_device(owner, scratch) && offset <= scratch.length);
+    return scratch != nil && zpu_buffer_belongs_to_device(owner, scratch) &&
+        offset <= scratch.length && required <= scratch.length - offset;
+}
+
 static BOOL zpu_cpu_acceleration_read_position(ZPUBuffer *buffer, NSUInteger offset, float position[3]) {
     if (!zpu_buffer_belongs_to_device((ZPUDevice *)buffer->_owner, buffer) || buffer.contents == NULL ||
         offset > buffer.length || buffer.length - offset < 3 * sizeof(float)) return NO;
@@ -23881,10 +23895,11 @@ static BOOL zpu_cpu_acceleration_build_payload(
     ZPUAccelerationStructure *target = (ZPUAccelerationStructure *)accelerationStructure;
     ZPUBuffer *scratch = (ZPUBuffer *)scratchBuffer;
     const NSUInteger required = zpu_acceleration_structure_size_for_descriptor(descriptor);
+    const NSUInteger scratchRequired = required / 2;
     if (!zpu_acceleration_structure_belongs_to_device([_owner device], accelerationStructure) ||
         required == 0 || target->_size < required ||
-        (scratchBuffer != nil && (!zpu_buffer_belongs_to_device([_owner device], scratch) ||
-            scratchBufferOffset > scratch.length))) {
+        !zpu_acceleration_scratch_range_valid([_owner device], scratch,
+                                              scratchBufferOffset, scratchRequired)) {
         [_owner markError];
         return;
     }
@@ -23937,8 +23952,8 @@ static BOOL zpu_cpu_acceleration_build_payload(
         !zpu_acceleration_structure_belongs_to_device([_owner device], (id<MTLAccelerationStructure>)destination) ||
         !source->_built || required == 0 || source->_size < required || destination->_size < source->_size ||
         (options & ~((NSUInteger)3)) != 0 ||
-        (scratchBuffer != nil && (!zpu_buffer_belongs_to_device([_owner device], scratch) ||
-            scratchBufferOffset > scratch.length)) || !zpu_acceleration_storage_range_valid(source, source->_size) ||
+        !zpu_acceleration_scratch_range_valid([_owner device], scratch, scratchBufferOffset, 256) ||
+        !zpu_acceleration_storage_range_valid(source, source->_size) ||
         !zpu_acceleration_storage_range_valid(destination, source->_size)) {
         [_owner markError];
         return;
