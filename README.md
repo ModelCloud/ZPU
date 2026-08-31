@@ -404,8 +404,9 @@ unchanged command buffers can use `drawUncountedParallelBatchStaticReplay` for
 the same explicit immutable-frame contract. The benchmark's
 `drawUncountedParallelDirtyClearedValidated` API is separate: it requires stable
 full-frame inputs and validates each replay while clearing only prior writable
-spans. Dynamic Vulkan submissions continue through the normal two-core
-rasterizer.
+spans. Dynamic Vulkan submissions continue through the selected physical-core
+profile; high-fanout streams enter Mosaic's spatial executor while small
+streams retain the tuned batch kernel.
 
 The displayed 3D snapshot is the median-throughput result of three fresh full
 probes on the validation host; CPU scheduling can move individual probes
@@ -460,8 +461,11 @@ canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 The Vulkan-facing submission boundary has a focused benchmark as well. It
 models a Vulkan-backed WezTerm terminal stream, a Dear ImGui Vulkan desktop
 application, and a complex Khronos Vulkan sample scene, then compares
-per-command dispatch, the old 256-command chunking, and the private Mosaic
-8,192-command batch bridge:
+per-command dispatch, the old 256-command chunking, and the existing Vulkan
+ABI's adaptive private Mosaic executor. Large streams use immutable prepared
+geometry, 256×256-pixel Morton supertiles, per-core queues, and same-LLC/NUMA
+stealing; small UI and scene streams remain on the already-tuned prepared
+batch kernel when that is faster:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \

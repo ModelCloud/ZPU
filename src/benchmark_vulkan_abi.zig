@@ -108,7 +108,7 @@ const Metric = struct {
 };
 const Report = struct {
     schema_version: u32 = schema_version,
-    renderer_scope: []const u8 = "Vulkan cpu_cube_v1 ABI boundary with private Mosaic batching; upstream projects are usage-shape references",
+    renderer_scope: []const u8 = "Vulkan cpu_cube_v1 ABI boundary with adaptive private Mosaic spatial execution; upstream projects are usage-shape references",
     resolution: []const u8 = "800x600",
     cpu_cores: u8 = target_cpu_cores,
     warmup_iterations: u32,
@@ -426,9 +426,15 @@ pub fn main(init: std.process.Init) !void {
         const per_draw = try measure(allocator, init.io, &per_draw_workload, .per_draw, smoke);
         const legacy_batched = try measure(allocator, init.io, &legacy_batched_workload, .legacy_batched, smoke);
         const mosaic_batched = try measure(allocator, init.io, &batched_workload, .mosaic_batched, smoke);
-        const per_checksum = try render(&per_draw_workload, .per_draw, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
-        const legacy_checksum = try render(&legacy_batched_workload, .legacy_batched, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
-        const mosaic_checksum = try render(&batched_workload, .mosaic_batched, try allocator.alloc(u8, surface_bytes), try allocator.alloc(u8, surface_bytes));
+        const per_color = try allocator.alloc(u8, surface_bytes);
+        const per_depth = try allocator.alloc(u8, surface_bytes);
+        const legacy_color = try allocator.alloc(u8, surface_bytes);
+        const legacy_depth = try allocator.alloc(u8, surface_bytes);
+        const mosaic_color = try allocator.alloc(u8, surface_bytes);
+        const mosaic_depth = try allocator.alloc(u8, surface_bytes);
+        const per_checksum = try render(&per_draw_workload, .per_draw, per_color, per_depth);
+        const legacy_checksum = try render(&legacy_batched_workload, .legacy_batched, legacy_color, legacy_depth);
+        const mosaic_checksum = try render(&batched_workload, .mosaic_batched, mosaic_color, mosaic_depth);
         if (per_checksum.checksum != legacy_checksum.checksum or per_checksum.checksum != mosaic_checksum.checksum) return error.BatchOracleMismatch;
         const first_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{mosaic_checksum.checksum});
         const per_hex = try std.fmt.allocPrint(allocator, "{x:0>16}", .{per_checksum.checksum});

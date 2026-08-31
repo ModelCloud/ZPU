@@ -11,13 +11,15 @@ kernel. It is the companion to [the Mosaic renderer design](mosaic-renderer.md).
 
 ## Current measurement boundary
 
-The Vulkan benchmark still exercises Mosaic's prepared scalar batch bridge;
-it does not yet lower every Vulkan draw into the physical
-`LOCAL`/`MACRO`/`GLOBAL` packet executor. A separate
-`benchmark-mosaic-scaling` gate now measures the physical scalar executor
-directly. It prepares and validates one immutable pass plan, constructs a
-tile-local index for `LOCAL` packets without expanding `MACRO` or `GLOBAL`
-commands, and excludes planning and thread creation from frame timing.
+The Vulkan benchmark exercises the existing ABI's prepared scalar Mosaic
+bridge for large command streams. It does not yet lower every Vulkan draw into
+the physical `LOCAL`/`MACRO`/`GLOBAL` packet executor, but it now gives the
+bridge spatial ownership: after preparation, a 256×256-pixel Morton supertile
+plan stores ordered per-region command references, and workers execute those
+regions through the existing scalar kernel. Small streams adaptively retain
+the tuned prepared batch path. A separate `benchmark-mosaic-scaling` gate
+measures the physical packet executor directly. Both gates retain exact
+color/depth differential checks.
 
 The current host topology used for the 1/2/3/4-core sweep has one NUMA node
 and one package. The selected CPUs are consequently on one coherent NUMA
@@ -71,6 +73,32 @@ the queue and completion design can scale approximately linearly. The
 multi-LLC result deliberately remains visible: cache-domain placement and
 same-NUMA memory traffic are the next topology costs, rather than a reason to
 hide a fixed worker ceiling.
+
+## Vulkan ABI spatial execution checkpoint
+
+The runtime bridge now follows the same core contract for high-fanout
+submissions:
+
+```text
+Vulkan DrawCommand[]
+        ↓
+parallel immutable preparation
+        ↓
+ordered region command references
+        ↓
+per-core Morton supertile queues
+        ↓
+own → same-LLC → same-NUMA stealing
+        ↓
+existing scalar raster kernel
+```
+
+Every region is spatially disjoint. Commands remain in submission order
+inside each region, preserving depth and equal-depth behavior without a
+global tile lock. If the bounded reference arena cannot represent a stream,
+or if the stream is too small to amortize planning, the public Vulkan ABI
+falls back to the prepared batch executor. This is an execution policy, not a
+new public ABI.
 
 ## Non-negotiable invariants
 
