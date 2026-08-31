@@ -5,7 +5,7 @@
 #define ZPU_CPU_ML_H
 
 /*
- * Optional, host-OS-neutral CPU ML extension used by ZPU's Metal-shaped layer.
+ * Optional, host-OS-neutral CPU ML extension for ZPU CPU/ZML integrations.
  *
  * This header intentionally includes no Metal, Foundation, PJRT, or platform
  * headers. A provider such as a ZML CPU bridge may register here, but it must

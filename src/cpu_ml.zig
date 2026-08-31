@@ -1,14 +1,14 @@
 // Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 // SPDX-License-Identifier: Apache-2.0
 
-//! Portable CPU tensor execution contracts used by the Metal-shaped layer.
+//! Portable CPU tensor execution contracts for ZPU CPU/ZML integrations.
 //!
-//! The public Metal adapter owns the object graph and the tensor ABI.  This
-//! module deliberately knows nothing about Metal, Foundation, or the host
-//! operating system.  It accepts raw storage views so an optional ZML CPU
-//! backend can be inserted without changing the adapter's layout or lifetime
-//! semantics.  The reference implementation is also the exact-layout
-//! fallback for views that cannot be represented by a dense compiler buffer.
+//! Optional adapters may consume this ABI, but this module deliberately knows
+//! nothing about Metal, Foundation, or the host operating system. It accepts
+//! raw storage views so a ZML CPU backend can be inserted without changing a
+//! caller's layout or lifetime semantics. The reference implementation is
+//! also the exact-layout fallback for views that cannot be represented by a
+//! dense compiler buffer.
 
 const builtin = @import("builtin");
 const std = @import("std");
