@@ -5193,13 +5193,14 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 34) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 37) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
     fn isBufferAddKernel(self: *const ComputeEncoder) bool {
         return self.kernel == 8 or self.kernel == 9 or self.kernel == 30 or
-            self.kernel == 32 or self.kernel == 33 or self.kernel == 34;
+            self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or
+            self.kernel == 35 or self.kernel == 36 or self.kernel == 37;
     }
 
     fn appendBufferAdd(
@@ -5221,7 +5222,8 @@ pub const ComputeEncoder = struct {
             output.device != left.device) return error.InvalidResource;
         _ = try self.command_buffer.append(.{ .compute_buffer_add = .{
             .kernel = self.kernel,
-            .elements_per_thread = if (self.kernel >= 32) 4 else 1,
+            .elements_per_thread = if (self.kernel >= 32 and self.kernel <= 34) 4 else
+                (if (self.kernel >= 35 and self.kernel <= 37) 2 else 1),
             .left = left,
             .left_offset = self.buffer_offsets[0],
             .right = right,
@@ -5923,8 +5925,10 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
     if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and
-        command.kernel != 32 and command.kernel != 33 and command.kernel != 34) or
-        (command.elements_per_thread != 1 and command.elements_per_thread != 4) or
+        command.kernel != 32 and command.kernel != 33 and command.kernel != 34 and
+        command.kernel != 35 and command.kernel != 36 and command.kernel != 37) or
+        (command.elements_per_thread != 1 and command.elements_per_thread != 2 and
+         command.elements_per_thread != 4) or
         !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
@@ -5946,9 +5950,9 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
             const left = readF32Little(command.left.bytes, left_offset);
             const right = readF32Little(command.right.bytes, right_offset);
             const result = switch (command.kernel) {
-                8, 32 => left + right,
-                9, 33 => left * right,
-                30, 34 => left - right,
+                8, 32, 35 => left + right,
+                9, 33, 36 => left * right,
+                30, 34, 37 => left - right,
                 else => unreachable,
             };
             std.mem.writeInt(u32, command.output.bytes[output_offset..][0..@sizeOf(f32)], @bitCast(result), .little);
