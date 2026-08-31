@@ -464,9 +464,10 @@ enum {
  * an Apple hardware BVH representation. When
  * ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS is set, reserved[0]
  * contains the little-endian offset of one uint32 visibility mask per
- * serialized triangle. When the AABBS flag is set, reserved[1] contains the
- * offset of the AABB records and reserved[2] contains their count. Version 1
- * triangle payloads remain readable; version 2 adds AABBs. The fixed
+ * serialized primitive (triangle or AABB). When the AABBS flag is set,
+ * reserved[1] contains the offset of the AABB records and reserved[2] contains
+ * their count. Version 1 triangle payloads remain readable; version 2 adds
+ * AABBs. The fixed
  * primary-ray profiles use Metal's default all-bits ray mask, so a zero
  * instance mask is invisible while nonzero masks remain visible; this
  * preserves the useful bounded subset without exposing an Apple hardware BVH

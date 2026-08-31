@@ -361,9 +361,11 @@ triangle path:
   fail-closed. The registered Metal 4 AABB trace profile separately serializes
   finite `MTL4AccelerationStructureBoundingBoxGeometryDescriptor` ranges into
   ZPU-owned min/max records and traverses them with the same half-pixel,
-  upper-left primary-ray grid; its exact RGBA8 output is checked against a
-  native Metal shader oracle, while native acceleration structures are never
-  used for adapter execution
+  upper-left primary-ray grid. Built Metal 4 indirect instance descriptors
+  flatten those AABB records through finite affine transforms and primitive
+  visibility masks. Exact RGBA8 output is checked against native Metal shader
+  oracles, while native acceleration structures are never used for adapter
+  execution
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
@@ -781,8 +783,10 @@ triangle path:
   buffer ranges, packed affine transforms, and per-instance visibility masks;
   zero-mask instances are filtered using the fixed all-bits primary-ray mask;
   the Metal 4 bounding-box profile traverses CPU-owned AABB records with
-  finite ordered bounds and exact top-left pixel mapping; arbitrary ray
-  intersection execution remains fail-closed
+  finite ordered bounds and exact top-left pixel mapping, and Metal 4 indirect
+  instance descriptors flatten built AABB children with finite affine
+  transforms and visibility masks; arbitrary ray intersection execution
+  remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level

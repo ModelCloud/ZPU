@@ -5097,6 +5097,185 @@ static int test_cpu_trace_aabbs_against_native(
     return 0;
 }
 
+/* The native path remains an oracle only. This test builds the child and
+ * instance descriptors through the adapter, then verifies that the CPU/ZPU
+ * instance flattening applies the same affine transform as a native shader
+ * fed the transformed bounds. */
+static int test_cpu_trace_aabb_instances_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLCommandQueue> native_queue, id<MTLCommandQueue> adapter_queue)
+    API_AVAILABLE(macos(26.0), ios(26.0)) {
+    enum { width = 11, height = 7, byte_count = width * height * 4 };
+    const float child_bounds[] = {-0.80f, -0.70f, -0.10f, 0.80f, 0.70f, 0.10f};
+    const float translated_bounds[] = {-0.30f, -0.70f, -0.10f, 1.30f, 0.70f, 0.10f};
+    NSString *source =
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+         "kernel void zpu_cpu_trace_aabb_instance_rgba8(device const float *bounds [[buffer(0)]], "
+         "texture2d<float, access::write> output [[texture(0)]], uint2 gid [[thread_position_in_grid]]) { "
+         "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+         "float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height()); "
+         "float3 origin = float3(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y, 1.0); "
+         "bool hit = origin.x >= bounds[0] && origin.x <= bounds[3] && "
+         "origin.y >= bounds[1] && origin.y <= bounds[4] && "
+         "bounds[2] <= origin.z && origin.z - bounds[2] >= 0.0; "
+         "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n";
+    NSError *native_error = nil;
+    NSError *adapter_error = nil;
+    id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
+    id<MTLFunction> native_function = [native_library newFunctionWithName:@"zpu_cpu_trace_aabb_instance_rgba8"];
+    id<MTLComputePipelineState> native_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_function error:&native_error];
+    id<MTLFunction> adapter_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_trace_aabbs_rgba8");
+    id<MTLComputePipelineState> adapter_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLBuffer> native_bounds =
+        [native_device newBufferWithBytes:translated_bounds length:sizeof(translated_bounds)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_bounds =
+        [adapter_device newBufferWithBytes:child_bounds length:sizeof(child_bounds)
+                                   options:MTLResourceStorageModeShared];
+    MTL4CommandAllocatorDescriptor *allocator_descriptor = [MTL4CommandAllocatorDescriptor new];
+    id<MTL4CommandAllocator> allocator =
+        [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&adapter_error];
+    MTL4CommandQueueDescriptor *queue_descriptor = [MTL4CommandQueueDescriptor new];
+    id<MTL4CommandQueue> metal4_queue =
+        [adapter_device newMTL4CommandQueueWithDescriptor:queue_descriptor error:&adapter_error];
+    MTL4PrimitiveAccelerationStructureDescriptor *child_descriptor =
+        [MTL4PrimitiveAccelerationStructureDescriptor new];
+    MTL4AccelerationStructureBoundingBoxGeometryDescriptor *child_geometry =
+        [MTL4AccelerationStructureBoundingBoxGeometryDescriptor new];
+    child_geometry.boundingBoxBuffer = MTL4BufferRangeMake(adapter_bounds.gpuAddress, UINT64_MAX);
+    child_geometry.boundingBoxStride = 6 * sizeof(float);
+    child_geometry.boundingBoxCount = 1;
+    child_descriptor.geometryDescriptors = @[child_geometry];
+    MTLAccelerationStructureSizes child_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:child_descriptor];
+    id<MTLAccelerationStructure> child_structure = child_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:child_sizes.accelerationStructureSize];
+    id<MTLBuffer> child_scratch = [adapter_device
+        newBufferWithLength:child_sizes.buildScratchBufferSize == 0 ? 1 : child_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTL4CommandBuffer> child_build = [adapter_device newCommandBuffer];
+    [child_build beginCommandBufferWithAllocator:allocator];
+    id<MTL4ComputeCommandEncoder> child_encoder = [child_build computeCommandEncoder];
+    [child_encoder buildAccelerationStructure:child_structure descriptor:child_descriptor
+                                 scratchBuffer:MTL4BufferRangeMake(child_scratch.gpuAddress, child_scratch.length)];
+    [child_encoder endEncoding];
+    [child_build endCommandBuffer];
+    id<MTL4CommandBuffer> child_buffers[] = {child_build};
+    MTL4CommitOptions *child_options = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *child_feedback_error = nil;
+    [child_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        child_feedback_error = feedback.error;
+    }];
+    if (metal4_queue != nil && child_build != nil) {
+        [metal4_queue commit:child_buffers count:1 options:child_options];
+    }
+
+    MTLPackedFloat4x3 identity_translation = {
+        .columns = {
+            MTLPackedFloat3Make(1.0f, 0.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 1.0f, 0.0f),
+            MTLPackedFloat3Make(0.0f, 0.0f, 1.0f),
+            MTLPackedFloat3Make(0.50f, 0.0f, 0.0f),
+        },
+    };
+    MTLIndirectAccelerationStructureInstanceDescriptor instance = {
+        .transformationMatrix = identity_translation,
+        .options = MTLAccelerationStructureInstanceOptionNone,
+        .mask = UINT32_MAX,
+        .intersectionFunctionTableOffset = 0,
+        .userID = 0,
+        .accelerationStructureID = [child_structure gpuResourceID],
+    };
+    id<MTLBuffer> instance_buffer =
+        [adapter_device newBufferWithBytes:&instance length:sizeof(instance) options:MTLResourceStorageModeShared];
+    MTL4InstanceAccelerationStructureDescriptor *instance_descriptor =
+        [MTL4InstanceAccelerationStructureDescriptor new];
+    instance_descriptor.instanceDescriptorBuffer = MTL4BufferRangeMake(instance_buffer.gpuAddress, UINT64_MAX);
+    instance_descriptor.instanceDescriptorStride = sizeof(instance);
+    instance_descriptor.instanceCount = 1;
+    instance_descriptor.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+    MTLAccelerationStructureSizes instance_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:instance_descriptor];
+    id<MTLAccelerationStructure> instance_structure = instance_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:instance_sizes.accelerationStructureSize];
+    id<MTLBuffer> instance_scratch = [adapter_device
+        newBufferWithLength:instance_sizes.buildScratchBufferSize == 0 ? 1 : instance_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTL4CommandBuffer> instance_build = [adapter_device newCommandBuffer];
+    [instance_build beginCommandBufferWithAllocator:allocator];
+    id<MTL4ComputeCommandEncoder> instance_encoder = [instance_build computeCommandEncoder];
+    [instance_encoder buildAccelerationStructure:instance_structure descriptor:instance_descriptor
+                                     scratchBuffer:MTL4BufferRangeMake(instance_scratch.gpuAddress,
+                                                                       instance_scratch.length)];
+    [instance_encoder endEncoding];
+    [instance_build endCommandBuffer];
+    id<MTL4CommandBuffer> instance_buffers[] = {instance_build};
+    MTL4CommitOptions *instance_options = ZPUMetalCreateCPUCommitOptions();
+    __block NSError *instance_feedback_error = nil;
+    [instance_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        instance_feedback_error = feedback.error;
+    }];
+    if (metal4_queue != nil && instance_build != nil) {
+        [metal4_queue commit:instance_buffers count:1 options:instance_options];
+    }
+
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+    [native_encoder setComputePipelineState:native_pipeline];
+    [native_encoder setBuffer:native_bounds offset:0 atIndex:0];
+    [native_encoder setTexture:native_texture atIndex:0];
+    [native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+              threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [native_encoder endEncoding];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+    [adapter_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_encoder setAccelerationStructure:instance_structure atBufferIndex:0];
+    [adapter_encoder setTexture:adapter_texture atIndex:0];
+    [adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+               threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    const BOOL exact = native_library != nil && native_function != nil && native_pipeline != nil &&
+        adapter_function != nil && adapter_pipeline != nil && native_texture != nil && adapter_texture != nil &&
+        native_bounds != nil && adapter_bounds != nil && allocator != nil && metal4_queue != nil &&
+        child_descriptor != nil && child_geometry != nil && child_structure != nil && child_scratch != nil &&
+        child_build != nil && child_encoder != nil && child_options != nil && child_feedback_error == nil &&
+        instance_buffer != nil && instance_descriptor != nil && instance_structure != nil &&
+        instance_scratch != nil && instance_build != nil && instance_encoder != nil &&
+        instance_options != nil && instance_feedback_error == nil && native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_command_buffer.status == MTLCommandBufferStatusCompleted && memcmp(native_pixels, adapter_pixels, byte_count) == 0;
+    if (!exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: CPU AABB instance/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("CPU AABB instance trace command failed", native_error ?: adapter_error);
+        return 162;
+    }
+    return 0;
+}
+
 /* A custom intersection function is still executed by the CPU/ZPU path. The
  * native pipeline below is only an oracle: its registered triangle function
  * rejects every candidate, so both textures must contain exact opaque black
@@ -23039,6 +23218,9 @@ int main(void) {
             const int aabb_oracle_result = test_cpu_trace_aabbs_against_native(
                 device, adapter_device, queue, adapter_queue);
             if (aabb_oracle_result != 0) return aabb_oracle_result;
+            const int aabb_instance_oracle_result = test_cpu_trace_aabb_instances_against_native(
+                device, adapter_device, queue, adapter_queue);
+            if (aabb_instance_oracle_result != 0) return aabb_instance_oracle_result;
         }
         if (@available(macOS 14.0, iOS 17.0, *)) {
             const int indirect_trace_oracle_result = test_cpu_indirect_trace_triangles_against_native(
@@ -39476,7 +39658,7 @@ int main(void) {
         zpu_metal_texture_destroy(zpu_texture);
         zpu_metal_command_queue_destroy(zpu_queue);
         zpu_metal_device_destroy(zpu_device);
-        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/RGBA32Uint/RGBA32Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/Depth16Unorm raw/D24/X24 CPU component blits/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources including Metal 4 AABB trace, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
+        printf("metal-pixel: exact Metal/ZPU bytes for R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint/RGBA32Uint/RGBA32Sint/R8/R16/RG8/RG16/RGBA8/RGBA16 Snorm/R8/RG8/RGBA8/BGRA8 sRGB/A8/B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed/Depth16Unorm raw/D24/X24 CPU component blits/R32Uint/RGBA8/BGRA8/R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float core, CPU compute, tensors, identity rasterization-rate maps, CPU Metal I/O, CPU log state, uniform fragment bytes/buffers, deferred vertex/index/indirect render arguments, Metal 4 sampler tables and border colors, mip/coordinate/reduction/anisotropic sampler modes, visibility results, acceleration-structure resources including Metal 4 AABB and AABB-instance traces, cube/cube-array textures, point/line/line-strip/triangle-strip coverage, legacy/Metal 4 counters, compiler-created Metal 4 compute/render, render/dispatch/copy, view pools, argument encoders, depth/stencil, heaps, indexed ICBs, and parallel adapter (%ux%u, %zu bytes)\n",
                width, height, (size_t)byte_count);
         return 0;
     }

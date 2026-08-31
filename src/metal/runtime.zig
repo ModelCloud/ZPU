@@ -6011,6 +6011,12 @@ fn executeTraceAabbs(command: ComputeCommand) Error!void {
     const aabb_bytes = std.math.mul(usize, aabb_count, cpu_acceleration_structure_aabb_bytes) catch return error.InvalidArgument;
     if (aabb_count == 0 or aabb_offset < triangle_end or
         !rangeValid(acceleration_structure.bytes.len, aabb_offset, aabb_bytes)) return error.InvalidArgument;
+    const mask_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 20));
+    if ((flags & cpu_acceleration_structure_flag_triangle_masks) != 0) {
+        const mask_bytes = std.math.mul(usize, aabb_count, @sizeOf(u32)) catch return error.InvalidArgument;
+        if (mask_offset < aabb_offset or mask_offset - aabb_offset < aabb_bytes or
+            !rangeValid(acceleration_structure.bytes.len, mask_offset, mask_bytes)) return error.InvalidArgument;
+    }
     var validation_index: usize = 0;
     while (validation_index < aabb_count) : (validation_index += 1) {
         const base = aabb_offset + validation_index * cpu_acceleration_structure_aabb_bytes;
@@ -6044,6 +6050,11 @@ fn executeTraceAabbs(command: ComputeCommand) Error!void {
         var hit = false;
         var aabb_index: usize = 0;
         while (aabb_index < aabb_count) : (aabb_index += 1) {
+            if ((flags & cpu_acceleration_structure_flag_triangle_masks) != 0 and
+                (readU32Little(acceleration_structure.bytes, mask_offset + aabb_index * @sizeOf(u32)) & std.math.maxInt(u32)) == 0)
+            {
+                continue;
+            }
             const base = aabb_offset + aabb_index * cpu_acceleration_structure_aabb_bytes;
             const minimum = CpuRayVec3{
                 .x = readF32Little(acceleration_structure.bytes, base),
@@ -9624,6 +9635,59 @@ test "CPU AABB trace preserves the Metal 4 top-left pixel grid" {
     try std.testing.expectEqualSlices(u8, &hit, texture.bytes[(2 * texture.stride + 3 * 4)..][0..4]);
     try std.testing.expectEqualSlices(u8, &hit, texture.bytes[(3 * texture.stride + 3 * 4)..][0..4]);
     try std.testing.expectEqualSlices(u8, &miss, texture.bytes[(4 * texture.stride + 3 * 4)..][0..4]);
+}
+
+test "CPU AABB trace applies primitive visibility masks" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 1, 1, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const acceleration_structure = try createBuffer(device, 64, null);
+    defer destroyBuffer(acceleration_structure);
+
+    writeU32Little(acceleration_structure.bytes, 0, cpu_acceleration_structure_magic);
+    writeU32Little(acceleration_structure.bytes, 4, cpu_acceleration_structure_version);
+    writeU32Little(acceleration_structure.bytes, 8, 0);
+    writeU32Little(acceleration_structure.bytes, 12, cpu_acceleration_structure_flag_aabbs | cpu_acceleration_structure_flag_triangle_masks);
+    writeU32Little(acceleration_structure.bytes, 16, cpu_acceleration_structure_header_bytes);
+    writeU32Little(acceleration_structure.bytes, 20, 56);
+    writeU32Little(acceleration_structure.bytes, 24, cpu_acceleration_structure_header_bytes);
+    writeU32Little(acceleration_structure.bytes, 28, 1);
+    const bounds = [_]f32{ -1.0, -1.0, -1.0, 1.0, 1.0, 1.0 };
+    for (bounds, 0..) |value, index| {
+        std.mem.writeInt(u32, acceleration_structure.bytes[cpu_acceleration_structure_header_bytes + index * 4 ..][0..4], @bitCast(value), .little);
+    }
+
+    writeU32Little(acceleration_structure.bytes, 56, 0);
+    var masked_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(masked_commands);
+    var masked_encoder = try beginCompute(masked_commands);
+    try masked_encoder.setKernel(45);
+    try masked_encoder.setTexture(texture, 0);
+    try masked_encoder.setAccelerationStructure(acceleration_structure, 0);
+    try masked_encoder.dispatchThreads(.{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 });
+    try masked_encoder.endEncoding();
+    destroyComputeEncoder(masked_encoder);
+    try masked_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, masked_commands.status);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[0..4]);
+
+    writeU32Little(acceleration_structure.bytes, 56, std.math.maxInt(u32));
+    @memset(texture.bytes, 0);
+    var visible_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(visible_commands);
+    var visible_encoder = try beginCompute(visible_commands);
+    try visible_encoder.setKernel(45);
+    try visible_encoder.setTexture(texture, 0);
+    try visible_encoder.setAccelerationStructure(acceleration_structure, 0);
+    try visible_encoder.dispatchThreads(.{ .width = 1, .height = 1, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 });
+    try visible_encoder.endEncoding();
+    destroyComputeEncoder(visible_encoder);
+    try visible_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, visible_commands.status);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, texture.bytes[0..4]);
 }
 
 test "CPU AABB trace rejects truncated and non-finite payloads" {
