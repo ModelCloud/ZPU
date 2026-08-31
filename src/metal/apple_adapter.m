@@ -12194,6 +12194,30 @@ static BOOL zpu_source_texture_type_for_name(NSString *name, MTLTextureType *tex
     return close.location + 1 == name.length;
 }
 
+/* Resource-valued argument-buffer members use Metal's named data types, but
+ * the MSL spellings for the function-table types carry a required template
+ * argument.  Keep this list exact: accepting an arbitrary template would
+ * report a reflection type without validating the resource's callable ABI. */
+static BOOL zpu_source_resource_type_for_name(NSString *name, MTLDataType *dataType) {
+    if (name == nil || dataType == NULL) return NO;
+    if ([name isEqualToString:@"visible_function_table<float(float)>"]) {
+        *dataType = MTLDataTypeVisibleFunctionTable;
+        return YES;
+    }
+    if ([name isEqualToString:@"intersection_function_table<triangle_data>"]) {
+        *dataType = MTLDataTypeIntersectionFunctionTable;
+        return YES;
+    }
+    NSDictionary<NSString *, NSNumber *> *resourceTypes = @{
+        @"primitive_acceleration_structure": @(MTLDataTypePrimitiveAccelerationStructure),
+        @"instance_acceleration_structure": @(MTLDataTypeInstanceAccelerationStructure),
+    };
+    NSNumber *value = resourceTypes[name];
+    if (value == nil) return NO;
+    *dataType = (MTLDataType)value.unsignedIntegerValue;
+    return YES;
+}
+
 static NSString *zpu_source_match_string(NSString *source, NSTextCheckingResult *match, NSUInteger index) {
     NSRange range = [match rangeAtIndex:index];
     return range.location == NSNotFound ? @"" : [source substringWithRange:range];
@@ -12284,6 +12308,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         MTLDataType elementDataType = MTLDataTypeNone;
         MTLBindingAccess access = MTLBindingAccessReadOnly;
         MTLTextureType textureType = MTLTextureType2D;
+        BOOL resource = NO;
         BOOL nested = [indirection isEqualToString:@"&"] && [address isEqualToString:@"constant"] &&
             structBodies[typeName] != nil;
         if (nested) {
@@ -12310,6 +12335,10 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             dataType = MTLDataTypeSampler;
             elementDataType = MTLDataTypeSampler;
             access = MTLBindingAccessReadOnly;
+        } else if (zpu_source_resource_type_for_name(typeName, &dataType)) {
+            elementDataType = dataType;
+            access = MTLBindingAccessReadOnly;
+            resource = YES;
         } else if (!zpu_source_data_type_for_name(typeName, &dataType) || indirection.length != 0) {
             [building removeObject:structName];
             return nil;
@@ -12329,7 +12358,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
                 @"kind": nested ? @"nested" :
                     ([indirection isEqualToString:@"*"] ? @"pointer" :
                      ([typeName hasPrefix:@"texture"] ? @"texture" :
-                      ([typeName isEqualToString:@"sampler"] ? @"sampler" : @"constant"))),
+                      ([typeName isEqualToString:@"sampler"] ? @"sampler" :
+                       (resource ? @"resource" : @"constant")))),
                 @"elementDataType": @(elementDataType),
                 @"access": @(access),
                 @"textureType": @(textureType),
@@ -18407,7 +18437,8 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
             if (!zpu_argument_align_up(elementSize, elementAlignment, &stride)) return nil;
             MTLDataType arrayElementType = [kind isEqualToString:@"constant"] ? elementDataType :
                 ([kind isEqualToString:@"texture"] ? MTLDataTypeTexture :
-                 ([kind isEqualToString:@"sampler"] ? MTLDataTypeSampler : MTLDataTypePointer));
+                 ([kind isEqualToString:@"sampler"] ? MTLDataTypeSampler :
+                  ([kind isEqualToString:@"resource"] ? descriptor.dataType : MTLDataTypePointer)));
             arrayType = [[ZPUArrayType alloc] initWithElementType:arrayElementType
                                                         arrayLength:arrayLength stride:stride
                                           argumentIndexStride:1

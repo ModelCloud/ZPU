@@ -607,7 +607,8 @@ triangle path:
   metadata-only argument-buffer declarations additionally preserve arbitrary
   supported member names, ids, buffer indices, arrays, recursive child
   reflection, and scalar/vector types including 64-bit `long`/`ulong` and
-  `bfloat`. Those executable functions execute through ZPU's
+  `bfloat`, plus validated function-table and primitive/instance acceleration
+  structure argument-buffer metadata. Those executable functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler;
   metadata-only argument-buffer functions expose layout/encoder state without
   claiming executable arbitrary shader semantics. Layered CPU vertex/fragment
