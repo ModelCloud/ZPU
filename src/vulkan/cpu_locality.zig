@@ -15,6 +15,12 @@ pub const Role = enum(usize) {
     present = 5,
 };
 
+pub const CpuTopology = struct {
+    cpu: usize,
+    numa: usize,
+    llc: usize,
+};
+
 var mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 var initialized = false;
 var selected_cpus: [cpu_capacity]usize = undefined;
@@ -221,6 +227,37 @@ pub fn selectedCpuCount() usize {
     return selected_count;
 }
 
+/// Snapshot the physical placement used by Mosaic workers. LLC identifiers
+/// are process-local equivalence classes: equal values mean the selected CPUs
+/// share a cache according to Linux sysfs. All selected CPUs already belong to
+/// the NUMA node chosen by discovery.
+pub fn selectedCpuTopology(output: []CpuTopology) usize {
+    ensureInitialized();
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    const count = @min(output.len, selected_count);
+    var llc_count: usize = 0;
+    for (0..count) |index| {
+        var llc: ?usize = null;
+        for (0..index) |previous| {
+            if (shareCache(selected_cpus[index], selected_cpus[previous])) {
+                llc = output[previous].llc;
+                break;
+            }
+        }
+        if (llc == null) {
+            llc = llc_count;
+            llc_count += 1;
+        }
+        output[index] = .{
+            .cpu = selected_cpus[index],
+            .numa = selected_node orelse 0,
+            .llc = llc.?,
+        };
+    }
+    return count;
+}
+
 pub fn pinCurrent(role: Role) bool {
     if (builtin.os.tag != .linux) return false;
     if (pinned_role == role) return true;
@@ -311,6 +348,16 @@ test "Linux CPU-list parser recognizes cache-sharing ranges" {
     try std.testing.expect(cpuListContains("0-3,8,10-12\n", 8));
     try std.testing.expect(cpuListContains("0-3,8,10-12\n", 11));
     try std.testing.expect(!cpuListContains("0-3,8,10-12\n", 9));
+}
+
+test "selected CPU topology exposes bounded LLC equivalence classes" {
+    var topology: [8]CpuTopology = undefined;
+    const count = selectedCpuTopology(&topology);
+    try std.testing.expect(count <= topology.len);
+    for (topology[0..count], 0..) |entry, index| {
+        try std.testing.expect(entry.llc <= index);
+        if (index != 0) try std.testing.expectEqual(topology[0].numa, entry.numa);
+    }
 }
 
 test "runtime raster tile profile is internally valid" {

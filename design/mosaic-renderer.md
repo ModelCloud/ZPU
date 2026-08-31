@@ -52,8 +52,8 @@ Native Mosaic API ---------------------------┤
 ```
 
 The current branch implements Mosaic planning, prepared primitives, physical
-packet streams, and a scalar packet executor with differential coverage against
-`cpu_cube.zig`. The Vulkan driver now has a narrow private bridge for eligible
+packet streams, and scalar expanded/physical packet executors with differential
+coverage against `cpu_cube.zig`. The Vulkan driver now has a narrow private bridge for eligible
 opaque `cpu_cube_v1` streams: it coalesces the complete bounded command run and
 routes it through the prepared scalar Mosaic executor. Full Vulkan draw
 lowering into hierarchy/physical cluster packets remains a later step.
@@ -78,7 +78,8 @@ Implemented in this branch:
 - admission-time hierarchy validation with topology and conservative-bound checks;
 - physical `LOCAL` / `MACRO` / `GLOBAL` packet streams;
 - prepared primitives that perform scalar triangle setup once;
-- scalar packet execution and differential testing against `cpu_cube`;
+- scalar expanded and physical packet execution with differential testing
+  against the reference stream;
 - private Vulkan ABI bridge for eligible opaque streams using the prepared
   scalar Mosaic executor;
 - primitive-SIMD versus pixel-SIMD path classification using a post-setup coverage estimate;
@@ -295,7 +296,11 @@ MACRO   medium/broad fanout
 GLOBAL  very broad/full-surface fanout
 ```
 
-The current packet structure carries this class, but physical storage is still one per-tile stream. A later optimization must materialize macro/global packets as range or pass-level references so a full-screen operation does not create tens of thousands of duplicate packet records.
+The current packet structure carries this class, and the scalar executor
+consumes the physical streams directly. MACRO packets expand only while a tile
+is executing; GLOBAL packets remain one pass-level reference. A full-screen
+operation therefore does not require tens of thousands of persistent duplicate
+packet records.
 
 ## Triangle setup boundary
 
@@ -393,7 +398,7 @@ Ineligible work remains on a strict conventional ordered path.
 
 ## Multicore scheduling
 
-The CPU-locality layer now allows raster roles to map to distinct selected CPUs when enough CPUs are available. This is only the foundation.
+The CPU-locality layer now exposes the selected CPUs' NUMA and LLC equivalence classes. The scalar physical-packet executor consumes that topology through immutable Morton-ordered pass plans, persistent pinned workers, per-core supertile queues, same-LLC then same-NUMA stealing, and one pass completion barrier. The contract and current one-LLC versus multi-LLC measurements are defined in [mosaic-scalability.md](mosaic-scalability.md).
 
 The target worker model is:
 
@@ -408,7 +413,7 @@ NUMA node
         └── local tile-group deque
 ```
 
-Workers should prefer local Morton-like tile groups, then steal batches when local work is exhausted.
+Workers consume their local Morton supertiles first, then steal from the same LLC and finally from the same NUMA node. The `benchmark-mosaic-scaling` gate reports placement, aggregate steal classes, per-worker item counts, checksums, and 1/2/3/4-core medians. Cross-NUMA work stealing is explicitly rejected and deferred.
 
 ## Autotuning
 
@@ -462,7 +467,7 @@ The current hard-coded geometry values are defaults/candidates only.
 ### Scale stage
 
 - [ ] richer instance/cluster hierarchy with LOD and cone/frustum tests
-- [ ] physical macro/global packet streams
+- [x] physical macro/global packet streams and scalar execution
 - [ ] parallel hierarchy traversal and bin construction
 - [ ] LLC-local worker queues and stealing
 - [ ] pass-aware dynamic tile selection

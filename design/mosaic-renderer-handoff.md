@@ -720,8 +720,10 @@ This is lower priority than the items above.
 ## Physical macro/global packet design
 
 Mosaic planning now emits physical `LOCAL`, `MACRO`, and `GLOBAL` streams.
-The remaining gate is to execute those streams directly and compare them with
-expanded tile packets and `cpu_cube`.
+The scalar gate executes those streams directly and compares them with
+expanded tile packets and the ordered reference renderer. Runtime Vulkan
+lowering still needs to feed this executor after full semantic parity is
+established.
 
 Permanent design should have three physical storage classes:
 
@@ -1142,6 +1144,7 @@ Before the planning foundation should be considered stable enough to build major
 [x] HZB level 0 aliases source depth
 [x] experimental Mosaic API namespace made explicit
 [x] scalar packet executor has a real `cpu_cube` differential gate
+[x] scalar physical packet executor matches expanded tile execution
 ```
 
 ## Final architectural summary for the next agent

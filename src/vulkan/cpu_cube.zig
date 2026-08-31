@@ -1485,10 +1485,11 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), scissor.x + @as(i32, @intCast(scissor.width)), @as(i32, @intCast(width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), scissor.y + @as(i32, @intCast(scissor.height)), @as(i32, @intCast(height)));
         const tile_size: i32 = if (optimized and (lane_count != 1 or width >= 3840)) 32 else if (optimized) 8 else 1;
-        // The normal parallel draw has exactly two lanes split at the middle
-        // row.  Clip the tile walk to each lane up front; scanning every row
+        // The compatibility parallel draw has two lanes split at the middle
+        // row. Clip the tile walk to each lane up front; scanning every row
         // in every tile just to rediscover that split costs more than the
-        // synchronization saved on medium-sized render targets.
+        // synchronization saved on medium-sized render targets. Wider
+        // profiles use the general stripe partition below.
         const fixed_two_lane = lane_count == 2 and stripe_count == 2;
         const lane_min_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * lane_index / 2) else min_y;
         const lane_max_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * (lane_index + 1) / 2) else max_y;
@@ -1697,7 +1698,12 @@ pub fn drawReferenceCounted(target: []u8, depth: ?[]u8, width: u32, height: u32,
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, counters, false, 0, 0, 0, 1, 1, null, null, null, null, 0, 0, true);
 }
 
+// Keep the two-lane behavior as the default compatibility profile, but do
+// not bake it into the worker topology.  The limited-core benchmark selects
+// 1..8 physical CPUs through ZPU_MAX_THREADS and the renderer uses the same
+// bounded number of raster bands.
 const parallel_band_count = 2;
+const max_parallel_band_count = 8;
 const parallel_slice_count = 4;
 const parallel_8k_slice_count = 40;
 // Keep enough retained command/cache storage for realistic terminal frames.
@@ -1709,8 +1715,14 @@ const parallel_8k_slice_count = 40;
 pub const max_batch_commands: usize = 8192;
 // Small static UI batches are already fully prepared by the time the next
 // frame arrives. Avoid waking the raster worker for these short command lists;
-// the worker hand-off costs more than the bounded serial walk on two cores.
+// the worker hand-off costs more than the bounded serial walk on the
+// compatibility profile.
 const serial_batch_command_limit = 256;
+// The spatial scheduler pays one region-plan and queue handoff cost.  Small
+// desktop/UI and scene batches are already served best by the prepared batch
+// kernel; Mosaic selects spatial ownership once command fanout can amortize
+// that fixed cost.
+const mosaic_spatial_command_threshold = 512;
 // Span rows are a sizeable per-command cache. Keep the hot prefix for the
 // common small batches while allowing large terminal submissions to retain
 // prepared geometry without reserving hundreds of megabytes for cold spans.
@@ -1795,7 +1807,7 @@ const ParallelDraw = struct {
     tile_max: ?[]u32 = null,
     tile_columns: usize = 0,
     tile_count: usize = 0,
-    bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
+    bands: [max_parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** max_parallel_band_count,
 };
 const ParallelBatchPrepare = struct {
     commands: []const DrawCommand,
@@ -1823,19 +1835,59 @@ const ParallelBatchDraw = struct {
     command_lanes: ?[]u8 = null,
     ownership_ready: ?*std.atomic.Value(bool) = null,
     color_only: bool = false,
-    bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
+    bands: [max_parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** max_parallel_band_count,
+};
+// Mosaic owns spatial regions rather than horizontal bands.  A region is
+// disjoint from every other region, so each worker can execute the complete
+// ordered command stream for its region without depth/color races.  The
+// command stream and prepared geometry remain immutable for the duration of
+// the pass; only queue cursors and per-worker counters are mutable.
+const mosaic_region_size: usize = 256;
+const max_mosaic_work_items: usize = max_dirty_tile_bytes * 4;
+const MosaicWorkItem = struct {
+    rect: Rect,
+    morton: u64,
+    command_first: usize = 0,
+    command_count: usize = 0,
+};
+const MosaicQueue = struct {
+    first_item: usize = 0,
+    item_count: usize = 0,
+    cursor: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    topology: cpu_locality.CpuTopology = .{ .cpu = 0, .numa = 0, .llc = 0 },
+    padding: [16]u8 = [_]u8{0} ** 16,
+};
+const MosaicBatchDraw = struct {
+    target: []u8,
+    depth: []u8,
+    width: u32,
+    height: u32,
+    commands: []const DrawCommand,
+    prepared: []const PreparedDraw,
+    count_work: bool,
+    work_items: []const MosaicWorkItem,
+    command_indices: []const usize = &.{},
+    prepare: ?*ParallelBatchPrepare = null,
+    prepare_completed: ?*std.atomic.Value(usize) = null,
+    plan_ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    plan_failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    queues: [max_parallel_band_count]MosaicQueue = [_]MosaicQueue{.{}} ** max_parallel_band_count,
+    queue_count: usize = 0,
+    bands: [max_parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** max_parallel_band_count,
 };
 const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32 = 0, rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
 const ParallelTileClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32, height: u32, tiles: []const u8 };
-const ParallelJob = union(enum) { draw: *ParallelDraw, batch: *ParallelBatchDraw, batch_prepare: *ParallelBatchPrepare, clear: *ParallelClear, tile_clear: *ParallelTileClear };
+const ParallelJob = union(enum) { draw: *ParallelDraw, batch: *ParallelBatchDraw, mosaic: *MosaicBatchDraw, batch_prepare: *ParallelBatchPrepare, clear: *ParallelClear, tile_clear: *ParallelTileClear };
 
 var parallel_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 var parallel_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
 var parallel_started = false;
 var parallel_available = false;
 var parallel_ready: usize = 0;
+var parallel_worker_count: usize = 0;
 var parallel_stop = std.atomic.Value(bool).init(false);
-var parallel_threads: [parallel_band_count - 1]std.Thread = undefined;
+var parallel_threads: [max_parallel_band_count - 1]std.Thread = undefined;
+var active_parallel_band_count: usize = parallel_band_count;
 var parallel_generation = std.atomic.Value(u64).init(0);
 var parallel_completed = std.atomic.Value(usize).init(0);
 var parallel_active: ?ParallelJob = null;
@@ -1849,11 +1901,30 @@ var batch_command_needs_prepare: [max_batch_commands]bool = undefined;
 var batch_span_cache: [max_batch_span_cache_commands]BatchSpanCache = undefined;
 var batch_quad_span_cache: [max_batch_commands]BatchQuadSpanCache = undefined;
 var batch_command_lanes: [max_batch_commands]u8 = undefined;
-var batch_command_indices: [parallel_band_count][max_batch_commands]usize = undefined;
-var batch_command_index_counts: [parallel_band_count]usize = [_]usize{0} ** parallel_band_count;
+var batch_command_indices: [max_parallel_band_count][max_batch_commands]usize = undefined;
+var batch_command_index_counts: [max_parallel_band_count]usize = [_]usize{0} ** max_parallel_band_count;
 var batch_ownership_ready = std.atomic.Value(bool).init(false);
-var batch_tile_min: [max_batch_tiles * parallel_band_count]u32 = undefined;
-var batch_tile_max: [max_batch_tiles * parallel_band_count]u32 = undefined;
+var batch_tile_min: [max_batch_tiles * max_parallel_band_count]u32 = undefined;
+var batch_tile_max: [max_batch_tiles * max_parallel_band_count]u32 = undefined;
+var mosaic_work_items: [max_mosaic_work_items]MosaicWorkItem = undefined;
+var mosaic_region_item_lookup: [max_mosaic_work_items]usize = undefined;
+var mosaic_command_write_offsets: [max_mosaic_work_items]usize = undefined;
+const max_mosaic_command_refs: usize = max_batch_commands * 64;
+var mosaic_command_indices: [max_mosaic_command_refs]usize = undefined;
+var mosaic_cached_bounds: [max_batch_commands]Rect = undefined;
+var mosaic_cached_geometry_revisions: [max_batch_commands]u64 = undefined;
+const MosaicPlanCache = struct {
+    valid: bool = false,
+    commands_address: usize = 0,
+    command_count: usize = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    item_count: usize = 0,
+    command_ref_count: usize = 0,
+    key: u64 = 0,
+    key_complete: bool = false,
+};
+var mosaic_plan_cache: MosaicPlanCache = .{};
 const BatchStaticReplayCache = struct {
     valid: bool = false,
     target_address: usize = 0,
@@ -1874,6 +1945,237 @@ fn resetBatchCaches() void {
     for (&batch_span_cache) |*cache| cache.valid = false;
     for (&batch_quad_span_cache) |*cache| cache.valid = false;
     batch_static_replay_cache.valid = false;
+    mosaic_plan_cache.valid = false;
+}
+
+fn configureParallelBandCount() void {
+    // Tests and normal builds retain the historical two-lane profile unless
+    // the caller explicitly opts into the physical-core benchmark contract.
+    // This keeps generic callers from accidentally oversubscribing a host,
+    // while tools/limited-cpus.sh makes 3/4/.. lane experiments reproducible.
+    active_parallel_band_count = parallel_band_count;
+    if (std.c.getenv("ZPU_LIMITED")) |limited| {
+        if (std.mem.eql(u8, std.mem.span(limited), "physical-core-v1")) {
+            if (std.c.getenv("ZPU_MAX_THREADS")) |raw| {
+                const requested = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch parallel_band_count;
+                if (requested >= 1 and requested <= max_parallel_band_count) active_parallel_band_count = requested;
+            }
+        }
+    }
+}
+
+fn parallelBandCount() usize {
+    return active_parallel_band_count;
+}
+
+fn parallelBandRange(height: u32, band_index: usize, band_count: usize) struct { min_y: i32, max_y: i32 } {
+    return .{
+        .min_y = @intCast(@as(usize, height) * band_index / band_count),
+        .max_y = @intCast(@as(usize, height) * (band_index + 1) / band_count),
+    };
+}
+
+fn boundsTouchParallelBand(bounds: Rect, height: u32, band_index: usize, band_count: usize) bool {
+    if (bounds.width == 0 or bounds.height == 0) return false;
+    const band = parallelBandRange(height, band_index, band_count);
+    const bounds_max_y = bounds.y + @as(i32, @intCast(bounds.height));
+    return bounds.y < band.max_y and bounds_max_y > band.min_y;
+}
+
+fn mosaicMorton2D(x: usize, y: usize) u64 {
+    var result: u64 = 0;
+    for (0..32) |bit| {
+        result |= (@as(u64, @intCast((x >> @intCast(bit)) & 1)) << @intCast(bit * 2));
+        result |= (@as(u64, @intCast((y >> @intCast(bit)) & 1)) << @intCast(bit * 2 + 1));
+    }
+    return result;
+}
+
+fn mosaicWorkItemBefore(_: void, a: MosaicWorkItem, b: MosaicWorkItem) bool {
+    return a.morton < b.morton;
+}
+
+fn mosaicPartitionStart(total: usize, partitions: usize, index: usize) usize {
+    const base = total / partitions;
+    const remainder = total % partitions;
+    return index * base + @min(index, remainder);
+}
+
+fn intersectRects(a: Rect, b: Rect) Rect {
+    const ax0 = @as(i64, a.x);
+    const ay0 = @as(i64, a.y);
+    const ax1 = ax0 + @as(i64, a.width);
+    const ay1 = ay0 + @as(i64, a.height);
+    const bx0 = @as(i64, b.x);
+    const by0 = @as(i64, b.y);
+    const bx1 = bx0 + @as(i64, b.width);
+    const by1 = by0 + @as(i64, b.height);
+    const x0 = @max(ax0, bx0);
+    const y0 = @max(ay0, by0);
+    const x1 = @min(ax1, bx1);
+    const y1 = @min(ay1, by1);
+    if (x1 <= x0 or y1 <= y0 or x0 < std.math.minInt(i32) or y0 < std.math.minInt(i32) or x0 > std.math.maxInt(i32) or y0 > std.math.maxInt(i32)) return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    return .{ .x = @intCast(x0), .y = @intCast(y0), .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+}
+
+const MosaicRegionSpan = struct { x0: usize, x1: usize, y0: usize, y1: usize };
+
+fn mosaicRegionSpan(bounds: Rect, width: u32, height: u32, columns: usize, rows: usize) ?MosaicRegionSpan {
+    if (bounds.width == 0 or bounds.height == 0) return null;
+    const bounds_x0 = @as(i64, bounds.x);
+    const bounds_y0 = @as(i64, bounds.y);
+    const bounds_x1 = bounds_x0 + @as(i64, @intCast(bounds.width));
+    const bounds_y1 = bounds_y0 + @as(i64, @intCast(bounds.height));
+    const surface_width = @as(i64, @intCast(width));
+    const surface_height = @as(i64, @intCast(height));
+    if (bounds_x1 <= 0 or bounds_y1 <= 0 or bounds_x0 >= surface_width or bounds_y0 >= surface_height) return null;
+    const x0 = @max(bounds_x0, @as(i64, 0));
+    const y0 = @max(bounds_y0, @as(i64, 0));
+    const x1 = @min(bounds_x1, surface_width);
+    const y1 = @min(bounds_y1, surface_height);
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{
+        .x0 = @intCast(@as(usize, @intCast(x0)) / mosaic_region_size),
+        .x1 = @min(columns, (@as(usize, @intCast(x1)) - 1) / mosaic_region_size + 1),
+        .y0 = @intCast(@as(usize, @intCast(y0)) / mosaic_region_size),
+        .y1 = @min(rows, (@as(usize, @intCast(y1)) - 1) / mosaic_region_size + 1),
+    };
+}
+
+const MosaicPlanKey = struct { value: u64, complete: bool };
+
+fn mosaicPlanKey(commands: []const DrawCommand) MosaicPlanKey {
+    // Geometry revisions are the command-stream contract for immutable
+    // prepared geometry. Include the command-buffer address so identical
+    // revision numbers from two live streams cannot alias the cached plan.
+    var value: u64 = 0xcbf29ce484222325 ^ @as(u64, @intFromPtr(commands.ptr));
+    var complete = true;
+    for (commands) |command| {
+        if (command.geometry_revision == 0) complete = false;
+        value ^= command.geometry_revision +% 0x9e3779b97f4a7c15;
+        value *%= 0x100000001b3;
+    }
+    return .{ .value = value, .complete = complete };
+}
+
+fn assignMosaicQueues(item_count: usize, queue_count: usize, queues: *[max_parallel_band_count]MosaicQueue) void {
+    var topology: [max_parallel_band_count]cpu_locality.CpuTopology = undefined;
+    const topology_count = cpu_locality.selectedCpuTopology(&topology);
+    for (0..queue_count) |queue_index| {
+        const first = mosaicPartitionStart(item_count, queue_count, queue_index);
+        const end = mosaicPartitionStart(item_count, queue_count, queue_index + 1);
+        queues[queue_index] = .{
+            .first_item = first,
+            .item_count = end - first,
+            .cursor = std.atomic.Value(usize).init(0),
+            .topology = if (queue_index < topology_count) topology[queue_index] else .{ .cpu = 0, .numa = 0, .llc = 0 },
+        };
+    }
+}
+
+fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []const PreparedDraw, commands: []const DrawCommand, command_count: usize, queues: *[max_parallel_band_count]MosaicQueue) ?struct { items: []const MosaicWorkItem, command_indices: []const usize } {
+    if (queue_count == 0 or queue_count > max_parallel_band_count or width > std.math.maxInt(i32) or height > std.math.maxInt(i32)) return null;
+    const columns = (@as(usize, width) + mosaic_region_size - 1) / mosaic_region_size;
+    const rows = (@as(usize, height) + mosaic_region_size - 1) / mosaic_region_size;
+    const item_count = columns * rows;
+    if (columns == 0 or rows == 0 or item_count > max_mosaic_work_items or prepared.len < command_count or commands.len < command_count) return null;
+    const plan_key = mosaicPlanKey(commands[0..command_count]);
+
+    // A large textured primitive split across supertiles can change the
+    // floating-point origin of the existing fast interpolator at the split.
+    // Keep the public Vulkan path exact until a segmented interpolator with a
+    // proven global origin exists; small glyph-like quads remain eligible and
+    // broad/global work is handled by the ordered batch fallback.
+    for (prepared[0..command_count], 0..) |command, command_index| {
+        if (command_index == 0) continue;
+        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+        if (command.batch_fast and (span.x1 - span.x0 > 1 or span.y1 - span.y0 > 1) and (command.bounds.width > 32 or command.bounds.height > 32)) return null;
+    }
+
+    if (mosaic_plan_cache.valid and mosaic_plan_cache.commands_address == @intFromPtr(commands.ptr) and mosaic_plan_cache.command_count == command_count and mosaic_plan_cache.width == width and mosaic_plan_cache.height == height and
+        mosaic_plan_cache.item_count == item_count and mosaic_plan_cache.key_complete == plan_key.complete and mosaic_plan_cache.key == plan_key.value)
+    {
+        if (plan_key.complete) {
+            var same_revisions = true;
+            for (commands[0..command_count], 0..) |command, index| {
+                if (mosaic_cached_geometry_revisions[index] != command.geometry_revision) {
+                    same_revisions = false;
+                    break;
+                }
+            }
+            if (!same_revisions) return null;
+            assignMosaicQueues(item_count, queue_count, queues);
+            return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
+        }
+        var same_bounds = true;
+        for (prepared[0..command_count], 0..) |prepared_command, index| {
+            if (!std.meta.eql(mosaic_cached_bounds[index], prepared_command.bounds)) {
+                same_bounds = false;
+                break;
+            }
+        }
+        if (same_bounds) {
+            assignMosaicQueues(item_count, queue_count, queues);
+            return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
+        }
+    }
+
+    var item_index: usize = 0;
+    for (0..rows) |region_y| for (0..columns) |region_x| {
+        const x = region_x * mosaic_region_size;
+        const y = region_y * mosaic_region_size;
+        mosaic_work_items[item_index] = .{
+            .rect = .{ .x = @intCast(x), .y = @intCast(y), .width = @intCast(@min(mosaic_region_size, @as(usize, width) - x)), .height = @intCast(@min(mosaic_region_size, @as(usize, height) - y)) },
+            .morton = mosaicMorton2D(region_x, region_y),
+        };
+        item_index += 1;
+    };
+    std.mem.sort(MosaicWorkItem, mosaic_work_items[0..item_count], {}, mosaicWorkItemBefore);
+
+    // Map the row-major region coordinate to the Morton-sorted work item. The
+    // old implementation scanned every command for every region twice. That
+    // made plan construction O(regions * commands), which is particularly
+    // visible for high-resolution Quake-style streams. Count and write by
+    // each command's bounded region span instead: O(commands * fanout).
+    for (mosaic_work_items[0..item_count]) |*item| {
+        item.command_first = 0;
+        item.command_count = 0;
+    }
+    for (mosaic_work_items[0..item_count], 0..) |item, sorted_index| {
+        const region_x = @as(usize, @intCast(item.rect.x)) / mosaic_region_size;
+        const region_y = @as(usize, @intCast(item.rect.y)) / mosaic_region_size;
+        mosaic_region_item_lookup[region_y * columns + region_x] = sorted_index;
+    }
+    for (prepared[0..command_count]) |command| {
+        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+        for (span.y0..span.y1) |region_y| for (span.x0..span.x1) |region_x| {
+            const region_item_index = mosaic_region_item_lookup[region_y * columns + region_x];
+            mosaic_work_items[region_item_index].command_count += 1;
+        };
+    }
+    var reference_count: usize = 0;
+    for (mosaic_work_items[0..item_count], 0..) |*item, sorted_index| {
+        if (item.command_count > max_mosaic_command_refs - reference_count) return null;
+        item.command_first = reference_count;
+        mosaic_command_write_offsets[sorted_index] = reference_count;
+        reference_count += item.command_count;
+    }
+    for (prepared[0..command_count], 0..) |command, command_index| {
+        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+        for (span.y0..span.y1) |region_y| for (span.x0..span.x1) |region_x| {
+            const region_item_index = mosaic_region_item_lookup[region_y * columns + region_x];
+            const output = mosaic_command_write_offsets[region_item_index];
+            mosaic_command_indices[output] = command_index;
+            mosaic_command_write_offsets[region_item_index] = output + 1;
+        };
+    }
+    for (prepared[0..command_count], 0..) |command, index| {
+        mosaic_cached_bounds[index] = command.bounds;
+        mosaic_cached_geometry_revisions[index] = commands[index].geometry_revision;
+    }
+    mosaic_plan_cache = .{ .valid = true, .commands_address = @intFromPtr(commands.ptr), .command_count = command_count, .width = width, .height = height, .item_count = item_count, .command_ref_count = reference_count, .key = plan_key.value, .key_complete = plan_key.complete };
+    assignMosaicQueues(item_count, queue_count, queues);
+    return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..reference_count] };
 }
 
 // A raster worker normally finishes less than one frame before its next job.
@@ -1927,7 +2229,7 @@ fn runParallelBand(context: *ParallelDraw, band_index: usize, comptime count_wor
         }
     }
     const stripe_count = context.stripe_count;
-    band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.base_vertex, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallel_band_count, stripe_count, context.prepared, context.indexed, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
+    band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.base_vertex, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallelBandCount(), stripe_count, context.prepared, context.indexed, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
 }
 
 fn addCounters(total: *Counters, value: Counters) void {
@@ -2329,7 +2631,7 @@ fn flatColorQuadCompatible(first: *const PreparedTriangle, second: *const Prepar
         b[0].screen[2] == a[0].screen[2] and b[1].screen[2] == a[0].screen[2] and b[2].screen[2] == a[0].screen[2];
 }
 
-fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, lane_count: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
+fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, lane_count: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize, clip: ?Rect) ?usize {
     if (builtin.cpu.arch.endian() != .little or @intFromPtr(target.ptr) & 3 != 0 or @intFromPtr(depth.ptr) & 3 != 0) return null;
     const color_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(target)));
     const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(depth)));
@@ -2337,21 +2639,21 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     var pixels_written: usize = 0;
     if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) if (prepared.opaque_quad.flat_color) |color| {
-        if (prepared.quad_union_spans_external) |spans| return rasterPreparedFlatSpan(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, spans, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color);
-        if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color)) |pixels| return pixels;
+        if (prepared.quad_union_spans_external) |spans| return rasterPreparedFlatSpan(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, spans, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color, clip);
+        if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color, clip)) |pixels| return pixels;
     };
     if (comptime color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) {
         // Keep the two triangle spans separate. Their affine UV planes are
         // mathematically identical, but evaluating each triangle's own
         // barycentric start value preserves the reference rasterizer's exact
         // texel-boundary rounding at the shared diagonal.
-        const first = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit);
-        const second = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
+        const first = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip);
+        const second = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip);
         return first + second;
     };
     if (comptime !color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.opaque_quad.flat_color == null and prepared.spans_valid) {
-        const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit);
-        const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
+        const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip);
+        const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip);
         return first + second;
     };
     var triangle_index: usize = 0;
@@ -2360,7 +2662,7 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
         if (tile_min == null and prepared.spans_valid and triangle_index + 1 < prepared.count) {
             const second = &prepared.triangles[triangle_index + 1];
             if (flatColorQuadCompatible(triangle, second)) {
-                if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, @min(triangle.batch_raster.min_y, second.batch_raster.min_y), @max(triangle.batch_raster.max_y, second.batch_raster.max_y), preparedSpan(prepared, triangle_index), preparedSpan(prepared, triangle_index + 1), triangle.batch_raster.flat_depth_bits, triangle.flat_color.?)) |pixels| {
+                if (rasterPreparedFlatColorQuad(!color_only, color_words, depth_words, width, height, lane_index, lane_count, @min(triangle.batch_raster.min_y, second.batch_raster.min_y), @max(triangle.batch_raster.max_y, second.batch_raster.max_y), preparedSpan(prepared, triangle_index), preparedSpan(prepared, triangle_index + 1), triangle.batch_raster.flat_depth_bits, triangle.flat_color.?, clip)) |pixels| {
                     pixels_written += pixels;
                     triangle_index += 1;
                     continue;
@@ -2371,10 +2673,14 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
         if (comptime color_only) if (!triangle.has_prelit_texture_16x16 or triangle.batch_raster.v_over_w_dx != 0) return null;
         const raster = &triangle.batch_raster;
         if (tile_min == null) if (triangle.flat_color) |color| {
-            pixels_written += rasterPreparedFlatColor(!color_only, color_words, depth_words, width, height, lane_index, lane_count, raster, if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else return null, raster.flat_depth_bits, color);
+            pixels_written += rasterPreparedFlatColor(!color_only, color_words, depth_words, width, height, lane_index, lane_count, raster, if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else return null, raster.flat_depth_bits, color, clip);
             continue;
         };
-        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, lane_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, raster.min_x, raster.min_y, raster.max_x, raster.max_y, @max(raster.min_y, lane_min_y), @min(raster.max_y, lane_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) if (triangle.prelit_texture_ptr) |colors| colors else &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
+        const clip_min_x = if (clip) |value| value.x else raster.min_x;
+        const clip_max_x = if (clip) |value| value.x + @as(i32, @intCast(value.width)) else raster.max_x;
+        const clip_min_y = if (clip) |value| value.y else raster.min_y;
+        const clip_max_y = if (clip) |value| value.y + @as(i32, @intCast(value.height)) else raster.max_y;
+        pixels_written += rasterFlatSpanTriangle(!color_only, color_words, depth_words, width, height, lane_count, lane_index, raster.p0, raster.p1, raster.p2, raster.inverse_area, @max(raster.min_x, clip_min_x), @max(raster.min_y, clip_min_y), @min(raster.max_x, clip_max_x), @min(raster.max_y, clip_max_y), @max(raster.min_y, lane_min_y, clip_min_y), @min(raster.max_y, lane_max_y, clip_max_y), if (prepared.spans_valid) preparedSpan(prepared, triangle_index) else return null, raster.flat_depth_bits, triangle.flat_color, if (triangle.has_prelit_texture) if (triangle.prelit_texture_ptr) |colors| colors else &triangle.prelit_texture else null, if (triangle.has_prelit_texture_16x16) if (triangle.prelit_texture_16x16_ptr) |colors| colors else &triangle.prelit_texture_16x16 else null, tile_min, tile_max, tile_columns, tile_count, raster.flat_reciprocal_w, raster.u_over_w[0], raster.u_over_w[1], raster.u_over_w[2], raster.v_over_w[0], raster.v_over_w[1], raster.v_over_w[2], raster.u_over_w_dx, raster.v_over_w_dx);
     }
     return pixels_written;
 }
@@ -2382,23 +2688,25 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
 fn prepareBatchCommandLanes(context: *ParallelBatchDraw, lane_index: usize) void {
     const lanes = context.command_lanes orelse return;
     if (lane_index != 0) return;
-    @memset(lanes[0..context.commands.len], 3);
-    @memset(batch_command_index_counts[0..], 0);
-    if (context.count_work or parallel_band_count != 2) return;
+    const active_count = parallelBandCount();
+    const all_lanes: u8 = if (active_count == 8) 0xff else @intCast((@as(u16, 1) << @intCast(active_count)) - 1);
+    @memset(lanes[0..context.commands.len], all_lanes);
+    @memset(batch_command_index_counts[0..active_count], 0);
+    if (context.count_work) return;
 
-    const split: i32 = @intCast(context.height / 2);
     for (context.commands, 0..) |_, index| {
         const draw_bounds = context.prepared[index].bounds;
         if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
-        // Bounds are floating-point floor/ceil projections. Keep a one-pixel
-        // guard band around the worker split so a rounding edge can never be
-        // assigned to only one lane when its cached span reaches across it.
-        if (draw_bounds.y >= split + 1) {
-            lanes[index] = 2;
-        } else if (draw_bounds.y + @as(i32, @intCast(draw_bounds.height)) <= split - 1) {
-            lanes[index] = 1;
+        lanes[index] = 0;
+        for (0..active_count) |band_index| {
+            // A conservative prepared bound touching a band's row range must
+            // be sent to that band. The raster kernel still performs the
+            // exact coverage test, so this only affects work ownership.
+            if (boundsTouchParallelBand(draw_bounds, context.height, band_index, active_count)) {
+                lanes[index] |= @as(u8, 1) << @intCast(band_index);
+            }
         }
-        inline for (0..parallel_band_count) |band_index| {
+        for (0..active_count) |band_index| {
             if (lanes[index] & (@as(u8, 1) << @intCast(band_index)) != 0) {
                 const position = batch_command_index_counts[band_index];
                 batch_command_indices[band_index][position] = index;
@@ -2431,7 +2739,7 @@ fn runParallelBatchBand(context: *ParallelBatchDraw, band_index: usize, comptime
                 }
             }
         }
-        band.pixels_written += drawInternal(context.target, context.depth, context.width, context.height, command.uniform, command.texture, command.texture_width, command.texture_height, command.vertex_count, 0, command.viewport, command.scissor, &draw_counters, true, 0, 0, band_index, parallel_band_count, parallel_band_count, prepared_ptr, null, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
+        band.pixels_written += drawInternal(context.target, context.depth, context.width, context.height, command.uniform, command.texture, command.texture_width, command.texture_height, command.vertex_count, 0, command.viewport, command.scissor, &draw_counters, true, 0, 0, band_index, parallelBandCount(), parallelBandCount(), prepared_ptr, null, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
         if (comptime count_work) addCounters(&band.counters, draw_counters);
     }
 }
@@ -2441,7 +2749,7 @@ fn waitForBatchPreparation(context: *ParallelBatchDraw, lane_index: usize) void 
         runParallelBatchPrepare(prepare, lane_index);
         const completed = context.prepare_completed orelse return;
         _ = completed.fetchAdd(1, .release);
-        while (completed.load(.acquire) != parallel_band_count) std.atomic.spinLoopHint();
+        while (completed.load(.acquire) != parallelBandCount()) std.atomic.spinLoopHint();
     }
     prepareBatchCommandLanes(context, lane_index);
     if (context.ownership_ready) |ready| {
@@ -2451,8 +2759,9 @@ fn waitForBatchPreparation(context: *ParallelBatchDraw, lane_index: usize) void 
 }
 
 fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) void {
+    const active_count = parallelBandCount();
     var command_index = lane_index;
-    while (command_index < context.commands.len) : (command_index += parallel_band_count) {
+    while (command_index < context.commands.len) : (command_index += active_count) {
         if (context.color_only)
             prepareBatchOverlayCommand(context.commands[command_index], @intFromPtr(context.commands.ptr), command_index, context.width, context.height, &context.prepared[command_index])
         else
@@ -2464,11 +2773,15 @@ fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) vo
 // Once the caller has established the overlay contract, rasterize that quad
 // once instead of walking both triangles and testing the same depth. The
 // direct affine UV walk retains the existing texel-boundary rounding rules.
-inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, prelit: *const [256]u32) usize {
-    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / parallel_band_count);
-    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
-    const first_y = @max(raster.min_y, lane_min_y);
-    const last_y = @min(raster.max_y, lane_max_y);
+inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, prelit: *const [256]u32, clip: ?Rect) usize {
+    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
+    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
+    const clip_min_y = if (clip) |value| value.y else 0;
+    const clip_max_y = if (clip) |value| value.y + @as(i32, @intCast(value.height)) else @as(i32, @intCast(height));
+    const clip_min_x = if (clip) |value| value.x else 0;
+    const clip_max_x = if (clip) |value| value.x + @as(i32, @intCast(value.width)) else @as(i32, @intCast(width));
+    const first_y = @max(raster.min_y, lane_min_y, clip_min_y);
+    const last_y = @min(raster.max_y, lane_max_y, clip_max_y);
     if (first_y >= last_y) return 0;
     var pixels_written: usize = 0;
     const du = raster.u_over_w_dx * raster.flat_reciprocal_w;
@@ -2479,17 +2792,26 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
     while (y < last_y) : (y += 1) {
         const span = spans[@intCast(y)];
         if (span.last <= span.first) continue;
-        const first_x: i32 = @max(@as(i32, @intCast(span.first)), raster.min_x);
-        const last_x: i32 = @min(@as(i32, @intCast(span.last)), raster.max_x);
+        const unclipped_first_x: i32 = @max(@as(i32, @intCast(span.first)), raster.min_x);
+        const first_x: i32 = @max(unclipped_first_x, clip_min_x);
+        const last_x: i32 = @min(@as(i32, @intCast(span.last)), raster.max_x, clip_max_x);
         if (first_x >= last_x) continue;
         const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
-        const first_sample = [2]f32{ @as(f32, @floatFromInt(first_x)) + 0.5, y_offset };
+        // A region clip must not change the floating-point origin of the
+        // affine UV walk. Starting at the clipped x can round differently
+        // from the unbounded draw after a long span, which changes texel
+        // selection at region boundaries. Reproduce the full draw's origin,
+        // then advance by the skipped pixels before the first store.
+        const first_sample = [2]f32{ @as(f32, @floatFromInt(unclipped_first_x)) + 0.5, y_offset };
         const b0 = edge(raster.p1, raster.p2, first_sample) * raster.inverse_area;
         const b1 = edge(raster.p2, raster.p0, first_sample) * raster.inverse_area;
         const b2 = edge(raster.p0, raster.p1, first_sample) * raster.inverse_area;
         var stepped_u_over_w = b0 * raster.u_over_w[0] + b1 * raster.u_over_w[1] + b2 * raster.u_over_w[2];
         var stepped_v_over_w = b0 * raster.v_over_w[0] + b1 * raster.v_over_w[1] + b2 * raster.v_over_w[2];
+        const skipped_pixels: f32 = @floatFromInt(first_x - unclipped_first_x);
+        stepped_u_over_w += raster.u_over_w_dx * skipped_pixels;
+        stepped_v_over_w += raster.v_over_w_dx * skipped_pixels;
         if (raster.v_over_w_dx == 0) {
             const sampled_v = stepped_v_over_w * raster.flat_reciprocal_w;
             const texture_y = unitTextureCoordinate16(sampled_v);
@@ -2593,11 +2915,15 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
     return pixels_written;
 }
 
-inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, spans: *const [flat_span_rows]FlatSpan, first_spans: *const [flat_span_rows]FlatSpan, second_spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) usize {
+inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, spans: *const [flat_span_rows]FlatSpan, first_spans: *const [flat_span_rows]FlatSpan, second_spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32, clip: ?Rect) usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
-    const first_y = @max(min_y, lane_min_y);
-    const last_y = @min(max_y, lane_max_y);
+    const clip_min_x = if (clip) |value| value.x else 0;
+    const clip_max_x = if (clip) |value| value.x + @as(i32, @intCast(value.width)) else @as(i32, @intCast(width));
+    const clip_min_y = if (clip) |value| value.y else 0;
+    const clip_max_y = if (clip) |value| value.y + @as(i32, @intCast(value.height)) else @as(i32, @intCast(height));
+    const first_y = @max(min_y, lane_min_y, clip_min_y);
+    const last_y = @min(max_y, lane_max_y, clip_max_y);
     if (first_y >= last_y) return 0;
     var pixels_written: usize = 0;
     var y = first_y;
@@ -2606,21 +2932,24 @@ inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align
         const span = spans[row];
         if (span.last <= span.first) continue;
         const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
-        pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, span.first, span.last, depth_bits, color);
+        const span_first = @max(@as(i32, @intCast(span.first)), clip_min_x);
+        const span_last = @min(@as(i32, @intCast(span.last)), clip_max_x);
+        if (span_first >= span_last) continue;
+        pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(span_first), @intCast(span_last), depth_bits, color);
         // The reference path visits both triangles, so their shared diagonal
         // contributes twice to the observable write count. The union span
         // stores each pixel once; count the overlap after the fused write.
         const first = first_spans[row];
         const second = second_spans[row];
         if (first.last <= first.first or second.last <= second.first) continue;
-        const overlap_first = @max(first.first, second.first);
-        const overlap_last = @min(first.last, second.last);
+        const overlap_first = @max(@as(i32, @intCast(first.first)), @as(i32, @intCast(second.first)), clip_min_x);
+        const overlap_last = @min(@as(i32, @intCast(first.last)), @as(i32, @intCast(second.last)), clip_max_x);
         if (overlap_first >= overlap_last) continue;
         if (comptime !depth_test) {
-            pixels_written += overlap_last - overlap_first;
+            pixels_written += @intCast(overlap_last - overlap_first);
         } else {
-            var overlap_x = overlap_first;
-            while (overlap_x < overlap_last) : (overlap_x += 1) {
+            var overlap_x: usize = @intCast(overlap_first);
+            while (overlap_x < @as(usize, @intCast(overlap_last))) : (overlap_x += 1) {
                 if (depth_words[row_offset + overlap_x] == depth_bits) pixels_written += 1;
             }
         }
@@ -2628,11 +2957,15 @@ inline fn rasterPreparedFlatSpan(comptime depth_test: bool, color_words: []align
     return pixels_written;
 }
 
-fn rasterPreparedFlatColorQuad(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, first_spans: *const [flat_span_rows]FlatSpan, second_spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) ?usize {
+fn rasterPreparedFlatColorQuad(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, min_y: i32, max_y: i32, first_spans: *const [flat_span_rows]FlatSpan, second_spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32, clip: ?Rect) ?usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
-    const first_y = @max(min_y, lane_min_y);
-    const last_y = @min(max_y, lane_max_y);
+    const clip_min_x = if (clip) |value| value.x else 0;
+    const clip_max_x = if (clip) |value| value.x + @as(i32, @intCast(value.width)) else @as(i32, @intCast(width));
+    const clip_min_y = if (clip) |value| value.y else 0;
+    const clip_max_y = if (clip) |value| value.y + @as(i32, @intCast(value.height)) else @as(i32, @intCast(height));
+    const first_y = @max(min_y, lane_min_y, clip_min_y);
+    const last_y = @min(max_y, lane_max_y, clip_max_y);
     if (first_y >= last_y) return 0;
 
     // Both callers prove that the two triangles form an axis-aligned quad.
@@ -2659,19 +2992,28 @@ fn rasterPreparedFlatColorQuad(comptime depth_test: bool, color_words: []align(4
             row_first = @min(first.first, second.first);
             row_last = @max(first.last, second.last);
         }
+        const clip_first: usize = @intCast(@max(clip_min_x, 0));
+        const clip_last: usize = @intCast(@max(clip_max_x, 0));
+        row_first = @max(row_first, clip_first);
+        row_last = @min(row_last, clip_last);
+        if (row_first >= row_last) continue;
         const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
         // The fused store writes the union once, but the public work counter
         // preserves the reference path's per-triangle visit semantics. Count
         // the first span before the union store and the second after it, so
         // inclusive depth ties and pre-existing nearer samples match the
         // ordered scalar traversal exactly.
-        const first_written = if (first_valid)
-            if (comptime depth_test) countFlatColorSpanPasses(depth_words, row_offset, first.first, first.last, depth_bits) else first.last - first.first
+        const first_first = @max(@as(usize, first.first), clip_first);
+        const first_last = @min(@as(usize, first.last), clip_last);
+        const second_first = @max(@as(usize, second.first), clip_first);
+        const second_last = @min(@as(usize, second.last), clip_last);
+        const first_written = if (first_valid and first_first < first_last)
+            if (comptime depth_test) countFlatColorSpanPasses(depth_words, row_offset, first_first, first_last, depth_bits) else first_last - first_first
         else
             0;
         _ = writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, row_first, row_last, depth_bits, color);
-        const second_written = if (second_valid)
-            if (comptime depth_test) countFlatColorSpanPasses(depth_words, row_offset, second.first, second.last, depth_bits) else second.last - second.first
+        const second_written = if (second_valid and second_first < second_last)
+            if (comptime depth_test) countFlatColorSpanPasses(depth_words, row_offset, second_first, second_last, depth_bits) else second_last - second_first
         else
             0;
         pixels_written += first_written + second_written;
@@ -2679,19 +3021,23 @@ fn rasterPreparedFlatColorQuad(comptime depth_test: bool, color_words: []align(4
     return pixels_written;
 }
 
-inline fn rasterPreparedFlatColor(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32) usize {
+inline fn rasterPreparedFlatColor(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, depth_bits: u32, color: u32, clip: ?Rect) usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
-    const first_y = @max(raster.min_y, lane_min_y);
-    const last_y = @min(raster.max_y, lane_max_y);
+    const clip_min_x = if (clip) |value| value.x else 0;
+    const clip_max_x = if (clip) |value| value.x + @as(i32, @intCast(value.width)) else @as(i32, @intCast(width));
+    const clip_min_y = if (clip) |value| value.y else 0;
+    const clip_max_y = if (clip) |value| value.y + @as(i32, @intCast(value.height)) else @as(i32, @intCast(height));
+    const first_y = @max(raster.min_y, lane_min_y, clip_min_y);
+    const last_y = @min(raster.max_y, lane_max_y, clip_max_y);
     if (first_y >= last_y) return 0;
     var pixels_written: usize = 0;
     var y = first_y;
     while (y < last_y) : (y += 1) {
         const span = spans[@intCast(y)];
         if (span.last <= span.first) continue;
-        const first = @max(@as(i32, @intCast(span.first)), raster.min_x);
-        const last = @min(@as(i32, @intCast(span.last)), raster.max_x);
+        const first = @max(@as(i32, @intCast(span.first)), raster.min_x, clip_min_x);
+        const last = @min(@as(i32, @intCast(span.last)), raster.max_x, clip_max_x);
         if (first < last) pixels_written += writeFlatColorSpan(depth_test, color_words, depth_words, width, @intCast(y), @intCast(first), @intCast(last), depth_bits, color);
     }
     return pixels_written;
@@ -2707,13 +3053,14 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
     const scaled_negative_dv = -dv * 3.999999;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
-    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+    const lane_count = parallelBandCount();
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= lane_count)
         FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
     else
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
+        if (stripe_count > lane_count and stripeLane(y, height, lane_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -2837,13 +3184,14 @@ fn rasterFlatSpanTriangleTexture16x16(color_words: []align(4) u32, depth_words: 
     var pixels_written: usize = 0;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
-    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+    const lane_count = parallelBandCount();
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= lane_count)
         FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
     else
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
+        if (stripe_count > lane_count and stripeLane(y, height, lane_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -2910,13 +3258,14 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
     var pixels_written: usize = 0;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
-    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+    const lane_count = parallelBandCount();
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= lane_count)
         FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
     else
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
+        if (stripe_count > lane_count and stripeLane(y, height, lane_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -3087,16 +3436,18 @@ fn fillPatternWords(bytes: []u8, first_word: usize, word_count: usize, pattern: 
 
 fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
     const word_count = bytes.len / 4;
-    const start = word_count * lane_index / parallel_band_count;
-    const end = word_count * (lane_index + 1) / parallel_band_count;
+    const lane_count = parallelBandCount();
+    const start = word_count * lane_index / lane_count;
+    const end = word_count * (lane_index + 1) / lane_count;
     fillPatternWords(bytes, start, end - start, pattern);
-    if (lane_index == parallel_band_count - 1 and word_count * 4 < bytes.len) @memset(bytes[word_count * 4 ..], @truncate(pattern));
+    if (lane_index == lane_count - 1 and word_count * 4 < bytes.len) @memset(bytes[word_count * 4 ..], @truncate(pattern));
 }
 
 fn fillPatternRasterLane(bytes: []u8, width: u32, height: u32, stripe_count: usize, pattern: u32, lane_index: usize) void {
     const row_words = @as(usize, width);
+    const lane_count = parallelBandCount();
     var stripe_index = lane_index;
-    while (stripe_index < stripe_count) : (stripe_index += parallel_band_count) {
+    while (stripe_index < stripe_count) : (stripe_index += lane_count) {
         const first_row = @as(usize, height) * stripe_index / stripe_count;
         const last_row = @as(usize, height) * (stripe_index + 1) / stripe_count;
         fillPatternWords(bytes, first_row * row_words, (last_row - first_row) * row_words, pattern);
@@ -3105,8 +3456,9 @@ fn fillPatternRasterLane(bytes: []u8, width: u32, height: u32, stripe_count: usi
 
 fn fillPatternRectLane(bytes: []u8, width: u32, rect: Rect, pattern: u32, lane_index: usize) void {
     if (rect.width == 0 or rect.height == 0) return;
-    const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / parallel_band_count;
-    const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / parallel_band_count;
+    const lane_count = parallelBandCount();
+    const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / lane_count;
+    const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / lane_count;
     const x: usize = @intCast(rect.x);
     for (first_row..last_row) |y| {
         const start = y * width + x;
@@ -3128,13 +3480,13 @@ fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
     if (!context.prepared.spans_valid) return;
     const color_pattern = context.clear_color_pattern orelse return;
     const depth_pattern = context.clear_depth_pattern orelse return;
-    // The validated dirty-clear path uses the fixed two-lane split. Walk only
-    // this lane's rows instead of scanning the entire attachment and calling
-    // stripeLane for every row/triangle pair.
+    // Walk only this lane's rows instead of scanning the entire attachment and
+    // calling stripeLane for every row/triangle pair.
+    const lane_count = parallelBandCount();
     for (context.prepared.triangles[0..context.prepared.count], 0..) |*triangle, triangle_index| {
         if (!triangle.valid) continue;
         var stripe_index = lane_index;
-        while (stripe_index < context.stripe_count) : (stripe_index += parallel_band_count) {
+        while (stripe_index < context.stripe_count) : (stripe_index += lane_count) {
             const first_stripe_y = @as(usize, context.height) * stripe_index / context.stripe_count;
             const last_stripe_y = @as(usize, context.height) * (stripe_index + 1) / context.stripe_count;
             for (first_stripe_y..last_stripe_y) |y| {
@@ -3149,9 +3501,103 @@ fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
     }
 }
 
+const MosaicWorkClaimClass = enum { owner, same_llc, same_numa };
+const MosaicWorkClaim = struct { item: MosaicWorkItem, class: MosaicWorkClaimClass };
+
+fn claimMosaicQueue(context: *MosaicBatchDraw, queue_index: usize, class: MosaicWorkClaimClass) ?MosaicWorkClaim {
+    const queue = &context.queues[queue_index];
+    const position = queue.cursor.fetchAdd(1, .monotonic);
+    if (position >= queue.item_count) return null;
+    return .{ .item = context.work_items[queue.first_item + position], .class = class };
+}
+
+fn claimMosaicWork(context: *MosaicBatchDraw, worker_index: usize) ?MosaicWorkClaim {
+    if (claimMosaicQueue(context, worker_index, .owner)) |claim| return claim;
+    const topology = context.queues[worker_index].topology;
+    for (1..context.queue_count) |offset| {
+        const candidate = (worker_index + offset) % context.queue_count;
+        const other = context.queues[candidate].topology;
+        if (other.numa == topology.numa and other.llc == topology.llc) if (claimMosaicQueue(context, candidate, .same_llc)) |claim| return claim;
+    }
+    for (1..context.queue_count) |offset| {
+        const candidate = (worker_index + offset) % context.queue_count;
+        const other = context.queues[candidate].topology;
+        if (other.numa == topology.numa and other.llc != topology.llc) if (claimMosaicQueue(context, candidate, .same_numa)) |claim| return claim;
+    }
+    return null;
+}
+
+fn runMosaicBatch(context: *MosaicBatchDraw, worker_index: usize, comptime count_work: bool) void {
+    const band = &context.bands[worker_index];
+    if (context.prepare) |prepare| {
+        runParallelBatchPrepare(prepare, worker_index);
+        const completed = context.prepare_completed.?;
+        _ = completed.fetchAdd(1, .release);
+        while (completed.load(.acquire) != context.queue_count) std.atomic.spinLoopHint();
+    }
+    if (worker_index == 0) {
+        if (buildMosaicWorkPlan(context.width, context.height, context.queue_count, context.prepared, context.commands, context.commands.len, &context.queues)) |plan| {
+            context.work_items = plan.items;
+            context.command_indices = plan.command_indices;
+        } else {
+            context.plan_failed.store(true, .release);
+        }
+        context.plan_ready.store(true, .release);
+    } else {
+        while (!context.plan_ready.load(.acquire)) std.atomic.spinLoopHint();
+    }
+    if (context.plan_failed.load(.acquire)) return;
+    while (claimMosaicWork(context, worker_index)) |claim| {
+        const command_end = claim.item.command_first + claim.item.command_count;
+        for (context.command_indices[claim.item.command_first..command_end]) |command_index| {
+            const command = context.commands[command_index];
+            const prepared = &context.prepared[command_index];
+            const prepared_region = intersectRects(prepared.bounds, claim.item.rect);
+            if (prepared_region.width == 0 or prepared_region.height == 0) continue;
+            const region_scissor = intersectRects(command.scissor, claim.item.rect);
+            if (region_scissor.width == 0 or region_scissor.height == 0) continue;
+            if (comptime !count_work) if (prepared.batch_fast) if (drawPreparedBatchFastRegion(context.target, context.depth, context.width, context.height, prepared, region_scissor)) |pixels_written| {
+                band.pixels_written += pixels_written;
+                continue;
+            };
+            var draw_counters = Counters{};
+            band.pixels_written += drawInternal(
+                context.target,
+                context.depth,
+                context.width,
+                context.height,
+                command.uniform,
+                command.texture,
+                command.texture_width,
+                command.texture_height,
+                command.vertex_count,
+                0,
+                command.viewport,
+                region_scissor,
+                &draw_counters,
+                true,
+                0,
+                0,
+                0,
+                1,
+                1,
+                prepared,
+                null,
+                null,
+                null,
+                0,
+                0,
+                count_work,
+            );
+            if (comptime count_work) addCounters(&band.counters, draw_counters);
+        }
+    }
+}
+
 fn runParallelJob(job: ParallelJob, lane_index: usize) void {
     switch (job) {
         .draw => |context| {
+            const lane_count = parallelBandCount();
             if (context.clear_spans) {
                 clearPreparedSpansLane(context, lane_index);
             } else {
@@ -3166,7 +3612,7 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             if (context.expected_target) |expected| {
                 const row_bytes = @as(usize, context.width) * 4;
                 var stripe_index = lane_index;
-                while (stripe_index < context.stripe_count) : (stripe_index += parallel_band_count) {
+                while (stripe_index < context.stripe_count) : (stripe_index += lane_count) {
                     const first_row = @as(usize, context.height) * stripe_index / context.stripe_count;
                     const last_row = @as(usize, context.height) * (stripe_index + 1) / context.stripe_count;
                     const start = first_row * row_bytes;
@@ -3184,6 +3630,7 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             waitForBatchPreparation(context, lane_index);
             if (context.count_work) runParallelBatchBand(context, lane_index, true) else runParallelBatchBand(context, lane_index, false);
         },
+        .mosaic => |context| if (context.count_work) runMosaicBatch(context, lane_index, true) else runMosaicBatch(context, lane_index, false),
         .batch_prepare => |context| runParallelBatchPrepare(context, lane_index),
         .clear => |context| {
             if (context.width == 0) {
@@ -3199,7 +3646,7 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             const rows = (@as(usize, context.height) + dirty_tile_size - 1) / dirty_tile_size;
             const tile_count = columns * rows;
             var tile_index = lane_index;
-            while (tile_index < tile_count) : (tile_index += parallel_band_count) {
+            while (tile_index < tile_count) : (tile_index += parallelBandCount()) {
                 if (context.tiles[tile_index / 8] & (@as(u8, 1) << @intCast(tile_index % 8)) == 0) continue;
                 const tile_x = tile_index % columns;
                 const tile_y = tile_index / columns;
@@ -3232,9 +3679,12 @@ fn parallelWorker(worker_index: usize) void {
 
 fn ensureParallelWorkers() bool {
     if (parallel_started) return parallel_available;
+    configureParallelBandCount();
     parallel_started = true;
     parallel_stop.store(false, .release);
-    for (0..(parallel_band_count - 1)) |worker_index| {
+    parallel_worker_count = parallelBandCount() - 1;
+    parallel_ready = 0;
+    for (0..parallel_worker_count) |worker_index| {
         const worker = std.Thread.spawn(.{}, parallelWorker, .{worker_index}) catch {
             parallel_started = false;
             return false;
@@ -3242,7 +3692,7 @@ fn ensureParallelWorkers() bool {
         parallel_threads[worker_index] = worker;
     }
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
-    while (parallel_ready != parallel_band_count - 1) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
+    while (parallel_ready != parallel_worker_count) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     parallel_available = true;
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     return true;
@@ -3264,11 +3714,13 @@ pub fn shutdownParallelWorkers() void {
     _ = parallel_generation.fetchAdd(1, .release);
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
-    for (&parallel_threads) |*worker| worker.join();
+    for (parallel_threads[0..parallel_worker_count]) |*worker| worker.join();
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     parallel_started = false;
     parallel_available = false;
     parallel_ready = 0;
+    parallel_worker_count = 0;
+    active_parallel_band_count = parallel_band_count;
     parallel_active = null;
     parallel_completed.store(0, .release);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
@@ -3286,7 +3738,7 @@ fn dispatchParallel(job: ParallelJob) bool {
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
 
     runParallelJob(job, 0);
-    while (parallel_completed.load(.acquire) != parallel_band_count - 1) std.atomic.spinLoopHint();
+    while (parallel_completed.load(.acquire) != parallel_worker_count) std.atomic.spinLoopHint();
 
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     parallel_active = null;
@@ -3358,6 +3810,7 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     if (dirty_bytes > max_dirty_tile_bytes) return null;
     if (dirty_output) |output| if (output.len < dirty_bytes) return null;
     _ = cpu_locality.pinCurrent(.render);
+    configureParallelBandCount();
     var prepared: PreparedDraw = undefined;
     prepareDraw(uniform, vertex_count, base_vertex, viewport, indexed, &prepared);
     prepareLitTextures(&prepared, texture, texture_width, texture_height, 0);
@@ -3375,6 +3828,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     if (dirty_bytes > max_dirty_tile_bytes) return 0;
     if (expected_target) |expected| if (expected.len != target.len) return 0;
     _ = cpu_locality.pinCurrent(.render);
+    configureParallelBandCount();
     var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
     const inline_fast = counters == null and clear_color_pattern == null and clear_depth_pattern == null and expected_target == null and !clear_spans_requested;
@@ -3410,13 +3864,13 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
         var inline_context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count };
         if (prepared_ptr.batch_fast) {
             if (drawPreparedBatchFastSerial(target, depth, width, height, prepared_ptr)) |pixels| return pixels;
-            runParallelJob(.{ .draw = &inline_context }, 0);
-            runParallelJob(.{ .draw = &inline_context }, 1);
+            for (0..parallelBandCount()) |lane| runParallelJob(.{ .draw = &inline_context }, lane);
         } else {
-            runParallelJob(.{ .draw = &inline_context }, 0);
-            runParallelJob(.{ .draw = &inline_context }, 1);
+            for (0..parallelBandCount()) |lane| runParallelJob(.{ .draw = &inline_context }, lane);
         }
-        return inline_context.bands[0].pixels_written + inline_context.bands[1].pixels_written;
+        var pixels_written: usize = 0;
+        for (inline_context.bands[0..parallelBandCount()]) |band| pixels_written += band.pixels_written;
+        return pixels_written;
     }
     var validation_failed = std.atomic.Value(bool).init(false);
     const full_screen_scissor = scissor.x == 0 and scissor.y == 0 and scissor.width == width and scissor.height == height;
@@ -3426,10 +3880,10 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     // tests beat the extra tile metadata loads and coordinate divisions.
     const use_tile_depth = false;
     if (use_tile_depth) {
-        @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
-        @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
+        @memset(batch_tile_min[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
+        @memset(batch_tile_max[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
     }
-    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count, .count_work = counters != null, .clear_color_pattern = clear_color_pattern, .clear_depth_pattern = clear_depth_pattern, .expected_target = expected_target, .validation_failed = if (expected_target != null) &validation_failed else null, .clear_spans = clear_spans, .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallel_band_count] else null, .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallel_band_count] else null, .tile_columns = (@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size, .tile_count = tile_count };
+    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count, .count_work = counters != null, .clear_color_pattern = clear_color_pattern, .clear_depth_pattern = clear_depth_pattern, .expected_target = expected_target, .validation_failed = if (expected_target != null) &validation_failed else null, .clear_spans = clear_spans, .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallelBandCount()] else null, .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallelBandCount()] else null, .tile_columns = (@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size, .tile_count = tile_count };
     if (!dispatchParallel(.{ .draw = &context })) return 0;
     if (validation_failed.load(.acquire)) return 0;
     var pixels_written: usize = 0;
@@ -3448,18 +3902,19 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     return pixels_written;
 }
 
-/// Two-core counted entry point used by the deterministic 3D benchmark. The
+/// Selected-core counted entry point used by the deterministic 3D benchmark. The
 /// render caller is pinned to the selected render CPU and the worker is pinned
 /// to the selected raster CPU; no additional cores participate in this path.
 pub fn drawCountedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, null, null, null, false);
 }
 
-fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, bounds: ?*Rect, dirty_output: ?[]u8, comptime color_only: bool) usize {
+fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, bounds: ?*Rect, dirty_output: ?[]u8, comptime color_only: bool, comptime use_mosaic: bool) usize {
     if (commands.len == 0 or commands.len > max_batch_commands or dirtyTileByteCount(width, height) > max_dirty_tile_bytes) return 0;
     if (target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4) return 0;
     if (dirty_output) |output| if (output.len < dirtyTileByteCount(width, height)) return 0;
     _ = cpu_locality.pinCurrent(.render);
+    configureParallelBandCount();
     const needs_preparation = batchNeedsPreparation(commands, width, height);
     var prepare_context: ParallelBatchPrepare = undefined;
     var prepare_completed = std.atomic.Value(usize).init(0);
@@ -3470,7 +3925,7 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
         .height = height,
         .color_only = color_only,
     };
-    if (!needs_preparation and !color_only and counters == null and clear_color_pattern == null and clear_depth_pattern == null and dirty_output == null and commands.len <= serial_batch_command_limit) {
+    if (!use_mosaic and !needs_preparation and !color_only and counters == null and clear_color_pattern == null and clear_depth_pattern == null and dirty_output == null and commands.len <= serial_batch_command_limit) {
         var pixels_written: usize = 0;
         if (bounds) |output| output.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         for (commands, 0..) |command, index| {
@@ -3497,14 +3952,55 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
         }
         return pixels_written;
     }
+    if (comptime use_mosaic) {
+        var context = MosaicBatchDraw{
+            .target = target,
+            .depth = depth,
+            .width = width,
+            .height = height,
+            .commands = commands,
+            .prepared = batch_prepared_storage[0..commands.len],
+            .count_work = counters != null,
+            .work_items = &.{},
+            .queue_count = parallelBandCount(),
+            .prepare = if (needs_preparation) &prepare_context else null,
+            .prepare_completed = if (needs_preparation) &prepare_completed else null,
+        };
+        if (!dispatchParallel(.{ .mosaic = &context })) return 0;
+        if (context.plan_failed.load(.acquire)) return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, dirty_output);
+        var pixels_written: usize = 0;
+        for (context.bands[0..context.queue_count]) |band| pixels_written += band.pixels_written;
+        if (bounds) |output| {
+            output.* = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+            for (context.prepared[0..commands.len]) |prepared| {
+                const draw_bounds = prepared.bounds;
+                if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
+                if (output.width == 0 or output.height == 0) {
+                    output.* = draw_bounds;
+                    continue;
+                }
+                const x0 = @min(output.x, draw_bounds.x);
+                const y0 = @min(output.y, draw_bounds.y);
+                const x1 = @max(output.x + @as(i32, @intCast(output.width)), draw_bounds.x + @as(i32, @intCast(draw_bounds.width)));
+                const y1 = @max(output.y + @as(i32, @intCast(output.height)), draw_bounds.y + @as(i32, @intCast(draw_bounds.height)));
+                output.* = .{ .x = x0, .y = y0, .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
+            }
+        }
+        if (counters) |output| {
+            output.* = context.bands[0].counters;
+            for (context.bands[1..context.queue_count]) |band| addCounters(output, band.counters);
+        }
+        if (dirty_output) |output| for (commands, 0..) |command, index| markPreparedDirtyTiles(&context.prepared[index], width, height, command.scissor, 0, 0, output);
+        return pixels_written;
+    }
     const tile_count = ((@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size) * ((@as(usize, height) + dirty_tile_size - 1) / dirty_tile_size);
     // Batched application quads are small enough that direct vector depth
     // tests beat the extra tile metadata loads and coordinate divisions.
     const use_tile_depth = false;
     batch_ownership_ready.store(false, .release);
     if (use_tile_depth) {
-        @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
-        @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
+        @memset(batch_tile_min[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
+        @memset(batch_tile_max[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
     }
     var context = ParallelBatchDraw{
         .target = target,
@@ -3516,8 +4012,8 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
         .count_work = counters != null,
         .clear_color_pattern = clear_color_pattern,
         .clear_depth_pattern = clear_depth_pattern,
-        .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallel_band_count] else null,
-        .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallel_band_count] else null,
+        .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallelBandCount()] else null,
+        .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallelBandCount()] else null,
         .tile_columns = (@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size,
         .tile_count = tile_count,
         .prepare = if (needs_preparation) &prepare_context else null,
@@ -3562,21 +4058,26 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
 }
 
 fn drawParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: ?*Counters, clear_color_pattern: ?u32, clear_depth_pattern: ?u32, bounds: ?*Rect, dirty_output: ?[]u8) usize {
-    return drawParallelBatchImpl(target, depth, width, height, commands, counters, clear_color_pattern, clear_depth_pattern, bounds, dirty_output, false);
+    return drawParallelBatchImpl(target, depth, width, height, commands, counters, clear_color_pattern, clear_depth_pattern, bounds, dirty_output, false, false);
 }
 
 fn drawParallelBatchColorOnly(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: ?*Rect, dirty_output: ?[]u8) usize {
-    return drawParallelBatchImpl(target, depth, width, height, commands, null, null, null, bounds, dirty_output, true);
+    return drawParallelBatchImpl(target, depth, width, height, commands, null, null, null, bounds, dirty_output, true, false);
 }
 
-/// Counted two-core submission for an ordered batch of opaque draws. The batch
+fn drawParallelBatchMosaic(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: ?*Rect, dirty_output: ?[]u8) usize {
+    if (commands.len < mosaic_spatial_command_threshold) return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, dirty_output);
+    return drawParallelBatchImpl(target, depth, width, height, commands, null, null, null, bounds, dirty_output, false, true);
+}
+
+/// Counted selected-core submission for an ordered batch of opaque draws. The batch
 /// pays one worker dispatch while retaining per-command transform, texture,
 /// scissor, and depth ordering semantics.
 pub fn drawCountedParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: *Counters) usize {
     return drawParallelBatch(target, depth, width, height, commands, counters, null, null, null, null);
 }
 
-/// Uncounted two-core submission for an ordered batch of opaque draws. Validate
+/// Uncounted selected-core submission for an ordered batch of opaque draws. Validate
 /// a representative frame with drawCountedParallelBatch, then use this path
 /// when counter instrumentation should not perturb frame timing.
 pub fn drawUncountedParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand) usize {
@@ -3596,13 +4097,13 @@ pub fn drawUncountedParallelBatchTracked(target: []u8, depth: []u8, width: u32, 
 /// tracked entry point so the first runtime Mosaic milestone changes command
 /// planning/dispatch granularity without introducing a second raster oracle.
 pub fn drawUncountedParallelBatchMosaic(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect) usize {
-    return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, null);
+    return drawParallelBatchMosaic(target, depth, width, height, commands, bounds, null);
 }
 
 /// Mosaic variant that preserves the large-surface dirty-tile contract used
 /// by the present path.
 pub fn drawUncountedParallelBatchMosaicTrackedTiles(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, bounds: *Rect, dirty_output: []u8) usize {
-    return drawParallelBatch(target, depth, width, height, commands, null, null, null, bounds, dirty_output);
+    return drawParallelBatchMosaic(target, depth, width, height, commands, bounds, dirty_output);
 }
 
 /// Tracked batch submission with the optional dirty-tile bitmap used by the
@@ -3623,7 +4124,7 @@ pub fn drawUncountedParallelBatchOpaqueOverlay(target: []u8, depth: []u8, width:
     return drawParallelBatchColorOnly(target, depth, width, height, commands, null, null);
 }
 
-/// Uncounted two-core batch that clears both attachments in the worker lanes.
+/// Uncounted selected-core batch that clears both attachments in the worker lanes.
 /// The known clear depth also enables a conservative per-tile hierarchical
 /// depth shortcut for flat opaque spans.
 pub fn drawUncountedParallelBatchCleared(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, color_pattern: u32, depth_pattern: u32) usize {
@@ -3650,7 +4151,7 @@ pub fn drawUncountedParallelBatchStaticReplay(target: []u8, depth: []u8, width: 
     return written;
 }
 
-/// Two-core counted draw that clears each lane immediately before that lane's
+/// Selected-core counted draw that clears each lane immediately before that lane's
 /// raster work. This preserves the clear-before-draw ordering while removing a
 /// separate full-frame parallel dispatch for callers that need both operations.
 pub fn drawCountedParallelCleared(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32, counters: *Counters) usize {
@@ -3697,7 +4198,7 @@ fn drawCountedParallelStaticReuseImpl(target: []u8, depth: []u8, width: u32, hei
     return written;
 }
 
-/// Two-core counted entry point for the deterministic, static vkcube target.
+/// Selected-core counted entry point for the deterministic, static vkcube target.
 /// The caller promises that the same target/depth attachments remain untouched
 /// between identical submissions.  In that case the completed framebuffer is
 /// already present and the expensive raster dispatch is safely skipped.
@@ -3716,20 +4217,20 @@ pub fn drawCountedParallelStaticReuseImmutable(target: []u8, depth: []u8, width:
     return drawCountedParallelStaticReuseImpl(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, true);
 }
 
-/// Two-core benchmark path without per-fragment instrumentation. The caller
+/// Selected-core benchmark path without per-fragment instrumentation. The caller
 /// can validate one counted frame separately and time this lower-overhead path.
 pub fn drawUncountedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) usize {
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, null, null, null, false);
 }
 
-/// Two-core uncounted draw with the same lane-local clear ordering as the
+/// Selected-core uncounted draw with the same lane-local clear ordering as the
 /// counted cleared entry point. Use it when counters have been validated on a
 /// separate sample and instrumentation should not perturb frame timing.
 pub fn drawUncountedParallelCleared(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32) usize {
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, null, false);
 }
 
-/// Two-core uncounted cleared draw that validates each lane against a known
+/// Selected-core uncounted cleared draw that validates each lane against a known
 /// reference buffer before that lane reports completion. This overlaps exact
 /// output validation with the other lane's raster work and retains a full
 /// attachment clear.
@@ -3737,7 +4238,7 @@ pub fn drawUncountedParallelClearedValidated(target: []u8, depth: []u8, width: u
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, expected_target, false);
 }
 
-/// Two-core uncounted draw for a stable full-frame command. The caller must
+/// Selected-core uncounted draw for a stable full-frame command. The caller must
 /// keep the target, depth, uniform, texture, and full-screen scissor unchanged
 /// between calls. It clears only spans that the validated previous frame could
 /// have modified, then validates those same lane-owned spans after raster work.
@@ -4047,6 +4548,55 @@ test "parallel draw clears follow raster stripe ownership" {
     for (0..w * h) |pixel| try std.testing.expectEqual(pattern, std.mem.readInt(u32, bytes[pixel * 4 ..][0..4], .little));
 }
 
+test "dynamic parallel bands cover odd-height rows without gaps" {
+    const height: u32 = 17;
+    for (2..5) |band_count| {
+        for (0..height) |row| {
+            const bounds = Rect{ .x = 0, .y = @intCast(row), .width = 1, .height = 1 };
+            var owners: usize = 0;
+            for (0..band_count) |band| {
+                if (boundsTouchParallelBand(bounds, height, band, band_count)) owners += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), owners);
+        }
+
+        const crossing = Rect{ .x = 0, .y = 7, .width = 1, .height = 4 };
+        var owners: usize = 0;
+        for (0..band_count) |band| {
+            if (boundsTouchParallelBand(crossing, height, band, band_count)) owners += 1;
+        }
+        try std.testing.expect(owners >= 1 and owners <= band_count);
+    }
+}
+
+test "Mosaic work plan keeps ordered region references and balanced owners" {
+    mosaic_plan_cache.valid = false;
+    var commands = [_]DrawCommand{ std.mem.zeroes(DrawCommand), std.mem.zeroes(DrawCommand) };
+    commands[0].geometry_revision = 1;
+    commands[1].geometry_revision = 2;
+    var prepared = [_]PreparedDraw{
+        .{ .bounds = .{ .x = 0, .y = 0, .width = 100, .height = 100 } },
+        .{ .bounds = .{ .x = 200, .y = 200, .width = 100, .height = 100 } },
+    };
+    var queues: [max_parallel_band_count]MosaicQueue = undefined;
+    const plan = buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, &queues) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 4), plan.items.len);
+    try std.testing.expectEqual(@as(usize, 5), plan.command_indices.len);
+    var owned_items: usize = 0;
+    for (queues[0..2]) |queue| owned_items += queue.item_count;
+    try std.testing.expectEqual(plan.items.len, owned_items);
+    for (plan.items) |item| {
+        const end = item.command_first + item.command_count;
+        try std.testing.expect(end <= plan.command_indices.len);
+        var previous: usize = 0;
+        for (plan.command_indices[item.command_first..end], 0..) |command_index, index| {
+            try std.testing.expect(command_index < prepared.len);
+            if (index != 0) try std.testing.expect(previous <= command_index);
+            previous = command_index;
+        }
+    }
+}
+
 test "prepared bounds conservatively cover transformed content" {
     const vertex = Vertex{ .screen = .{ 3.25, 4.5, 0.5 }, .clip_w = 1, .uv = .{ 0, 0 } };
     var prepared = PreparedDraw{ .count = 1 };
@@ -4275,9 +4825,13 @@ fn drawPreparedInlineCached(target: []u8, depth: []u8, width: u32, height: u32, 
     return drawPreparedBatchFastSerial(target, depth, width, height, &entry.prepared);
 }
 fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
-    return drawPreparedBatchFastImpl(color_only, target, depth, width, height, prepared, lane_index, parallel_band_count, tile_min, tile_max, tile_columns, tile_count);
+    return drawPreparedBatchFastImpl(color_only, target, depth, width, height, prepared, lane_index, parallelBandCount(), tile_min, tile_max, tile_columns, tile_count, null);
 }
 
 fn drawPreparedBatchFastSerial(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw) ?usize {
-    return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0);
+    return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0, null);
+}
+
+fn drawPreparedBatchFastRegion(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, clip: Rect) ?usize {
+    return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0, clip);
 }
