@@ -1907,6 +1907,8 @@ var batch_ownership_ready = std.atomic.Value(bool).init(false);
 var batch_tile_min: [max_batch_tiles * max_parallel_band_count]u32 = undefined;
 var batch_tile_max: [max_batch_tiles * max_parallel_band_count]u32 = undefined;
 var mosaic_work_items: [max_mosaic_work_items]MosaicWorkItem = undefined;
+var mosaic_region_item_lookup: [max_mosaic_work_items]usize = undefined;
+var mosaic_command_write_offsets: [max_mosaic_work_items]usize = undefined;
 const max_mosaic_command_refs: usize = max_batch_commands * 64;
 var mosaic_command_indices: [max_mosaic_command_refs]usize = undefined;
 var mosaic_cached_bounds: [max_batch_commands]Rect = undefined;
@@ -2012,6 +2014,30 @@ fn intersectRects(a: Rect, b: Rect) Rect {
     return .{ .x = @intCast(x0), .y = @intCast(y0), .width = @intCast(x1 - x0), .height = @intCast(y1 - y0) };
 }
 
+const MosaicRegionSpan = struct { x0: usize, x1: usize, y0: usize, y1: usize };
+
+fn mosaicRegionSpan(bounds: Rect, width: u32, height: u32, columns: usize, rows: usize) ?MosaicRegionSpan {
+    if (bounds.width == 0 or bounds.height == 0) return null;
+    const bounds_x0 = @as(i64, bounds.x);
+    const bounds_y0 = @as(i64, bounds.y);
+    const bounds_x1 = bounds_x0 + @as(i64, @intCast(bounds.width));
+    const bounds_y1 = bounds_y0 + @as(i64, @intCast(bounds.height));
+    const surface_width = @as(i64, @intCast(width));
+    const surface_height = @as(i64, @intCast(height));
+    if (bounds_x1 <= 0 or bounds_y1 <= 0 or bounds_x0 >= surface_width or bounds_y0 >= surface_height) return null;
+    const x0 = @max(bounds_x0, @as(i64, 0));
+    const y0 = @max(bounds_y0, @as(i64, 0));
+    const x1 = @min(bounds_x1, surface_width);
+    const y1 = @min(bounds_y1, surface_height);
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{
+        .x0 = @intCast(@as(usize, @intCast(x0)) / mosaic_region_size),
+        .x1 = @min(columns, (@as(usize, @intCast(x1)) - 1) / mosaic_region_size + 1),
+        .y0 = @intCast(@as(usize, @intCast(y0)) / mosaic_region_size),
+        .y1 = @min(rows, (@as(usize, @intCast(y1)) - 1) / mosaic_region_size + 1),
+    };
+}
+
 fn assignMosaicQueues(item_count: usize, queue_count: usize, queues: *[max_parallel_band_count]MosaicQueue) void {
     var topology: [max_parallel_band_count]cpu_locality.CpuTopology = undefined;
     const topology_count = cpu_locality.selectedCpuTopology(&topology);
@@ -2033,6 +2059,17 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
     const rows = (@as(usize, height) + mosaic_region_size - 1) / mosaic_region_size;
     const item_count = columns * rows;
     if (columns == 0 or rows == 0 or item_count > max_mosaic_work_items or prepared.len < command_count) return null;
+
+    // A large textured primitive split across supertiles can change the
+    // floating-point origin of the existing fast interpolator at the split.
+    // Keep the public Vulkan path exact until a segmented interpolator with a
+    // proven global origin exists; small glyph-like quads remain eligible and
+    // broad/global work is handled by the ordered batch fallback.
+    for (prepared[0..command_count], 0..) |command, command_index| {
+        if (command_index == 0) continue;
+        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+        if (command.batch_fast and (span.x1 - span.x0 > 1 or span.y1 - span.y0 > 1) and (command.bounds.width > 32 or command.bounds.height > 32)) return null;
+    }
 
     if (mosaic_plan_cache.valid and mosaic_plan_cache.command_count == command_count and mosaic_plan_cache.width == width and mosaic_plan_cache.height == height) {
         var same_bounds = true;
@@ -2060,29 +2097,43 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
     };
     std.mem.sort(MosaicWorkItem, mosaic_work_items[0..item_count], {}, mosaicWorkItemBefore);
 
-    var reference_count: usize = 0;
+    // Map the row-major region coordinate to the Morton-sorted work item. The
+    // old implementation scanned every command for every region twice. That
+    // made plan construction O(regions * commands), which is particularly
+    // visible for high-resolution Quake-style streams. Count and write by
+    // each command's bounded region span instead: O(commands * fanout).
     for (mosaic_work_items[0..item_count]) |*item| {
-        var count: usize = 0;
-        for (prepared[0..command_count]) |command| {
-            const overlap = intersectRects(command.bounds, item.rect);
-            if (overlap.width != 0 and overlap.height != 0) count += 1;
-        }
-        if (count > max_mosaic_command_refs - reference_count) return null;
+        item.command_first = 0;
+        item.command_count = 0;
+    }
+    for (mosaic_work_items[0..item_count], 0..) |item, sorted_index| {
+        const region_x = @as(usize, @intCast(item.rect.x)) / mosaic_region_size;
+        const region_y = @as(usize, @intCast(item.rect.y)) / mosaic_region_size;
+        mosaic_region_item_lookup[region_y * columns + region_x] = sorted_index;
+    }
+    for (prepared[0..command_count]) |command| {
+        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+        for (span.y0..span.y1) |region_y| for (span.x0..span.x1) |region_x| {
+            const region_item_index = mosaic_region_item_lookup[region_y * columns + region_x];
+            mosaic_work_items[region_item_index].command_count += 1;
+        };
+    }
+    var reference_count: usize = 0;
+    for (mosaic_work_items[0..item_count], 0..) |*item, sorted_index| {
+        if (item.command_count > max_mosaic_command_refs - reference_count) return null;
         item.command_first = reference_count;
-        item.command_count = count;
-        reference_count += count;
+        mosaic_command_write_offsets[sorted_index] = reference_count;
+        reference_count += item.command_count;
     }
-    for (mosaic_work_items[0..item_count]) |item| {
-        var output = item.command_first;
-        for (prepared[0..command_count], 0..) |command, command_index| {
-            const overlap = intersectRects(command.bounds, item.rect);
-            if (overlap.width != 0 and overlap.height != 0) {
-                mosaic_command_indices[output] = command_index;
-                output += 1;
-            }
-        }
+    for (prepared[0..command_count], 0..) |command, command_index| {
+        const span = mosaicRegionSpan(command.bounds, width, height, columns, rows) orelse continue;
+        for (span.y0..span.y1) |region_y| for (span.x0..span.x1) |region_x| {
+            const region_item_index = mosaic_region_item_lookup[region_y * columns + region_x];
+            const output = mosaic_command_write_offsets[region_item_index];
+            mosaic_command_indices[output] = command_index;
+            mosaic_command_write_offsets[region_item_index] = output + 1;
+        };
     }
-
     for (prepared[0..command_count], 0..) |command, index| mosaic_cached_bounds[index] = command.bounds;
     mosaic_plan_cache = .{ .valid = true, .command_count = command_count, .width = width, .height = height, .item_count = item_count, .command_ref_count = reference_count };
     assignMosaicQueues(item_count, queue_count, queues);
@@ -2703,17 +2754,26 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
     while (y < last_y) : (y += 1) {
         const span = spans[@intCast(y)];
         if (span.last <= span.first) continue;
-        const first_x: i32 = @max(@as(i32, @intCast(span.first)), raster.min_x, clip_min_x);
+        const unclipped_first_x: i32 = @max(@as(i32, @intCast(span.first)), raster.min_x);
+        const first_x: i32 = @max(unclipped_first_x, clip_min_x);
         const last_x: i32 = @min(@as(i32, @intCast(span.last)), raster.max_x, clip_max_x);
         if (first_x >= last_x) continue;
         const row_offset = @as(usize, @intCast(y)) * @as(usize, width);
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
-        const first_sample = [2]f32{ @as(f32, @floatFromInt(first_x)) + 0.5, y_offset };
+        // A region clip must not change the floating-point origin of the
+        // affine UV walk. Starting at the clipped x can round differently
+        // from the unbounded draw after a long span, which changes texel
+        // selection at region boundaries. Reproduce the full draw's origin,
+        // then advance by the skipped pixels before the first store.
+        const first_sample = [2]f32{ @as(f32, @floatFromInt(unclipped_first_x)) + 0.5, y_offset };
         const b0 = edge(raster.p1, raster.p2, first_sample) * raster.inverse_area;
         const b1 = edge(raster.p2, raster.p0, first_sample) * raster.inverse_area;
         const b2 = edge(raster.p0, raster.p1, first_sample) * raster.inverse_area;
         var stepped_u_over_w = b0 * raster.u_over_w[0] + b1 * raster.u_over_w[1] + b2 * raster.u_over_w[2];
         var stepped_v_over_w = b0 * raster.v_over_w[0] + b1 * raster.v_over_w[1] + b2 * raster.v_over_w[2];
+        const skipped_pixels: f32 = @floatFromInt(first_x - unclipped_first_x);
+        stepped_u_over_w += raster.u_over_w_dx * skipped_pixels;
+        stepped_v_over_w += raster.v_over_w_dx * skipped_pixels;
         if (raster.v_over_w_dx == 0) {
             const sampled_v = stepped_v_over_w * raster.flat_reciprocal_w;
             const texture_y = unitTextureCoordinate16(sampled_v);

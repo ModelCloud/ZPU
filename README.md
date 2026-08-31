@@ -459,13 +459,15 @@ terminal and game frames. These are workload-specific measurements; the
 canonical fixed-FNV vkcube benchmark remains separate and unchanged.
 
 The Vulkan-facing submission boundary has a focused benchmark as well. It
-models a Vulkan-backed WezTerm terminal stream, a Dear ImGui Vulkan desktop
-application, and a complex Khronos Vulkan sample scene, then compares
-per-command dispatch, the old 256-command chunking, and the existing Vulkan
-ABI's adaptive private Mosaic executor. Large streams use immutable prepared
-geometry, 256×256-pixel Morton supertiles, per-core queues, and same-LLC/NUMA
-stealing; small UI and scene streams remain on the already-tuned prepared
-batch kernel when that is faster:
+models a Vulkan-backed WezTerm terminal, a Dear ImGui Vulkan desktop
+application, a complex Khronos Vulkan sample scene, and game-shaped streams
+based on vkQuake, vkQuake2, VkDoom, a Vulkan voxel game, and a Vulkan
+platformer. It compares per-command dispatch, the old 256-command chunking,
+and the existing Vulkan ABI's adaptive private Mosaic executor. Large streams
+use immutable prepared geometry, static-geometry revision reuse, 256×256-pixel
+Morton supertiles, per-core queues, and same-LLC/NUMA stealing; small UI and
+scene streams remain on the already-tuned prepared batch kernel when that is
+faster:
 
 ```sh
 ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
@@ -473,8 +475,8 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
 ```
 
 See [`docs/vulkan-abi-benchmarks.md`](docs/vulkan-abi-benchmarks.md) for the
-open-source references, stream sizes, ABI eligibility contract, oracle tests,
-and the 2/3/4-core scaling sweep.
+open-source references, stream sizes, static/dynamic update model, ABI
+eligibility contract, oracle tests, and the 2/3/4-core scaling sweep.
 
 The physical Mosaic scalar scheduler has a separate topology-aware gate. It
 uses realistic terminal, desktop UI, and complex-demo geometry; compares every
