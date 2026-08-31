@@ -652,6 +652,10 @@ triangle path:
   resource reflection and execute as
   deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary
   MSL remains fail-closed.
+  Legacy compute-pipeline creation also carries the same canonical CPU/source
+  binding reflection onto the pipeline object on SDKs that expose the Metal 4
+  reflection property; reflection therefore does not depend on selecting the
+  Metal 4 compiler factory.
   Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
   descriptor, so supported unspecialized blend state can be resolved through

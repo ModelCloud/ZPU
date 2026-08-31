@@ -1157,7 +1157,20 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         BOOL reflection_ok = YES;
         if (@available(macOS 26.0, iOS 26.0, *)) {
             MTLFunctionReflection *reflection = [adapter_library reflectionForFunctionWithName:cases[case_index].name];
-            reflection_ok = reflection != nil && reflection.bindings.count == 3;
+            MTLComputePipelineReflection *pipeline_reflection = adapter_pipeline.reflection;
+            reflection_ok = reflection != nil && reflection.bindings.count == 3 &&
+                pipeline_reflection != nil && pipeline_reflection.bindings.count == reflection.bindings.count;
+            if (reflection_ok) {
+                for (NSUInteger binding_index = 0; binding_index < reflection.bindings.count; ++binding_index) {
+                    id<MTLBinding> function_binding = reflection.bindings[binding_index];
+                    id<MTLBinding> pipeline_binding = pipeline_reflection.bindings[binding_index];
+                    reflection_ok = reflection_ok &&
+                        [function_binding.name isEqualToString:pipeline_binding.name] &&
+                        function_binding.type == pipeline_binding.type &&
+                        function_binding.access == pipeline_binding.access &&
+                        function_binding.index == pipeline_binding.index;
+                }
+            }
         }
         const BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&

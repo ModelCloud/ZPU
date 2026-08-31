@@ -18339,6 +18339,22 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
             zpu_set_error(error, @"ZPU CPU Metal has no registered CPU implementation for this compute function");
             return nil;
         }
+        /* Metal 4 exposes compute-pipeline reflection through the pipeline
+         * object even when the state was created through the legacy factory.
+         * Source-lowered functions carry the binding reflection produced by
+         * the CPU parser; registered kernels use the same canonical profile
+         * reflection used by the Metal 4 compiler path. Keep this metadata
+         * attached to the legacy state as well so callers do not observe a
+         * reflection gap merely because they used the older constructor. */
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            if (cpuFunction->_functionReflection != nil) {
+                _reflection = zpu_source_compute_pipeline_reflection(
+                    (MTLFunctionReflection *)cpuFunction->_functionReflection);
+            }
+            if (_reflection == nil && _kernel != 0) {
+                _reflection = zpu_compute_pipeline_reflection(_kernel);
+            }
+        }
     }
     if (error != NULL) *error = nil;
     return self;
