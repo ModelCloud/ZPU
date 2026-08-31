@@ -17922,6 +17922,22 @@ int main(void) {
                     native_reflection.bindings.count == expected_binding_count &&
                     adapter_reflection.bindings.count == expected_binding_count;
             }
+            /* Every function exported by the CPU library must have a
+             * reflection object.  This covers both the fixed profiles and
+             * source-lowered aliases, whose implementation name is different
+             * from the public function name.  Keep this exhaustive check
+             * separate from the native comparison above: Apple may omit
+             * reflection for a native function on a particular SDK, but a
+             * ZPU-owned registered function must never silently return nil. */
+            for (NSString *registered_name in adapter_library.functionNames) {
+                MTLFunctionReflection *registered_reflection =
+                    [adapter_library reflectionForFunctionWithName:registered_name];
+                if (registered_reflection == nil) {
+                    fprintf(stderr, "metal-pixel: missing CPU function reflection for %s\n",
+                            registered_name.UTF8String);
+                    adapter_function_reflection_ok = NO;
+                }
+            }
             MTLFunctionReflection *adapter_trace_reflection =
                 [adapter_library reflectionForFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
             adapter_trace_reflection_ok = adapter_trace_reflection != nil &&
