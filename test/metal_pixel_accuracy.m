@@ -5307,6 +5307,126 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         return 165;
     }
 
+    /* An empty AABB child still carries its geometry kind in the CPU payload.
+     * The parent instance must therefore serialize an empty AABB payload
+     * instead of falling through to the triangle serializer. */
+    MTLAccelerationStructureBoundingBoxGeometryDescriptor *empty_geometry =
+        [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
+    empty_geometry.boundingBoxBuffer = adapter_bounds;
+    empty_geometry.boundingBoxBufferOffset = 0;
+    empty_geometry.boundingBoxStride = 6 * sizeof(float);
+    empty_geometry.boundingBoxCount = 0;
+    MTLPrimitiveAccelerationStructureDescriptor *empty_child_descriptor =
+        [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    empty_child_descriptor.geometryDescriptors = @[empty_geometry];
+    MTLAccelerationStructureSizes empty_child_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:empty_child_descriptor];
+    id<MTLAccelerationStructure> empty_child = empty_child_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:empty_child_sizes.accelerationStructureSize];
+    id<MTLBuffer> empty_child_scratch = [adapter_device
+        newBufferWithLength:empty_child_sizes.buildScratchBufferSize == 0 ? 1 : empty_child_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> empty_child_build_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> empty_child_build_encoder =
+        [empty_child_build_command_buffer accelerationStructureCommandEncoder];
+    if (empty_geometry == nil || empty_child_descriptor == nil || empty_child == nil ||
+        empty_child_scratch == nil || empty_child_build_command_buffer == nil || empty_child_build_encoder == nil) {
+        fail_with_error("legacy CPU empty AABB child allocation failed", adapter_error);
+        return 166;
+    }
+    [empty_child_build_encoder buildAccelerationStructure:empty_child descriptor:empty_child_descriptor
+                                             scratchBuffer:empty_child_scratch scratchBufferOffset:0];
+    [empty_child_build_encoder endEncoding];
+    [empty_child_build_command_buffer commit];
+    [empty_child_build_command_buffer waitUntilCompleted];
+
+    MTLAccelerationStructureInstanceDescriptor empty_instance = instance;
+    id<MTLBuffer> empty_instance_buffer =
+        [adapter_device newBufferWithBytes:&empty_instance length:sizeof(empty_instance)
+                                   options:MTLResourceStorageModeShared];
+    MTLInstanceAccelerationStructureDescriptor *empty_instance_descriptor =
+        [MTLInstanceAccelerationStructureDescriptor descriptor];
+    empty_instance_descriptor.instanceDescriptorBuffer = empty_instance_buffer;
+    empty_instance_descriptor.instanceDescriptorBufferOffset = 0;
+    empty_instance_descriptor.instanceDescriptorStride = sizeof(empty_instance);
+    empty_instance_descriptor.instanceCount = 1;
+    empty_instance_descriptor.instancedAccelerationStructures = @[empty_child];
+    MTLAccelerationStructureSizes empty_instance_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:empty_instance_descriptor];
+    id<MTLAccelerationStructure> empty_instance_acceleration_structure =
+        empty_instance_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:empty_instance_sizes.accelerationStructureSize];
+    id<MTLBuffer> empty_instance_scratch = [adapter_device
+        newBufferWithLength:empty_instance_sizes.buildScratchBufferSize == 0 ? 1 : empty_instance_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> empty_instance_build_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> empty_instance_build_encoder =
+        [empty_instance_build_command_buffer accelerationStructureCommandEncoder];
+    if (empty_instance_buffer == nil || empty_instance_descriptor == nil ||
+        empty_instance_acceleration_structure == nil || empty_instance_scratch == nil ||
+        empty_instance_build_command_buffer == nil || empty_instance_build_encoder == nil) {
+        fail_with_error("legacy CPU empty AABB instance allocation failed", adapter_error);
+        return 167;
+    }
+    [empty_instance_build_encoder buildAccelerationStructure:empty_instance_acceleration_structure
+                                                   descriptor:empty_instance_descriptor
+                                                scratchBuffer:empty_instance_scratch scratchBufferOffset:0];
+    [empty_instance_build_encoder endEncoding];
+    [empty_instance_build_command_buffer commit];
+    [empty_instance_build_command_buffer waitUntilCompleted];
+
+    const float empty_expected_bounds[] = {2.0f, 2.0f, 2.0f, 3.0f, 3.0f, 3.0f};
+    id<MTLBuffer> native_empty_bounds =
+        [native_device newBufferWithBytes:empty_expected_bounds length:sizeof(empty_expected_bounds)
+                                   options:MTLResourceStorageModeShared];
+    id<MTLTexture> native_empty_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_empty_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLCommandBuffer> native_empty_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_empty_encoder =
+        [native_empty_command_buffer computeCommandEncoder];
+    [native_empty_encoder setComputePipelineState:native_pipeline];
+    [native_empty_encoder setBuffer:native_empty_bounds offset:0 atIndex:0];
+    [native_empty_encoder setTexture:native_empty_texture atIndex:0];
+    [native_empty_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                  threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [native_empty_encoder endEncoding];
+    id<MTLCommandBuffer> adapter_empty_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> adapter_empty_encoder =
+        [adapter_empty_command_buffer computeCommandEncoder];
+    [adapter_empty_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_empty_encoder setAccelerationStructure:empty_instance_acceleration_structure atBufferIndex:0];
+    [adapter_empty_encoder setTexture:adapter_empty_texture atIndex:0];
+    [adapter_empty_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+                   threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [adapter_empty_encoder endEncoding];
+    [native_empty_command_buffer commit];
+    [adapter_empty_command_buffer commit];
+    [native_empty_command_buffer waitUntilCompleted];
+    [adapter_empty_command_buffer waitUntilCompleted];
+    uint8_t native_empty_pixels[byte_count] = {0};
+    uint8_t adapter_empty_pixels[byte_count] = {0};
+    [native_empty_texture getBytes:native_empty_pixels bytesPerRow:width * 4
+                        fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_empty_texture getBytes:adapter_empty_pixels bytesPerRow:width * 4
+                         fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    const BOOL empty_exact = empty_child_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        empty_instance_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        native_empty_bounds != nil && native_empty_texture != nil && adapter_empty_texture != nil &&
+        native_empty_command_buffer != nil && native_empty_encoder != nil &&
+        native_empty_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_empty_command_buffer != nil && adapter_empty_encoder != nil &&
+        adapter_empty_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        memcmp(native_empty_pixels, adapter_empty_pixels, byte_count) == 0;
+    if (!empty_exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_empty_pixels[mismatch] == adapter_empty_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: legacy CPU empty AABB instance/native oracle mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_empty_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_empty_pixels[mismatch] : 0);
+        fail_with_error("legacy CPU empty AABB instance trace command failed", adapter_error ?: native_error);
+        return 168;
+    }
+
     if (@available(macOS 14.0, iOS 17.0, *)) {
         uint32_t indirect_instance_count = 1;
         id<MTLBuffer> indirect_instance_count_buffer =

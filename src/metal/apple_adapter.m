@@ -22524,7 +22524,7 @@ static BOOL zpu_cpu_acceleration_write_instance_payload(
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 ||
         !zpu_cpu_acceleration_instance_descriptor_size(descriptor, &descriptorSize)) return NO;
     NSUInteger aabbCount = 0;
-    if (zpu_cpu_acceleration_instance_aabb_count(descriptor, &aabbCount) && aabbCount != 0) {
+    if (zpu_cpu_acceleration_instance_aabb_count(descriptor, &aabbCount)) {
         if (aabbCount > UINT32_MAX ||
             aabbCount > (target->_size - 256) / sizeof(zpu_metal_cpu_acceleration_aabb) ||
             aabbCount > (target->_size - (256 + aabbCount * sizeof(zpu_metal_cpu_acceleration_aabb))) /
@@ -22764,7 +22764,7 @@ static BOOL zpu_cpu_acceleration_write_metal4_aabb_instance_payload(
     ZPUAccelerationStructure *target, MTL4InstanceAccelerationStructureDescriptor *descriptor,
     NSUInteger aabbCount) {
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 ||
-        descriptor == nil || aabbCount == 0 || aabbCount > UINT32_MAX) return NO;
+        descriptor == nil || aabbCount > UINT32_MAX) return NO;
     ZPUBuffer *instanceBuffer = nil;
     NSUInteger instanceOffset = 0;
     NSUInteger instanceRangeLength = 0;
@@ -22829,7 +22829,7 @@ static BOOL zpu_cpu_acceleration_write_metal4_instance_payload(
     ZPUAccelerationStructure *target, MTL4InstanceAccelerationStructureDescriptor *descriptor) {
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 || descriptor == nil) return NO;
     NSUInteger aabbCount = 0;
-    if (zpu_cpu_acceleration_metal4_instance_aabb_count(descriptor, &aabbCount) && aabbCount != 0) {
+    if (zpu_cpu_acceleration_metal4_instance_aabb_count(descriptor, &aabbCount)) {
         return zpu_cpu_acceleration_write_metal4_aabb_instance_payload(target, descriptor, aabbCount);
     }
     ZPUBuffer *instanceBuffer = nil;
@@ -23194,6 +23194,7 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
         ![descriptor isKindOfClass:[MTLPrimitiveAccelerationStructureDescriptor class]]) return NO;
     NSUInteger triangleCount = 0;
     NSUInteger aabbCount = 0;
+    BOOL hasAabbs = NO;
     for (MTLAccelerationStructureGeometryDescriptor *geometry in
          ((MTLPrimitiveAccelerationStructureDescriptor *)descriptor).geometryDescriptors) {
         if (!zpu_cpu_acceleration_legacy_geometry_cpu_payload_supported(geometry)) return NO;
@@ -23202,6 +23203,7 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
             if (count > SIZE_MAX - triangleCount) return NO;
             triangleCount += count;
         } else {
+            hasAabbs = YES;
             const NSUInteger count = ((MTLAccelerationStructureBoundingBoxGeometryDescriptor *)geometry).boundingBoxCount;
             if (count > SIZE_MAX - aabbCount) return NO;
             aabbCount += count;
@@ -23212,16 +23214,16 @@ static BOOL zpu_cpu_acceleration_write_payload(ZPUAccelerationStructure *target,
     const NSUInteger aabbOffset = 256 + triangleCount * sizeof(zpu_metal_cpu_acceleration_triangle);
     if (aabbOffset > target->_size || aabbCount > (target->_size - aabbOffset) /
             sizeof(zpu_metal_cpu_acceleration_aabb) ||
-        (aabbCount != 0 && aabbOffset > UINT32_MAX)) return NO;
+        (hasAabbs && aabbOffset > UINT32_MAX)) return NO;
     memset(target->_storage.contents, 0, target->_size);
     zpu_metal_cpu_acceleration_structure_header header = {
         .magic = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
         .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
         .triangle_count = (uint32_t)triangleCount,
         .flags = (triangleCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLES) |
-            (aabbCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS),
+            (!hasAabbs ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS),
         .triangle_offset = 256,
-        .reserved = {0, aabbCount == 0 ? 0u : (uint32_t)aabbOffset, (uint32_t)aabbCount},
+        .reserved = {0, hasAabbs ? (uint32_t)aabbOffset : 0u, (uint32_t)aabbCount},
     };
     memcpy(target->_storage.contents, &header, sizeof(header));
     NSUInteger destinationIndex = 0;
@@ -23608,6 +23610,7 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
     if (!zpu_acceleration_storage_range_valid(target, target->_size) || target->_size < 256 || descriptor == nil) return NO;
     NSUInteger triangleCount = 0;
     NSUInteger aabbCount = 0;
+    BOOL hasAabbs = NO;
     for (MTL4AccelerationStructureGeometryDescriptor *geometry in descriptor.geometryDescriptors) {
         if (!zpu_cpu_acceleration_metal4_geometry_cpu_payload_supported(geometry)) return NO;
         if ([geometry isKindOfClass:[MTL4AccelerationStructureTriangleGeometryDescriptor class]]) {
@@ -23615,6 +23618,7 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
             if (count > SIZE_MAX - triangleCount) return NO;
             triangleCount += count;
         } else if ([geometry isKindOfClass:[MTL4AccelerationStructureBoundingBoxGeometryDescriptor class]]) {
+            hasAabbs = YES;
             const NSUInteger count = ((MTL4AccelerationStructureBoundingBoxGeometryDescriptor *)geometry).boundingBoxCount;
             if (count > SIZE_MAX - aabbCount) return NO;
             aabbCount += count;
@@ -23625,16 +23629,18 @@ static BOOL zpu_cpu_acceleration_write_metal4_payload(
     if (triangleCount > UINT32_MAX || aabbCount > UINT32_MAX ||
         triangleCount > (target->_size - 256) / sizeof(zpu_metal_cpu_acceleration_triangle)) return NO;
     const NSUInteger aabbOffset = 256 + triangleCount * sizeof(zpu_metal_cpu_acceleration_triangle);
-    if (aabbCount > (target->_size - aabbOffset) / sizeof(zpu_metal_cpu_acceleration_aabb)) return NO;
+    if (aabbOffset > target->_size ||
+        (hasAabbs && aabbOffset > UINT32_MAX) ||
+        aabbCount > (target->_size - aabbOffset) / sizeof(zpu_metal_cpu_acceleration_aabb)) return NO;
     memset(target->_storage.contents, 0, target->_size);
     zpu_metal_cpu_acceleration_structure_header header = {
         .magic = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC,
         .version = ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION,
         .triangle_count = (uint32_t)triangleCount,
         .flags = (triangleCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLES) |
-            (aabbCount == 0 ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS),
+            (!hasAabbs ? 0u : ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_AABBS),
         .triangle_offset = 256,
-        .reserved = {0, aabbCount == 0 ? 0u : (uint32_t)aabbOffset, (uint32_t)aabbCount},
+        .reserved = {0, hasAabbs ? (uint32_t)aabbOffset : 0u, (uint32_t)aabbCount},
     };
     memcpy(target->_storage.contents, &header, sizeof(header));
     NSUInteger destinationIndex = 0;
