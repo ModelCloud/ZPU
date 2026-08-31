@@ -354,6 +354,24 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_ml_sub_f32_oracle(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
+    "kernel void zpu_cpu_ml_sub_u8_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = uchar(left[gid] - right[gid]); }\n"
+    "kernel void zpu_cpu_ml_sub_i8_oracle(device const char *left [[buffer(0)]], "
+    "device const char *right [[buffer(1)]], device char *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = (char)((short)left[gid] - (short)right[gid]); }\n"
+    "kernel void zpu_cpu_ml_sub_u16_oracle(device const ushort *left [[buffer(0)]], "
+    "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = (ushort)(uint(left[gid]) - uint(right[gid])); }\n"
+    "kernel void zpu_cpu_ml_sub_i16_oracle(device const short *left [[buffer(0)]], "
+    "device const short *right [[buffer(1)]], device short *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = (short)((int)left[gid] - (int)right[gid]); }\n"
+    "kernel void zpu_cpu_ml_sub_u32_oracle(device const uint *left [[buffer(0)]], "
+    "device const uint *right [[buffer(1)]], device uint *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
+    "kernel void zpu_cpu_ml_sub_i32_oracle(device const int *left [[buffer(0)]], "
+    "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
     "kernel void zpu_cpu_ml_add_i32_oracle(device const int *left [[buffer(0)]], "
     "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] + right[gid]; }\n"
@@ -385,6 +403,26 @@ static const char *const kShaderSource =
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; "
     "output[gid] = zpu_cpu_float_to_bfloat16(zpu_cpu_bfloat16_to_float(left[gid]) * "
     "zpu_cpu_bfloat16_to_float(right[gid])); }\n"
+    "kernel void zpu_cpu_ml_sub_f16_oracle(device const half *left [[buffer(0)]], "
+    "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
+    "kernel void zpu_cpu_ml_sub_bf16_oracle(device const ushort *left [[buffer(0)]], "
+    "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; "
+    "output[gid] = zpu_cpu_float_to_bfloat16(zpu_cpu_bfloat16_to_float(left[gid]) - "
+    "zpu_cpu_bfloat16_to_float(right[gid])); }\n"
+    "kernel void zpu_cpu_ml_sub_i4_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; "
+    "uint value = 0; for (uint shift = 0; shift < 8; shift += 4) { "
+    "int l = int((left[gid] >> shift) & 0xfu); int r = int((right[gid] >> shift) & 0xfu); "
+    "if (l >= 8) l -= 16; if (r >= 8) r -= 16; "
+    "value |= uint((l - r) & 0xf) << shift; } output[gid] = uchar(value); }\n"
+    "kernel void zpu_cpu_ml_sub_u4_oracle(device const uchar *left [[buffer(0)]], "
+    "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; "
+    "output[gid] = uchar((uint(left[gid] & 0xfu) - uint(right[gid] & 0xfu)) & 0xfu) | "
+    "uchar(((uint(left[gid] >> 4) - uint(right[gid] >> 4)) & 0xfu) << 4); }\n"
     "kernel void zpu_cpu_ml_matmul_bf16_oracle(device const ushort *left [[buffer(0)]], "
     "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
     "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= 3 || gid.y >= 2) return; "
@@ -13943,29 +13981,182 @@ typedef struct {
     const char *name;
     const char *oracleName;
     MTLTensorDataType dataType;
-    NSUInteger elementSize;
-    NSUInteger elementBits;
-} ZPUIntegerMultiplyProfile;
+} ZPUFloatElementwiseProfile;
 
-/* Native Metal is used only as the arithmetic oracle here. Every adapter
- * tensor, argument table, command buffer, and multiply operation remains
- * CPU/ZPU-owned. The post-dispatch left-tensor write also proves that the
- * adapter observes resource bytes at commit time rather than executing an
- * Apple command encoder during recording. */
-static int test_metal4_cpu_integer_multiply_profiles(
+/* Half and bfloat16 subtraction are compared as raw tensor bytes. The input
+ * values are powers of two, so both the native oracle and the CPU/ZPU path
+ * produce exactly representable results without a tolerance-based escape. */
+static int test_metal4_cpu_float_subtract_profiles(
     id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
     id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
     id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
     id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
-    const ZPUIntegerMultiplyProfile profiles[] = {
-        {"zpu_cpu_ml_mul_u8", "zpu_cpu_ml_mul_u8_oracle", MTLTensorDataTypeUInt8, 1, 8},
-        {"zpu_cpu_ml_mul_i8", "zpu_cpu_ml_mul_i8_oracle", MTLTensorDataTypeInt8, 1, 8},
-        {"zpu_cpu_ml_mul_u16", "zpu_cpu_ml_mul_u16_oracle", MTLTensorDataTypeUInt16, 2, 16},
-        {"zpu_cpu_ml_mul_i16", "zpu_cpu_ml_mul_i16_oracle", MTLTensorDataTypeInt16, 2, 16},
-        {"zpu_cpu_ml_mul_u32", "zpu_cpu_ml_mul_u32_oracle", MTLTensorDataTypeUInt32, 4, 32},
-        {"zpu_cpu_ml_mul_i32", "zpu_cpu_ml_mul_i32_oracle", MTLTensorDataTypeInt32, 4, 32},
-        {"zpu_cpu_ml_mul_i4", "zpu_cpu_ml_mul_i4_oracle", MTLTensorDataTypeInt4, 1, 4},
-        {"zpu_cpu_ml_mul_u4", "zpu_cpu_ml_mul_u4_oracle", MTLTensorDataTypeUInt4, 1, 4},
+    const ZPUFloatElementwiseProfile profiles[] = {
+        {"zpu_cpu_ml_sub_f16", "zpu_cpu_ml_sub_f16_oracle", MTLTensorDataTypeFloat16},
+        {"zpu_cpu_ml_sub_bf16", "zpu_cpu_ml_sub_bf16_oracle", MTLTensorDataTypeBFloat16},
+    };
+    const uint16_t leftValues[2][12] = {
+        {0x3c00u, 0x4000u, 0x4400u, 0x4800u, 0x4c00u, 0x5000u,
+         0x5400u, 0x5800u, 0x5c00u, 0x6000u, 0x6400u, 0x6800u},
+        {0x3f80u, 0x4000u, 0x4080u, 0x4100u, 0x4180u, 0x4200u,
+         0x4280u, 0x4300u, 0x4380u, 0x4400u, 0x4480u, 0x4500u},
+    };
+    const uint16_t rightValues[2][12] = {
+        {0x3800u, 0x3c00u, 0x4000u, 0x4400u, 0x4800u, 0x4c00u,
+         0x5000u, 0x5400u, 0x5800u, 0x5c00u, 0x6000u, 0x6400u},
+        {0x3f00u, 0x3f80u, 0x4000u, 0x4080u, 0x4100u, 0x4180u,
+         0x4200u, 0x4280u, 0x4300u, 0x4380u, 0x4400u, 0x4480u},
+    };
+    MTLTensorExtents *dimensions =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){4, 3}];
+    MTLTensorExtents *strides =
+        [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){1, 4}];
+    id<MTLCommandQueue> nativeQueue = [nativeDevice newCommandQueue];
+    if (dimensions == nil || strides == nil || nativeQueue == nil || adapterCompiler == nil ||
+        adapterQueue == nil || adapterAllocator == nil || adapterHeap == nil) return 182;
+
+    for (NSUInteger profileIndex = 0;
+         profileIndex < sizeof(profiles) / sizeof(profiles[0]); ++profileIndex) {
+        const ZPUFloatElementwiseProfile profile = profiles[profileIndex];
+        const NSUInteger valueIndex = profileIndex;
+        uint16_t initialLeft[12] = {0};
+        uint16_t sentinel[12] = {0};
+        for (NSUInteger index = 0; index < 12; ++index) {
+            initialLeft[index] = 0x7bffu;
+            sentinel[index] = 0xa5a5u;
+        }
+
+        NSError *adapterError = nil;
+        MTL4LibraryFunctionDescriptor *functionDescriptor = [MTL4LibraryFunctionDescriptor new];
+        functionDescriptor.library = adapterLibrary;
+        functionDescriptor.name = [NSString stringWithUTF8String:profile.name];
+        MTL4MachineLearningPipelineDescriptor *pipelineDescriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        pipelineDescriptor.machineLearningFunctionDescriptor = functionDescriptor;
+        [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:0];
+        [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:1];
+        [pipelineDescriptor setInputDimensions:dimensions atBufferIndex:2];
+        id<MTL4MachineLearningPipelineState> pipeline =
+            [adapterCompiler newMachineLearningPipelineStateWithDescriptor:pipelineDescriptor
+                                                                       error:&adapterError];
+        MTLTensorDescriptor *tensorDescriptor = [MTLTensorDescriptor new];
+        tensorDescriptor.dimensions = dimensions;
+        tensorDescriptor.dataType = profile.dataType;
+        tensorDescriptor.usage = MTLTensorUsageMachineLearning;
+        tensorDescriptor.resourceOptions = MTLResourceStorageModeShared;
+        tensorDescriptor.storageMode = MTLStorageModeShared;
+        id<MTLTensor> left = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+        id<MTLTensor> right = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+        id<MTLTensor> output = [adapterDevice newTensorWithDescriptor:tensorDescriptor error:&adapterError];
+        if (left != nil) [left replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                      sliceDimensions:dimensions withBytes:initialLeft strides:strides];
+        if (right != nil) [right replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                        sliceDimensions:dimensions withBytes:rightValues[valueIndex] strides:strides];
+        if (output != nil) [output replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                         sliceDimensions:dimensions withBytes:sentinel strides:strides];
+        MTL4ArgumentTableDescriptor *tableDescriptor = [MTL4ArgumentTableDescriptor new];
+        tableDescriptor.maxBufferBindCount = 3;
+        id<MTL4ArgumentTable> table = [adapterDevice newArgumentTableWithDescriptor:tableDescriptor
+                                                                                  error:&adapterError];
+        if (table != nil && left != nil && right != nil && output != nil) {
+            [table setResource:left.gpuResourceID atBufferIndex:0];
+            [table setResource:right.gpuResourceID atBufferIndex:1];
+            [table setResource:output.gpuResourceID atBufferIndex:2];
+        }
+        id<MTL4CommandBuffer> commandBuffer = [adapterDevice newCommandBuffer];
+        [commandBuffer beginCommandBufferWithAllocator:adapterAllocator];
+        id<MTL4MachineLearningCommandEncoder> encoder = [commandBuffer machineLearningCommandEncoder];
+        [encoder setPipelineState:pipeline];
+        [encoder setArgumentTable:table];
+        [encoder dispatchNetworkWithIntermediatesHeap:adapterHeap];
+        if (left != nil) [left replaceSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                                      sliceDimensions:dimensions withBytes:leftValues[valueIndex] strides:strides];
+        [encoder endEncoding];
+        [commandBuffer endCommandBuffer];
+        id<MTL4CommandBuffer> commandBuffers[] = {commandBuffer};
+        MTL4CommitOptions *commitOptions = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *feedbackError = nil;
+        [commitOptions addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            feedbackError = feedback.error;
+        }];
+        [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+        uint16_t adapterValues[12] = {0};
+        if (output != nil) [output getBytes:adapterValues strides:strides
+                            fromSliceOrigin:[[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){0, 0}]
+                             sliceDimensions:dimensions];
+
+        NSError *nativeError = nil;
+        id<MTLFunction> nativeFunction =
+            [nativeLibrary newFunctionWithName:[NSString stringWithUTF8String:profile.oracleName]];
+        id<MTLComputePipelineState> nativePipeline =
+            [nativeDevice newComputePipelineStateWithFunction:nativeFunction error:&nativeError];
+        id<MTLBuffer> nativeLeft = [nativeDevice newBufferWithBytes:leftValues[valueIndex]
+                                                              length:sizeof(leftValues[valueIndex])
+                                                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> nativeRight = [nativeDevice newBufferWithBytes:rightValues[valueIndex]
+                                                               length:sizeof(rightValues[valueIndex])
+                                                              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> nativeOutput = [nativeDevice newBufferWithLength:sizeof(adapterValues)
+                                                                  options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> nativeCommandBuffer = [nativeQueue commandBuffer];
+        id<MTLComputeCommandEncoder> nativeEncoder = [nativeCommandBuffer computeCommandEncoder];
+        [nativeEncoder setComputePipelineState:nativePipeline];
+        [nativeEncoder setBuffer:nativeLeft offset:0 atIndex:0];
+        [nativeEncoder setBuffer:nativeRight offset:0 atIndex:1];
+        [nativeEncoder setBuffer:nativeOutput offset:0 atIndex:2];
+        [nativeEncoder dispatchThreads:MTLSizeMake(12, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [nativeEncoder endEncoding];
+        [nativeCommandBuffer commit];
+        [nativeCommandBuffer waitUntilCompleted];
+        if (adapterError != nil || pipeline == nil || left == nil || right == nil || output == nil ||
+            table == nil || commandBuffer == nil || encoder == nil || feedbackError != nil ||
+            nativeFunction == nil || nativePipeline == nil || nativeError != nil ||
+            nativeCommandBuffer.status != MTLCommandBufferStatusCompleted || nativeOutput == nil ||
+            memcmp(adapterValues, nativeOutput.contents, sizeof(adapterValues)) != 0) {
+            fail_with_error(profile.name, adapterError ?: feedbackError ?: nativeError);
+            return (int)(183 + profileIndex);
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    const char *name;
+    const char *oracleName;
+    MTLTensorDataType dataType;
+    NSUInteger elementSize;
+    NSUInteger elementBits;
+} ZPUIntegerElementwiseProfile;
+
+/* Native Metal is used only as the arithmetic oracle here. Every adapter
+ * tensor, argument table, command buffer, and elementwise operation remains
+ * CPU/ZPU-owned. The post-dispatch left-tensor write also proves that the
+ * adapter observes resource bytes at commit time rather than executing an
+ * Apple command encoder during recording. */
+static int test_metal4_cpu_integer_elementwise_profiles(
+    id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
+    id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
+    id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
+    id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap,
+    BOOL subtract) {
+    const ZPUIntegerElementwiseProfile profiles[] = {
+        {subtract ? "zpu_cpu_ml_sub_u8" : "zpu_cpu_ml_mul_u8",
+         subtract ? "zpu_cpu_ml_sub_u8_oracle" : "zpu_cpu_ml_mul_u8_oracle", MTLTensorDataTypeUInt8, 1, 8},
+        {subtract ? "zpu_cpu_ml_sub_i8" : "zpu_cpu_ml_mul_i8",
+         subtract ? "zpu_cpu_ml_sub_i8_oracle" : "zpu_cpu_ml_mul_i8_oracle", MTLTensorDataTypeInt8, 1, 8},
+        {subtract ? "zpu_cpu_ml_sub_u16" : "zpu_cpu_ml_mul_u16",
+         subtract ? "zpu_cpu_ml_sub_u16_oracle" : "zpu_cpu_ml_mul_u16_oracle", MTLTensorDataTypeUInt16, 2, 16},
+        {subtract ? "zpu_cpu_ml_sub_i16" : "zpu_cpu_ml_mul_i16",
+         subtract ? "zpu_cpu_ml_sub_i16_oracle" : "zpu_cpu_ml_mul_i16_oracle", MTLTensorDataTypeInt16, 2, 16},
+        {subtract ? "zpu_cpu_ml_sub_u32" : "zpu_cpu_ml_mul_u32",
+         subtract ? "zpu_cpu_ml_sub_u32_oracle" : "zpu_cpu_ml_mul_u32_oracle", MTLTensorDataTypeUInt32, 4, 32},
+        {subtract ? "zpu_cpu_ml_sub_i32" : "zpu_cpu_ml_mul_i32",
+         subtract ? "zpu_cpu_ml_sub_i32_oracle" : "zpu_cpu_ml_mul_i32_oracle", MTLTensorDataTypeInt32, 4, 32},
+        {subtract ? "zpu_cpu_ml_sub_i4" : "zpu_cpu_ml_mul_i4",
+         subtract ? "zpu_cpu_ml_sub_i4_oracle" : "zpu_cpu_ml_mul_i4_oracle", MTLTensorDataTypeInt4, 1, 4},
+        {subtract ? "zpu_cpu_ml_sub_u4" : "zpu_cpu_ml_mul_u4",
+         subtract ? "zpu_cpu_ml_sub_u4_oracle" : "zpu_cpu_ml_mul_u4_oracle", MTLTensorDataTypeUInt4, 1, 4},
     };
     const uint32_t leftValuesBySize[3][12] = {
         {3u, 249u, 12u, 245u, 31u, 2u, 7u, 248u, 17u, 32u, 30u, 0u},
@@ -13988,7 +14179,7 @@ static int test_metal4_cpu_integer_multiply_profiles(
 
     for (NSUInteger profileIndex = 0;
          profileIndex < sizeof(profiles) / sizeof(profiles[0]); ++profileIndex) {
-        const ZPUIntegerMultiplyProfile profile = profiles[profileIndex];
+        const ZPUIntegerElementwiseProfile profile = profiles[profileIndex];
         const NSUInteger sizeIndex = profile.elementSize == 1 ? 0 :
             (profile.elementSize == 2 ? 1 : 2);
         const NSUInteger byteCount = profile.elementBits == 4 ? 6 : 12 * profile.elementSize;
@@ -30091,10 +30282,20 @@ int main(void) {
             }
         }
 
-        const int metal4_ml_integer_multiply_result = test_metal4_cpu_integer_multiply_profiles(
+        const int metal4_ml_integer_multiply_result = test_metal4_cpu_integer_elementwise_profiles(
+            device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
+            metal4_queue, metal4_allocator, adapter_three_d_heap, NO);
+        if (metal4_ml_integer_multiply_result != 0) return metal4_ml_integer_multiply_result;
+
+        const int metal4_ml_integer_subtract_result = test_metal4_cpu_integer_elementwise_profiles(
+            device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
+            metal4_queue, metal4_allocator, adapter_three_d_heap, YES);
+        if (metal4_ml_integer_subtract_result != 0) return metal4_ml_integer_subtract_result;
+
+        const int metal4_ml_float_subtract_result = test_metal4_cpu_float_subtract_profiles(
             device, adapter_device, library, metal4_ml_identity_library, adapter_mtl4_compiler,
             metal4_queue, metal4_allocator, adapter_three_d_heap);
-        if (metal4_ml_integer_multiply_result != 0) return metal4_ml_integer_multiply_result;
+        if (metal4_ml_float_subtract_result != 0) return metal4_ml_float_subtract_result;
 
         /* Placement-sparse buffers use CPU-owned physical pages. The native
          * Metal sparse implementation is not used for this path; its only
