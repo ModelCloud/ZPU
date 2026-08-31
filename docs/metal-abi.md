@@ -309,6 +309,10 @@ triangle path:
   provide the same three buffer bindings without changing CPU ownership, and
   `setBytes:length:atIndex:` snapshots are accepted in any of those profile
   slots with the same ZPU-owned lifetime semantics.
+  The bounded `zpu_cpu_sub_f32` profile uses the identical bindings and
+  deferred CPU/ZPU execution path for elementwise Float32 subtraction; its
+  source lowering admits only the exact subtraction body and fixed bound, so
+  arbitrary MSL remains rejected.
   Direct compute texture slots 2 through 127 and sampler slots 0 through 15
   are retained as ZPU-owned metadata for registered profiles that do not
   execute those resources; the executable texture slots remain profile-owned
@@ -723,10 +727,10 @@ triangle path:
   buffer, and dispatch state for deferred execution, with device ownership,
   command-type, buffer-offset, dimension, and CPU threadgroup-limit checks.
   The fixed texture/copy kernels use their documented single buffer slot, while
-  the registered `zpu_cpu_add_f32` and `zpu_cpu_mul_f32` profiles preserve all
-  three kernel-buffer bindings at indices 0/1/2 through ICB record, copy, reset,
-  and replay; unsupported profile-specific slots still fail closed rather than
-  being silently rebound.
+  the registered `zpu_cpu_add_f32`, `zpu_cpu_mul_f32`, and `zpu_cpu_sub_f32`
+  profiles preserve all three kernel-buffer bindings at indices 0/1/2 through
+  ICB record, copy, reset, and replay; unsupported profile-specific slots still
+  fail closed rather than being silently rebound.
   Indirect imageblock dimensions, stage-in regions, and kernel threadgroup
   memory bindings are retained through copy/reset and checked against the
   descriptor's bind limit; they are metadata-only for the registered ZPU

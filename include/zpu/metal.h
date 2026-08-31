@@ -390,7 +390,7 @@ enum {
     /* Fixed CPU ray-query profile: orthographic primary rays against the
      * triangle payload produced by the ZPU acceleration encoder. */
     ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8 = 7,
-    /* Fixed CPU buffer arithmetic profile. Bind left/right/output buffers at
+    /* Fixed CPU buffer arithmetic profiles. Bind left/right/output buffers at
      * indices 0/1/2 and dispatch one thread per Float32 element. */
     ZPU_METAL_COMPUTE_ADD_F32 = 8,
     ZPU_METAL_COMPUTE_MUL_F32 = 9,
@@ -420,6 +420,8 @@ enum {
     ZPU_METAL_COMPUTE_FILL_GRADIENT_RGB10A2_UINT = 28,
     /* Metadata-only source kernels with an empty body execute as CPU no-ops. */
     ZPU_METAL_COMPUTE_SOURCE_NOOP = 29,
+    /* Bounded source-defined Float32 subtraction, lowered to the CPU path. */
+    ZPU_METAL_COMPUTE_SUB_F32 = 30,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

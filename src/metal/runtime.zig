@@ -5182,12 +5182,12 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 29) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 30) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
     fn isBufferAddKernel(self: *const ComputeEncoder) bool {
-        return self.kernel == 8 or self.kernel == 9;
+        return self.kernel == 8 or self.kernel == 9 or self.kernel == 30;
     }
 
     fn appendBufferAdd(
@@ -5901,7 +5901,7 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
 }
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
-    if ((command.kernel != 8 and command.kernel != 9) or !validBuffer(command.left) or !validBuffer(command.right) or
+    if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30) or !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
         command.threads_per_grid.depth != 1 or command.threads_per_threadgroup.width == 0 or
@@ -5917,7 +5917,12 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
         const output_offset = command.output_offset + index * @sizeOf(f32);
         const left = readF32Little(command.left.bytes, left_offset);
         const right = readF32Little(command.right.bytes, right_offset);
-        const result = if (command.kernel == 8) left + right else left * right;
+        const result = switch (command.kernel) {
+            8 => left + right,
+            9 => left * right,
+            30 => left - right,
+            else => unreachable,
+        };
         std.mem.writeInt(u32, command.output.bytes[output_offset..][0..@sizeOf(f32)], @bitCast(result), .little);
     }
 }

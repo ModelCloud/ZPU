@@ -186,6 +186,9 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_mul_f32(device const float *left [[buffer(0)]], "
     "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 10) return; output[gid] = left[gid] * right[gid]; }\n"
+    "kernel void zpu_cpu_sub_f32(device const float *left [[buffer(0)]], "
+    "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] - right[gid]; }\n"
     "kernel void zpu_cpu_ml_mul_f16_oracle(device const half *left [[buffer(0)]], "
     "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] * right[gid]; }\n"
@@ -562,6 +565,9 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_mul_f32(device const float *left [[buffer(0)]], "
          "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_f32(device const float *left [[buffer(0)]], "
+         "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
          "kernel void zpu_source_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
@@ -745,7 +751,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 49) {
+        adapter_library.functionNames.count != 50) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1081,9 +1087,11 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         NSString *name;
         NSUInteger count;
         BOOL multiply;
+        BOOL subtract;
     } cases[] = {
-        {@"zpu_source_add_f32", 12, NO},
-        {@"zpu_source_mul_f32", 10, YES},
+        {@"zpu_source_add_f32", 12, NO, NO},
+        {@"zpu_source_mul_f32", 10, YES, NO},
+        {@"zpu_source_sub_f32", 12, NO, YES},
     };
     const float left_values[12] = {
         -3.5f, -2.25f, -0.0f, 0.5f, 1.25f, 2.0f,
@@ -1152,7 +1160,8 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             memcmp(native_output.contents, adapter_output.contents, cases[case_index].count * sizeof(float)) == 0;
         if (!exact) {
             fprintf(stderr, "metal-pixel: source-defined CPU %s lowering mismatch\n",
-                    cases[case_index].multiply ? "multiply" : "add");
+                    cases[case_index].multiply ? "multiply" :
+                    (cases[case_index].subtract ? "subtract" : "add"));
             fail_with_error("source-defined CPU lowering execution failed",
                             adapter_pipeline_error ?: native_pipeline_error);
             return 167 + (int)case_index;
@@ -19457,6 +19466,7 @@ int main(void) {
             "kernel void zpu_cpu_fill_gradient_rgb10a2_uint() {}\n"
             "kernel void zpu_cpu_add_f32() {}\n"
             "kernel void zpu_cpu_mul_f32() {}\n"
+            "kernel void zpu_cpu_sub_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f32() {}\n"
             "kernel void zpu_cpu_ml_matmul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f16() {}\n"
@@ -20057,7 +20067,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 69 ||
+            adapter_library.functionNames.count != 70 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -20083,6 +20093,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgb10a2_uint"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_sub_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f16"].functionType != MTLFunctionTypeKernel ||
