@@ -11812,6 +11812,17 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             return;
         }
 
+        NSString *copySignature =
+            @"deviceconstuchar4*source[[buffer(0)]],texture2d<float,access::write>output[[texture(1)]],"
+             "uint2gid[[thread_position_in_grid]]";
+        NSString *copyBody =
+            @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+             "output.write(float4(source[gid.y*output.get_width()+gid.x])/255.0,gid);";
+        if ([compactSignature isEqualToString:copySignature] && [compactBody isEqualToString:copyBody]) {
+            implementations[functionName] = @"zpu_cpu_copy_rgba8_buffer_to_texture";
+            return;
+        }
+
         NSError *indexError = nil;
         NSRegularExpression *indexExpression = [NSRegularExpression
             regularExpressionWithPattern:@"uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[thread_position_in_grid\\]\\]"
