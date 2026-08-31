@@ -827,7 +827,7 @@ const SharedEventCommand = struct {
 
 const ComputeCommand = struct {
     kernel: u8,
-    texture: *Texture,
+    texture: ?*Texture,
     texture_index: u32,
     buffer: ?*Buffer,
     buffer_offset: usize,
@@ -2882,12 +2882,12 @@ pub const CommandBuffer = struct {
                 sparseSyncOptionalBuffer(compute.buffer);
                 sparseSyncOptionalBuffer(compute.acceleration_structure);
                 sparseSyncOptionalBuffer(compute.indirect_buffer);
-                sparseSyncTexture(compute.texture);
+                if (compute.texture) |texture| sparseSyncTexture(texture);
                 defer {
                     sparseFlushOptionalBuffer(compute.buffer);
                     sparseFlushOptionalBuffer(compute.acceleration_structure);
                     sparseFlushOptionalBuffer(compute.indirect_buffer);
-                    sparseFlushTexture(compute.texture);
+                    if (compute.texture) |texture| sparseFlushTexture(texture);
                 }
                 var resolved = compute;
                 if (compute.indirect_buffer) |indirect_buffer| {
@@ -2907,7 +2907,7 @@ pub const CommandBuffer = struct {
                             .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 16),
                             .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 20),
                         };
-                        if ((compute.kernel != 3 and compute.kernel != 4 and resolved.threads_per_grid.depth != 1) or
+                        if ((compute.kernel != 3 and compute.kernel != 4 and compute.kernel != 29 and resolved.threads_per_grid.depth != 1) or
                             resolved.threads_per_threadgroup.width == 0 or
                             resolved.threads_per_threadgroup.height == 0 or
                             resolved.threads_per_threadgroup.depth == 0) return self.fail(error.InvalidArgument);
@@ -2917,7 +2917,7 @@ pub const CommandBuffer = struct {
                             .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 4),
                             .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 8),
                         };
-                        if ((compute.kernel != 3 and compute.kernel != 4 and groups.depth != 1) or compute.threads_per_threadgroup.depth == 0 or
+                        if ((compute.kernel != 3 and compute.kernel != 4 and compute.kernel != 29 and groups.depth != 1) or compute.threads_per_threadgroup.depth == 0 or
                             compute.threads_per_threadgroup.width == 0 or compute.threads_per_threadgroup.height == 0)
                         {
                             return self.fail(error.InvalidArgument);
@@ -5182,7 +5182,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 28) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 29) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5215,6 +5215,33 @@ pub const ComputeEncoder = struct {
             .right_offset = self.buffer_offsets[1],
             .output = output,
             .output_offset = self.buffer_offsets[2],
+            .threads_per_grid = threads_per_grid,
+            .threads_per_threadgroup = threads_per_threadgroup,
+            .indirect_buffer = indirect_buffer,
+            .indirect_buffer_offset = indirect_buffer_offset,
+            .indirect_threads = indirect_threads,
+        } });
+    }
+
+    fn appendSourceNoop(
+        self: *ComputeEncoder,
+        threads_per_grid: abi.Size,
+        threads_per_threadgroup: abi.Size,
+        indirect_buffer: ?*Buffer,
+        indirect_buffer_offset: usize,
+        indirect_threads: bool,
+    ) Error!void {
+        if (self.kernel != 29 or threads_per_threadgroup.width == 0 or
+            threads_per_threadgroup.height == 0 or threads_per_threadgroup.depth == 0)
+            return error.InvalidArgument;
+        _ = try self.command_buffer.append(.{ .compute = .{
+            .kernel = self.kernel,
+            .texture = null,
+            .texture_index = 0,
+            .buffer = self.buffer,
+            .buffer_offset = self.buffer_offset,
+            .acceleration_structure = self.acceleration_structure,
+            .acceleration_structure_index = self.acceleration_structure_index,
             .threads_per_grid = threads_per_grid,
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
@@ -5365,6 +5392,7 @@ pub const ComputeEncoder = struct {
 
     pub fn dispatchThreads(self: *ComputeEncoder, threads_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0) return error.InvalidCommand;
+        if (self.kernel == 29) return self.appendSourceNoop(threads_per_grid, threads_per_threadgroup, null, 0, false);
         if (self.isBufferAddKernel()) {
             return self.appendBufferAdd(threads_per_grid, threads_per_threadgroup, null, 0, false);
         }
@@ -5390,6 +5418,18 @@ pub const ComputeEncoder = struct {
 
     pub fn dispatchThreadgroups(self: *ComputeEncoder, threadgroups_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0) return error.InvalidCommand;
+        if (self.kernel == 29) {
+            const grid_width = @as(u64, threadgroups_per_grid.width) * @as(u64, threads_per_threadgroup.width);
+            const grid_height = @as(u64, threadgroups_per_grid.height) * @as(u64, threads_per_threadgroup.height);
+            const grid_depth = @as(u64, threadgroups_per_grid.depth) * @as(u64, threads_per_threadgroup.depth);
+            if (grid_width > std.math.maxInt(u32) or grid_height > std.math.maxInt(u32) or
+                grid_depth > std.math.maxInt(u32)) return error.InvalidArgument;
+            return self.appendSourceNoop(.{
+                .width = @intCast(grid_width),
+                .height = @intCast(grid_height),
+                .depth = @intCast(grid_depth),
+            }, threads_per_threadgroup, null, 0, false);
+        }
         if (self.isBufferAddKernel()) {
             const grid_width = @as(u64, threadgroups_per_grid.width) * @as(u64, threads_per_threadgroup.width);
             if (grid_width > std.math.maxInt(u32)) return error.InvalidArgument;
@@ -5415,6 +5455,13 @@ pub const ComputeEncoder = struct {
 
     pub fn dispatchThreadgroupsIndirect(self: *ComputeEncoder, indirect_buffer: *Buffer, indirect_buffer_offset: usize, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0) return error.InvalidCommand;
+        if (self.kernel == 29) {
+            if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
+                indirect_buffer_offset % @alignOf(u32) != 0 or
+                !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
+            return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 }, threads_per_threadgroup,
+                indirect_buffer, indirect_buffer_offset, false);
+        }
         if (self.isBufferAddKernel()) {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
@@ -5450,6 +5497,13 @@ pub const ComputeEncoder = struct {
 
     pub fn dispatchThreadsIndirectAtOffset(self: *ComputeEncoder, indirect_buffer: *Buffer, indirect_buffer_offset: usize) Error!void {
         if (!self.open() or self.kernel == 0) return error.InvalidCommand;
+        if (self.kernel == 29) {
+            if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
+                indirect_buffer_offset % @alignOf(u32) != 0 or
+                !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
+            return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 },
+                .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
+        }
         if (self.isBufferAddKernel()) {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
                 indirect_buffer_offset % @alignOf(u32) != 0 or
@@ -5795,9 +5849,10 @@ fn cpuRayTriangleHit(origin: CpuRayVec3, direction: CpuRayVec3, v0: CpuRayVec3, 
 }
 
 fn executeTraceTriangles(command: ComputeCommand) Error!void {
-    if (command.texture.format != .rgba8_unorm) return error.UnsupportedFormat;
+    const texture = command.texture orelse return error.InvalidResource;
+    if (texture.format != .rgba8_unorm) return error.UnsupportedFormat;
     const acceleration_structure = command.acceleration_structure orelse return error.InvalidCommand;
-    if (!validBuffer(acceleration_structure) or acceleration_structure.device != command.texture.device) return error.InvalidResource;
+    if (!validBuffer(acceleration_structure) or acceleration_structure.device != texture.device) return error.InvalidResource;
     if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
     if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or
         readU32Little(acceleration_structure.bytes, 4) != cpu_acceleration_structure_version) return error.InvalidResource;
@@ -5806,15 +5861,15 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
     const triangle_bytes = std.math.mul(usize, triangle_count, cpu_acceleration_structure_triangle_bytes) catch return error.InvalidArgument;
     if (triangle_offset < cpu_acceleration_structure_header_bytes or
         !rangeValid(acceleration_structure.bytes.len, triangle_offset, triangle_bytes)) return error.InvalidArgument;
-    const width = @min(command.threads_per_grid.width, command.texture.width);
-    const height = @min(command.threads_per_grid.height, command.texture.height);
-    var target = command.texture.asTarget();
+    const width = @min(command.threads_per_grid.width, texture.width);
+    const height = @min(command.threads_per_grid.height, texture.height);
+    var target = texture.asTarget();
     for (0..height) |y| for (0..width) |x| {
         // Metal's texture grid is top-left: row zero is the upper edge and
         // clip/world +Y therefore maps toward decreasing pixel rows.
         const origin = CpuRayVec3{
-            .x = 2.0 * ((@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(command.texture.width))) - 1.0,
-            .y = 1.0 - 2.0 * ((@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(command.texture.height))),
+            .x = 2.0 * ((@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(texture.width))) - 1.0,
+            .y = 1.0 - 2.0 * ((@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(texture.height))),
             .z = 1.0,
         };
         const direction = CpuRayVec3{ .x = 0.0, .y = 0.0, .z = -1.0 };
@@ -5868,13 +5923,18 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
 }
 
 fn executeCompute(command: ComputeCommand) Error!void {
-    if (!validTexture(command.texture) or !command.texture.format.isColor()) return error.InvalidResource;
+    // An empty source kernel has no resource requirement. It still travels
+    // through the deferred CPU command stream so dispatch ordering and
+    // indirect argument validation match the other compute profiles.
+    if (command.kernel == 29) return;
+    const texture = command.texture orelse return error.InvalidResource;
+    if (!validTexture(texture) or !texture.format.isColor()) return error.InvalidResource;
     if (command.kernel != 3 and command.kernel != 4 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
-    const width = @min(command.threads_per_grid.width, command.texture.width);
-    const height = @min(command.threads_per_grid.height, command.texture.height);
+    const width = @min(command.threads_per_grid.width, texture.width);
+    const height = @min(command.threads_per_grid.height, texture.height);
     switch (command.kernel) {
         1, 3, 4 => {
-            var target = command.texture.asTarget();
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| {
                 const blue = if (command.kernel == 4 and command.array_slice != null)
                     (@as(f32, @floatFromInt(command.array_slice.?)) + 1.0) / 8.0
@@ -5890,7 +5950,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
         },
         2 => {
             const source = command.buffer orelse return error.InvalidCommand;
-            const row_bytes = std.math.mul(usize, command.texture.width, 4) catch return error.InvalidArgument;
+            const row_bytes = std.math.mul(usize, texture.width, 4) catch return error.InvalidArgument;
             const required = if (width == 0 or height == 0) 0 else std.math.add(
                 usize,
                 std.math.mul(usize, @as(usize, height - 1), row_bytes) catch return error.InvalidArgument,
@@ -5898,7 +5958,7 @@ fn executeCompute(command: ComputeCommand) Error!void {
             ) catch return error.InvalidArgument;
             if (!rangeValid(source.bytes.len, command.buffer_offset, required)) return error.InvalidArgument;
             const byte_to_float: f32 = 1.0 / 255.0;
-            var target = command.texture.asTarget();
+            var target = texture.asTarget();
             for (0..height) |y| {
                 const source_row = command.buffer_offset + y * row_bytes;
                 for (0..width) |x| {
@@ -5913,15 +5973,15 @@ fn executeCompute(command: ComputeCommand) Error!void {
             }
         },
         5 => {
-            if (command.texture.format != .r32_float) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r32_float) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeColor(x, y, .{
                 (@as(f32, @floatFromInt(x)) + 1.0) / 8.0, 0, 0, 1,
             });
         },
         6 => {
-            if (command.texture.format != .rgba16_float) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba16_float) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeColor(x, y, .{
                 (@as(f32, @floatFromInt(x)) + 1.0) / 8.0,
                 (@as(f32, @floatFromInt(y)) + 1.0) / 8.0,
@@ -5930,8 +5990,8 @@ fn executeCompute(command: ComputeCommand) Error!void {
             });
         },
         10 => {
-            if (command.texture.format != .rgba32_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba32_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1),
                 @floatFromInt(y + 1),
@@ -5940,8 +6000,8 @@ fn executeCompute(command: ComputeCommand) Error!void {
             });
         },
         11 => {
-            if (command.texture.format != .rgba32_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba32_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1),
                 -@as(f32, @floatFromInt(y + 1)),
@@ -5950,120 +6010,120 @@ fn executeCompute(command: ComputeCommand) Error!void {
             });
         },
         12 => {
-            if (command.texture.format != .r32_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r32_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), 0, 0, 0,
             });
         },
         13 => {
-            if (command.texture.format != .r32_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r32_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), 0, 0, 0,
             });
         },
         14 => {
-            if (command.texture.format != .rg32_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rg32_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), @floatFromInt(y + 1), 0, 0,
             });
         },
         15 => {
-            if (command.texture.format != .rg32_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rg32_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), 0, 0,
             });
         },
         16 => {
-            if (command.texture.format != .r8_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r8_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), 0, 0, 0,
             });
         },
         17 => {
-            if (command.texture.format != .r8_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r8_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), 0, 0, 0,
             });
         },
         18 => {
-            if (command.texture.format != .rg8_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rg8_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), @floatFromInt(y + 1), 0, 0,
             });
         },
         19 => {
-            if (command.texture.format != .rg8_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rg8_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), 0, 0,
             });
         },
         20 => {
-            if (command.texture.format != .rgba8_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba8_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), @floatFromInt(y + 1), @floatFromInt(x + y + 1), 255,
             });
         },
         21 => {
-            if (command.texture.format != .rgba8_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba8_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), @floatFromInt(x + y), 127,
             });
         },
         22 => {
-            if (command.texture.format != .r16_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r16_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), 0, 0, 0,
             });
         },
         23 => {
-            if (command.texture.format != .r16_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .r16_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), 0, 0, 0,
             });
         },
         24 => {
-            if (command.texture.format != .rg16_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rg16_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), @floatFromInt(y + 1), 0, 0,
             });
         },
         25 => {
-            if (command.texture.format != .rg16_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rg16_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), 0, 0,
             });
         },
         26 => {
-            if (command.texture.format != .rgba16_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba16_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), @floatFromInt(y + 1), @floatFromInt(x + y + 1), 65535,
             });
         },
         27 => {
-            if (command.texture.format != .rgba16_sint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgba16_sint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), -@as(f32, @floatFromInt(y + 1)), @floatFromInt(x + y), 32767,
             });
         },
         28 => {
-            if (command.texture.format != .rgb10a2_uint) return error.UnsupportedFormat;
-            var target = command.texture.asTarget();
+            if (texture.format != .rgb10a2_uint) return error.UnsupportedFormat;
+            var target = texture.asTarget();
             for (0..height) |y| for (0..width) |x| target.storeRawColor(x, y, .{
                 @floatFromInt(x + 1), @floatFromInt(y + 1), @floatFromInt(x + y + 1), 3,
             });

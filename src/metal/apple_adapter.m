@@ -18072,6 +18072,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8: return zpu_cpu_trace_triangles_function_name;
         case ZPU_METAL_COMPUTE_ADD_F32: return zpu_cpu_add_f32_function_name;
         case ZPU_METAL_COMPUTE_MUL_F32: return zpu_cpu_mul_f32_function_name;
+        case ZPU_METAL_COMPUTE_SOURCE_NOOP: return zpu_cpu_source_metadata_function_name;
         default: return nil;
     }
 }
@@ -18162,6 +18163,8 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_MUL_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_source_metadata_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SOURCE_NOOP;
         } else {
             zpu_set_error(error, @"ZPU CPU Metal has no registered CPU implementation for this compute function");
             return nil;
@@ -18782,6 +18785,17 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
+    if (_kernel == ZPU_METAL_COMPUTE_SOURCE_NOOP) {
+        if (zpu_metal_compute_encoder_dispatch_threads(_zpuEncoder,
+                (zpu_metal_size){(uint32_t)threadsPerGrid.width, (uint32_t)threadsPerGrid.height,
+                                 (uint32_t)threadsPerGrid.depth},
+                (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width,
+                                 (uint32_t)threadsPerThreadgroup.height,
+                                 (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
+            [_owner markError];
+        }
+        return;
+    }
     const BOOL arrayKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
     const BOOL volumeKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
     ZPUTexture *boundTexture = zpu_compute_bound_texture(self);
@@ -18844,6 +18858,20 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
+    if (_kernel == ZPU_METAL_COMPUTE_SOURCE_NOOP) {
+        const uint64_t gridWidth = (uint64_t)threadgroupsPerGrid.width * threadsPerThreadgroup.width;
+        const uint64_t gridHeight = (uint64_t)threadgroupsPerGrid.height * threadsPerThreadgroup.height;
+        const uint64_t gridDepth = (uint64_t)threadgroupsPerGrid.depth * threadsPerThreadgroup.depth;
+        if (gridWidth > UINT32_MAX || gridHeight > UINT32_MAX || gridDepth > UINT32_MAX ||
+            zpu_metal_compute_encoder_dispatch_threads(_zpuEncoder,
+                (zpu_metal_size){(uint32_t)gridWidth, (uint32_t)gridHeight, (uint32_t)gridDepth},
+                (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width,
+                                 (uint32_t)threadsPerThreadgroup.height,
+                                 (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
+            [_owner markError];
+        }
+        return;
+    }
     ZPUTexture *boundTexture = zpu_compute_bound_texture(self);
     if (_kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY &&
         boundTexture != nil && boundTexture->_textureType == MTLTextureType2DArray) {
@@ -18890,6 +18918,16 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         !zpu_u32(threadsPerThreadgroup.height, &(uint32_t){0}) ||
         !zpu_u32(threadsPerThreadgroup.depth, &(uint32_t){0})) {
         [_owner markError];
+        return;
+    }
+    if (_kernel == ZPU_METAL_COMPUTE_SOURCE_NOOP) {
+        if (zpu_metal_compute_encoder_dispatch_threadgroups_indirect(_zpuEncoder, zpuBuffer->_zpuBuffer,
+                indirectBufferOffset, (zpu_metal_size){(uint32_t)threadsPerThreadgroup.width,
+                (uint32_t)threadsPerThreadgroup.height, (uint32_t)threadsPerThreadgroup.depth}) != ZPU_METAL_OK) {
+            [_owner markError];
+            return;
+        }
+        [_owner retainResource:zpuBuffer];
         return;
     }
     const BOOL arrayKernel = _kernel == ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;

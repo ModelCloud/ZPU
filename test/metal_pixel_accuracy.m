@@ -789,6 +789,93 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined direct binding reflection lowering failed", adapter_error ?: native_error);
         return 175;
     }
+    const uint8_t source_noop_seed[32] = {
+        0x03, 0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7a,
+        0x8b, 0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2,
+        0x13, 0x24, 0x35, 0x46, 0x57, 0x68, 0x79, 0x8a,
+        0x9b, 0xac, 0xbd, 0xce, 0xdf, 0xe0, 0xf1, 0x02,
+    };
+    const uint32_t source_noop_indirect_arguments[3] = {3, 1, 1};
+    NSError *native_noop_pipeline_error = nil;
+    NSError *adapter_noop_pipeline_error = nil;
+    id<MTLComputePipelineState> native_noop_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_metadata_function
+                                                       error:&native_noop_pipeline_error];
+    id<MTLComputePipelineState> adapter_noop_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_metadata_function
+                                                       error:&adapter_noop_pipeline_error];
+    id<MTLBuffer> native_noop_direct_buffer =
+        [native_device newBufferWithBytes:source_noop_seed length:sizeof(source_noop_seed)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_noop_direct_buffer =
+        [adapter_device newBufferWithBytes:source_noop_seed length:sizeof(source_noop_seed)
+                                   options:MTLResourceStorageModeShared];
+    id<MTLBuffer> native_noop_indirect_buffer =
+        [native_device newBufferWithBytes:source_noop_indirect_arguments
+                                   length:sizeof(source_noop_indirect_arguments)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_noop_indirect_buffer =
+        [adapter_device newBufferWithBytes:source_noop_indirect_arguments
+                                    length:sizeof(source_noop_indirect_arguments)
+                                   options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> native_noop_direct_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_noop_direct_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_noop_direct_encoder =
+        [native_noop_direct_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_noop_direct_encoder =
+        [adapter_noop_direct_command_buffer computeCommandEncoder];
+    if (native_noop_pipeline != nil && adapter_noop_pipeline != nil &&
+        native_noop_direct_buffer != nil && adapter_noop_direct_buffer != nil &&
+        native_noop_direct_encoder != nil && adapter_noop_direct_encoder != nil) {
+        [native_noop_direct_encoder setComputePipelineState:native_noop_pipeline];
+        [native_noop_direct_encoder dispatchThreads:MTLSizeMake(7, 1, 1)
+                                threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+        [native_noop_direct_encoder endEncoding];
+        [native_noop_direct_command_buffer commit];
+        [native_noop_direct_command_buffer waitUntilCompleted];
+        [adapter_noop_direct_encoder setComputePipelineState:adapter_noop_pipeline];
+        [adapter_noop_direct_encoder dispatchThreads:MTLSizeMake(7, 1, 1)
+                                 threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+        [adapter_noop_direct_encoder endEncoding];
+        [adapter_noop_direct_command_buffer commit];
+        [adapter_noop_direct_command_buffer waitUntilCompleted];
+    }
+    id<MTLCommandBuffer> native_noop_indirect_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_noop_indirect_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_noop_indirect_encoder =
+        [native_noop_indirect_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_noop_indirect_encoder =
+        [adapter_noop_indirect_command_buffer computeCommandEncoder];
+    if (native_noop_pipeline != nil && adapter_noop_pipeline != nil &&
+        native_noop_indirect_buffer != nil && adapter_noop_indirect_buffer != nil &&
+        native_noop_indirect_encoder != nil && adapter_noop_indirect_encoder != nil) {
+        [native_noop_indirect_encoder setComputePipelineState:native_noop_pipeline];
+        [native_noop_indirect_encoder dispatchThreadgroupsWithIndirectBuffer:native_noop_indirect_buffer
+                                                         indirectBufferOffset:0
+                                                          threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+        [native_noop_indirect_encoder endEncoding];
+        [native_noop_indirect_command_buffer commit];
+        [native_noop_indirect_command_buffer waitUntilCompleted];
+        [adapter_noop_indirect_encoder setComputePipelineState:adapter_noop_pipeline];
+        [adapter_noop_indirect_encoder dispatchThreadgroupsWithIndirectBuffer:adapter_noop_indirect_buffer
+                                                          indirectBufferOffset:0
+                                                           threadsPerThreadgroup:MTLSizeMake(2, 1, 1)];
+        [adapter_noop_indirect_encoder endEncoding];
+        [adapter_noop_indirect_command_buffer commit];
+        [adapter_noop_indirect_command_buffer waitUntilCompleted];
+    }
+    if (native_noop_pipeline == nil || native_noop_pipeline_error != nil || adapter_noop_pipeline == nil ||
+        adapter_noop_pipeline_error != nil || native_noop_direct_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_noop_direct_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        native_noop_indirect_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_noop_indirect_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        native_noop_direct_buffer == nil || adapter_noop_direct_buffer == nil ||
+        memcmp(native_noop_direct_buffer.contents, adapter_noop_direct_buffer.contents,
+               sizeof(source_noop_seed)) != 0) {
+        fail_with_error("source-defined empty CPU kernel direct dispatch failed",
+                        adapter_noop_pipeline_error ?: native_noop_pipeline_error);
+        return 176;
+    }
     NSError *mismatched_guard_error = nil;
     id<MTLLibrary> mismatched_guard_library = [adapter_device newLibraryWithSource:
         @"kernel void zpu_source_bad_bound(device const float *left [[buffer(0)]], "

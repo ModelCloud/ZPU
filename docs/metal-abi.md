@@ -634,7 +634,10 @@ triangle path:
   claiming executable arbitrary shader semantics. Layered CPU vertex/fragment
   profiles also expose their native-matching buffer reflection: the layered
   vertex reports its input vertex buffer, while the layered fragment reports no
-  resource bindings.
+  resource bindings. Direct source kernels with an empty body additionally
+  expose native-matching buffer/texture/sampler reflection and execute as
+  deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary
+  MSL remains fail-closed.
   Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
   descriptor, so supported unspecialized blend state can be resolved through
