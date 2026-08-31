@@ -29168,36 +29168,6 @@ int main(void) {
             return 187;
         }
 
-        /* Mipmap generation is a blit command even when encoded through the
-         * MTL4 compute encoder. The public stages property must expose that
-         * transition before the command buffer is submitted. */
-        MTLTextureDescriptor *metal4_stage_mipmap_descriptor =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                 width:4 height:4 mipmapped:YES];
-        metal4_stage_mipmap_descriptor.storageMode = MTLStorageModeShared;
-        metal4_stage_mipmap_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-        id<MTLTexture> metal4_stage_mipmap_texture =
-            [adapter_device newTextureWithDescriptor:metal4_stage_mipmap_descriptor];
-        id<MTL4CommandBuffer> metal4_stage_mipmap_command_buffer = [adapter_device newCommandBuffer];
-        id<MTL4ComputeCommandEncoder> metal4_stage_mipmap_encoder = nil;
-        BOOL metal4_stage_mipmap_is_blit = NO;
-        if (metal4_stage_mipmap_texture != nil && metal4_stage_mipmap_command_buffer != nil) {
-            [metal4_stage_mipmap_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
-            metal4_stage_mipmap_encoder = [metal4_stage_mipmap_command_buffer computeCommandEncoder];
-            [metal4_stage_mipmap_encoder generateMipmapsForTexture:metal4_stage_mipmap_texture];
-            metal4_stage_mipmap_is_blit =
-                (metal4_stage_mipmap_encoder.stages & MTLStageBlit) != 0;
-            [metal4_stage_mipmap_encoder endEncoding];
-            [metal4_stage_mipmap_command_buffer endCommandBuffer];
-            id<MTL4CommandBuffer> metal4_stage_mipmap_buffers[] = {
-                metal4_stage_mipmap_command_buffer};
-            [metal4_queue commit:metal4_stage_mipmap_buffers count:1];
-        }
-        if (metal4_stage_mipmap_texture == nil || metal4_stage_mipmap_command_buffer == nil ||
-            metal4_stage_mipmap_encoder == nil || !metal4_stage_mipmap_is_blit) {
-            fail_with_error("Metal 4 compute blit stage tracking failed", metal4_error);
-            return 189;
-        }
         MTL4ArgumentTableDescriptor *metal4_buffer_mul_table_descriptor = [MTL4ArgumentTableDescriptor new];
         metal4_buffer_mul_table_descriptor.maxBufferBindCount = 3;
         id<MTL4ArgumentTable> metal4_buffer_mul_table =
@@ -34640,6 +34610,7 @@ int main(void) {
                                   mipmapLevel:1];
         if (metal4_generate_mip_texture == nil || metal4_generate_mip_command_buffer == nil ||
             metal4_generate_mip_encoder == nil ||
+            [metal4_generate_mip_encoder stages] != MTLStageBlit ||
             memcmp(metal4_deferred_generated_mip_level_one, (const uint8_t[sizeof(mip_level_one)]){0}, sizeof(mip_level_one)) != 0 ||
             memcmp(metal4_generated_mip_level_one, native_generated_mip_level_one, sizeof(mip_level_one)) != 0) {
             fail_with_error("Metal 4 CPU mipmap generation failed", metal4_error);
