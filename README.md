@@ -120,8 +120,8 @@ with Keyboard() as k:
 | Emulated Linux input devices | ✅ zmouse / zkeyboard build + `zpu` PyPI package | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; the `zpu` package (and `tools/zinput.py`) exposes them to Python via `libzinput.so`. Install with `pip install zpu`; see `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
 | Zig implementation | ✅ Zig 0.16.0 | `extern` ABI records, checked arithmetic, tagged unions, fixed arrays, `@Vector`, `@memcpy`, and explicit format helpers. |
 | 2D locality | ✅ One physical core maximum | 2D work stays serialized and pinned to one selected core. |
-| Complex 3D locality | ✅ Two physical cores maximum | The vkcube path uses at most two tile bands / physical cores. |
-| Mosaic renderer | 🧪 Scalar packet parity foundation | The hierarchy-first packetized tile renderer has validated hierarchy/HZB planning, physical packet streams, prepared primitives, and a scalar differential gate. See [`design/mosaic-renderer.md`](design/mosaic-renderer.md). |
+| Complex 3D locality | 🧪 Intra-NUMA Mosaic scaling | Persistent physical-packet workers reach 3.98× at four cores in one LLC on the current complex-demo scalar gate; multi-LLC placement is reported separately. |
+| Mosaic renderer | 🧪 Scalable scalar packet foundation | Immutable plans, tile-local packet indices, topology-pinned per-core supertile queues, same-LLC/same-NUMA stealing, one completion barrier, and serial differential gates are implemented. See [`design/mosaic-renderer.md`](design/mosaic-renderer.md) and the [Mosaic scalability contract](design/mosaic-scalability.md). |
 | 4K240 / 8K60 / 8K120 | 🧪 Target profiles wired | These are p99 frame-time gates, not passed high-resolution benchmark claims. |
 | 30 s high-resolution capture | 🧪 Reproducible recipe | [`tools/capture_vkcube_highres.sh`](tools/capture_vkcube_highres.sh) captures VP9 WebM when the selected gate is green. |
 
@@ -469,8 +469,23 @@ ZPU_MAX_THREADS=2 tools/limited-cpus.sh zig build benchmark-vulkan-abi \
 ```
 
 See [`docs/vulkan-abi-benchmarks.md`](docs/vulkan-abi-benchmarks.md) for the
-open-source references, stream sizes, ABI eligibility contract, and oracle
-tests.
+open-source references, stream sizes, ABI eligibility contract, oracle tests,
+and the 2/3/4-core scaling sweep.
+
+The physical Mosaic scalar scheduler has a separate topology-aware gate. It
+uses realistic terminal, desktop UI, and complex-demo geometry; compares every
+run to serial color/depth/visibility/counters; and reports each worker's CPU,
+NUMA node, LLC class, work count, and steal class:
+
+```sh
+ZPU_MAX_THREADS=4 tools/limited-cpus.sh zig build benchmark-mosaic-scaling \
+  -Doptimize=ReleaseFast
+```
+
+On the current host, four physical cores selected from one LLC scale by
+3.70×/3.62×/3.98× respectively. A same-NUMA set spread across three LLCs
+scales by 2.17×/1.98×/2.77×, which is kept as a distinct cache-topology result
+rather than presented as one universal core-count claim.
 
 Vulkan image transfers have a focused benchmark too. It models four
 1920×1080 RGBA layers uploaded from a 2048-texel row-pitch buffer and a

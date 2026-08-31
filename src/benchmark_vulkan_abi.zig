@@ -398,7 +398,8 @@ fn parseTarget(name: []const u8) ?Target {
 pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, init.environ_map.get("ZPU_LIMITED") orelse "", "physical-core-v1")) return error.MissingAffinityGate;
     const selected = init.environ_map.get("ZPU_SELECTED_CPUS") orelse return error.MissingAffinityGate;
-    if (selectedCpuCount(selected) != target_cpu_cores) return error.TwoCoreAffinityRequired;
+    const cpu_cores = selectedCpuCount(selected);
+    if (cpu_cores == 0 or cpu_cores > 8) return error.InvalidAffinityWidth;
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
     var smoke = false;
@@ -453,7 +454,7 @@ pub fn main(init: std.process.Init) !void {
         metric_index += 1;
     }
     defer cube.shutdownParallelWorkers();
-    const report = Report{ .warmup_iterations = if (smoke) 1 else 2, .sample_count = if (smoke) 3 else 6, .workloads = metrics };
+    const report = Report{ .cpu_cores = @intCast(cpu_cores), .warmup_iterations = if (smoke) 1 else 2, .sample_count = if (smoke) 3 else 6, .workloads = metrics };
     if (json) {
         var out: std.Io.Writer.Allocating = .init(allocator);
         var stringify: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };

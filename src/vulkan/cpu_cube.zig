@@ -1485,10 +1485,11 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(p0[0], @max(p1[0], p2[0]))))), scissor.x + @as(i32, @intCast(scissor.width)), @as(i32, @intCast(width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(p0[1], @max(p1[1], p2[1]))))), scissor.y + @as(i32, @intCast(scissor.height)), @as(i32, @intCast(height)));
         const tile_size: i32 = if (optimized and (lane_count != 1 or width >= 3840)) 32 else if (optimized) 8 else 1;
-        // The normal parallel draw has exactly two lanes split at the middle
-        // row.  Clip the tile walk to each lane up front; scanning every row
+        // The compatibility parallel draw has two lanes split at the middle
+        // row. Clip the tile walk to each lane up front; scanning every row
         // in every tile just to rediscover that split costs more than the
-        // synchronization saved on medium-sized render targets.
+        // synchronization saved on medium-sized render targets. Wider
+        // profiles use the general stripe partition below.
         const fixed_two_lane = lane_count == 2 and stripe_count == 2;
         const lane_min_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * lane_index / 2) else min_y;
         const lane_max_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * (lane_index + 1) / 2) else max_y;
@@ -1697,7 +1698,12 @@ pub fn drawReferenceCounted(target: []u8, depth: ?[]u8, width: u32, height: u32,
     return drawInternal(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, 0, viewport, scissor, counters, false, 0, 0, 0, 1, 1, null, null, null, null, 0, 0, true);
 }
 
+// Keep the two-lane behavior as the default compatibility profile, but do
+// not bake it into the worker topology.  The limited-core benchmark selects
+// 1..8 physical CPUs through ZPU_MAX_THREADS and the renderer uses the same
+// bounded number of raster bands.
 const parallel_band_count = 2;
+const max_parallel_band_count = 8;
 const parallel_slice_count = 4;
 const parallel_8k_slice_count = 40;
 // Keep enough retained command/cache storage for realistic terminal frames.
@@ -1709,7 +1715,8 @@ const parallel_8k_slice_count = 40;
 pub const max_batch_commands: usize = 8192;
 // Small static UI batches are already fully prepared by the time the next
 // frame arrives. Avoid waking the raster worker for these short command lists;
-// the worker hand-off costs more than the bounded serial walk on two cores.
+// the worker hand-off costs more than the bounded serial walk on the
+// compatibility profile.
 const serial_batch_command_limit = 256;
 // Span rows are a sizeable per-command cache. Keep the hot prefix for the
 // common small batches while allowing large terminal submissions to retain
@@ -1795,7 +1802,7 @@ const ParallelDraw = struct {
     tile_max: ?[]u32 = null,
     tile_columns: usize = 0,
     tile_count: usize = 0,
-    bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
+    bands: [max_parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** max_parallel_band_count,
 };
 const ParallelBatchPrepare = struct {
     commands: []const DrawCommand,
@@ -1823,7 +1830,7 @@ const ParallelBatchDraw = struct {
     command_lanes: ?[]u8 = null,
     ownership_ready: ?*std.atomic.Value(bool) = null,
     color_only: bool = false,
-    bands: [parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** parallel_band_count,
+    bands: [max_parallel_band_count]ParallelBand = [_]ParallelBand{.{}} ** max_parallel_band_count,
 };
 const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32 = 0, rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
 const ParallelTileClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32, height: u32, tiles: []const u8 };
@@ -1834,8 +1841,10 @@ var parallel_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
 var parallel_started = false;
 var parallel_available = false;
 var parallel_ready: usize = 0;
+var parallel_worker_count: usize = 0;
 var parallel_stop = std.atomic.Value(bool).init(false);
-var parallel_threads: [parallel_band_count - 1]std.Thread = undefined;
+var parallel_threads: [max_parallel_band_count - 1]std.Thread = undefined;
+var active_parallel_band_count: usize = parallel_band_count;
 var parallel_generation = std.atomic.Value(u64).init(0);
 var parallel_completed = std.atomic.Value(usize).init(0);
 var parallel_active: ?ParallelJob = null;
@@ -1849,11 +1858,11 @@ var batch_command_needs_prepare: [max_batch_commands]bool = undefined;
 var batch_span_cache: [max_batch_span_cache_commands]BatchSpanCache = undefined;
 var batch_quad_span_cache: [max_batch_commands]BatchQuadSpanCache = undefined;
 var batch_command_lanes: [max_batch_commands]u8 = undefined;
-var batch_command_indices: [parallel_band_count][max_batch_commands]usize = undefined;
-var batch_command_index_counts: [parallel_band_count]usize = [_]usize{0} ** parallel_band_count;
+var batch_command_indices: [max_parallel_band_count][max_batch_commands]usize = undefined;
+var batch_command_index_counts: [max_parallel_band_count]usize = [_]usize{0} ** max_parallel_band_count;
 var batch_ownership_ready = std.atomic.Value(bool).init(false);
-var batch_tile_min: [max_batch_tiles * parallel_band_count]u32 = undefined;
-var batch_tile_max: [max_batch_tiles * parallel_band_count]u32 = undefined;
+var batch_tile_min: [max_batch_tiles * max_parallel_band_count]u32 = undefined;
+var batch_tile_max: [max_batch_tiles * max_parallel_band_count]u32 = undefined;
 const BatchStaticReplayCache = struct {
     valid: bool = false,
     target_address: usize = 0,
@@ -1874,6 +1883,40 @@ fn resetBatchCaches() void {
     for (&batch_span_cache) |*cache| cache.valid = false;
     for (&batch_quad_span_cache) |*cache| cache.valid = false;
     batch_static_replay_cache.valid = false;
+}
+
+fn configureParallelBandCount() void {
+    // Tests and normal builds retain the historical two-lane profile unless
+    // the caller explicitly opts into the physical-core benchmark contract.
+    // This keeps generic callers from accidentally oversubscribing a host,
+    // while tools/limited-cpus.sh makes 3/4/.. lane experiments reproducible.
+    active_parallel_band_count = parallel_band_count;
+    if (std.c.getenv("ZPU_LIMITED")) |limited| {
+        if (std.mem.eql(u8, std.mem.span(limited), "physical-core-v1")) {
+            if (std.c.getenv("ZPU_MAX_THREADS")) |raw| {
+                const requested = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch parallel_band_count;
+                if (requested >= 1 and requested <= max_parallel_band_count) active_parallel_band_count = requested;
+            }
+        }
+    }
+}
+
+fn parallelBandCount() usize {
+    return active_parallel_band_count;
+}
+
+fn parallelBandRange(height: u32, band_index: usize, band_count: usize) struct { min_y: i32, max_y: i32 } {
+    return .{
+        .min_y = @intCast(@as(usize, height) * band_index / band_count),
+        .max_y = @intCast(@as(usize, height) * (band_index + 1) / band_count),
+    };
+}
+
+fn boundsTouchParallelBand(bounds: Rect, height: u32, band_index: usize, band_count: usize) bool {
+    if (bounds.width == 0 or bounds.height == 0) return false;
+    const band = parallelBandRange(height, band_index, band_count);
+    const bounds_max_y = bounds.y + @as(i32, @intCast(bounds.height));
+    return bounds.y < band.max_y and bounds_max_y > band.min_y;
 }
 
 // A raster worker normally finishes less than one frame before its next job.
@@ -1927,7 +1970,7 @@ fn runParallelBand(context: *ParallelDraw, band_index: usize, comptime count_wor
         }
     }
     const stripe_count = context.stripe_count;
-    band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.base_vertex, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallel_band_count, stripe_count, context.prepared, context.indexed, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
+    band.pixels_written = drawInternal(context.target, context.depth, context.width, context.height, context.uniform, context.texture, context.texture_width, context.texture_height, context.vertex_count, context.base_vertex, context.viewport, context.scissor, &band.counters, true, context.cull_mode, context.front_face, band_index, parallelBandCount(), stripe_count, context.prepared, context.indexed, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
 }
 
 fn addCounters(total: *Counters, value: Counters) void {
@@ -2345,13 +2388,13 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
         // mathematically identical, but evaluating each triangle's own
         // barycentric start value preserves the reference rasterizer's exact
         // texel-boundary rounding at the shared diagonal.
-        const first = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit);
-        const second = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
+        const first = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit);
+        const second = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
         return first + second;
     };
     if (comptime !color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.opaque_quad.flat_color == null and prepared.spans_valid) {
-        const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit);
-        const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
+        const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit);
+        const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit);
         return first + second;
     };
     var triangle_index: usize = 0;
@@ -2382,23 +2425,25 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
 fn prepareBatchCommandLanes(context: *ParallelBatchDraw, lane_index: usize) void {
     const lanes = context.command_lanes orelse return;
     if (lane_index != 0) return;
-    @memset(lanes[0..context.commands.len], 3);
-    @memset(batch_command_index_counts[0..], 0);
-    if (context.count_work or parallel_band_count != 2) return;
+    const active_count = parallelBandCount();
+    const all_lanes: u8 = if (active_count == 8) 0xff else @intCast((@as(u16, 1) << @intCast(active_count)) - 1);
+    @memset(lanes[0..context.commands.len], all_lanes);
+    @memset(batch_command_index_counts[0..active_count], 0);
+    if (context.count_work) return;
 
-    const split: i32 = @intCast(context.height / 2);
     for (context.commands, 0..) |_, index| {
         const draw_bounds = context.prepared[index].bounds;
         if (draw_bounds.width == 0 or draw_bounds.height == 0) continue;
-        // Bounds are floating-point floor/ceil projections. Keep a one-pixel
-        // guard band around the worker split so a rounding edge can never be
-        // assigned to only one lane when its cached span reaches across it.
-        if (draw_bounds.y >= split + 1) {
-            lanes[index] = 2;
-        } else if (draw_bounds.y + @as(i32, @intCast(draw_bounds.height)) <= split - 1) {
-            lanes[index] = 1;
+        lanes[index] = 0;
+        for (0..active_count) |band_index| {
+            // A conservative prepared bound touching a band's row range must
+            // be sent to that band. The raster kernel still performs the
+            // exact coverage test, so this only affects work ownership.
+            if (boundsTouchParallelBand(draw_bounds, context.height, band_index, active_count)) {
+                lanes[index] |= @as(u8, 1) << @intCast(band_index);
+            }
         }
-        inline for (0..parallel_band_count) |band_index| {
+        for (0..active_count) |band_index| {
             if (lanes[index] & (@as(u8, 1) << @intCast(band_index)) != 0) {
                 const position = batch_command_index_counts[band_index];
                 batch_command_indices[band_index][position] = index;
@@ -2431,7 +2476,7 @@ fn runParallelBatchBand(context: *ParallelBatchDraw, band_index: usize, comptime
                 }
             }
         }
-        band.pixels_written += drawInternal(context.target, context.depth, context.width, context.height, command.uniform, command.texture, command.texture_width, command.texture_height, command.vertex_count, 0, command.viewport, command.scissor, &draw_counters, true, 0, 0, band_index, parallel_band_count, parallel_band_count, prepared_ptr, null, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
+        band.pixels_written += drawInternal(context.target, context.depth, context.width, context.height, command.uniform, command.texture, command.texture_width, command.texture_height, command.vertex_count, 0, command.viewport, command.scissor, &draw_counters, true, 0, 0, band_index, parallelBandCount(), parallelBandCount(), prepared_ptr, null, context.tile_min, context.tile_max, context.tile_columns, context.tile_count, count_work);
         if (comptime count_work) addCounters(&band.counters, draw_counters);
     }
 }
@@ -2441,7 +2486,7 @@ fn waitForBatchPreparation(context: *ParallelBatchDraw, lane_index: usize) void 
         runParallelBatchPrepare(prepare, lane_index);
         const completed = context.prepare_completed orelse return;
         _ = completed.fetchAdd(1, .release);
-        while (completed.load(.acquire) != parallel_band_count) std.atomic.spinLoopHint();
+        while (completed.load(.acquire) != parallelBandCount()) std.atomic.spinLoopHint();
     }
     prepareBatchCommandLanes(context, lane_index);
     if (context.ownership_ready) |ready| {
@@ -2451,8 +2496,9 @@ fn waitForBatchPreparation(context: *ParallelBatchDraw, lane_index: usize) void 
 }
 
 fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) void {
+    const active_count = parallelBandCount();
     var command_index = lane_index;
-    while (command_index < context.commands.len) : (command_index += parallel_band_count) {
+    while (command_index < context.commands.len) : (command_index += active_count) {
         if (context.color_only)
             prepareBatchOverlayCommand(context.commands[command_index], @intFromPtr(context.commands.ptr), command_index, context.width, context.height, &context.prepared[command_index])
         else
@@ -2464,9 +2510,9 @@ fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) vo
 // Once the caller has established the overlay contract, rasterize that quad
 // once instead of walking both triangles and testing the same depth. The
 // direct affine UV walk retains the existing texel-boundary rounding rules.
-inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, prelit: *const [256]u32) usize {
-    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / parallel_band_count);
-    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / parallel_band_count);
+inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, prelit: *const [256]u32) usize {
+    const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
+    const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     const first_y = @max(raster.min_y, lane_min_y);
     const last_y = @min(raster.max_y, lane_max_y);
     if (first_y >= last_y) return 0;
@@ -2707,13 +2753,14 @@ fn rasterFlatSpanTriangleTexture4x4(color_words: []align(4) u32, depth_words: []
     const scaled_negative_dv = -dv * 3.999999;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
-    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+    const lane_count = parallelBandCount();
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= lane_count)
         FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
     else
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
+        if (stripe_count > lane_count and stripeLane(y, height, lane_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -2837,13 +2884,14 @@ fn rasterFlatSpanTriangleTexture16x16(color_words: []align(4) u32, depth_words: 
     var pixels_written: usize = 0;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
-    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+    const lane_count = parallelBandCount();
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= lane_count)
         FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
     else
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
+        if (stripe_count > lane_count and stripeLane(y, height, lane_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -2910,13 +2958,14 @@ fn rasterFlatSpanTriangle(comptime depth_test: bool, color_words: []align(4) u32
     var pixels_written: usize = 0;
     const first_lane_y = @max(min_y, lane_min_y);
     const last_lane_y = @min(max_y, lane_max_y);
-    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= parallel_band_count)
+    const lane_count = parallelBandCount();
+    var span_stepper: ?FlatSpanStepper = if (cached_spans == null and stripe_count <= lane_count)
         FlatSpanStepper.init(p0, p1, p2, inverse_area, min_x, max_x, first_lane_y)
     else
         null;
     var y = first_lane_y;
     while (y < last_lane_y) : (y += 1) {
-        if (stripe_count > parallel_band_count and stripeLane(y, height, parallel_band_count, stripe_count) != lane_index) continue;
+        if (stripe_count > lane_count and stripeLane(y, height, lane_count, stripe_count) != lane_index) continue;
         const y_offset = @as(f32, @floatFromInt(y)) + 0.5;
         const span = if (cached_spans) |spans| spans[@intCast(y)] else if (span_stepper) |*stepper| stepper.next() else flatSpanForRow(p0, p1, p2, inverse_area, min_x, max_x, y);
         if (span.last <= span.first) continue;
@@ -3087,16 +3136,18 @@ fn fillPatternWords(bytes: []u8, first_word: usize, word_count: usize, pattern: 
 
 fn fillPatternLane(bytes: []u8, pattern: u32, lane_index: usize) void {
     const word_count = bytes.len / 4;
-    const start = word_count * lane_index / parallel_band_count;
-    const end = word_count * (lane_index + 1) / parallel_band_count;
+    const lane_count = parallelBandCount();
+    const start = word_count * lane_index / lane_count;
+    const end = word_count * (lane_index + 1) / lane_count;
     fillPatternWords(bytes, start, end - start, pattern);
-    if (lane_index == parallel_band_count - 1 and word_count * 4 < bytes.len) @memset(bytes[word_count * 4 ..], @truncate(pattern));
+    if (lane_index == lane_count - 1 and word_count * 4 < bytes.len) @memset(bytes[word_count * 4 ..], @truncate(pattern));
 }
 
 fn fillPatternRasterLane(bytes: []u8, width: u32, height: u32, stripe_count: usize, pattern: u32, lane_index: usize) void {
     const row_words = @as(usize, width);
+    const lane_count = parallelBandCount();
     var stripe_index = lane_index;
-    while (stripe_index < stripe_count) : (stripe_index += parallel_band_count) {
+    while (stripe_index < stripe_count) : (stripe_index += lane_count) {
         const first_row = @as(usize, height) * stripe_index / stripe_count;
         const last_row = @as(usize, height) * (stripe_index + 1) / stripe_count;
         fillPatternWords(bytes, first_row * row_words, (last_row - first_row) * row_words, pattern);
@@ -3105,8 +3156,9 @@ fn fillPatternRasterLane(bytes: []u8, width: u32, height: u32, stripe_count: usi
 
 fn fillPatternRectLane(bytes: []u8, width: u32, rect: Rect, pattern: u32, lane_index: usize) void {
     if (rect.width == 0 or rect.height == 0) return;
-    const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / parallel_band_count;
-    const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / parallel_band_count;
+    const lane_count = parallelBandCount();
+    const first_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * lane_index / lane_count;
+    const last_row = @as(usize, @intCast(rect.y)) + @as(usize, rect.height) * (lane_index + 1) / lane_count;
     const x: usize = @intCast(rect.x);
     for (first_row..last_row) |y| {
         const start = y * width + x;
@@ -3128,13 +3180,13 @@ fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
     if (!context.prepared.spans_valid) return;
     const color_pattern = context.clear_color_pattern orelse return;
     const depth_pattern = context.clear_depth_pattern orelse return;
-    // The validated dirty-clear path uses the fixed two-lane split. Walk only
-    // this lane's rows instead of scanning the entire attachment and calling
-    // stripeLane for every row/triangle pair.
+    // Walk only this lane's rows instead of scanning the entire attachment and
+    // calling stripeLane for every row/triangle pair.
+    const lane_count = parallelBandCount();
     for (context.prepared.triangles[0..context.prepared.count], 0..) |*triangle, triangle_index| {
         if (!triangle.valid) continue;
         var stripe_index = lane_index;
-        while (stripe_index < context.stripe_count) : (stripe_index += parallel_band_count) {
+        while (stripe_index < context.stripe_count) : (stripe_index += lane_count) {
             const first_stripe_y = @as(usize, context.height) * stripe_index / context.stripe_count;
             const last_stripe_y = @as(usize, context.height) * (stripe_index + 1) / context.stripe_count;
             for (first_stripe_y..last_stripe_y) |y| {
@@ -3152,6 +3204,7 @@ fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
 fn runParallelJob(job: ParallelJob, lane_index: usize) void {
     switch (job) {
         .draw => |context| {
+            const lane_count = parallelBandCount();
             if (context.clear_spans) {
                 clearPreparedSpansLane(context, lane_index);
             } else {
@@ -3166,7 +3219,7 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             if (context.expected_target) |expected| {
                 const row_bytes = @as(usize, context.width) * 4;
                 var stripe_index = lane_index;
-                while (stripe_index < context.stripe_count) : (stripe_index += parallel_band_count) {
+                while (stripe_index < context.stripe_count) : (stripe_index += lane_count) {
                     const first_row = @as(usize, context.height) * stripe_index / context.stripe_count;
                     const last_row = @as(usize, context.height) * (stripe_index + 1) / context.stripe_count;
                     const start = first_row * row_bytes;
@@ -3199,7 +3252,7 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
             const rows = (@as(usize, context.height) + dirty_tile_size - 1) / dirty_tile_size;
             const tile_count = columns * rows;
             var tile_index = lane_index;
-            while (tile_index < tile_count) : (tile_index += parallel_band_count) {
+            while (tile_index < tile_count) : (tile_index += parallelBandCount()) {
                 if (context.tiles[tile_index / 8] & (@as(u8, 1) << @intCast(tile_index % 8)) == 0) continue;
                 const tile_x = tile_index % columns;
                 const tile_y = tile_index / columns;
@@ -3232,9 +3285,12 @@ fn parallelWorker(worker_index: usize) void {
 
 fn ensureParallelWorkers() bool {
     if (parallel_started) return parallel_available;
+    configureParallelBandCount();
     parallel_started = true;
     parallel_stop.store(false, .release);
-    for (0..(parallel_band_count - 1)) |worker_index| {
+    parallel_worker_count = parallelBandCount() - 1;
+    parallel_ready = 0;
+    for (0..parallel_worker_count) |worker_index| {
         const worker = std.Thread.spawn(.{}, parallelWorker, .{worker_index}) catch {
             parallel_started = false;
             return false;
@@ -3242,7 +3298,7 @@ fn ensureParallelWorkers() bool {
         parallel_threads[worker_index] = worker;
     }
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
-    while (parallel_ready != parallel_band_count - 1) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
+    while (parallel_ready != parallel_worker_count) _ = std.c.pthread_cond_wait(&parallel_condition, &parallel_mutex);
     parallel_available = true;
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     return true;
@@ -3264,11 +3320,13 @@ pub fn shutdownParallelWorkers() void {
     _ = parallel_generation.fetchAdd(1, .release);
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
-    for (&parallel_threads) |*worker| worker.join();
+    for (parallel_threads[0..parallel_worker_count]) |*worker| worker.join();
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     parallel_started = false;
     parallel_available = false;
     parallel_ready = 0;
+    parallel_worker_count = 0;
+    active_parallel_band_count = parallel_band_count;
     parallel_active = null;
     parallel_completed.store(0, .release);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
@@ -3286,7 +3344,7 @@ fn dispatchParallel(job: ParallelJob) bool {
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
 
     runParallelJob(job, 0);
-    while (parallel_completed.load(.acquire) != parallel_band_count - 1) std.atomic.spinLoopHint();
+    while (parallel_completed.load(.acquire) != parallel_worker_count) std.atomic.spinLoopHint();
 
     _ = std.c.pthread_mutex_lock(&parallel_mutex);
     parallel_active = null;
@@ -3358,6 +3416,7 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     if (dirty_bytes > max_dirty_tile_bytes) return null;
     if (dirty_output) |output| if (output.len < dirty_bytes) return null;
     _ = cpu_locality.pinCurrent(.render);
+    configureParallelBandCount();
     var prepared: PreparedDraw = undefined;
     prepareDraw(uniform, vertex_count, base_vertex, viewport, indexed, &prepared);
     prepareLitTextures(&prepared, texture, texture_width, texture_height, 0);
@@ -3375,6 +3434,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     if (dirty_bytes > max_dirty_tile_bytes) return 0;
     if (expected_target) |expected| if (expected.len != target.len) return 0;
     _ = cpu_locality.pinCurrent(.render);
+    configureParallelBandCount();
     var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
     const inline_fast = counters == null and clear_color_pattern == null and clear_depth_pattern == null and expected_target == null and !clear_spans_requested;
@@ -3410,13 +3470,13 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
         var inline_context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count };
         if (prepared_ptr.batch_fast) {
             if (drawPreparedBatchFastSerial(target, depth, width, height, prepared_ptr)) |pixels| return pixels;
-            runParallelJob(.{ .draw = &inline_context }, 0);
-            runParallelJob(.{ .draw = &inline_context }, 1);
+            for (0..parallelBandCount()) |lane| runParallelJob(.{ .draw = &inline_context }, lane);
         } else {
-            runParallelJob(.{ .draw = &inline_context }, 0);
-            runParallelJob(.{ .draw = &inline_context }, 1);
+            for (0..parallelBandCount()) |lane| runParallelJob(.{ .draw = &inline_context }, lane);
         }
-        return inline_context.bands[0].pixels_written + inline_context.bands[1].pixels_written;
+        var pixels_written: usize = 0;
+        for (inline_context.bands[0..parallelBandCount()]) |band| pixels_written += band.pixels_written;
+        return pixels_written;
     }
     var validation_failed = std.atomic.Value(bool).init(false);
     const full_screen_scissor = scissor.x == 0 and scissor.y == 0 and scissor.width == width and scissor.height == height;
@@ -3426,10 +3486,10 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     // tests beat the extra tile metadata loads and coordinate divisions.
     const use_tile_depth = false;
     if (use_tile_depth) {
-        @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
-        @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
+        @memset(batch_tile_min[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
+        @memset(batch_tile_max[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
     }
-    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count, .count_work = counters != null, .clear_color_pattern = clear_color_pattern, .clear_depth_pattern = clear_depth_pattern, .expected_target = expected_target, .validation_failed = if (expected_target != null) &validation_failed else null, .clear_spans = clear_spans, .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallel_band_count] else null, .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallel_band_count] else null, .tile_columns = (@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size, .tile_count = tile_count };
+    var context = ParallelDraw{ .target = target, .depth = depth, .width = width, .height = height, .uniform = uniform, .texture = texture, .texture_width = texture_width, .texture_height = texture_height, .vertex_count = vertex_count, .base_vertex = 0, .viewport = viewport, .scissor = scissor, .cull_mode = 0, .front_face = 0, .indexed = null, .prepared = prepared_ptr, .stripe_count = parallel_slice_count, .count_work = counters != null, .clear_color_pattern = clear_color_pattern, .clear_depth_pattern = clear_depth_pattern, .expected_target = expected_target, .validation_failed = if (expected_target != null) &validation_failed else null, .clear_spans = clear_spans, .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallelBandCount()] else null, .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallelBandCount()] else null, .tile_columns = (@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size, .tile_count = tile_count };
     if (!dispatchParallel(.{ .draw = &context })) return 0;
     if (validation_failed.load(.acquire)) return 0;
     var pixels_written: usize = 0;
@@ -3448,7 +3508,7 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     return pixels_written;
 }
 
-/// Two-core counted entry point used by the deterministic 3D benchmark. The
+/// Selected-core counted entry point used by the deterministic 3D benchmark. The
 /// render caller is pinned to the selected render CPU and the worker is pinned
 /// to the selected raster CPU; no additional cores participate in this path.
 pub fn drawCountedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, counters: *Counters) usize {
@@ -3460,6 +3520,7 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     if (target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4) return 0;
     if (dirty_output) |output| if (output.len < dirtyTileByteCount(width, height)) return 0;
     _ = cpu_locality.pinCurrent(.render);
+    configureParallelBandCount();
     const needs_preparation = batchNeedsPreparation(commands, width, height);
     var prepare_context: ParallelBatchPrepare = undefined;
     var prepare_completed = std.atomic.Value(usize).init(0);
@@ -3503,8 +3564,8 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     const use_tile_depth = false;
     batch_ownership_ready.store(false, .release);
     if (use_tile_depth) {
-        @memset(batch_tile_min[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
-        @memset(batch_tile_max[0 .. tile_count * parallel_band_count], clear_depth_pattern.?);
+        @memset(batch_tile_min[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
+        @memset(batch_tile_max[0 .. tile_count * parallelBandCount()], clear_depth_pattern.?);
     }
     var context = ParallelBatchDraw{
         .target = target,
@@ -3516,8 +3577,8 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
         .count_work = counters != null,
         .clear_color_pattern = clear_color_pattern,
         .clear_depth_pattern = clear_depth_pattern,
-        .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallel_band_count] else null,
-        .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallel_band_count] else null,
+        .tile_min = if (use_tile_depth) batch_tile_min[0 .. tile_count * parallelBandCount()] else null,
+        .tile_max = if (use_tile_depth) batch_tile_max[0 .. tile_count * parallelBandCount()] else null,
         .tile_columns = (@as(usize, width) + dirty_tile_size - 1) / dirty_tile_size,
         .tile_count = tile_count,
         .prepare = if (needs_preparation) &prepare_context else null,
@@ -3569,14 +3630,14 @@ fn drawParallelBatchColorOnly(target: []u8, depth: []u8, width: u32, height: u32
     return drawParallelBatchImpl(target, depth, width, height, commands, null, null, null, bounds, dirty_output, true);
 }
 
-/// Counted two-core submission for an ordered batch of opaque draws. The batch
+/// Counted selected-core submission for an ordered batch of opaque draws. The batch
 /// pays one worker dispatch while retaining per-command transform, texture,
 /// scissor, and depth ordering semantics.
 pub fn drawCountedParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, counters: *Counters) usize {
     return drawParallelBatch(target, depth, width, height, commands, counters, null, null, null, null);
 }
 
-/// Uncounted two-core submission for an ordered batch of opaque draws. Validate
+/// Uncounted selected-core submission for an ordered batch of opaque draws. Validate
 /// a representative frame with drawCountedParallelBatch, then use this path
 /// when counter instrumentation should not perturb frame timing.
 pub fn drawUncountedParallelBatch(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand) usize {
@@ -3623,7 +3684,7 @@ pub fn drawUncountedParallelBatchOpaqueOverlay(target: []u8, depth: []u8, width:
     return drawParallelBatchColorOnly(target, depth, width, height, commands, null, null);
 }
 
-/// Uncounted two-core batch that clears both attachments in the worker lanes.
+/// Uncounted selected-core batch that clears both attachments in the worker lanes.
 /// The known clear depth also enables a conservative per-tile hierarchical
 /// depth shortcut for flat opaque spans.
 pub fn drawUncountedParallelBatchCleared(target: []u8, depth: []u8, width: u32, height: u32, commands: []const DrawCommand, color_pattern: u32, depth_pattern: u32) usize {
@@ -3650,7 +3711,7 @@ pub fn drawUncountedParallelBatchStaticReplay(target: []u8, depth: []u8, width: 
     return written;
 }
 
-/// Two-core counted draw that clears each lane immediately before that lane's
+/// Selected-core counted draw that clears each lane immediately before that lane's
 /// raster work. This preserves the clear-before-draw ordering while removing a
 /// separate full-frame parallel dispatch for callers that need both operations.
 pub fn drawCountedParallelCleared(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32, counters: *Counters) usize {
@@ -3697,7 +3758,7 @@ fn drawCountedParallelStaticReuseImpl(target: []u8, depth: []u8, width: u32, hei
     return written;
 }
 
-/// Two-core counted entry point for the deterministic, static vkcube target.
+/// Selected-core counted entry point for the deterministic, static vkcube target.
 /// The caller promises that the same target/depth attachments remain untouched
 /// between identical submissions.  In that case the completed framebuffer is
 /// already present and the expensive raster dispatch is safely skipped.
@@ -3716,20 +3777,20 @@ pub fn drawCountedParallelStaticReuseImmutable(target: []u8, depth: []u8, width:
     return drawCountedParallelStaticReuseImpl(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, counters, true);
 }
 
-/// Two-core benchmark path without per-fragment instrumentation. The caller
+/// Selected-core benchmark path without per-fragment instrumentation. The caller
 /// can validate one counted frame separately and time this lower-overhead path.
 pub fn drawUncountedParallel(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect) usize {
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, null, null, null, false);
 }
 
-/// Two-core uncounted draw with the same lane-local clear ordering as the
+/// Selected-core uncounted draw with the same lane-local clear ordering as the
 /// counted cleared entry point. Use it when counters have been validated on a
 /// separate sample and instrumentation should not perturb frame timing.
 pub fn drawUncountedParallelCleared(target: []u8, depth: []u8, width: u32, height: u32, uniform: []const u8, texture: []const u8, texture_width: u32, texture_height: u32, vertex_count: u32, viewport: Viewport, scissor: Rect, color_pattern: u32, depth_pattern: u32) usize {
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, null, false);
 }
 
-/// Two-core uncounted cleared draw that validates each lane against a known
+/// Selected-core uncounted cleared draw that validates each lane against a known
 /// reference buffer before that lane reports completion. This overlaps exact
 /// output validation with the other lane's raster work and retains a full
 /// attachment clear.
@@ -3737,7 +3798,7 @@ pub fn drawUncountedParallelClearedValidated(target: []u8, depth: []u8, width: u
     return drawPreparedParallel(target, depth, width, height, uniform, texture, texture_width, texture_height, vertex_count, viewport, scissor, null, color_pattern, depth_pattern, expected_target, false);
 }
 
-/// Two-core uncounted draw for a stable full-frame command. The caller must
+/// Selected-core uncounted draw for a stable full-frame command. The caller must
 /// keep the target, depth, uniform, texture, and full-screen scissor unchanged
 /// between calls. It clears only spans that the validated previous frame could
 /// have modified, then validates those same lane-owned spans after raster work.
@@ -4047,6 +4108,27 @@ test "parallel draw clears follow raster stripe ownership" {
     for (0..w * h) |pixel| try std.testing.expectEqual(pattern, std.mem.readInt(u32, bytes[pixel * 4 ..][0..4], .little));
 }
 
+test "dynamic parallel bands cover odd-height rows without gaps" {
+    const height: u32 = 17;
+    for (2..5) |band_count| {
+        for (0..height) |row| {
+            const bounds = Rect{ .x = 0, .y = @intCast(row), .width = 1, .height = 1 };
+            var owners: usize = 0;
+            for (0..band_count) |band| {
+                if (boundsTouchParallelBand(bounds, height, band, band_count)) owners += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), owners);
+        }
+
+        const crossing = Rect{ .x = 0, .y = 7, .width = 1, .height = 4 };
+        var owners: usize = 0;
+        for (0..band_count) |band| {
+            if (boundsTouchParallelBand(crossing, height, band, band_count)) owners += 1;
+        }
+        try std.testing.expect(owners >= 1 and owners <= band_count);
+    }
+}
+
 test "prepared bounds conservatively cover transformed content" {
     const vertex = Vertex{ .screen = .{ 3.25, 4.5, 0.5 }, .clip_w = 1, .uv = .{ 0, 0 } };
     var prepared = PreparedDraw{ .count = 1 };
@@ -4275,7 +4357,7 @@ fn drawPreparedInlineCached(target: []u8, depth: []u8, width: u32, height: u32, 
     return drawPreparedBatchFastSerial(target, depth, width, height, &entry.prepared);
 }
 fn drawPreparedBatchFast(comptime color_only: bool, target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, lane_index: usize, tile_min: ?[]u32, tile_max: ?[]u32, tile_columns: usize, tile_count: usize) ?usize {
-    return drawPreparedBatchFastImpl(color_only, target, depth, width, height, prepared, lane_index, parallel_band_count, tile_min, tile_max, tile_columns, tile_count);
+    return drawPreparedBatchFastImpl(color_only, target, depth, width, height, prepared, lane_index, parallelBandCount(), tile_min, tile_max, tile_columns, tile_count);
 }
 
 fn drawPreparedBatchFastSerial(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw) ?usize {
