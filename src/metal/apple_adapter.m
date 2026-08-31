@@ -98,6 +98,7 @@ static NSString *const zpu_cpu_ml_matmul_i32_function_name = @"zpu_cpu_ml_matmul
 static NSString *const zpu_cpu_add_f32_function_name = @"zpu_cpu_add_f32";
 static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
 static NSString *const zpu_cpu_sub_f32_function_name = @"zpu_cpu_sub_f32";
+static NSString *const zpu_cpu_copy_rgba8_texture_to_texture_function_name = @"zpu_cpu_copy_rgba8_texture_to_texture";
 /* Metadata-only profile used to exercise CPU nested argument-buffer
  * encoding. It is intentionally not an executable arbitrary-MSL kernel. */
 static NSString *const zpu_cpu_argument_buffer_function_name = @"zpu_cpu_argument_buffer";
@@ -8536,6 +8537,24 @@ static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_c
         [outputBinding setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
         [arguments addObject:output];
         [bindings addObject:outputBinding];
+    } else if (kernel == ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE) {
+        ZPUArgument *input = zpu_reflection_argument(@"input", MTLArgumentTypeTexture,
+                                                       MTLBindingAccessReadOnly, 0);
+        [input setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        ZPUBinding *inputBinding = zpu_reflection_binding(@"input", MTLBindingTypeTexture,
+                                                           MTLBindingAccessReadOnly, 0);
+        [inputBinding setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        [arguments addObject:input];
+        [bindings addObject:inputBinding];
+
+        ZPUArgument *output = zpu_reflection_argument(@"output", MTLArgumentTypeTexture,
+                                                       MTLBindingAccessWriteOnly, 1);
+        [output setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        ZPUBinding *outputBinding = zpu_reflection_binding(@"output", MTLBindingTypeTexture,
+                                                            MTLBindingAccessWriteOnly, 1);
+        [outputBinding setTextureType:MTLTextureType2D dataType:MTLDataTypeFloat arrayLength:1];
+        [arguments addObject:output];
+        [bindings addObject:outputBinding];
     } else if (kernel == ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE) {
         ZPUArgument *source = zpu_reflection_argument(@"source", MTLArgumentTypeBuffer,
                                                        MTLBindingAccessReadOnly, 0);
@@ -9059,6 +9078,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         zpu_metal_compute_kernel kernel = 0;
         if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
         else if ([name isEqualToString:@"zpu_cpu_copy_rgba8_buffer_to_texture"]) kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE;
+        else if ([name isEqualToString:zpu_cpu_copy_rgba8_texture_to_texture_function_name]) kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE;
         else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_array"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
         else if ([name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_3d"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D;
         else if ([name isEqualToString:@"zpu_cpu_fill_gradient_r32_float"]) kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT;
@@ -9174,6 +9194,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         @"zpu_cpu_uniform_color_fragment",
         @"zpu_cpu_fill_gradient_rgba8",
         @"zpu_cpu_copy_rgba8_buffer_to_texture",
+        zpu_cpu_copy_rgba8_texture_to_texture_function_name,
         @"zpu_cpu_fill_gradient_rgba8_array",
         @"zpu_cpu_fill_gradient_rgba8_3d",
         @"zpu_cpu_fill_gradient_r32_float",
@@ -11053,7 +11074,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_fill_gradient_rgba32_uint zpu_cpu_fill_gradient_rgba32_sint zpu_cpu_fill_gradient_r32_uint zpu_cpu_fill_gradient_r32_sint zpu_cpu_fill_gradient_rg32_uint zpu_cpu_fill_gradient_rg32_sint zpu_cpu_fill_gradient_r8_uint zpu_cpu_fill_gradient_r8_sint zpu_cpu_fill_gradient_rg8_uint zpu_cpu_fill_gradient_rg8_sint zpu_cpu_fill_gradient_rgba8_uint zpu_cpu_fill_gradient_rgba8_sint zpu_cpu_fill_gradient_r16_uint zpu_cpu_fill_gradient_r16_sint zpu_cpu_fill_gradient_rg16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgba16_uint zpu_cpu_fill_gradient_rgba16_sint zpu_cpu_fill_gradient_rgb10a2_uint zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_sub_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rgba32_uint_fragment zpu_cpu_rgba32_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_u8 zpu_cpu_ml_mul_i8 zpu_cpu_ml_mul_u16 zpu_cpu_ml_mul_i16 zpu_cpu_ml_mul_u32 zpu_cpu_ml_mul_i32 zpu_cpu_ml_mul_i4 zpu_cpu_ml_mul_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_ml_matmul_u8 zpu_cpu_ml_matmul_i8 zpu_cpu_ml_matmul_u16 zpu_cpu_ml_matmul_i16 zpu_cpu_ml_matmul_u32 zpu_cpu_ml_matmul_i32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_copy_rgba8_texture_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_fill_gradient_rgba32_uint zpu_cpu_fill_gradient_rgba32_sint zpu_cpu_fill_gradient_r32_uint zpu_cpu_fill_gradient_r32_sint zpu_cpu_fill_gradient_rg32_uint zpu_cpu_fill_gradient_rg32_sint zpu_cpu_fill_gradient_r8_uint zpu_cpu_fill_gradient_r8_sint zpu_cpu_fill_gradient_rg8_uint zpu_cpu_fill_gradient_rg8_sint zpu_cpu_fill_gradient_rgba8_uint zpu_cpu_fill_gradient_rgba8_sint zpu_cpu_fill_gradient_r16_uint zpu_cpu_fill_gradient_r16_sint zpu_cpu_fill_gradient_rg16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgba16_uint zpu_cpu_fill_gradient_rgba16_sint zpu_cpu_fill_gradient_rgb10a2_uint zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_sub_f32 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rgba32_uint_fragment zpu_cpu_rgba32_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_u8 zpu_cpu_ml_mul_i8 zpu_cpu_ml_mul_u16 zpu_cpu_ml_mul_i16 zpu_cpu_ml_mul_u32 zpu_cpu_ml_mul_i32 zpu_cpu_ml_mul_i4 zpu_cpu_ml_mul_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_ml_matmul_u8 zpu_cpu_ml_matmul_i8 zpu_cpu_ml_matmul_u16 zpu_cpu_ml_matmul_i16 zpu_cpu_ml_matmul_u32 zpu_cpu_ml_matmul_i32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -11907,6 +11928,19 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
              "output.write(float4(source[gid.y*output.get_width()+gid.x])/255.0,gid);";
         if ([compactSignature isEqualToString:copySignature] && [compactBody isEqualToString:copyBody]) {
             implementations[functionName] = @"zpu_cpu_copy_rgba8_buffer_to_texture";
+            return;
+        }
+
+        NSString *textureCopySignature =
+            @"texture2d<float,access::read>input[[texture(0)]],"
+             "texture2d<float,access::write>output[[texture(1)]],"
+             "uint2gid[[thread_position_in_grid]]";
+        NSString *textureCopyBody =
+            @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+             "output.write(input.read(gid),gid);";
+        if ([compactSignature isEqualToString:textureCopySignature] &&
+            [compactBody isEqualToString:textureCopyBody]) {
+            implementations[functionName] = zpu_cpu_copy_rgba8_texture_to_texture_function_name;
             return;
         }
 
@@ -13431,6 +13465,7 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             @"zpu_cpu_uniform_color_fragment",
             @"zpu_cpu_fill_gradient_rgba8",
             @"zpu_cpu_copy_rgba8_buffer_to_texture",
+            zpu_cpu_copy_rgba8_texture_to_texture_function_name,
             @"zpu_cpu_fill_gradient_rgba8_array",
             @"zpu_cpu_fill_gradient_rgba8_3d",
             @"zpu_cpu_fill_gradient_r32_float",
@@ -18172,6 +18207,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
     switch (kernel) {
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8: return @"zpu_cpu_fill_gradient_rgba8";
         case ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE: return @"zpu_cpu_copy_rgba8_buffer_to_texture";
+        case ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE: return zpu_cpu_copy_rgba8_texture_to_texture_function_name;
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY: return @"zpu_cpu_fill_gradient_rgba8_array";
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D: return @"zpu_cpu_fill_gradient_rgba8_3d";
         case ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT: return @"zpu_cpu_fill_gradient_r32_float";
@@ -18205,7 +18241,8 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
 }
 
 static NSUInteger zpu_compute_texture_index_for_kernel(zpu_metal_compute_kernel kernel) {
-    return kernel == ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE ? 1 : 0;
+    return (kernel == ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE ||
+            kernel == ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE) ? 1 : 0;
 }
 
 static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
@@ -18238,6 +18275,8 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_copy_rgba8_buffer_to_texture"]) {
             _kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_copy_rgba8_texture_to_texture_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_array"]) {
             _kernel = ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY;
         } else if (is_kernel && [name isEqualToString:@"zpu_cpu_fill_gradient_rgba8_3d"]) {

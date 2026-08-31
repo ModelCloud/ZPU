@@ -572,6 +572,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
          "(float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+         "kernel void zpu_source_copy_texture_rgba8(texture2d<float, access::read> input [[texture(0)]], "
+         "texture2d<float, access::write> output [[texture(1)]], "
+         "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
+         "gid.y >= output.get_height()) return; output.write(input.read(gid), gid); }\n"
          "struct Vertex { float4 position [[position]]; float4 color; };\n"
          "vertex Vertex zpu_source_vertex(uint vertex_id [[vertex_id]], "
          "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
@@ -751,7 +755,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 50) {
+        adapter_library.functionNames.count != 51) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1324,6 +1328,123 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU copy lowering execution failed",
                         adapter_copy_error ?: native_copy_error);
         return 173;
+    }
+
+    enum { texture_copy_width = 9, texture_copy_height = 6,
+           texture_copy_bytes = texture_copy_width * texture_copy_height * 4 };
+    uint8_t texture_copy_source[texture_copy_bytes];
+    for (NSUInteger y = 0; y < texture_copy_height; ++y) {
+        for (NSUInteger x = 0; x < texture_copy_width; ++x) {
+            const NSUInteger offset = (y * texture_copy_width + x) * 4;
+            texture_copy_source[offset + 0] = (uint8_t)(x * 17u + 3u);
+            texture_copy_source[offset + 1] = (uint8_t)(y * 29u + 5u);
+            texture_copy_source[offset + 2] = (uint8_t)(x + y * texture_copy_width + 7u);
+            texture_copy_source[offset + 3] = 255;
+        }
+    }
+    id<MTLFunction> native_texture_copy_function =
+        [native_library newFunctionWithName:@"zpu_source_copy_texture_rgba8"];
+    id<MTLFunction> adapter_texture_copy_function =
+        [adapter_library newFunctionWithName:@"zpu_source_copy_texture_rgba8"];
+    NSError *native_texture_copy_error = nil;
+    NSError *adapter_texture_copy_error = nil;
+    id<MTLComputePipelineState> native_texture_copy_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_texture_copy_function
+                                                       error:&native_texture_copy_error];
+    id<MTLComputePipelineState> adapter_texture_copy_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_texture_copy_function
+                                                       error:&adapter_texture_copy_error];
+    MTLTextureDescriptor *texture_copy_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:texture_copy_width
+                                                           height:texture_copy_height
+                                                        mipmapped:NO];
+    texture_copy_descriptor.storageMode = MTLStorageModeShared;
+    texture_copy_descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture_copy_input =
+        [native_device newTextureWithDescriptor:texture_copy_descriptor];
+    id<MTLTexture> native_texture_copy_output =
+        [native_device newTextureWithDescriptor:texture_copy_descriptor];
+    id<MTLTexture> adapter_texture_copy_input =
+        [adapter_device newTextureWithDescriptor:texture_copy_descriptor];
+    id<MTLTexture> adapter_texture_copy_output =
+        [adapter_device newTextureWithDescriptor:texture_copy_descriptor];
+    MTLRegion texture_copy_region = MTLRegionMake2D(0, 0, texture_copy_width, texture_copy_height);
+    if (native_texture_copy_input != nil) {
+        [native_texture_copy_input replaceRegion:texture_copy_region mipmapLevel:0
+                                        withBytes:texture_copy_source bytesPerRow:texture_copy_width * 4];
+    }
+    if (adapter_texture_copy_input != nil) {
+        [adapter_texture_copy_input replaceRegion:texture_copy_region mipmapLevel:0
+                                         withBytes:texture_copy_source bytesPerRow:texture_copy_width * 4];
+    }
+    id<MTLCommandBuffer> native_texture_copy_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_texture_copy_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_texture_copy_encoder =
+        [native_texture_copy_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_texture_copy_encoder =
+        [adapter_texture_copy_command_buffer computeCommandEncoder];
+    if (native_texture_copy_pipeline != nil && adapter_texture_copy_pipeline != nil &&
+        native_texture_copy_input != nil && native_texture_copy_output != nil &&
+        adapter_texture_copy_input != nil && adapter_texture_copy_output != nil &&
+        native_texture_copy_encoder != nil && adapter_texture_copy_encoder != nil) {
+        [native_texture_copy_encoder setComputePipelineState:native_texture_copy_pipeline];
+        [native_texture_copy_encoder setTexture:native_texture_copy_input atIndex:0];
+        [native_texture_copy_encoder setTexture:native_texture_copy_output atIndex:1];
+        [native_texture_copy_encoder dispatchThreads:MTLSizeMake(texture_copy_width + 3,
+                                                                  texture_copy_height + 2, 1)
+                             threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+        [native_texture_copy_encoder endEncoding];
+        [native_texture_copy_command_buffer commit];
+        [native_texture_copy_command_buffer waitUntilCompleted];
+        [adapter_texture_copy_encoder setComputePipelineState:adapter_texture_copy_pipeline];
+        [adapter_texture_copy_encoder setTexture:adapter_texture_copy_input atIndex:0];
+        [adapter_texture_copy_encoder setTexture:adapter_texture_copy_output atIndex:1];
+        [adapter_texture_copy_encoder dispatchThreads:MTLSizeMake(texture_copy_width + 3,
+                                                                   texture_copy_height + 2, 1)
+                              threadsPerThreadgroup:MTLSizeMake(4, 4, 1)];
+        [adapter_texture_copy_encoder endEncoding];
+        [adapter_texture_copy_command_buffer commit];
+        [adapter_texture_copy_command_buffer waitUntilCompleted];
+    }
+    uint8_t native_texture_copy_pixels[texture_copy_bytes] = {0};
+    uint8_t adapter_texture_copy_pixels[texture_copy_bytes] = {0};
+    if (native_texture_copy_output != nil) {
+        [native_texture_copy_output getBytes:native_texture_copy_pixels
+                                 bytesPerRow:texture_copy_width * 4
+                                  fromRegion:texture_copy_region mipmapLevel:0];
+    }
+    if (adapter_texture_copy_output != nil) {
+        [adapter_texture_copy_output getBytes:adapter_texture_copy_pixels
+                                  bytesPerRow:texture_copy_width * 4
+                                   fromRegion:texture_copy_region mipmapLevel:0];
+    }
+    BOOL texture_copy_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_copy_texture_rgba8"];
+        texture_copy_reflection_ok = reflection != nil && reflection.bindings.count == 2 &&
+            reflection.bindings[0].type == MTLBindingTypeTexture &&
+            reflection.bindings[0].index == 0 &&
+            reflection.bindings[0].access == MTLBindingAccessReadOnly &&
+            reflection.bindings[1].type == MTLBindingTypeTexture &&
+            reflection.bindings[1].index == 1 &&
+            reflection.bindings[1].access == MTLBindingAccessWriteOnly;
+    }
+    if (native_texture_copy_function == nil || adapter_texture_copy_function == nil ||
+        native_texture_copy_error != nil || adapter_texture_copy_error != nil ||
+        native_texture_copy_pipeline == nil || adapter_texture_copy_pipeline == nil ||
+        native_texture_copy_input == nil || native_texture_copy_output == nil ||
+        adapter_texture_copy_input == nil || adapter_texture_copy_output == nil ||
+        native_texture_copy_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_texture_copy_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        !texture_copy_reflection_ok || memcmp(native_texture_copy_pixels, adapter_texture_copy_pixels,
+                                              sizeof(native_texture_copy_pixels)) != 0 ||
+        memcmp(texture_copy_source, adapter_texture_copy_pixels,
+               sizeof(texture_copy_source)) != 0) {
+        fail_with_error("source-defined CPU texture-to-texture lowering execution failed",
+                        adapter_texture_copy_error ?: native_texture_copy_error);
+        return 174;
     }
 
     const struct {
@@ -19443,6 +19564,7 @@ int main(void) {
         NSString *adapter_cpu_source =
             @"kernel void zpu_cpu_fill_gradient_rgba8() {}\n"
             "kernel void zpu_cpu_copy_rgba8_buffer_to_texture() {}\n"
+            "kernel void zpu_cpu_copy_rgba8_texture_to_texture() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_array() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba8_3d() {}\n"
             "kernel void zpu_cpu_fill_gradient_rgba32_uint() {}\n"
@@ -20067,7 +20189,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 70 ||
+            adapter_library.functionNames.count != 71 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -20094,6 +20216,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_add_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_sub_f32"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_copy_rgba8_texture_to_texture"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f16"].functionType != MTLFunctionTypeKernel ||

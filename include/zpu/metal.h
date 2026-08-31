@@ -422,6 +422,10 @@ enum {
     ZPU_METAL_COMPUTE_SOURCE_NOOP = 29,
     /* Bounded source-defined Float32 subtraction, lowered to the CPU path. */
     ZPU_METAL_COMPUTE_SUB_F32 = 30,
+    /* Bounded source-defined RGBA8 texture copy. Bind input at texture(0)
+     * and output at texture(1); the CPU path preserves Metal's top-left
+     * gid.x/gid.y mapping and raw four-byte texels. */
+    ZPU_METAL_COMPUTE_COPY_RGBA8_TEXTURE_TO_TEXTURE = 31,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

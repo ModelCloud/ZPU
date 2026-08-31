@@ -313,6 +313,11 @@ triangle path:
   deferred CPU/ZPU execution path for elementwise Float32 subtraction; its
   source lowering admits only the exact subtraction body and fixed bound, so
   arbitrary MSL remains rejected.
+  The bounded `zpu_cpu_copy_rgba8_texture_to_texture` profile reads a
+  ZPU-owned RGBA8 texture at binding 0 and writes a same-sized ZPU-owned
+  RGBA8 texture at binding 1. Its CPU loop clips the dispatch to the output
+  dimensions and copies raw four-byte texels in Metal's upper-left
+  `gid.x/gid.y` order; source lowering admits only the exact read/write body.
   Direct compute texture slots 2 through 127 and sampler slots 0 through 15
   are retained as ZPU-owned metadata for registered profiles that do not
   execute those resources; the executable texture slots remain profile-owned
@@ -609,7 +614,10 @@ triangle path:
   for source-named F32 buffer add/multiply kernels with the standard three
   buffer slots and `thread_position_in_grid`, plus the source-named RGBA8
   texture gradient profile with a `texture2d<float, access::write>` slot and
-  the top-left `uint2` grid, and a strict source-named passthrough vertex plus
+  the top-left `uint2` grid, plus a source-named RGBA8 texture-to-texture copy
+  profile with read binding 0 and write binding 1. The copy profile preserves
+  raw texel bytes and admits only its exact bounded body. The same source
+  lowering set includes a strict source-named passthrough vertex plus
   color-returning fragment pair. The pair accepts any source struct identifier
   whose validated layout is `float4 position [[position]]; float4 color;`, so
   renaming the source record does not change the fixed CPU ABI. A canonical

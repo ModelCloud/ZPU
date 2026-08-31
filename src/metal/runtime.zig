@@ -827,6 +827,7 @@ const SharedEventCommand = struct {
 
 const ComputeCommand = struct {
     kernel: u8,
+    source_texture: ?*Texture = null,
     texture: ?*Texture,
     texture_index: u32,
     buffer: ?*Buffer,
@@ -2882,11 +2883,16 @@ pub const CommandBuffer = struct {
                 sparseSyncOptionalBuffer(compute.buffer);
                 sparseSyncOptionalBuffer(compute.acceleration_structure);
                 sparseSyncOptionalBuffer(compute.indirect_buffer);
+                if (compute.source_texture) |source| {
+                    if (!validTexture(source) or source.device != self.queue.device) return self.fail(error.InvalidResource);
+                    sparseSyncTexture(source);
+                }
                 if (compute.texture) |texture| sparseSyncTexture(texture);
                 defer {
                     sparseFlushOptionalBuffer(compute.buffer);
                     sparseFlushOptionalBuffer(compute.acceleration_structure);
                     sparseFlushOptionalBuffer(compute.indirect_buffer);
+                    if (compute.source_texture) |source| sparseFlushTexture(source);
                     if (compute.texture) |texture| sparseFlushTexture(texture);
                 }
                 var resolved = compute;
@@ -5173,16 +5179,20 @@ pub const ComputeEncoder = struct {
     }
 
     fn textureIndexForKernel(self: *const ComputeEncoder) usize {
-        return if (self.kernel == 2) 1 else 0;
+        return if (self.kernel == 2 or self.kernel == 31) 1 else 0;
     }
 
     fn textureForKernel(self: *const ComputeEncoder) ?*Texture {
         return self.textures[self.textureIndexForKernel()];
     }
 
+    fn sourceTextureForKernel(self: *const ComputeEncoder) ?*Texture {
+        return if (self.kernel == 31) self.textures[0] else null;
+    }
+
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 30) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 31) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5397,6 +5407,7 @@ pub const ComputeEncoder = struct {
             return self.appendBufferAdd(threads_per_grid, threads_per_threadgroup, null, 0, false);
         }
         if (self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
         if (self.kernel == 7 and (self.acceleration_structure == null or self.acceleration_structure_index != 0)) return error.InvalidCommand;
         if ((self.kernel != 3 and self.kernel != 4 and threads_per_grid.depth != 1) or
@@ -5405,6 +5416,7 @@ pub const ComputeEncoder = struct {
         if (self.kernel != 4 and threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
+            .source_texture = self.sourceTextureForKernel(),
             .texture = self.textureForKernel().?,
             .texture_index = @intCast(self.textureIndexForKernel()),
             .buffer = self.buffer,
@@ -5412,6 +5424,7 @@ pub const ComputeEncoder = struct {
             .acceleration_structure = self.acceleration_structure,
             .acceleration_structure_index = self.acceleration_structure_index,
             .threads_per_grid = threads_per_grid,
+            .threads_per_threadgroup = threads_per_threadgroup,
             .array_slice = self.array_slices[self.textureIndexForKernel()],
         } });
     }
@@ -5440,6 +5453,7 @@ pub const ComputeEncoder = struct {
             }, threads_per_threadgroup);
         }
         if (self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if ((self.kernel != 3 and self.kernel != 4 and threadgroups_per_grid.depth != 1) or
             (self.kernel != 4 and threads_per_threadgroup.depth != 1) or
             threads_per_threadgroup.width == 0 or threads_per_threadgroup.height == 0) return error.InvalidArgument;
@@ -5469,6 +5483,7 @@ pub const ComputeEncoder = struct {
             return self.appendBufferAdd(.{ .width = 0, .height = 1, .depth = 1 }, threads_per_threadgroup, indirect_buffer, indirect_buffer_offset, false);
         }
         if (self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
@@ -5477,6 +5492,7 @@ pub const ComputeEncoder = struct {
         if (self.kernel != 4 and threads_per_threadgroup.depth != 1) return error.UnsupportedOperation;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
+            .source_texture = self.sourceTextureForKernel(),
             .texture = self.textureForKernel().?,
             .texture_index = @intCast(self.textureIndexForKernel()),
             .buffer = self.buffer,
@@ -5511,12 +5527,14 @@ pub const ComputeEncoder = struct {
             return self.appendBufferAdd(.{ .width = 0, .height = 0, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
         }
         if (self.textureForKernel() == null) return error.InvalidCommand;
+        if (self.kernel == 31 and self.sourceTextureForKernel() == null) return error.InvalidCommand;
         if (self.kernel == 2 and self.buffer == null) return error.InvalidCommand;
         if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
             indirect_buffer_offset % @alignOf(u32) != 0 or
             !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
         _ = try self.command_buffer.append(.{ .compute = .{
             .kernel = self.kernel,
+            .source_texture = self.sourceTextureForKernel(),
             .texture = self.textureForKernel().?,
             .texture_index = @intCast(self.textureIndexForKernel()),
             .buffer = self.buffer,
@@ -5934,6 +5952,25 @@ fn executeCompute(command: ComputeCommand) Error!void {
     if (command.kernel == 29) return;
     const texture = command.texture orelse return error.InvalidResource;
     if (!validTexture(texture) or !texture.format.isColor()) return error.InvalidResource;
+    if (command.kernel == 31) {
+        const source = command.source_texture orelse return error.InvalidResource;
+        if (!validTexture(source) or source.device != texture.device or
+            source.format != texture.format or
+            (source.format != .rgba8_unorm and source.format != .bgra8_unorm) or
+            source.width != texture.width or source.height != texture.height or
+            command.threads_per_grid.depth != 1 or
+            command.threads_per_threadgroup.width == 0 or
+            command.threads_per_threadgroup.height == 0 or
+            command.threads_per_threadgroup.depth != 1) return error.InvalidArgument;
+        const width = @min(command.threads_per_grid.width, texture.width);
+        const height = @min(command.threads_per_grid.height, texture.height);
+        for (0..height) |y| for (0..width) |x| {
+            const source_offset = y * source.stride + x * source.format.bytesPerPixel();
+            const destination_offset = y * texture.stride + x * texture.format.bytesPerPixel();
+            @memcpy(texture.bytes[destination_offset..][0..4], source.bytes[source_offset..][0..4]);
+        };
+        return;
+    }
     if (command.kernel != 3 and command.kernel != 4 and command.threads_per_grid.depth != 1) return error.InvalidArgument;
     const width = @min(command.threads_per_grid.width, texture.width);
     const height = @min(command.threads_per_grid.height, texture.height);
@@ -9260,6 +9297,46 @@ test "CPU buffer multiply compute is deferred and slot-accurate" {
     }
     try std.testing.expectEqual(@as(f32, 123.0), readF32Little(output.bytes, 0));
     try std.testing.expectEqual(@as(f32, 456.0), readF32Little(output.bytes, @sizeOf(f32)));
+}
+
+test "CPU texture copy compute preserves the top-left pixel grid" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+
+    const source = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(source);
+    const destination = try createTexture(device, 5, 3, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(destination);
+    @memset(destination.bytes, 0xa5);
+    for (0..source.height) |y| for (0..source.width) |x| {
+        const offset = y * source.stride + x * 4;
+        source.bytes[offset + 0] = @intCast(10 + x);
+        source.bytes[offset + 1] = @intCast(40 + y);
+        source.bytes[offset + 2] = @intCast(80 + x + y * source.width);
+        source.bytes[offset + 3] = 255;
+    };
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(31);
+    try encoder.setTexture(source, 0);
+    try encoder.setTexture(destination, 1);
+    try encoder.dispatchThreads(.{ .width = 7, .height = 4, .depth = 1 }, .{ .width = 2, .height = 2, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try std.testing.expectEqual(@as(u8, 0xa5), destination.bytes[0]);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+
+    for (0..source.height) |y| for (0..source.width) |x| {
+        const source_offset = y * source.stride + x * 4;
+        const destination_offset = y * destination.stride + x * 4;
+        try std.testing.expectEqualSlices(u8,
+            source.bytes[source_offset..][0..4], destination.bytes[destination_offset..][0..4]);
+    };
 }
 
 test "CPU triangle trace uses the Metal top-left pixel grid" {
