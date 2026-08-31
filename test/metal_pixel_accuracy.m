@@ -273,9 +273,9 @@ static const char *const kShaderSource =
     "kernel void zpu_cpu_argument_buffer_array(constant ZPUCPUArgumentBufferArray &args [[buffer(0)]]) { (void)args; }\n"
     "struct ZPUCPUNestedInnerArgumentBuffer { device float *data [[id(0)]]; "
     "texture2d<float> tex [[id(1)]]; };\n"
-    "struct ZPUCPUNestedOuterArgumentBuffer { constant ZPUCPUNestedInnerArgumentBuffer &inner [[id(0)]]; "
-    "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
-    "kernel void zpu_cpu_argument_buffer_nested(constant ZPUCPUNestedOuterArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
+         "struct ZPUCPUNestedOuterArgumentBuffer { constant ZPUCPUNestedInnerArgumentBuffer &inner [[id(0)]]; "
+         "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
+         "kernel void zpu_cpu_argument_buffer_nested(constant ZPUCPUNestedOuterArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "struct ZPUCPURecursiveGrandArgumentBuffer { device float *data [[id(0)]]; "
     "texture2d<float> tex [[id(1)]]; };\n"
     "struct ZPUCPURecursiveInnerArgumentBuffer { constant ZPUCPURecursiveGrandArgumentBuffer &grand [[id(0)]]; "
@@ -571,13 +571,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
          "fragment float4 zpu_source_fragment(Vertex input [[stage_in]]) { return input.color; }\n"
          "fragment float4 zpu_source_uniform_fragment(Vertex input [[stage_in]], "
-         "constant float4 &color [[buffer(0)]]) { return color; }\n";
+         "constant float4 &color [[buffer(0)]]) { return color; }\n"
+         "struct SourceNestedInner { device float *data [[id(0)]]; texture2d<float> tex [[id(1)]]; };\n"
+         "struct SourceNestedOuter { constant SourceNestedInner &inner [[id(0)]]; "
+         "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_nested(constant SourceNestedOuter &args [[buffer(0)]]) { (void)args; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 6) {
+        adapter_library.functionNames.count != 7) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -924,6 +928,37 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU uniform fragment lowering execution failed",
                         adapter_uniform_error ?: native_uniform_error);
         return 171;
+    }
+
+    id<MTLFunction> native_source_nested_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_nested"];
+    id<MTLFunction> adapter_source_nested_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_nested"];
+    id<MTLArgumentEncoder> native_source_nested_encoder =
+        [native_source_nested_function newArgumentEncoderWithBufferIndex:0];
+    id<MTLArgumentEncoder> adapter_source_nested_encoder =
+        [adapter_source_nested_function newArgumentEncoderWithBufferIndex:0];
+    id<MTLArgumentEncoder> native_source_nested_child =
+        [native_source_nested_encoder newArgumentEncoderForBufferAtIndex:0];
+    id<MTLArgumentEncoder> adapter_source_nested_child =
+        [adapter_source_nested_encoder newArgumentEncoderForBufferAtIndex:0];
+    BOOL source_nested_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_nested"];
+        source_nested_reflection_ok = reflection != nil && reflection.bindings.count == 1 &&
+            reflection.bindings[0].type == MTLBindingTypeBuffer;
+    }
+    if (native_source_nested_function == nil || adapter_source_nested_function == nil ||
+        native_source_nested_encoder == nil || adapter_source_nested_encoder == nil ||
+        native_source_nested_child == nil || adapter_source_nested_child == nil ||
+        native_source_nested_encoder.encodedLength != adapter_source_nested_encoder.encodedLength ||
+        native_source_nested_encoder.alignment != adapter_source_nested_encoder.alignment ||
+        native_source_nested_child.encodedLength != adapter_source_nested_child.encodedLength ||
+        native_source_nested_child.alignment != adapter_source_nested_child.alignment ||
+        !source_nested_reflection_ok) {
+        fail_with_error("source-defined CPU nested argument lowering failed", adapter_error ?: native_error);
+        return 172;
     }
     return 0;
 }

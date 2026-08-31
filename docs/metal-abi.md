@@ -589,7 +589,10 @@ triangle path:
   plus color-returning fragment pair. A canonical source-named fragment that
   returns a `constant float4` buffer-0 color is lowered to the CPU
   uniform-color raster profile, preserving `setFragmentBytes:length:atIndex:`
-  and its exact attachment bytes. Those functions execute through ZPU's
+  and its exact attachment bytes. A complete canonical nested argument-buffer
+  declaration is also lowered to the CPU recursive argument encoder, with
+  native-matching parent/child layout metadata and resource slots. Those
+  functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler.
   Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization

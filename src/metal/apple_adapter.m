@@ -11848,6 +11848,64 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
     return [implementations copy];
 }
 
+/* A nested argument buffer has no executable CPU shader body of its own, but
+ * its Metal layout is still useful to applications. Recognize one complete
+ * resource layout by its declarations and lower it to the existing recursive
+ * CPU encoder. Do not infer layouts from arbitrary MSL: an incomplete or
+ * differently ordered declaration remains unavailable. */
+static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_argument_buffer_functions(NSString *source) {
+    NSString *compactSource = zpu_source_compact(source);
+    if (compactSource.length == 0) return @{};
+    NSError *structError = nil;
+    NSRegularExpression *structExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"struct([A-Za-z_][A-Za-z0-9_]*)\\{([^{}]*)\\};"
+                               options:0 error:&structError];
+    if (structExpression == nil || structError != nil) return @{};
+    __block NSString *innerName = nil;
+    NSMutableArray<NSTextCheckingResult *> *structMatches = [NSMutableArray array];
+    [structExpression enumerateMatchesInString:compactSource options:0
+                                          range:NSMakeRange(0, compactSource.length)
+                                     usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        [structMatches addObject:match];
+        NSString *body = [compactSource substringWithRange:[match rangeAtIndex:2]];
+        if ([body isEqualToString:
+                @"devicefloat*data[[id(0)]];texture2d<float>tex[[id(1)]];"]) {
+            innerName = [compactSource substringWithRange:[match rangeAtIndex:1]];
+        }
+    }];
+    if (innerName == nil) return @{};
+    NSString *outerName = nil;
+    for (NSTextCheckingResult *match in structMatches) {
+        NSString *body = [compactSource substringWithRange:[match rangeAtIndex:2]];
+        NSString *expectedBody = [NSString stringWithFormat:
+            @"constant%@&inner[[id(0)]];samplersamp[[id(1)]];float4color[[id(2)]];", innerName];
+        if ([body isEqualToString:expectedBody]) {
+            outerName = [compactSource substringWithRange:[match rangeAtIndex:1]];
+            break;
+        }
+    }
+    if (outerName == nil) return @{};
+    NSError *kernelError = nil;
+    NSRegularExpression *kernelExpression = [NSRegularExpression
+        regularExpressionWithPattern:[NSString stringWithFormat:
+            @"kernelvoid([A-Za-z_][A-Za-z0-9_]*)\\(constant%@&args"
+             "\\[\\[buffer\\(0\\)\\]\\]\\)\\{\\(void\\)args;\\}", outerName]
+                               options:0 error:&kernelError];
+    if (kernelExpression == nil || kernelError != nil) return @{};
+    NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
+    [kernelExpression enumerateMatchesInString:compactSource options:0
+                                          range:NSMakeRange(0, compactSource.length)
+                                     usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+        implementations[name] = zpu_cpu_argument_buffer_nested_function_name;
+    }];
+    return [implementations copy];
+}
+
 /* The render lowering profile is equally narrow: only the canonical Vertex
  * passthrough and color-returning fragment can safely share the fixed ZPU
  * vertex/fragment implementations. */
@@ -12036,6 +12094,14 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
             }
         }
         [zpu_source_lowerable_compute_functions(source) enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *name, NSString *implementation, BOOL *stop) {
+                (void)stop;
+                if (![names containsObject:name]) {
+                    [names addObject:name];
+                    implementations[name] = implementation;
+                }
+            }];
+        [zpu_source_lowerable_argument_buffer_functions(source) enumerateKeysAndObjectsUsingBlock:
             ^(NSString *name, NSString *implementation, BOOL *stop) {
                 (void)stop;
                 if (![names containsObject:name]) {
