@@ -547,8 +547,10 @@ triangle path:
   argument-index strides. The `zpu_cpu_argument_buffer_nested` profile also
   supports one bounded child encoder: the parent stores the child buffer's
   synthetic GPU address and the child independently encodes its pointer and
-  texture slots. Arbitrary shader-specific struct and deeper nested layouts
-  remain unsupported rather than being guessed
+  texture slots. The `zpu_cpu_argument_buffer_recursive` profile extends that
+  contract through two child levels, with each child retaining an independent
+  declaration-order layout. Arbitrary shader-specific struct and unregistered
+  nested layouts remain unsupported rather than being guessed
 - CPU-owned Metal 4 timestamp counter heaps; timestamps are monotonic values
   from the adapter's CPU clock domain, resolve into ZPU buffers, and support
   immediate CPU-range invalidation. `queryTimestampFrequency` reports

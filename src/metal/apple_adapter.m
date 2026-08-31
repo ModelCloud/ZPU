@@ -109,6 +109,10 @@ static NSString *const zpu_cpu_argument_buffer_array_function_name = @"zpu_cpu_a
  * name only makes the nested layout discoverable without parsing arbitrary
  * MSL. */
 static NSString *const zpu_cpu_argument_buffer_nested_function_name = @"zpu_cpu_argument_buffer_nested";
+/* Metadata-only profile for recursively nested argument-buffer encoders. The
+ * recursive layout is registered explicitly; arbitrary MSL remains outside
+ * the CPU adapter's supported reflection surface. */
+static NSString *const zpu_cpu_argument_buffer_recursive_function_name = @"zpu_cpu_argument_buffer_recursive";
 static NSString *const zpu_cpu_tensor_argument_buffer_function_name = @"zpu_cpu_tensor_argument_buffer";
 static NSString *const zpu_cpu_tensor_argument_buffer_array_function_name = @"zpu_cpu_tensor_argument_buffer_array";
 
@@ -1753,7 +1757,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
 - (instancetype)initWithOwner:(ZPUDevice *)owner arguments:(NSArray<MTLArgumentDescriptor *> *)arguments;
 - (instancetype)initWithOwner:(ZPUDevice *)owner
                      arguments:(NSArray<MTLArgumentDescriptor *> *)arguments
-              nestedArguments:(NSDictionary<NSNumber *, NSArray<MTLArgumentDescriptor *> *> *)nestedArguments;
+              nestedArguments:(NSDictionary<NSNumber *, id> *)nestedArguments;
 - (instancetype)initWithOwner:(ZPUDevice *)owner bufferBinding:(id<MTLBufferBinding>)bufferBinding
     API_AVAILABLE(macos(13.0), ios(16.0));
 @end
@@ -8694,6 +8698,55 @@ static MTLFunctionReflection *zpu_mtl4_ml_function_reflection(NSString *name) {
 
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLFunctionReflection *zpu_argument_buffer_function_reflection(NSString *name) {
+    if ([name isEqualToString:zpu_cpu_argument_buffer_recursive_function_name]) {
+        ZPUPointerType *grandDataPointer = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeFloat access:MTLBindingAccessReadWrite
+                      alignment:sizeof(float) dataSize:sizeof(float) structType:nil];
+        ZPUTextureReferenceType *grandTextureReference = [[ZPUTextureReferenceType alloc]
+            initWithTextureType:MTLTextureType2D dataType:MTLDataTypeFloat
+                          access:MTLBindingAccessReadOnly];
+        ZPUStructMember *grandData = [[ZPUStructMember alloc] initWithName:@"data" offset:0
+            dataType:MTLDataTypePointer argumentIndex:0];
+        [grandData setPointerType:grandDataPointer textureReferenceType:nil];
+        ZPUStructMember *grandTexture = [[ZPUStructMember alloc] initWithName:@"tex" offset:8
+            dataType:MTLDataTypeTexture argumentIndex:1];
+        [grandTexture setPointerType:nil textureReferenceType:grandTextureReference];
+        MTLStructType *grandStruct = [[ZPUStructType alloc]
+            initWithMembers:@[grandData, grandTexture]];
+
+        ZPUPointerType *grandArgument = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                      alignment:8 dataSize:16 structType:grandStruct];
+        ZPUStructMember *grand = [[ZPUStructMember alloc] initWithName:@"grand" offset:0
+            dataType:MTLDataTypePointer argumentIndex:0];
+        [grand setPointerType:grandArgument textureReferenceType:nil];
+        ZPUStructMember *innerSampler = [[ZPUStructMember alloc] initWithName:@"samp" offset:8
+            dataType:MTLDataTypeSampler argumentIndex:1];
+        MTLStructType *innerStruct = [[ZPUStructType alloc]
+            initWithMembers:@[grand, innerSampler]];
+
+        ZPUPointerType *innerArgument = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                      alignment:8 dataSize:16 structType:innerStruct];
+        ZPUStructMember *inner = [[ZPUStructMember alloc] initWithName:@"inner" offset:0
+            dataType:MTLDataTypePointer argumentIndex:0];
+        [inner setPointerType:innerArgument textureReferenceType:nil];
+        ZPUStructMember *color = [[ZPUStructMember alloc] initWithName:@"color" offset:16
+            dataType:MTLDataTypeFloat4 argumentIndex:1];
+        MTLStructType *outerStruct = [[ZPUStructType alloc]
+            initWithMembers:@[inner, color]];
+
+        ZPUBinding *binding = zpu_reflection_binding(@"args", MTLBindingTypeBuffer,
+                                                      MTLBindingAccessReadOnly, 0);
+        [binding setBufferDataSize:32 dataType:MTLDataTypeStruct];
+        binding->_bufferAlignment = 16;
+        binding->_bufferStructType = outerStruct;
+        binding->_bufferPointerType = [[ZPUPointerType alloc]
+            initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
+                      alignment:16 dataSize:32 structType:outerStruct];
+        return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:@[binding] userAnnotation:nil];
+    }
     if ([name isEqualToString:zpu_cpu_argument_buffer_nested_function_name]) {
         ZPUPointerType *nestedArgument = [[ZPUPointerType alloc]
             initWithElementType:MTLDataTypeStruct access:MTLBindingAccessReadOnly
@@ -11578,7 +11631,9 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     const BOOL fixed_argument_buffer = [_implementationName isEqualToString:zpu_cpu_argument_buffer_function_name];
     const BOOL fixed_argument_buffer_array = [_implementationName isEqualToString:zpu_cpu_argument_buffer_array_function_name];
     const BOOL fixed_argument_buffer_nested = [_implementationName isEqualToString:zpu_cpu_argument_buffer_nested_function_name];
-    if (bufferIndex != 0 || (!fixed_argument_buffer && !fixed_argument_buffer_array && !fixed_argument_buffer_nested)) {
+    const BOOL fixed_argument_buffer_recursive = [_implementationName isEqualToString:zpu_cpu_argument_buffer_recursive_function_name];
+    if (bufferIndex != 0 || (!fixed_argument_buffer && !fixed_argument_buffer_array &&
+                             !fixed_argument_buffer_nested && !fixed_argument_buffer_recursive)) {
         /* The other registered CPU profiles expose ordinary
          * buffer/texture/sampler arguments, not an MSL argument-buffer
          * parameter. Metal returns nil for this selector in that case; an
@@ -11600,11 +11655,16 @@ static BOOL zpu_apply_legacy_compute_descriptor(
     sampler.arrayLength = fixed_argument_buffer_array ? 2 : 1;
     MTLArgumentDescriptor *color = [MTLArgumentDescriptor argumentDescriptor];
     color.dataType = MTLDataTypeFloat4;
-    color.index = fixed_argument_buffer_nested ? 2 : (fixed_argument_buffer_array ? 6 : 3);
+    color.index = fixed_argument_buffer_recursive ? 1 :
+        (fixed_argument_buffer_nested ? 2 : (fixed_argument_buffer_array ? 6 : 3));
     color.arrayLength = fixed_argument_buffer_array ? 2 : 1;
-    NSArray<MTLArgumentDescriptor *> *descriptors = fixed_argument_buffer_nested ?
+    NSArray<MTLArgumentDescriptor *> *descriptors = (fixed_argument_buffer_nested || fixed_argument_buffer_recursive) ?
         @[data, sampler, color] : @[data, texture, sampler, color];
-    NSDictionary<NSNumber *, NSArray<MTLArgumentDescriptor *> *> *nestedArguments = nil;
+    if (fixed_argument_buffer_recursive) {
+        MTLArgumentDescriptor *recursiveColor = color;
+        descriptors = @[data, recursiveColor];
+    }
+    NSDictionary<NSNumber *, id> *nestedArguments = nil;
     if (fixed_argument_buffer_nested) {
         MTLArgumentDescriptor *nestedData = [MTLArgumentDescriptor argumentDescriptor];
         nestedData.dataType = MTLDataTypePointer;
@@ -11613,6 +11673,27 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         nestedTexture.dataType = MTLDataTypeTexture;
         nestedTexture.index = 1;
         nestedArguments = @{@0: @[nestedData, nestedTexture]};
+    } else if (fixed_argument_buffer_recursive) {
+        MTLArgumentDescriptor *nestedData = [MTLArgumentDescriptor argumentDescriptor];
+        nestedData.dataType = MTLDataTypePointer;
+        nestedData.index = 0;
+        MTLArgumentDescriptor *nestedSampler = [MTLArgumentDescriptor argumentDescriptor];
+        nestedSampler.dataType = MTLDataTypeSampler;
+        nestedSampler.index = 1;
+        MTLArgumentDescriptor *grandData = [MTLArgumentDescriptor argumentDescriptor];
+        grandData.dataType = MTLDataTypePointer;
+        grandData.index = 0;
+        MTLArgumentDescriptor *grandTexture = [MTLArgumentDescriptor argumentDescriptor];
+        grandTexture.dataType = MTLDataTypeTexture;
+        grandTexture.index = 1;
+        NSDictionary *grandLayout = @{
+            @"arguments": @[grandData, grandTexture],
+        };
+        NSDictionary *nestedLayout = @{
+            @"arguments": @[nestedData, nestedSampler],
+            @"nestedArguments": @{@0: grandLayout},
+        };
+        nestedArguments = @{@0: nestedLayout};
     }
     return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc]
         initWithOwner:_owner arguments:descriptors nestedArguments:nestedArguments];
@@ -11794,6 +11875,7 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
             zpu_cpu_argument_buffer_function_name,
             zpu_cpu_argument_buffer_array_function_name,
             zpu_cpu_argument_buffer_nested_function_name,
+            zpu_cpu_argument_buffer_recursive_function_name,
             zpu_cpu_tensor_argument_buffer_function_name,
             zpu_cpu_tensor_argument_buffer_array_function_name,
         ]) {
@@ -17466,7 +17548,7 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner
                      arguments:(NSArray<MTLArgumentDescriptor *> *)arguments
-              nestedArguments:(NSDictionary<NSNumber *, NSArray<MTLArgumentDescriptor *> *> *)nestedArguments {
+              nestedArguments:(NSDictionary<NSNumber *, id> *)nestedArguments {
     if ((self = [super init])) {
         _owner = owner;
         _bufferBindingEncoder = NO;
@@ -17784,10 +17866,18 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
     }
 }
 - (id<MTLArgumentEncoder>)newArgumentEncoderForBufferAtIndex:(NSUInteger)index API_AVAILABLE(macos(10.13), ios(11.0)) {
-    NSArray<MTLArgumentDescriptor *> *nestedArguments = _nestedArguments[@(index)];
-    if (nestedArguments != nil) {
+    id nestedLayout = _nestedArguments[@(index)];
+    if ([nestedLayout isKindOfClass:[NSArray class]]) {
         return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc]
-            initWithOwner:_owner arguments:nestedArguments];
+            initWithOwner:_owner arguments:(NSArray<MTLArgumentDescriptor *> *)nestedLayout];
+    }
+    if ([nestedLayout isKindOfClass:[NSDictionary class]]) {
+        NSArray<MTLArgumentDescriptor *> *nestedArguments = nestedLayout[@"arguments"];
+        NSDictionary<NSNumber *, id> *childLayouts = nestedLayout[@"nestedArguments"];
+        if (![nestedArguments isKindOfClass:[NSArray class]] ||
+            (childLayouts != nil && ![childLayouts isKindOfClass:[NSDictionary class]])) return nil;
+        return (id<MTLArgumentEncoder>)[[ZPUArgumentEncoder alloc]
+            initWithOwner:_owner arguments:nestedArguments nestedArguments:childLayouts];
     }
     /* The registered CPU descriptor profile has no nested argument-buffer
      * layout metadata. Do not over-report an empty encoder: Apple's flat

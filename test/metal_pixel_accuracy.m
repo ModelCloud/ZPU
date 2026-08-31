@@ -276,6 +276,13 @@ static const char *const kShaderSource =
     "struct ZPUCPUNestedOuterArgumentBuffer { constant ZPUCPUNestedInnerArgumentBuffer &inner [[id(0)]]; "
     "sampler samp [[id(1)]]; float4 color [[id(2)]]; };\n"
     "kernel void zpu_cpu_argument_buffer_nested(constant ZPUCPUNestedOuterArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
+    "struct ZPUCPURecursiveGrandArgumentBuffer { device float *data [[id(0)]]; "
+    "texture2d<float> tex [[id(1)]]; };\n"
+    "struct ZPUCPURecursiveInnerArgumentBuffer { constant ZPUCPURecursiveGrandArgumentBuffer &grand [[id(0)]]; "
+    "sampler samp [[id(1)]]; };\n"
+    "struct ZPUCPURecursiveOuterArgumentBuffer { constant ZPUCPURecursiveInnerArgumentBuffer &inner [[id(0)]]; "
+    "float4 color [[id(1)]]; };\n"
+    "kernel void zpu_cpu_argument_buffer_recursive(constant ZPUCPURecursiveOuterArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "struct ZPUCPUTensorArgumentBuffer { tensor<device float, dextents<int32_t, 2>> input [[id(0)]]; };\n"
     "kernel void zpu_cpu_tensor_argument_buffer(constant ZPUCPUTensorArgumentBuffer &args [[buffer(0)]]) { (void)args; }\n"
     "struct ZPUCPUTensorArgumentBufferArray { tensor<device float, dextents<int32_t, 2>> inputs[2]; };\n"
@@ -16902,6 +16909,7 @@ int main(void) {
             "kernel void zpu_cpu_argument_buffer() {}\n"
             "kernel void zpu_cpu_argument_buffer_array() {}\n"
             "kernel void zpu_cpu_argument_buffer_nested() {}\n"
+            "kernel void zpu_cpu_argument_buffer_recursive() {}\n"
             "kernel void zpu_cpu_tensor_argument_buffer() {}\n"
             "kernel void zpu_cpu_tensor_argument_buffer_array() {}\n"
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
@@ -17469,7 +17477,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 66 ||
+            adapter_library.functionNames.count != 67 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -17503,6 +17511,7 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_nested"] == nil ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_recursive"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tensor_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_tensor_argument_buffer_array"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_position_gradient_fragment"].functionType != MTLFunctionTypeFragment ||
@@ -29903,6 +29912,113 @@ int main(void) {
         } else {
             fprintf(stderr, "metal-pixel: CPU nested argument encoder fixture allocation failed\n");
             return 264;
+        }
+
+        /* Recursive nested argument buffers must preserve each level's
+         * independent packed layout. Native Metal is the layout oracle; the
+         * adapter resources and all writes below remain CPU/ZPU-owned. */
+        id<MTLFunction> native_recursive_argument_function =
+            [library newFunctionWithName:@"zpu_cpu_argument_buffer_recursive"];
+        id<MTLFunction> adapter_recursive_argument_function =
+            [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_recursive"];
+        id<MTLArgumentEncoder> native_deep_outer_encoder =
+            [native_recursive_argument_function newArgumentEncoderWithBufferIndex:0];
+        id<MTLArgumentEncoder> adapter_deep_outer_encoder =
+            [adapter_recursive_argument_function newArgumentEncoderWithBufferIndex:0];
+        id<MTLArgumentEncoder> native_deep_inner_encoder =
+            [native_deep_outer_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> adapter_deep_inner_encoder =
+            [adapter_deep_outer_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> native_deep_grand_encoder =
+            [native_deep_inner_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> adapter_deep_grand_encoder =
+            [adapter_deep_inner_encoder newArgumentEncoderForBufferAtIndex:0];
+        id<MTLArgumentEncoder> adapter_invalid_deep_encoder =
+            [adapter_deep_inner_encoder newArgumentEncoderForBufferAtIndex:1];
+        id<MTLBuffer> native_deep_outer_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_deep_outer_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_deep_inner_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_deep_inner_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_deep_grand_buffer =
+            [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_deep_grand_buffer =
+            [adapter_device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+        if (native_deep_outer_encoder == nil || adapter_deep_outer_encoder == nil ||
+            native_deep_inner_encoder == nil || adapter_deep_inner_encoder == nil ||
+            native_deep_grand_encoder == nil || adapter_deep_grand_encoder == nil ||
+            native_deep_outer_buffer == nil || adapter_deep_outer_buffer == nil ||
+            native_deep_inner_buffer == nil || adapter_deep_inner_buffer == nil ||
+            native_deep_grand_buffer == nil || adapter_deep_grand_buffer == nil) {
+            fprintf(stderr, "metal-pixel: CPU recursive argument encoder fixture allocation failed\n");
+            return 265;
+        }
+        [native_deep_outer_encoder setArgumentBuffer:native_deep_outer_buffer offset:0];
+        [adapter_deep_outer_encoder setArgumentBuffer:adapter_deep_outer_buffer offset:0];
+        [native_deep_inner_encoder setArgumentBuffer:native_deep_inner_buffer offset:0];
+        [adapter_deep_inner_encoder setArgumentBuffer:adapter_deep_inner_buffer offset:0];
+        [native_deep_grand_encoder setArgumentBuffer:native_deep_grand_buffer offset:0];
+        [adapter_deep_grand_encoder setArgumentBuffer:adapter_deep_grand_buffer offset:0];
+        [native_deep_outer_encoder setBuffer:native_deep_inner_buffer offset:0 atIndex:0];
+        [adapter_deep_outer_encoder setBuffer:adapter_deep_inner_buffer offset:0 atIndex:0];
+        [native_deep_inner_encoder setBuffer:native_deep_grand_buffer offset:0 atIndex:0];
+        [adapter_deep_inner_encoder setBuffer:adapter_deep_grand_buffer offset:0 atIndex:0];
+        [native_deep_inner_encoder setSamplerState:native_nested_array_sampler atIndex:1];
+        [adapter_deep_inner_encoder setSamplerState:adapter_sampler atIndex:1];
+        [native_deep_grand_encoder setBuffer:native_copy_buffer offset:8 atIndex:0];
+        [adapter_deep_grand_encoder setBuffer:adapter_copy_buffer offset:8 atIndex:0];
+        [native_deep_grand_encoder setTexture:native_compute_texture atIndex:1];
+        [adapter_deep_grand_encoder setTexture:adapter_compute_icb_texture atIndex:1];
+        const float recursive_argument_color[] = {0.625f, 0.25f, 0.125f, 1.0f};
+        memcpy([native_deep_outer_encoder constantDataAtIndex:1],
+               recursive_argument_color, sizeof(recursive_argument_color));
+        memcpy([adapter_deep_outer_encoder constantDataAtIndex:1],
+               recursive_argument_color, sizeof(recursive_argument_color));
+        uint64_t adapter_deep_outer_words[4] = {0};
+        uint64_t adapter_deep_inner_words[2] = {0};
+        uint64_t adapter_deep_grand_words[2] = {0};
+        memcpy(adapter_deep_outer_words, adapter_deep_outer_buffer.contents,
+               sizeof(adapter_deep_outer_words));
+        memcpy(adapter_deep_inner_words, adapter_deep_inner_buffer.contents,
+               sizeof(adapter_deep_inner_words));
+        memcpy(adapter_deep_grand_words, adapter_deep_grand_buffer.contents,
+               sizeof(adapter_deep_grand_words));
+        float adapter_recursive_argument_color[4] = {0};
+        memcpy(adapter_recursive_argument_color,
+               (uint8_t *)adapter_deep_outer_buffer.contents + 16,
+               sizeof(adapter_recursive_argument_color));
+        MTLFunctionReflection *native_recursive_reflection =
+            [library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer_recursive"];
+        MTLFunctionReflection *adapter_recursive_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_cpu_argument_buffer_recursive"];
+        BOOL recursive_reflection_ok = native_recursive_reflection != nil &&
+            adapter_recursive_reflection != nil && native_recursive_reflection.bindings.count == 1 &&
+            adapter_recursive_reflection.bindings.count == 1;
+        if ([native_deep_outer_encoder encodedLength] != [adapter_deep_outer_encoder encodedLength] ||
+            [native_deep_outer_encoder alignment] != [adapter_deep_outer_encoder alignment] ||
+            [native_deep_inner_encoder encodedLength] != [adapter_deep_inner_encoder encodedLength] ||
+            [native_deep_inner_encoder alignment] != [adapter_deep_inner_encoder alignment] ||
+            [native_deep_grand_encoder encodedLength] != [adapter_deep_grand_encoder encodedLength] ||
+            [native_deep_grand_encoder alignment] != [adapter_deep_grand_encoder alignment] ||
+            [native_deep_outer_encoder encodedLength] != 32 ||
+            [native_deep_outer_encoder alignment] != 16 ||
+            [native_deep_inner_encoder encodedLength] != 16 ||
+            [native_deep_inner_encoder alignment] != 8 ||
+            [native_deep_grand_encoder encodedLength] != 16 ||
+            [native_deep_grand_encoder alignment] != 8 ||
+            adapter_deep_outer_words[0] != adapter_deep_inner_buffer.gpuAddress ||
+            adapter_deep_inner_words[0] != adapter_deep_grand_buffer.gpuAddress ||
+            adapter_deep_inner_words[1] != adapter_sampler.gpuResourceID._impl ||
+            adapter_deep_grand_words[0] != adapter_copy_buffer.gpuAddress + 8 ||
+            adapter_deep_grand_words[1] != adapter_compute_icb_texture.gpuResourceID._impl ||
+            memcmp(adapter_recursive_argument_color, recursive_argument_color,
+                   sizeof(recursive_argument_color)) != 0 ||
+            adapter_invalid_deep_encoder != nil || !recursive_reflection_ok) {
+            fprintf(stderr, "metal-pixel: CPU recursive argument encoder mismatch\n");
+            return 265;
         }
 
         /* The array form exercises Metal's tensor-aware array reflection,
