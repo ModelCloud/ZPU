@@ -605,7 +605,10 @@ triangle path:
   reflection. Those executable functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler;
   metadata-only argument-buffer functions expose layout/encoder state without
-  claiming executable arbitrary shader semantics.
+  claiming executable arbitrary shader semantics. Layered CPU vertex/fragment
+  profiles also expose their native-matching buffer reflection: the layered
+  vertex reports its input vertex buffer, while the layered fragment reports no
+  resource bindings.
   Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
   descriptor, so supported unspecialized blend state can be resolved through

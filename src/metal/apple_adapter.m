@@ -8917,7 +8917,8 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         return (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
             initWithBindings:@[] userAnnotation:nil];
     }
-    if ([name isEqualToString:@"zpu_test_vertex"] || [name isEqualToString:zpu_cpu_vertex_name]) {
+    if ([name isEqualToString:@"zpu_test_vertex"] || [name isEqualToString:zpu_cpu_vertex_name] ||
+        [name isEqualToString:zpu_cpu_layered_vertex_name]) {
         ZPUBinding *binding = zpu_reflection_binding(@"vertices", MTLBindingTypeBuffer,
                                                       MTLBindingAccessReadOnly, 0);
         [binding setBufferDataSize:sizeof(zpu_metal_vertex) dataType:MTLDataTypeStruct];
@@ -8966,6 +8967,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
     if ([name isEqualToString:@"zpu_test_stage_in_vertex"] ||
         [name isEqualToString:@"zpu_test_visible"] ||
         [name isEqualToString:@"zpu_test_visible_secondary"] ||
+        [name isEqualToString:zpu_cpu_layered_fragment_name] ||
         [name isEqualToString:@"zpu_cpu_rgba8_uint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_rgba8_sint_fragment"] ||
         [name isEqualToString:@"zpu_cpu_r8_uint_fragment"] ||

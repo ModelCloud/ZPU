@@ -17783,9 +17783,11 @@ int main(void) {
             "kernel void zpu_cpu_trace_triangles_rgba8() {}\n"
             "vertex void zpu_test_vertex() {}\n"
             "vertex void zpu_cpu_vertex() {}\n"
+            "vertex void zpu_cpu_layered_vertex() {}\n"
             "vertex void zpu_test_stage_in_vertex() {}\n"
             "fragment float4 zpu_test_fragment() { return float4(1.0); }\n"
             "fragment float4 zpu_cpu_fragment() { return float4(1.0); }\n"
+            "fragment float4 zpu_cpu_layered_fragment() { return float4(1.0); }\n"
             "kernel void zpu_cpu_tile_gradient_rgba8() {}\n"
             "kernel void zpu_cpu_mesh_gradient_rgba8() {}\n"
             "fragment float4 zpu_cpu_mesh_gradient_fragment() { return float4(1.0); }\n"
@@ -17896,6 +17898,7 @@ int main(void) {
             NSArray<NSString *> *reflection_names = @[
                 @"zpu_test_stage_in_vertex", @"zpu_test_fragment",
                 @"zpu_test_visible", @"zpu_test_visible_secondary",
+                @"zpu_cpu_layered_vertex", @"zpu_cpu_layered_fragment",
                 @"zpu_cpu_r8_uint_fragment", @"zpu_cpu_r8_sint_fragment",
                 @"zpu_cpu_r16_uint_fragment", @"zpu_cpu_r16_sint_fragment",
                 @"zpu_cpu_rg8_uint_fragment", @"zpu_cpu_rg8_sint_fragment",
@@ -17912,9 +17915,12 @@ int main(void) {
                     [library reflectionForFunctionWithName:reflection_name];
                 MTLFunctionReflection *adapter_reflection =
                     [adapter_library reflectionForFunctionWithName:reflection_name];
+                const NSUInteger expected_binding_count =
+                    [reflection_name isEqualToString:@"zpu_cpu_layered_vertex"] ? 1 : 0;
                 adapter_function_reflection_ok = adapter_function_reflection_ok &&
                     native_reflection != nil && adapter_reflection != nil &&
-                    native_reflection.bindings.count == 0 && adapter_reflection.bindings.count == 0;
+                    native_reflection.bindings.count == expected_binding_count &&
+                    adapter_reflection.bindings.count == expected_binding_count;
             }
             MTLFunctionReflection *adapter_trace_reflection =
                 [adapter_library reflectionForFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
@@ -18345,7 +18351,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 67 ||
+            adapter_library.functionNames.count != 69 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
