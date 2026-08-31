@@ -501,8 +501,6 @@ pub fn operation(arguments: *const OperationArguments) Status {
     const element_type = elementTypeFromRaw(arguments.element_type) orelse return .invalid_argument;
     const expected_inputs = operationInputCount(operation_kind) orelse return .invalid_argument;
     if (arguments.input_count != expected_inputs or arguments.reserved != 0) return .invalid_argument;
-    const backend = operationBackendSnapshot() orelse return .unsupported;
-    const callback = backend.operation orelse return .unsupported;
 
     var input_info: [max_inputs]?ViewInfo = @splat(null);
     var input_storage: [max_inputs]?[]u8 = @splat(null);
@@ -523,6 +521,13 @@ pub fn operation(arguments: *const OperationArguments) Status {
 
     const destination_info = validateTypedView(&arguments.destination, element_type) orelse return .invalid_argument;
     const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
+
+    // Validate the complete portable ABI before looking for an optional
+    // provider. A malformed call must have the same result whether a ZML/cpu
+    // provider is installed or not; `unsupported` is reserved for a valid
+    // operation for which no provider is currently available.
+    const backend = operationBackendSnapshot() orelse return .unsupported;
+    const callback = backend.operation orelse return .unsupported;
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
     @memset(destination_storage, 0);
@@ -1316,6 +1321,14 @@ test "optional CPU operation provider receives dense ZML views" {
     invalid_arguments.reserved = 1;
     try std.testing.expectEqual(Status.invalid_argument, operation(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "CPU operation validates views before provider selection" {
+    var arguments: OperationArguments = std.mem.zeroes(OperationArguments);
+    arguments.operation = @intFromEnum(Operation.add);
+    arguments.element_type = @intFromEnum(ElementType.uint32);
+    arguments.input_count = 2;
+    try std.testing.expectEqual(Status.invalid_argument, operation(&arguments));
 }
 
 test "named CPU provider receives a portable graph name and dense transpose views" {

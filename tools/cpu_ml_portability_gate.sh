@@ -31,6 +31,9 @@ build_target() {
     zig build --prefix "$prefix" -Dtarget="$target" -Dxcb=false cpu-ml-install
     test -f "$prefix/lib/libzpu_cpu_ml.a"
     test -f "$prefix/include/zpu/cpu_ml.h"
+    echo "cpu-ml-portability: compiling public C header for $target"
+    zig cc -target "$target" -std=c11 -Wall -Wextra -Werror \
+        -I include -c test/cpu_ml_header.c -o "$prefix/cpu_ml_header.o"
     if nm -u "$prefix/lib/libzpu_cpu_ml.a" 2>/dev/null | rg -n -i '(Metal|Foundation|PJRT)' ; then
         echo "cpu-ml-portability FAILED: standalone archive has an Apple/PJRT dependency for $target" >&2
         exit 1
