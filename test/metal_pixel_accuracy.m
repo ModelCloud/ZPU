@@ -565,13 +565,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
-         "(float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n";
+         "(float(gid.y) + 1.0) / 8.0, 0.25, 1.0), gid); }\n"
+         "struct Vertex { float4 position [[position]]; float4 color; };\n"
+         "vertex Vertex zpu_source_vertex(uint vertex_id [[vertex_id]], "
+         "device const Vertex *vertices [[buffer(0)]]) { return vertices[vertex_id]; }\n"
+         "fragment float4 zpu_source_fragment(Vertex input [[stage_in]]) { return input.color; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 3) {
+        adapter_library.functionNames.count != 5) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -739,6 +743,104 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU texture lowering execution failed",
                         adapter_gradient_error ?: native_gradient_error);
         return 169;
+    }
+
+    id<MTLFunction> native_vertex = [native_library newFunctionWithName:@"zpu_source_vertex"];
+    id<MTLFunction> native_fragment = [native_library newFunctionWithName:@"zpu_source_fragment"];
+    id<MTLFunction> adapter_vertex = [adapter_library newFunctionWithName:@"zpu_source_vertex"];
+    id<MTLFunction> adapter_fragment = [adapter_library newFunctionWithName:@"zpu_source_fragment"];
+    MTLRenderPipelineDescriptor *native_render_descriptor = [MTLRenderPipelineDescriptor new];
+    native_render_descriptor.vertexFunction = native_vertex;
+    native_render_descriptor.fragmentFunction = native_fragment;
+    native_render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    MTLRenderPipelineDescriptor *adapter_render_descriptor = [MTLRenderPipelineDescriptor new];
+    adapter_render_descriptor.vertexFunction = adapter_vertex;
+    adapter_render_descriptor.fragmentFunction = adapter_fragment;
+    adapter_render_descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *native_render_error = nil;
+    NSError *adapter_render_error = nil;
+    id<MTLRenderPipelineState> native_render_pipeline =
+        [native_device newRenderPipelineStateWithDescriptor:native_render_descriptor error:&native_render_error];
+    id<MTLRenderPipelineState> adapter_render_pipeline =
+        [adapter_device newRenderPipelineStateWithDescriptor:adapter_render_descriptor error:&adapter_render_error];
+    const zpu_metal_vertex render_vertices[] = {
+        {{-0.75f, -0.70f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 0.80f, -0.60f, 0.5f, 1.0f}, {0.0f, 1.0f, 0.0f, 1.0f}},
+        {{ 0.65f,  0.85f, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        {{-0.75f, -0.70f, 0.5f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        {{ 0.65f,  0.85f, 0.5f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+        {{-0.60f,  0.65f, 0.5f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}},
+    };
+    MTLTextureDescriptor *render_texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:8 height:8 mipmapped:NO];
+    render_texture_descriptor.storageMode = MTLStorageModeShared;
+    render_texture_descriptor.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> native_render_texture = [native_device newTextureWithDescriptor:render_texture_descriptor];
+    id<MTLTexture> adapter_render_texture = [adapter_device newTextureWithDescriptor:render_texture_descriptor];
+    id<MTLBuffer> native_render_vertices =
+        [native_device newBufferWithBytes:render_vertices length:sizeof(render_vertices)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_render_vertices =
+        [adapter_device newBufferWithBytes:render_vertices length:sizeof(render_vertices)
+                                   options:MTLResourceStorageModeShared];
+    MTLRenderPassDescriptor *native_render_pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    native_render_pass.colorAttachments[0].texture = native_render_texture;
+    native_render_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    native_render_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    native_render_pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+    MTLRenderPassDescriptor *adapter_render_pass = [native_render_pass copy];
+    adapter_render_pass.colorAttachments[0].texture = adapter_render_texture;
+    id<MTLCommandBuffer> native_render_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_render_command_buffer = [adapter_queue commandBuffer];
+    id<MTLRenderCommandEncoder> native_render_encoder =
+        [native_render_command_buffer renderCommandEncoderWithDescriptor:native_render_pass];
+    id<MTLRenderCommandEncoder> adapter_render_encoder =
+        [adapter_render_command_buffer renderCommandEncoderWithDescriptor:adapter_render_pass];
+    if (native_render_pipeline != nil && adapter_render_pipeline != nil && native_render_vertices != nil &&
+        adapter_render_vertices != nil && native_render_texture != nil && adapter_render_texture != nil &&
+        native_render_encoder != nil && adapter_render_encoder != nil) {
+        [native_render_encoder setRenderPipelineState:native_render_pipeline];
+        [native_render_encoder setVertexBuffer:native_render_vertices offset:0 atIndex:0];
+        [native_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [native_render_encoder endEncoding];
+        [native_render_command_buffer commit];
+        [native_render_command_buffer waitUntilCompleted];
+        [adapter_render_encoder setRenderPipelineState:adapter_render_pipeline];
+        [adapter_render_encoder setVertexBuffer:adapter_render_vertices offset:0 atIndex:0];
+        [adapter_render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+        [adapter_render_encoder endEncoding];
+        [adapter_render_command_buffer commit];
+        [adapter_render_command_buffer waitUntilCompleted];
+    }
+    uint8_t native_render_pixels[8 * 8 * 4] = {0};
+    uint8_t adapter_render_pixels[8 * 8 * 4] = {0};
+    if (native_render_texture != nil) {
+        [native_render_texture getBytes:native_render_pixels bytesPerRow:8 * 4
+                             fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    if (adapter_render_texture != nil) {
+        [adapter_render_texture getBytes:adapter_render_pixels bytesPerRow:8 * 4
+                              fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    }
+    BOOL render_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *vertex_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_vertex"];
+        MTLFunctionReflection *fragment_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_fragment"];
+        render_reflection_ok = vertex_reflection != nil && vertex_reflection.bindings.count == 1 &&
+            fragment_reflection != nil && fragment_reflection.bindings.count == 0;
+    }
+    if (native_vertex == nil || native_fragment == nil || native_render_error != nil || native_render_pipeline == nil ||
+        adapter_vertex == nil || adapter_fragment == nil || adapter_render_error != nil || adapter_render_pipeline == nil ||
+        native_render_texture == nil || adapter_render_texture == nil ||
+        native_render_command_buffer.status != MTLCommandBufferStatusCompleted ||
+        adapter_render_command_buffer.status != MTLCommandBufferStatusCompleted || !render_reflection_ok ||
+        memcmp(native_render_pixels, adapter_render_pixels, sizeof(native_render_pixels)) != 0) {
+        fail_with_error("source-defined CPU render lowering execution failed",
+                        adapter_render_error ?: native_render_error);
+        return 170;
     }
     return 0;
 }

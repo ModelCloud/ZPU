@@ -585,9 +585,10 @@ triangle path:
   for source-named F32 buffer add/multiply kernels with the standard three
   buffer slots and `thread_position_in_grid`, plus the source-named RGBA8
   texture gradient profile with a `texture2d<float, access::write>` slot and
-  the top-left `uint2` grid. Those functions execute through ZPU's existing
-  CPU kernels and never through Apple's compiler. Unsupported arbitrary MSL
-  and stitched libraries still fail closed
+  the top-left `uint2` grid, and the canonical source-named `Vertex` passthrough
+  plus color-returning fragment pair. Those functions execute through ZPU's
+  existing CPU kernels/raster profiles and never through Apple's compiler.
+  Unsupported arbitrary MSL and stitched libraries still fail closed
 - CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
   descriptor, so supported unspecialized blend state can be resolved through
   `newRenderPipelineDescriptorForSpecialization` and the CPU compiler path

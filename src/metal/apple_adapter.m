@@ -11769,6 +11769,12 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
     return NO;
 }
 
+static NSString *zpu_source_compact(NSString *source) {
+    NSArray<NSString *> *parts =
+        [source componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [parts componentsJoinedByString:@""];
+}
+
 /* Source compilation is intentionally a small, fail-closed lowering
  * profile.  These are the only source-defined kernels that can be mapped to
  * an existing ZPU CPU implementation without invoking Apple's compiler or
@@ -11789,12 +11795,8 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         NSString *functionName = [source substringWithRange:[match rangeAtIndex:1]];
         NSString *signature = [source substringWithRange:[match rangeAtIndex:2]];
         NSString *body = [source substringWithRange:[match rangeAtIndex:3]];
-        NSArray<NSString *> *signatureParts =
-            [signature componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        NSString *compactSignature = [signatureParts componentsJoinedByString:@""];
-        NSArray<NSString *> *bodyParts =
-            [body componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        NSString *compactBody = [bodyParts componentsJoinedByString:@""];
+        NSString *compactSignature = zpu_source_compact(signature);
+        NSString *compactBody = zpu_source_compact(body);
 
         /* The source-defined texture profile intentionally mirrors the
          * registered RGBA8 gradient kernel, including its top-left gid
@@ -11843,6 +11845,50 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         if (prefix.length != 0 && ![prefix isEqualToString:expectedPrefix]) return;
         implementations[functionName] = isAdd ? zpu_cpu_add_f32_function_name : zpu_cpu_mul_f32_function_name;
     }];
+    return [implementations copy];
+}
+
+/* The render lowering profile is equally narrow: only the canonical Vertex
+ * passthrough and color-returning fragment can safely share the fixed ZPU
+ * vertex/fragment implementations. */
+static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functions(NSString *source) {
+    NSString *compactSource = zpu_source_compact(source);
+    if ([compactSource rangeOfString:
+            @"structVertex{float4position[[position]];float4color;};"].location == NSNotFound) return @{};
+    NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
+    NSError *vertexError = nil;
+    NSRegularExpression *vertexExpression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"vertexVertex([A-Za-z_][A-Za-z0-9_]*)\\(uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[vertex_id\\]\\],"
+             "deviceconstVertex\\*([A-Za-z_][A-Za-z0-9_]*)\\[\\[buffer\\(0\\)\\]\\]\\)"
+             "\\{return\\3\\[\\2\\];\\}"
+                                   options:0 error:&vertexError];
+    if (vertexExpression != nil && vertexError == nil) {
+        [vertexExpression enumerateMatchesInString:compactSource options:0
+                                              range:NSMakeRange(0, compactSource.length)
+                                         usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+            (void)flags;
+            (void)stop;
+            NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+            implementations[name] = zpu_cpu_vertex_name;
+        }];
+    }
+    NSError *fragmentError = nil;
+    NSRegularExpression *fragmentExpression = [NSRegularExpression
+        regularExpressionWithPattern:
+            @"fragmentfloat4([A-Za-z_][A-Za-z0-9_]*)\\(Vertex([A-Za-z_][A-Za-z0-9_]*)"
+             "\\[\\[stage_in\\]\\]\\)\\{return\\2\\.color;\\}"
+                                   options:0 error:&fragmentError];
+    if (fragmentExpression != nil && fragmentError == nil) {
+        [fragmentExpression enumerateMatchesInString:compactSource options:0
+                                                range:NSMakeRange(0, compactSource.length)
+                                           usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+            (void)flags;
+            (void)stop;
+            NSString *name = [compactSource substringWithRange:[match rangeAtIndex:1]];
+            implementations[name] = zpu_cpu_fragment_name;
+        }];
+    }
     return [implementations copy];
 }
 
@@ -11980,6 +12026,14 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
                     implementations[name] = implementation;
                 }
             }];
+        [zpu_source_lowerable_render_functions(source) enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *name, NSString *implementation, BOOL *stop) {
+                (void)stop;
+                if (![names containsObject:name]) {
+                    [names addObject:name];
+                    implementations[name] = implementation;
+                }
+            }];
         _functionNames = [names copy];
         _functionImplementations = [implementations copy];
     }
@@ -11993,8 +12047,14 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
     if (![_functionNames containsObject:functionName]) return nil;
     NSString *implementationName = _functionImplementations[functionName] ?: functionName;
     const BOOL sourceLowered = ![implementationName isEqualToString:functionName];
-    MTLFunctionType functionType = sourceLowered ? MTLFunctionTypeKernel :
-        ([_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0);
+    MTLFunctionType functionType = 0;
+    if (sourceLowered) {
+        functionType = [implementationName isEqualToString:zpu_cpu_vertex_name] ? MTLFunctionTypeVertex :
+            ([implementationName isEqualToString:zpu_cpu_fragment_name] ? MTLFunctionTypeFragment :
+             MTLFunctionTypeKernel);
+    } else {
+        functionType = [_visibleFunctionNames containsObject:functionName] ? MTLFunctionTypeVisible : 0;
+    }
     return (id<MTLFunction>)[[ZPUCPUFunction alloc] initWithOwner:_owner
                                                                name:implementationName
                                                      specializedName:sourceLowered ? functionName : nil
