@@ -4115,6 +4115,42 @@ static int test_adapter_metal4_object_protocols(id<MTLDevice> adapter_device,
     MTL4CommandQueueDescriptor *queue_descriptor = [MTL4CommandQueueDescriptor new];
     id<MTL4CommandQueue> queue =
         [adapter_device newMTL4CommandQueueWithDescriptor:queue_descriptor error:&error];
+    BOOL residency_limit_ok = YES;
+    if (queue != nil) {
+        for (NSUInteger index = 0; index < 33; ++index) {
+            MTLResidencySetDescriptor *residency_descriptor = [MTLResidencySetDescriptor new];
+            NSError *residency_error = nil;
+            id<MTLResidencySet> residency_set =
+                [adapter_device newResidencySetWithDescriptor:residency_descriptor error:&residency_error];
+            if (residency_set == nil || residency_error != nil) {
+                residency_limit_ok = NO;
+                break;
+            }
+            [queue addResidencySet:residency_set];
+        }
+        /* The queue is intentionally failed by the 33rd unique set. A
+         * zero-work command makes the sticky failure observable through the
+         * normal MTL4 commit-feedback path. */
+        id<MTL4CommandBuffer> residency_command_buffer = [adapter_device newCommandBuffer];
+        id<MTL4CommandAllocator> residency_allocator =
+            [adapter_device newCommandAllocatorWithDescriptor:allocator_descriptor error:&error];
+        if (residency_command_buffer != nil && residency_allocator != nil) {
+            [residency_command_buffer beginCommandBufferWithAllocator:residency_allocator];
+            [residency_command_buffer endCommandBuffer];
+            MTL4CommitOptions *residency_options = ZPUMetalCreateCPUCommitOptions();
+            __block NSError *residency_feedback_error = nil;
+            [residency_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                residency_feedback_error = feedback.error;
+            }];
+            id<MTL4CommandBuffer> residency_buffers[] = {residency_command_buffer};
+            [queue commit:residency_buffers count:1 options:residency_options];
+            residency_limit_ok = residency_limit_ok && residency_feedback_error != nil;
+        } else {
+            residency_limit_ok = NO;
+        }
+    } else {
+        residency_limit_ok = NO;
+    }
     id<MTL4ArgumentTable> argument_table = nil;
     {
         MTL4ArgumentTableDescriptor *descriptor = [MTL4ArgumentTableDescriptor new];
@@ -4224,7 +4260,7 @@ static int test_adapter_metal4_object_protocols(id<MTLDevice> adapter_device,
                            "MTL4MachineLearningCommandEncoder");
     ZPU_AUDIT_MTL4_OBJECT(render_encoder, MTL4RenderCommandEncoder, "MTL4RenderCommandEncoder");
 #undef ZPU_AUDIT_MTL4_OBJECT
-    if (result == 0 && (error != nil || compute_pipeline == nil || binary_library == nil)) {
+    if (result == 0 && (!residency_limit_ok || error != nil || compute_pipeline == nil || binary_library == nil)) {
         fprintf(stderr, "metal-pixel: CPU adapter Metal 4 protocol audit object creation failed\n");
         return 165;
     }

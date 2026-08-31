@@ -18165,6 +18165,13 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         _failed = YES;
         return;
     }
+    if (![_residencySets containsObject:zpuSet] && _residencySets.count >= 32) {
+        /* MTL4 queues admit at most 32 unique residency sets.  Keep this
+         * failure sticky so a later commit cannot silently run without the
+         * caller's declared residency requirements. */
+        _failed = YES;
+        return;
+    }
     [_residencySets addObject:zpuSet];
     [zpuSet commit];
 }
