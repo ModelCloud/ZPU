@@ -500,7 +500,7 @@ pub fn operation(arguments: *const OperationArguments) Status {
     const operation_kind = operationFromRaw(arguments.operation) orelse return .invalid_argument;
     const element_type = elementTypeFromRaw(arguments.element_type) orelse return .invalid_argument;
     const expected_inputs = operationInputCount(operation_kind) orelse return .invalid_argument;
-    if (arguments.input_count != expected_inputs) return .invalid_argument;
+    if (arguments.input_count != expected_inputs or arguments.reserved != 0) return .invalid_argument;
     const backend = operationBackendSnapshot() orelse return .unsupported;
     const callback = backend.operation orelse return .unsupported;
 
@@ -694,11 +694,13 @@ fn namedOperationWithViews(
 }
 
 pub fn namedOperation(arguments: *const NamedOperationArguments) Status {
+    if (arguments.reserved != 0) return .invalid_argument;
     const name = arguments.function_name orelse return .invalid_argument;
     return namedOperationWithViews(name, arguments.function_name_length, arguments.input_count, arguments.element_type, arguments.inputs[0..].ptr, &arguments.destination, arguments.permutation[0..].ptr, max_inputs);
 }
 
 pub fn namedOperationV2(arguments: *const NamedOperationArgumentsV2) Status {
+    if (arguments.reserved != 0) return .invalid_argument;
     const name = arguments.function_name orelse return .invalid_argument;
     const inputs = arguments.inputs orelse return .invalid_argument;
     const permutation = arguments.permutation orelse return .invalid_argument;
@@ -1266,6 +1268,10 @@ test "optional CPU operation provider receives dense ZML views" {
     invalid_arguments.element_type = @intFromEnum(ElementType.uint8);
     try std.testing.expectEqual(Status.invalid_argument, operation(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    invalid_arguments = arguments;
+    invalid_arguments.reserved = 1;
+    try std.testing.expectEqual(Status.invalid_argument, operation(&invalid_arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }
 
 test "named CPU provider receives a portable graph name and dense transpose views" {
@@ -1336,6 +1342,12 @@ test "named CPU provider receives a portable graph name and dense transpose view
     try std.testing.expectEqual(@as(u32, 6), destination_storage[6]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
+
+    var invalid_arguments = arguments;
+    invalid_arguments.reserved = 1;
+    try std.testing.expectEqual(Status.invalid_argument, namedOperation(&invalid_arguments));
+    try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
 }
 
 test "named CPU provider catalog exposes discoverable function names" {
@@ -1422,6 +1434,12 @@ test "named CPU provider v2 carries a generic three-input graph" {
     try std.testing.expectEqual(@as(f32, 666), destination_storage[9]);
     try std.testing.expectEqual(@as(f32, 12345.0), destination_storage[2]);
     try std.testing.expectEqual(@as(f32, 12345.0), destination_storage[3]);
+
+    var invalid_arguments = arguments;
+    invalid_arguments.reserved = 1;
+    try std.testing.expectEqual(Status.invalid_argument, namedOperationV2(&invalid_arguments));
+    try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
 }
 
 test "optional CPU provider preserves packed 4-bit tensor padding" {
