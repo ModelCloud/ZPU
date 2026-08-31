@@ -68,11 +68,28 @@ still pins it. Unsupported commands remain hard Mosaic barriers, so stream
 coalescing does not reorder observable Vulkan work.
 
 On the validation host, the smoke probe measured the 4,801-draw WezTerm-shaped
-stream at 31.3 ms p50 with 256-command chunking and 2.86 ms p50 through Mosaic
-(10.9×). The ImGui-shaped 192-draw and Khronos-shaped 128-object streams remain
-one batch in both modes and therefore remain within measurement noise. These
-are workload-specific measurements; the byte-identical color/depth oracle is
-the correctness gate.
+stream at 30.17 ms p50 with 256-command chunking and 3.00 ms p50 through Mosaic
+(10.05×). The ImGui-shaped 192-draw and Khronos-shaped 128-object streams
+remain one batch in both modes: 0.997× and 1.002× respectively. These are
+workload-specific measurements; the byte-identical color/depth oracle is the
+correctness gate.
+
+## Next 4× target
+
+The long-stream submission problem is no longer the highest-value target.
+Short and medium streams already pay only one dispatch, so increasing the
+Mosaic batch limit cannot improve them. A Mosaic-only attempt to force those
+batches through the parallel scheduler regressed the ImGui-shaped frame by
+about 19% and was discarded.
+
+The next target is the one-batch raster path used by both short workloads:
+execute prepared geometry through tile-local physical packets, first with the
+scalar executor and then with portable primitive batches. The physical
+`LOCAL`/`MACRO`/`GLOBAL` scalar executor and its differential test now exist in
+`src/render/scalar_packet.zig`; driver lowering remains gated until its output
+matches the existing reference path across the broader semantic corpus. This
+is the measured route toward another 4×, rather than claiming a speedup from a
+submission change that these workloads do not exercise.
 
 ## Correctness contract
 

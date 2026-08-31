@@ -157,6 +157,124 @@ pub fn renderPackets(surface: Surface, primitives: []const prepared.PreparedPrim
     }
 }
 
+fn packetBefore(a: pipeline.TilePacket, b: pipeline.TilePacket) bool {
+    if (pipeline.OrderKey.less(a.order_key, b.order_key)) return true;
+    if (pipeline.OrderKey.less(b.order_key, a.order_key)) return false;
+    return a.source_cluster_index < b.source_cluster_index;
+}
+
+fn clusterTileRange(cluster: pipeline.Cluster, width: u32, height: u32, tile_w: u32, tile_h: u32) ?pipeline.TileRect {
+    const bounds = cluster.bounds.clipped(width, height);
+    if (bounds.empty()) return null;
+    const max_x = @as(usize, bounds.max_x);
+    const max_y = @as(usize, bounds.max_y);
+    return .{
+        .min_x = bounds.min_x / tile_w,
+        .min_y = bounds.min_y / tile_h,
+        .max_x = @intCast((max_x + tile_w - 1) / tile_w),
+        .max_y = @intCast((max_y + tile_h - 1) / tile_h),
+    };
+}
+
+fn tileInRange(tile_x: u32, tile_y: u32, range: pipeline.TileRect) bool {
+    return tile_x >= range.min_x and tile_x < range.max_x and tile_y >= range.min_y and tile_y < range.max_y;
+}
+
+fn physicalPacketTouchesTile(packet: pipeline.TilePacket, clusters: []const pipeline.Cluster, tile_x: u32, tile_y: u32, width: u32, height: u32, tile_w: u32, tile_h: u32) bool {
+    const range = clusterTileRange(clusters[packet.source_cluster_index], width, height, tile_w, tile_h) orelse return false;
+    return tileInRange(tile_x, tile_y, range);
+}
+
+/// Execute the compact physical packet streams without expanding MACRO or
+/// GLOBAL work into persistent per-tile records. Each tile merges the three
+/// already ordered producer streams, so strict Vulkan order remains intact
+/// while broad work stays physically compact in memory.
+pub fn renderPhysicalPackets(
+    surface: Surface,
+    primitives: []const prepared.PreparedPrimitive,
+    ranges: []const PreparedCluster,
+    clusters: []const pipeline.Cluster,
+    tile_w: u32,
+    tile_h: u32,
+    local_packets: []const pipeline.LocalPacket,
+    macro_packets: []const pipeline.MacroPacket,
+    global_packets: []const pipeline.GlobalPacket,
+    seen_clusters: []bool,
+    counters: *Counters,
+) Error!void {
+    if (tile_w == 0 or tile_h == 0 or ranges.len != clusters.len or seen_clusters.len < ranges.len) return error.InvalidPacketStream;
+    const columns = (@as(usize, surface.width) + tile_w - 1) / tile_w;
+    const rows = (@as(usize, surface.height) + tile_h - 1) / tile_h;
+    const tile_count = columns * rows;
+    if (columns == 0 or rows == 0 or tile_count > std.math.maxInt(u32)) return error.InvalidPacketStream;
+
+    // Validate the compact stream once. The hot tile merge below can then
+    // use direct range checks without turning malformed packet data into an
+    // out-of-bounds access.
+    for (local_packets) |entry| {
+        if (entry.packet.extent != .local or entry.packet.source_cluster_index >= clusters.len or entry.tile_x >= columns or entry.tile_y >= rows) return error.InvalidPacketStream;
+    }
+    for (macro_packets) |entry| {
+        if (entry.packet.extent != .macro or entry.packet.source_cluster_index >= clusters.len or
+            entry.tile_range.min_x >= entry.tile_range.max_x or entry.tile_range.min_y >= entry.tile_range.max_y or
+            entry.tile_range.max_x > columns or entry.tile_range.max_y > rows) return error.InvalidPacketStream;
+    }
+    for (global_packets) |entry| if (entry.packet.extent != .global or entry.packet.source_cluster_index >= clusters.len) return error.InvalidPacketStream;
+
+    @memset(seen_clusters[0..ranges.len], false);
+    for (0..rows) |tile_y| for (0..columns) |tile_x| {
+        const clip = pipeline.ScreenBounds{
+            .min_x = @intCast(tile_x * @as(usize, tile_w)),
+            .min_y = @intCast(tile_y * @as(usize, tile_h)),
+            .max_x = @min(surface.width, @as(u32, @intCast((tile_x + 1) * @as(usize, tile_w)))),
+            .max_y = @min(surface.height, @as(u32, @intCast((tile_y + 1) * @as(usize, tile_h)))),
+        };
+        var local_index: usize = 0;
+        var macro_index: usize = 0;
+        var global_index: usize = 0;
+        while (true) {
+            while (local_index < local_packets.len and
+                (local_packets[local_index].tile_x != tile_x or local_packets[local_index].tile_y != tile_y)) local_index += 1;
+            while (macro_index < macro_packets.len and
+                !tileInRange(@intCast(tile_x), @intCast(tile_y), macro_packets[macro_index].tile_range)) macro_index += 1;
+            while (global_index < global_packets.len and
+                !physicalPacketTouchesTile(global_packets[global_index].packet, clusters, @intCast(tile_x), @intCast(tile_y), surface.width, surface.height, tile_w, tile_h)) global_index += 1;
+
+            if (local_index == local_packets.len and macro_index == macro_packets.len and global_index == global_packets.len) break;
+            const local_packet = if (local_index < local_packets.len) local_packets[local_index].packet else null;
+            const macro_packet = if (macro_index < macro_packets.len) macro_packets[macro_index].packet else null;
+            const global_packet = if (global_index < global_packets.len) global_packets[global_index].packet else null;
+
+            const selected = if (local_packet) |candidate| blk: {
+                if (macro_packet) |other| if (packetBefore(other, candidate)) {
+                    if (global_packet) |third| break :blk if (packetBefore(third, other)) @as(u2, 2) else @as(u2, 1);
+                    break :blk @as(u2, 1);
+                };
+                if (global_packet) |other| if (packetBefore(other, candidate)) break :blk @as(u2, 2);
+                break :blk @as(u2, 0);
+            } else if (macro_packet) |candidate| blk: {
+                if (global_packet) |other| if (packetBefore(other, candidate)) break :blk @as(u2, 2);
+                break :blk @as(u2, 1);
+            } else @as(u2, 2);
+
+            const selected_packet = switch (selected) {
+                0 => local_packets[local_index].packet,
+                1 => macro_packets[macro_index].packet,
+                else => global_packets[global_index].packet,
+            };
+            const cluster_index = @as(usize, selected_packet.source_cluster_index);
+            const count_setup = !seen_clusters[cluster_index];
+            seen_clusters[cluster_index] = true;
+            try renderCluster(surface, primitives, ranges, selected_packet.source_cluster_index, clip, count_setup, counters);
+            switch (selected) {
+                0 => local_index += 1,
+                1 => macro_index += 1,
+                else => global_index += 1,
+            }
+        }
+    };
+}
+
 test "scalar packet path is byte exact against ordered reference" {
     const source = [_]prepared.SourceTriangle{
         .{ .positions = .{ .{ 0.5, 0.5 }, .{ 6.5, 0.5 }, .{ 0.5, 6.5 } }, .depths = .{ 0.4, 0.4, 0.4 }, .primitive_id = 100, .material_id = 0x11 },
@@ -228,4 +346,74 @@ test "scalar packet traversal visits prepared setup once across tile fanout" {
     var cursors: [16]u32 = undefined;
     const count = try pipeline.buildTilePacketsFromMacrobins(&[_]pipeline.Cluster{cluster}, 16, 16, 16, 16, &macro_headers, &macro_entries, 4, 4, .less, &headers, &packets, &cursors);
     try std.testing.expectEqual(@as(usize, 16), count);
+}
+
+test "physical packet streams match expanded tile execution" {
+    const source = [_]prepared.SourceTriangle{
+        .{ .positions = .{ .{ 0.5, 0.5 }, .{ 3.5, 0.5 }, .{ 0.5, 3.5 } }, .depths = .{ 0.6, 0.6, 0.6 }, .primitive_id = 1, .material_id = 0x11 },
+        .{ .positions = .{ .{ 5.5, 5.5 }, .{ 10.5, 5.5 }, .{ 5.5, 10.5 } }, .depths = .{ 0.4, 0.4, 0.4 }, .primitive_id = 2, .material_id = 0x22 },
+        .{ .positions = .{ .{ 11.5, 11.5 }, .{ 15.5, 11.5 }, .{ 11.5, 15.5 } }, .depths = .{ 0.2, 0.2, 0.2 }, .primitive_id = 3, .material_id = 0x33 },
+    };
+    var prepared_primitives: [3]prepared.PreparedPrimitive = undefined;
+    var prepared_batches: [3]prepared.PreparedPrimitiveBatch = undefined;
+    _ = try prepared.prepare(&source, 20, 20, 16, .{ .primitives = &prepared_primitives, .batches = &prepared_batches });
+    const ranges = [_]PreparedCluster{
+        .{ .first_primitive = 0, .primitive_count = 1 },
+        .{ .first_primitive = 1, .primitive_count = 1 },
+        .{ .first_primitive = 2, .primitive_count = 1 },
+    };
+    const clusters = [_]pipeline.Cluster{
+        .{ .id = 1, .draw_id = 0, .material_id = 0x11, .first_triangle = 0, .triangle_count = 1, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 4, .max_y = 4 }, .best_depth = 0.6, .order_key = .{ .submission = 0, .command = 0, .primitive_group = 0 } },
+        .{ .id = 2, .draw_id = 0, .material_id = 0x22, .first_triangle = 1, .triangle_count = 1, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 16, .max_y = 16 }, .best_depth = 0.4, .order_key = .{ .submission = 0, .command = 1, .primitive_group = 0 } },
+        .{ .id = 3, .draw_id = 0, .material_id = 0x33, .first_triangle = 2, .triangle_count = 1, .bounds = .{ .min_x = 0, .min_y = 0, .max_x = 20, .max_y = 20 }, .best_depth = 0.2, .order_key = .{ .submission = 0, .command = 2, .primitive_group = 0 } },
+    };
+    var physical_local: [16]pipeline.LocalPacket = undefined;
+    var physical_macro: [3]pipeline.MacroPacket = undefined;
+    var physical_global: [3]pipeline.GlobalPacket = undefined;
+    const physical_count = try pipeline.buildPhysicalPackets(&clusters, null, 20, 20, 1, 1, .less_equal, &physical_local, &physical_macro, &physical_global);
+    try std.testing.expectEqual(@as(usize, 16), physical_count.local);
+    try std.testing.expectEqual(@as(usize, 1), physical_count.macro);
+    try std.testing.expectEqual(@as(usize, 1), physical_count.global);
+
+    var macro_headers: [4]pipeline.MacrobinHeader = undefined;
+    var macro_entries: [8]pipeline.MacrobinRef = undefined;
+    var macro_cursors: [4]u32 = undefined;
+    const macro_ref_count = try pipeline.buildMacrobins(&clusters, null, 20, 20, 16, 16, &macro_headers, &macro_entries, &macro_cursors);
+    var tile_headers: [400]pipeline.TileHeader = undefined;
+    var tile_packets: [2048]pipeline.TilePacket = undefined;
+    var tile_cursors: [400]u32 = undefined;
+    const tile_packet_count = try pipeline.buildTilePacketsFromMacrobins(&clusters, 20, 20, 16, 16, &macro_headers, macro_entries[0..macro_ref_count], 1, 1, .less_equal, &tile_headers, &tile_packets, &tile_cursors);
+
+    var reference_color: [400]u32 = undefined;
+    var expanded_color: [400]u32 = undefined;
+    var physical_color: [400]u32 = undefined;
+    var reference_depth: [400]f32 = undefined;
+    var expanded_depth: [400]f32 = undefined;
+    var physical_depth: [400]f32 = undefined;
+    var reference_visibility: [400]pipeline.Visibility = undefined;
+    var expanded_visibility: [400]pipeline.Visibility = undefined;
+    var physical_visibility: [400]pipeline.Visibility = undefined;
+    const reference = try Surface.init(&reference_color, &reference_depth, &reference_visibility, 20, 20, .less_equal);
+    const expanded = try Surface.init(&expanded_color, &expanded_depth, &expanded_visibility, 20, 20, .less_equal);
+    const physical = try Surface.init(&physical_color, &physical_depth, &physical_visibility, 20, 20, .less_equal);
+    reference.clear(0, 1);
+    expanded.clear(0, 1);
+    physical.clear(0, 1);
+    var reference_counters = Counters{};
+    var expanded_counters = Counters{};
+    var physical_counters = Counters{};
+    const ordered = [_]u32{ 0, 1, 2 };
+    var expanded_seen: [3]bool = undefined;
+    var physical_seen: [3]bool = undefined;
+    try renderReference(reference, &prepared_primitives, &ranges, &ordered, &reference_counters);
+    try renderPackets(expanded, &prepared_primitives, &ranges, 1, 1, &tile_headers, tile_packets[0..tile_packet_count], &expanded_seen, &expanded_counters);
+    try renderPhysicalPackets(physical, &prepared_primitives, &ranges, &clusters, 1, 1, physical_local[0..physical_count.local], physical_macro[0..physical_count.macro], physical_global[0..physical_count.global], &physical_seen, &physical_counters);
+    try std.testing.expectEqualSlices(u32, &reference_color, &expanded_color);
+    try std.testing.expectEqualSlices(u32, &reference_color, &physical_color);
+    try std.testing.expectEqualSlices(f32, &reference_depth, &expanded_depth);
+    try std.testing.expectEqualSlices(f32, &reference_depth, &physical_depth);
+    try std.testing.expectEqualSlices(pipeline.Visibility, &reference_visibility, &expanded_visibility);
+    try std.testing.expectEqualSlices(pipeline.Visibility, &reference_visibility, &physical_visibility);
+    try std.testing.expectEqual(reference_counters, expanded_counters);
+    try std.testing.expectEqual(reference_counters, physical_counters);
 }
