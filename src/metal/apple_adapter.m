@@ -12226,13 +12226,46 @@ static BOOL zpu_source_resource_type_for_name(NSString *name, MTLDataType *dataT
     return YES;
 }
 
+/* Argument-buffer arrays use Metal's template spelling.  A C-style member
+ * declarator such as `float4 values[2] [[id(0)]]` is rejected by Apple's
+ * compiler, so keep this parser aligned with the native grammar and accept
+ * only one validated element type plus a positive constant length. */
+static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementName,
+                                            NSUInteger *arrayLength, BOOL *resource) {
+    if (name == nil || elementName == NULL || arrayLength == NULL || resource == NULL) return NO;
+    if (![name hasPrefix:@"array<"] || ![name hasSuffix:@">"]) return NO;
+    NSString *arguments = [name substringWithRange:NSMakeRange(6, name.length - 7)];
+    NSRange comma = [arguments rangeOfString:@","];
+    if (comma.location == NSNotFound || comma.location == 0 || comma.location + 1 >= arguments.length ||
+        [arguments rangeOfString:@"," options:0 range:NSMakeRange(comma.location + 1,
+                                                                    arguments.length - comma.location - 1)].location != NSNotFound) {
+        return NO;
+    }
+    NSString *candidateElement = [arguments substringToIndex:comma.location];
+    NSString *candidateLength = [arguments substringFromIndex:comma.location + 1];
+    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+    if (candidateLength.length == 0 || [candidateLength rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
+        return NO;
+    }
+    NSUInteger length = candidateLength.integerValue;
+    if (length == 0 || length == NSUIntegerMax) return NO;
+    MTLDataType dataType = MTLDataTypeNone;
+    BOOL isResource = zpu_source_resource_type_for_name(candidateElement, &dataType);
+    if (!isResource && !zpu_source_data_type_for_name(candidateElement, &dataType) &&
+        ![candidateElement isEqualToString:@"sampler"]) return NO;
+    *elementName = candidateElement;
+    *arrayLength = length;
+    *resource = isResource || [candidateElement isEqualToString:@"sampler"];
+    return YES;
+}
+
 static NSString *zpu_source_match_string(NSString *source, NSTextCheckingResult *match, NSUInteger index) {
     NSRange range = [match rangeAtIndex:index];
     return range.location == NSNotFound ? @"" : [source substringWithRange:range];
 }
 
 /* Build one descriptor tree from source struct declarations.  The parser
- * accepts resource members, constants, fixed-size member arrays, and
+ * accepts resource members, constants, native `array<T,N>` members, and
  * recursively nested `constant Struct &member` fields.  Members are sorted
  * in source order. Metal requires argument-buffer ids to increase through a
  * declaration, so non-monotonic or overlapping ids are rejected instead of
@@ -12264,6 +12297,23 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             [building removeObject:structName];
             return nil;
         }
+        NSString *declaratorArrayLength = zpu_source_compact(zpu_source_match_string(rawField, match, 6));
+        if (declaratorArrayLength.length != 0) {
+            /* `T[N] [[id]]` is not an argument-buffer member spelling in
+             * native Metal; array<T,N> is the validated representation. */
+            [building removeObject:structName];
+            return nil;
+        }
+        NSString *fieldTypeName = zpu_source_compact(zpu_source_match_string(rawField, match, 3));
+        NSUInteger typeArrayLength = 1;
+        NSString *typeArrayElementName = nil;
+        BOOL typeArrayResource = NO;
+        if ([fieldTypeName hasPrefix:@"array<"] &&
+            !zpu_source_array_type_for_name(fieldTypeName, &typeArrayElementName,
+                                             &typeArrayLength, &typeArrayResource)) {
+            [building removeObject:structName];
+            return nil;
+        }
         NSUInteger index = zpu_source_match_string(rawField, match, 7).integerValue;
         for (NSDictionary *field in fields) {
             if ([field[@"index"] unsignedIntegerValue] == index) {
@@ -12277,7 +12327,8 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             @"type": zpu_source_compact(zpu_source_match_string(rawField, match, 3)),
             @"indirection": zpu_source_compact(zpu_source_match_string(rawField, match, 4)),
             @"name": zpu_source_compact(zpu_source_match_string(rawField, match, 5)),
-            @"arrayLength": zpu_source_compact(zpu_source_match_string(rawField, match, 6)),
+            @"arrayLength": declaratorArrayLength,
+            @"typeArrayLength": @(typeArrayLength),
             @"index": @(index),
         }];
     }
@@ -12286,7 +12337,9 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
     for (NSDictionary *field in fields) {
         NSUInteger index = [field[@"index"] unsignedIntegerValue];
         NSString *arrayLengthString = field[@"arrayLength"];
-        NSUInteger arrayLength = arrayLengthString.length == 0 ? 1 : (NSUInteger)arrayLengthString.integerValue;
+        NSUInteger arrayLength = arrayLengthString.length == 0 ?
+            MAX((NSUInteger)1, [field[@"typeArrayLength"] unsignedIntegerValue]) :
+            (NSUInteger)arrayLengthString.integerValue;
         if (arrayLength == 0 || (hasPreviousField && index < previousEnd) ||
             index > NSUIntegerMax - arrayLength) {
             [building removeObject:structName];
@@ -12307,6 +12360,16 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         NSUInteger index = [field[@"index"] unsignedIntegerValue];
         NSString *arrayLengthString = field[@"arrayLength"];
         NSUInteger arrayLength = arrayLengthString.length == 0 ? 1 : (NSUInteger)arrayLengthString.integerValue;
+        NSString *arrayElementName = nil;
+        BOOL arrayResource = NO;
+        if ([typeName hasPrefix:@"array<"]) {
+            if (arrayLengthString.length != 0 || address.length != 0 || indirection.length != 0 ||
+                !zpu_source_array_type_for_name(typeName, &arrayElementName, &arrayLength, &arrayResource)) {
+                [building removeObject:structName];
+                return nil;
+            }
+            typeName = arrayElementName;
+        }
         if (arrayLength == 0 || (arrayLength > 1 && index > NSUIntegerMax - (arrayLength - 1))) {
             [building removeObject:structName];
             return nil;
@@ -12350,7 +12413,10 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         } else if (!zpu_source_data_type_for_name(typeName, &dataType) || indirection.length != 0) {
             [building removeObject:structName];
             return nil;
+        } else {
+            elementDataType = dataType;
         }
+        if (arrayResource) resource = YES;
 
         MTLArgumentDescriptor *descriptor = [MTLArgumentDescriptor argumentDescriptor];
         descriptor.dataType = dataType;
@@ -18401,7 +18467,12 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         MTLDataType elementDataType = (MTLDataType)[metadata[@"elementDataType"] unsignedIntegerValue];
         MTLBindingAccess access = (MTLBindingAccess)[metadata[@"access"] unsignedIntegerValue];
         MTLTextureType textureType = (MTLTextureType)[metadata[@"textureType"] unsignedIntegerValue];
-        MTLDataType memberDataType = arrayLength > 1 ? MTLDataTypeArray : descriptor.dataType;
+        /* Native Metal reflects constant `array<T,N>` members as an
+         * anonymous struct containing `__elems`, while resource arrays are
+         * exposed directly as MTLDataTypeArray. Preserve that distinction in
+         * the CPU reflection object. */
+        MTLDataType memberDataType = arrayLength > 1 ?
+            ([kind isEqualToString:@"constant"] ? MTLDataTypeStruct : MTLDataTypeArray) : descriptor.dataType;
         ZPUStructMember *member = [[ZPUStructMember alloc] initWithName:memberName
                                                                     offset:offset
                                                                  dataType:memberDataType
@@ -18453,7 +18524,20 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
                                                         structType:nil arrayType:nil
                                              textureReferenceType:textureReferenceType
                                                     pointerType:pointerType tensorReferenceType:nil];
-            [member setStructType:nil arrayType:arrayType tensorReferenceType:nil];
+            if ([kind isEqualToString:@"constant"]) {
+                /* Metal models a constant array member as an anonymous
+                 * one-member struct containing `__elems`, rather than as a
+                 * top-level MTLDataTypeArray member. */
+                ZPUStructMember *elements = [[ZPUStructMember alloc]
+                    initWithName:@"__elems" offset:0 dataType:MTLDataTypeArray
+                    argumentIndex:descriptor.index];
+                [elements setStructType:nil arrayType:arrayType tensorReferenceType:nil];
+                ZPUStructType *arrayStruct = [[ZPUStructType alloc]
+                    initWithMembers:@[elements]];
+                [member setStructType:arrayStruct arrayType:nil tensorReferenceType:nil];
+            } else {
+                [member setStructType:nil arrayType:arrayType tensorReferenceType:nil];
+            }
         } else if (pointerType != nil || textureReferenceType != nil) {
             [member setPointerType:pointerType textureReferenceType:textureReferenceType];
         }

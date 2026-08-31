@@ -605,7 +605,8 @@ triangle path:
   declaration is also lowered to the CPU recursive argument encoder, with
   native-matching parent/child layout metadata and resource slots. Strict
   metadata-only argument-buffer declarations additionally preserve arbitrary
-  supported member names, ids, buffer indices, arrays, recursive child
+  supported member names, ids, buffer indices, native `array<T,N>` members,
+  recursive child
   reflection, and scalar/vector types including 64-bit `long`/`ulong` and
   `bfloat`, plus validated function-table, Metal 4 command-resource, and
   primitive/instance acceleration structure argument-buffer metadata. Those executable functions execute through ZPU's

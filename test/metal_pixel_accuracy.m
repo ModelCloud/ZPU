@@ -681,13 +681,18 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "render_pipeline_state renderPipeline [[id(1)]]; "
          "compute_pipeline_state computePipeline [[id(2)]]; };\n"
          "kernel void zpu_source_argument_buffer_command_resources(constant SourceCommandResources &arguments [[buffer(6)]]) { "
+         "(void)arguments; }\n"
+         "using namespace metal::raytracing;\n"
+         "struct SourceArrayArguments { array<float4, 2> colors [[id(0)]]; "
+         "array<primitive_acceleration_structure, 2> structures [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_arrays(constant SourceArrayArguments &arguments [[buffer(7)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 36) {
+        adapter_library.functionNames.count != 37) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -701,6 +706,16 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     if (mismatched_guard_library != nil || mismatched_guard_error == nil) {
         fprintf(stderr, "metal-pixel: source lowering accepted a mismatched fixed CPU bound\n");
         return 168;
+    }
+    NSError *c_array_argument_error = nil;
+    id<MTLLibrary> c_array_argument_library = [adapter_device newLibraryWithSource:
+        @"struct InvalidArrayArguments { float4 values[2] [[id(0)]]; };"
+         "kernel void zpu_source_invalid_c_array(constant InvalidArrayArguments &args [[buffer(0)]]) { (void)args; }"
+                                                                                  options:nil
+                                                                                    error:&c_array_argument_error];
+    if (c_array_argument_library != nil || c_array_argument_error == nil) {
+        fprintf(stderr, "metal-pixel: source lowering accepted a non-native C-style argument array\n");
+        return 179;
     }
     NSError *cyclic_argument_error = nil;
     id<MTLLibrary> cyclic_argument_library = [adapter_device newLibraryWithSource:
@@ -1540,6 +1555,81 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_command_resource_reflection_ok) {
         fail_with_error("source-defined command resource argument layout lowering failed", adapter_error ?: native_error);
         return 176;
+    }
+
+    id<MTLFunction> native_source_array_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_arrays"];
+    id<MTLFunction> adapter_source_array_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_arrays"];
+    id<MTLArgumentEncoder> native_source_array_encoder =
+        [native_source_array_function newArgumentEncoderWithBufferIndex:7];
+    id<MTLArgumentEncoder> adapter_source_array_encoder =
+        [adapter_source_array_function newArgumentEncoderWithBufferIndex:7];
+    BOOL source_array_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_arrays"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_arrays"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        source_array_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 7 &&
+            adapter_binding.index == 7 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 2 && adapter_struct.members.count == 2;
+        if (source_array_reflection_ok) {
+            MTLStructMember *native_colors = native_struct.members[0];
+            MTLStructMember *adapter_colors = adapter_struct.members[0];
+            MTLStructMember *native_structures = native_struct.members[1];
+            MTLStructMember *adapter_structures = adapter_struct.members[1];
+            MTLArrayType *native_structure_array = native_structures.arrayType;
+            MTLArrayType *adapter_structure_array = adapter_structures.arrayType;
+            MTLStructType *native_color_struct = native_colors.structType;
+            MTLStructType *adapter_color_struct = adapter_colors.structType;
+            MTLStructMember *native_color_elements = native_color_struct.members.count == 1 ?
+                native_color_struct.members[0] : nil;
+            MTLStructMember *adapter_color_elements = adapter_color_struct.members.count == 1 ?
+                adapter_color_struct.members[0] : nil;
+            source_array_reflection_ok =
+                [native_colors.name isEqualToString:adapter_colors.name] &&
+                native_colors.offset == adapter_colors.offset &&
+                native_colors.dataType == MTLDataTypeStruct &&
+                adapter_colors.dataType == MTLDataTypeStruct &&
+                native_color_struct != nil && adapter_color_struct != nil &&
+                native_color_struct.members.count == 1 && adapter_color_struct.members.count == 1 &&
+                [native_color_elements.name isEqualToString:@"__elems"] &&
+                [adapter_color_elements.name isEqualToString:@"__elems"] &&
+                native_color_elements.dataType == MTLDataTypeArray &&
+                adapter_color_elements.dataType == MTLDataTypeArray &&
+                native_colors.arrayType == nil && adapter_colors.arrayType == nil &&
+                native_color_elements.arrayType != nil && adapter_color_elements.arrayType != nil &&
+                native_color_elements.arrayType.elementType == MTLDataTypeFloat4 &&
+                adapter_color_elements.arrayType.elementType == MTLDataTypeFloat4 &&
+                native_color_elements.arrayType.arrayLength == 2 &&
+                adapter_color_elements.arrayType.arrayLength == 2 &&
+                native_color_elements.arrayType.stride == adapter_color_elements.arrayType.stride &&
+                [native_structures.name isEqualToString:adapter_structures.name] &&
+                native_structures.offset == adapter_structures.offset &&
+                native_structures.dataType == MTLDataTypeArray &&
+                adapter_structures.dataType == MTLDataTypeArray &&
+                native_structure_array != nil && adapter_structure_array != nil &&
+                native_structure_array.elementType == MTLDataTypePrimitiveAccelerationStructure &&
+                adapter_structure_array.elementType == MTLDataTypePrimitiveAccelerationStructure &&
+                native_structure_array.arrayLength == 2 && adapter_structure_array.arrayLength == 2 &&
+                native_structure_array.stride == adapter_structure_array.stride;
+        }
+    }
+    if (native_source_array_function == nil || adapter_source_array_function == nil ||
+        native_source_array_encoder == nil || adapter_source_array_encoder == nil ||
+        native_source_array_encoder.encodedLength != adapter_source_array_encoder.encodedLength ||
+        native_source_array_encoder.alignment != adapter_source_array_encoder.alignment ||
+        !source_array_reflection_ok) {
+        fail_with_error("source-defined array argument layout lowering failed", adapter_error ?: native_error);
+        return 177;
     }
     return 0;
 }
