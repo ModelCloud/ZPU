@@ -118,6 +118,10 @@ static NSString *const zpu_cpu_argument_buffer_recursive_function_name = @"zpu_c
  * deliberately not an executable shader profile: the source body is limited
  * to a metadata-only reference to the argument buffer. */
 static NSString *const zpu_cpu_source_argument_buffer_function_name = @"zpu_cpu_source_argument_buffer";
+/* Metadata-only marker for direct source kernels whose bindings can be
+ * reflected by the CPU parser but whose arbitrary body is intentionally not
+ * executed by the adapter. */
+static NSString *const zpu_cpu_source_metadata_function_name = @"zpu_cpu_source_metadata";
 static NSString *const zpu_cpu_tensor_argument_buffer_function_name = @"zpu_cpu_tensor_argument_buffer";
 static NSString *const zpu_cpu_tensor_argument_buffer_array_function_name = @"zpu_cpu_tensor_argument_buffer_array";
 
@@ -847,11 +851,13 @@ API_AVAILABLE(macos(13.0), ios(16.0))
     MTLDataType _textureDataType;
     BOOL _depthTexture;
     NSUInteger _arrayLength;
+    BOOL _used;
 }
 - (instancetype)initWithName:(NSString *)name type:(MTLBindingType)type
                        access:(MTLBindingAccess)access index:(NSUInteger)index;
 - (void)setBufferDataSize:(NSUInteger)size dataType:(MTLDataType)dataType;
 - (void)setTextureType:(MTLTextureType)textureType dataType:(MTLDataType)dataType arrayLength:(NSUInteger)arrayLength;
+- (void)setUsed:(BOOL)used;
 @end
 
 /* Tensor bindings are a Metal 4-only refinement of the common binding
@@ -1518,6 +1524,7 @@ static uint64_t zpu_next_cpu_drawable_id;
     NSArray *_functionNames;
     NSDictionary *_functionImplementations;
     NSDictionary *_functionArgumentBufferLayouts;
+    NSDictionary *_sourceFunctionReflections;
     NSSet *_visibleFunctionNames;
     NSString *_label;
     MTLLibraryType _type;
@@ -8375,6 +8382,7 @@ API_AVAILABLE(macos(10.12), ios(10.0))
         _textureType = MTLTextureType2D;
         _textureDataType = MTLDataTypeFloat;
         _arrayLength = 1;
+        _used = YES;
     }
     return self;
 }
@@ -8382,7 +8390,8 @@ API_AVAILABLE(macos(10.12), ios(10.0))
 - (MTLBindingType)type { return _type; }
 - (MTLBindingAccess)access { return _access; }
 - (NSUInteger)index { return _index; }
-- (BOOL)isUsed { return YES; }
+- (BOOL)isUsed { return _used; }
+- (void)setUsed:(BOOL)used { _used = used; }
 - (BOOL)isArgument { return YES; }
 - (NSUInteger)bufferAlignment { return _bufferAlignment; }
 - (NSUInteger)bufferDataSize { return _bufferDataSize; }
@@ -12996,6 +13005,293 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
     return [implementations copy];
 }
 
+/* Return the matching delimiter in compact source. Function signatures
+ * contain nested parentheses in resource attributes such as
+ * [[buffer(3)]], so a regular expression that stops at the first ) does
+ * not describe Metal's parameter list. */
+static NSUInteger zpu_source_matching_delimiter(NSString *source, NSUInteger open,
+                                                unichar opener, unichar closer) {
+    if (source == nil || open >= source.length || [source characterAtIndex:open] != opener) return NSNotFound;
+    NSUInteger depth = 0;
+    for (NSUInteger index = open; index < source.length; ++index) {
+        const unichar character = [source characterAtIndex:index];
+        if (character == opener) {
+            if (depth == NSUIntegerMax) return NSNotFound;
+            depth += 1;
+        } else if (character == closer) {
+            if (depth == 0) return NSNotFound;
+            depth -= 1;
+            if (depth == 0) return index;
+        }
+    }
+    return NSNotFound;
+}
+
+static NSArray<NSString *> *zpu_source_split_parameters(NSString *parameters) {
+    if (parameters == nil) return nil;
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    NSUInteger angleDepth = 0;
+    NSUInteger parenDepth = 0;
+    NSUInteger squareDepth = 0;
+    NSUInteger start = 0;
+    for (NSUInteger index = 0; index < parameters.length; ++index) {
+        const unichar character = [parameters characterAtIndex:index];
+        if (character == '<') {
+            if (angleDepth == NSUIntegerMax) return nil;
+            angleDepth += 1;
+        } else if (character == '>') {
+            if (angleDepth == 0) return nil;
+            angleDepth -= 1;
+        } else if (character == '(') {
+            if (parenDepth == NSUIntegerMax) return nil;
+            parenDepth += 1;
+        } else if (character == ')') {
+            if (parenDepth == 0) return nil;
+            parenDepth -= 1;
+        } else if (character == '[') {
+            if (squareDepth == NSUIntegerMax) return nil;
+            squareDepth += 1;
+        } else if (character == ']') {
+            if (squareDepth == 0) return nil;
+            squareDepth -= 1;
+        } else if (character == ',' && angleDepth == 0 && parenDepth == 0 && squareDepth == 0) {
+            [result addObject:[parameters substringWithRange:NSMakeRange(start, index - start)]];
+            start = index + 1;
+        }
+    }
+    if (angleDepth != 0 || parenDepth != 0 || squareDepth != 0) return nil;
+    [result addObject:[parameters substringFromIndex:start]];
+    return [result copy];
+}
+
+static NSDictionary<NSString *, NSString *> *zpu_source_struct_bodies(NSString *source) {
+    if (source.length == 0) return @{};
+    NSError *error = nil;
+    NSRegularExpression *expression = [NSRegularExpression
+        regularExpressionWithPattern:@"struct[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\\{([^{}]*)\\}[[:space:]]*;"
+                               options:0 error:&error];
+    if (expression == nil || error != nil) return @{};
+    NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
+    [expression enumerateMatchesInString:source options:0 range:NSMakeRange(0, source.length)
+                              usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *name = zpu_source_match_string(source, match, 1);
+        NSString *body = zpu_source_match_string(source, match, 2);
+        if (name.length != 0 && result[name] == nil) result[name] = body;
+    }];
+    return [result copy];
+}
+
+/* Defined later with the argument-buffer reflection builder. Direct source
+ * bindings may use the same validated ordinary-struct representation. */
+static MTLStructType *zpu_source_data_struct_type(NSDictionary *layout);
+
+static BOOL zpu_source_resource_binding_type(MTLDataType dataType, MTLBindingType *bindingType) {
+    if (bindingType == NULL) return NO;
+    switch (dataType) {
+        case MTLDataTypeVisibleFunctionTable:
+            *bindingType = MTLBindingTypeVisibleFunctionTable;
+            return YES;
+        case MTLDataTypeIntersectionFunctionTable:
+            *bindingType = MTLBindingTypeIntersectionFunctionTable;
+            return YES;
+        case MTLDataTypePrimitiveAccelerationStructure:
+            *bindingType = MTLBindingTypePrimitiveAccelerationStructure;
+            return YES;
+        case MTLDataTypeInstanceAccelerationStructure:
+            *bindingType = MTLBindingTypeInstanceAccelerationStructure;
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+/* Parse one direct kernel resource parameter for metadata reflection. This
+ * deliberately excludes arbitrary MSL execution: it only creates the same
+ * CPU-owned binding objects for scalar/vector/struct buffers, textures,
+ * samplers, and resource handles already admitted by the descriptor
+ * vocabulary. */
+API_AVAILABLE(macos(26.0), ios(26.0))
+static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
+                                             NSDictionary<NSString *, NSString *> *structBodies,
+                                             NSString *body) {
+    if (parameter == nil || structBodies == nil) return nil;
+    NSError *attributeError = nil;
+    NSRegularExpression *attributeExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"\\[\\[(buffer|texture|sampler)\\(([0-9]+)\\)\\]\\]"
+                               options:0 error:&attributeError];
+    if (attributeExpression == nil || attributeError != nil) return nil;
+    NSArray<NSTextCheckingResult *> *attributes =
+        [attributeExpression matchesInString:parameter options:0 range:NSMakeRange(0, parameter.length)];
+    if (attributes.count != 1) return nil;
+    NSTextCheckingResult *attribute = attributes.firstObject;
+    NSString *attributeName = zpu_source_match_string(parameter, attribute, 1);
+    NSUInteger index = zpu_source_match_string(parameter, attribute, 2).integerValue;
+    NSString *prefix = zpu_source_compact([parameter substringToIndex:attribute.range.location]);
+    NSString *name = nil;
+    NSString *declaration = nil;
+    /* Unlike pointers and template types, the sampler spelling has no
+     * delimiter between its type and identifier after whitespace is
+     * compacted. Handle that one-token prefix before the general suffix
+     * matcher below. */
+    if ([prefix hasPrefix:@"sampler"] && prefix.length > [@"sampler" length]) {
+        name = [prefix substringFromIndex:[@"sampler" length]];
+        declaration = @"sampler";
+    }
+    NSError *nameError = nil;
+    NSRegularExpression *nameExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"([A-Za-z_][A-Za-z0-9_]*)$" options:0 error:&nameError];
+    if (name == nil) {
+        if (nameExpression == nil || nameError != nil) return nil;
+        NSTextCheckingResult *nameMatch = [nameExpression firstMatchInString:prefix options:0
+                                                                          range:NSMakeRange(0, prefix.length)];
+        if (nameMatch == nil) return nil;
+        name = zpu_source_match_string(prefix, nameMatch, 1);
+        if (name.length == 0 || nameMatch.range.location == 0) return nil;
+        declaration = [prefix substringToIndex:nameMatch.range.location];
+    }
+    NSString *address = nil;
+    for (NSString *candidate in @[@"device", @"constant", @"threadgroup"]) {
+        if ([declaration hasPrefix:candidate]) {
+            address = candidate;
+            declaration = [declaration substringFromIndex:candidate.length];
+            break;
+        }
+    }
+    BOOL isConst = [declaration hasPrefix:@"const"];
+    if (isConst) declaration = [declaration substringFromIndex:5];
+    BOOL indirection = [declaration hasSuffix:@"*"] || [declaration hasSuffix:@"&"];
+    if (indirection) declaration = [declaration substringToIndex:declaration.length - 1];
+    NSString *typeName = declaration;
+    if (typeName.length == 0) return nil;
+
+    if ([attributeName isEqualToString:@"buffer"]) {
+        MTLDataType resourceDataType = MTLDataTypeNone;
+        MTLBindingType resourceBindingType = MTLBindingTypeBuffer;
+        if (zpu_source_resource_type_for_name(typeName, &resourceDataType) &&
+            zpu_source_resource_binding_type(resourceDataType, &resourceBindingType)) {
+            ZPUBinding *binding = zpu_reflection_binding(name, resourceBindingType,
+                                                          MTLBindingAccessReadOnly, index);
+            [binding setUsed:zpu_source_contains_identifier(body, name)];
+            return binding;
+        }
+        MTLDataType dataType = MTLDataTypeNone;
+        NSUInteger dataSize = 0;
+        NSUInteger alignment = 0;
+        MTLStructType *structType = nil;
+        if (zpu_source_data_type_for_name(typeName, &dataType)) {
+            if (!zpu_argument_type_size_align(dataType, &dataSize, &alignment)) return nil;
+        } else if (structBodies[typeName] != nil) {
+            NSMutableSet<NSString *> *building = [NSMutableSet set];
+            NSDictionary *layout = zpu_source_data_struct_layout_for_struct(typeName, structBodies, building);
+            if (layout == nil) return nil;
+            dataType = MTLDataTypeStruct;
+            dataSize = [layout[@"size"] unsignedIntegerValue];
+            alignment = [layout[@"alignment"] unsignedIntegerValue];
+            structType = zpu_source_data_struct_type(layout);
+            if (structType == nil || dataSize == 0 || alignment == 0) return nil;
+        } else {
+            return nil;
+        }
+        const MTLBindingAccess access = (isConst || [address isEqualToString:@"constant"] || !indirection) ?
+            MTLBindingAccessReadOnly : MTLBindingAccessReadWrite;
+        ZPUBinding *binding = zpu_reflection_binding(name, MTLBindingTypeBuffer, access, index);
+        [binding setBufferDataSize:dataSize dataType:dataType];
+        binding->_bufferAlignment = alignment;
+        binding->_bufferStructType = structType;
+        binding->_bufferPointerType = [[ZPUPointerType alloc]
+            initWithElementType:dataType access:access alignment:alignment dataSize:dataSize structType:structType];
+        [binding setUsed:zpu_source_contains_identifier(body, name)];
+        return binding;
+    }
+    if ([attributeName isEqualToString:@"texture"]) {
+        MTLTextureType textureType = MTLTextureType2D;
+        MTLDataType dataType = MTLDataTypeNone;
+        MTLBindingAccess access = MTLBindingAccessReadOnly;
+        BOOL depthTexture = NO;
+        if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access, &depthTexture)) return nil;
+        ZPUBinding *binding = zpu_reflection_binding(name, MTLBindingTypeTexture, access, index);
+        [binding setTextureType:textureType dataType:dataType arrayLength:1];
+        binding->_depthTexture = depthTexture;
+        [binding setUsed:zpu_source_contains_identifier(body, name)];
+        return binding;
+    }
+    if ([attributeName isEqualToString:@"sampler"] && [typeName isEqualToString:@"sampler"]) {
+        ZPUBinding *binding = zpu_reflection_binding(name, MTLBindingTypeSampler,
+                                                      MTLBindingAccessReadOnly, index);
+        [binding setUsed:zpu_source_contains_identifier(body, name)];
+        return binding;
+    }
+    return nil;
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_function_reflections(NSString *source) {
+    NSString *compactSource = zpu_source_compact(source);
+    NSDictionary<NSString *, NSString *> *structBodies = zpu_source_struct_bodies(compactSource);
+    if (compactSource.length == 0) return @{};
+    NSError *error = nil;
+    NSRegularExpression *kernelExpression = [NSRegularExpression
+        regularExpressionWithPattern:@"kernelvoid([A-Za-z_][A-Za-z0-9_]*)\\("
+                               options:0 error:&error];
+    if (kernelExpression == nil || error != nil) return @{};
+    NSMutableDictionary<NSString *, MTLFunctionReflection *> *result = [NSMutableDictionary dictionary];
+    [kernelExpression enumerateMatchesInString:compactSource options:0
+                                         range:NSMakeRange(0, compactSource.length)
+                                    usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        (void)flags;
+        (void)stop;
+        NSString *name = zpu_source_match_string(compactSource, match, 1);
+        NSRange matchRange = [match rangeAtIndex:0];
+        NSUInteger open = NSMaxRange(matchRange) - 1;
+        NSUInteger close = zpu_source_matching_delimiter(compactSource, open, '(', ')');
+        if (close == NSNotFound) return;
+        NSUInteger bodyOpen = close + 1;
+        while (bodyOpen < compactSource.length && [compactSource characterAtIndex:bodyOpen] != '{') bodyOpen += 1;
+        if (bodyOpen >= compactSource.length) return;
+        NSUInteger bodyClose = zpu_source_matching_delimiter(compactSource, bodyOpen, '{', '}');
+        if (bodyClose == NSNotFound) return;
+        NSString *parameters = [compactSource substringWithRange:NSMakeRange(open + 1, close - open - 1)];
+        NSArray<NSString *> *parameterList = zpu_source_split_parameters(parameters);
+        if (parameterList == nil) return;
+        NSString *body = [compactSource substringWithRange:NSMakeRange(bodyOpen + 1, bodyClose - bodyOpen - 1)];
+        /* This profile is reflection-only. Requiring an empty body prevents
+         * a syntactically plausible but semantically arbitrary kernel from
+         * becoming an accepted executable function merely because its
+         * resource declarations are recognizable. Existing exact CPU source
+         * profiles are discovered by their dedicated lowerers above. */
+        if (body.length != 0) return;
+        NSMutableArray<ZPUBinding *> *bindings = [NSMutableArray array];
+        NSMutableSet<NSNumber *> *indices = [NSMutableSet set];
+        BOOL valid = YES;
+        for (NSString *parameter in parameterList) {
+            NSString *compactParameter = zpu_source_compact(parameter);
+            if (compactParameter.length == 0) continue;
+            const BOOL declaresBinding =
+                [compactParameter rangeOfString:@"[[buffer"].location != NSNotFound ||
+                [compactParameter rangeOfString:@"[[texture"].location != NSNotFound ||
+                [compactParameter rangeOfString:@"[[sampler"].location != NSNotFound;
+            if (!declaresBinding) continue;
+            ZPUBinding *binding = zpu_source_direct_binding(compactParameter, structBodies, body);
+            if (binding == nil || [indices containsObject:@(binding.index)]) {
+                valid = NO;
+                break;
+            }
+            [indices addObject:@(binding.index)];
+            [bindings addObject:binding];
+        }
+        if (!valid || bindings.count == 0) return;
+        [bindings sortUsingComparator:^NSComparisonResult(ZPUBinding *left, ZPUBinding *right) {
+            return left.index < right.index ? NSOrderedAscending :
+                (left.index > right.index ? NSOrderedDescending : NSOrderedSame);
+        }];
+        result[name] = (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+            initWithBindings:bindings userAnnotation:nil];
+    }];
+    return [result copy];
+}
+
 @implementation ZPULibrary
 - (instancetype)initWithOwner:(ZPUDevice *)owner source:(NSString *)source {
     return [self initWithOwner:owner source:source type:MTLLibraryTypeExecutable installName:nil];
@@ -13011,6 +13307,10 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
         NSMutableArray *names = [NSMutableArray array];
         NSDictionary<NSString *, NSDictionary *> *sourceArgumentBufferLayouts =
             zpu_source_lowerable_argument_buffer_layouts(source);
+        NSDictionary *sourceFunctionReflections = nil;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            sourceFunctionReflections = zpu_source_metadata_function_reflections(source);
+        }
         for (NSString *name in @[
             @"zpu_test_vertex",
             zpu_cpu_vertex_name,
@@ -13157,9 +13457,19 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
                     implementations[name] = implementation;
                 }
             }];
+        [sourceFunctionReflections enumerateKeysAndObjectsUsingBlock:
+            ^(NSString *name, id reflection, BOOL *stop) {
+                (void)reflection;
+                (void)stop;
+                if (![names containsObject:name]) {
+                    [names addObject:name];
+                    implementations[name] = zpu_cpu_source_metadata_function_name;
+                }
+            }];
         _functionNames = [names copy];
         _functionImplementations = [implementations copy];
         _functionArgumentBufferLayouts = [sourceArgumentBufferLayouts copy];
+        _sourceFunctionReflections = [sourceFunctionReflections copy] ?: @{};
     }
     return self;
 }
@@ -13210,6 +13520,9 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_render_functio
     NSString *implementationName = _functionImplementations[functionName] ?: functionName;
     if ([implementationName isEqualToString:zpu_cpu_source_argument_buffer_function_name]) {
         return zpu_source_argument_buffer_function_reflection(_functionArgumentBufferLayouts[functionName]);
+    }
+    if ([implementationName isEqualToString:zpu_cpu_source_metadata_function_name]) {
+        return _sourceFunctionReflections[functionName];
     }
     return zpu_function_reflection(implementationName);
 }
