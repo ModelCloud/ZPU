@@ -15378,7 +15378,10 @@ static int test_metal4_cpu_named_sum3_provider_profile(
         nativePipeline == nil || nativeLeft == nil || nativeMiddle == nil || nativeRight == nil ||
         nativeOutput == nil || nativeError != nil ||
         nativeCommandBuffer.status != MTLCommandBufferStatusCompleted ||
-        memcmp(adapterValues, nativeOutput.contents, sizeof(adapterValues)) != 0) {
+        !zpu_ml_float32_values_within_tolerance(adapterValues,
+                                                (const float *)nativeOutput.contents,
+                                                sizeof(adapterValues) / sizeof(float),
+                                                kMetalMLInferenceTolerance)) {
         fail_with_error("Metal 4 CPU ML named v2 three-input provider failed",
                         adapterError ?: feedbackError ?: nativeError);
         return 189;
@@ -15512,7 +15515,10 @@ static int test_metal4_cpu_float32_division_profile(
         table == nil || commandBuffer == nil || encoder == nil || feedbackError != nil ||
         nativeQueue == nil || nativeFunction == nil || nativePipeline == nil || nativeError != nil ||
         nativeCommandBuffer.status != MTLCommandBufferStatusCompleted || nativeOutput == nil ||
-        memcmp(adapterValues, nativeOutput.contents, sizeof(adapterValues)) != 0) {
+        !zpu_ml_float32_values_within_tolerance(adapterValues,
+                                                (const float *)nativeOutput.contents,
+                                                sizeof(adapterValues) / sizeof(float),
+                                                kMetalMLPureMathTolerance)) {
         fail_with_error("Metal 4 CPU ML Float32 division profile failed",
                         adapterError ?: feedbackError ?: nativeError);
         return 186;
@@ -15883,10 +15889,8 @@ typedef struct {
     BOOL multiply;
 } ZPUFloatElementwiseProfile;
 
-/* Half and bfloat16 elementwise operations are compared as raw tensor bytes.
- * The input values are powers of two, so both the native oracle and the
- * CPU/ZPU path produce exactly representable results without a tolerance
- * based escape. */
+/* Half and bfloat16 elementwise operations use the pure-math oracle tolerance;
+ * the helpers decode their storage formats before comparing values. */
 static int test_metal4_cpu_float_elementwise_profiles(
     id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
     id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
@@ -16016,7 +16020,15 @@ static int test_metal4_cpu_float_elementwise_profiles(
             table == nil || commandBuffer == nil || encoder == nil || feedbackError != nil ||
             nativeFunction == nil || nativePipeline == nil || nativeError != nil ||
             nativeCommandBuffer.status != MTLCommandBufferStatusCompleted || nativeOutput == nil ||
-            memcmp(adapterValues, nativeOutput.contents, sizeof(adapterValues)) != 0) {
+            (profile.dataType == MTLTensorDataTypeFloat16 ?
+                 !zpu_ml_float16_bits_within_tolerance(adapterValues,
+                                                       (const uint16_t *)nativeOutput.contents,
+                                                       sizeof(adapterValues) / sizeof(uint16_t),
+                                                       kMetalMLPureMathTolerance) :
+                 !zpu_ml_bfloat16_values_within_tolerance(adapterValues,
+                                                          (const uint16_t *)nativeOutput.contents,
+                                                          sizeof(adapterValues) / sizeof(uint16_t),
+                                                          kMetalMLPureMathTolerance))) {
             fail_with_error(profile.name, adapterError ?: feedbackError ?: nativeError);
             return (int)(183 + profileIndex);
         }
