@@ -577,6 +577,15 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_sub_f32(device const float *left [[buffer(0)]], "
          "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_add_f32x4(device const float4 *left [[buffer(0)]], "
+         "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_f32x4(device const float4 *left [[buffer(0)]], "
+         "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_f32x4(device const float4 *left [[buffer(0)]], "
+         "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
          "kernel void zpu_source_gradient_rgba8(texture2d<float, access::write> output [[texture(0)]], "
          "uint2 gid [[thread_position_in_grid]]) { if (gid.x >= output.get_width() || "
          "gid.y >= output.get_height()) return; output.write(float4((float(gid.x) + 1.0) / 8.0, "
@@ -768,7 +777,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 52) {
+        adapter_library.functionNames.count != 55) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1105,18 +1114,24 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         NSUInteger count;
         BOOL multiply;
         BOOL subtract;
+        BOOL vector;
     } cases[] = {
-        {@"zpu_source_add_f32", 12, NO, NO},
-        {@"zpu_source_mul_f32", 10, YES, NO},
-        {@"zpu_source_sub_f32", 12, NO, YES},
+        {@"zpu_source_add_f32", 12, NO, NO, NO},
+        {@"zpu_source_mul_f32", 10, YES, NO, NO},
+        {@"zpu_source_sub_f32", 12, NO, YES, NO},
+        {@"zpu_source_add_f32x4", 5, NO, NO, YES},
+        {@"zpu_source_mul_f32x4", 5, YES, NO, YES},
+        {@"zpu_source_sub_f32x4", 5, NO, YES, YES},
     };
-    const float left_values[12] = {
+    const float left_values[20] = {
         -3.5f, -2.25f, -0.0f, 0.5f, 1.25f, 2.0f,
         3.5f, 4.75f, 8.0f, -16.0f, 0.125f, 1000.0f,
+        17.0f, -9.0f, 0.25f, -0.0f, 1.0f, 2.0f, 3.0f, 4.0f,
     };
-    const float right_values[12] = {
+    const float right_values[20] = {
         2.0f, 0.25f, 1.0f, -0.5f, 2.75f, -1.0f,
         -3.5f, 0.25f, -8.0f, 16.0f, 0.375f, -100.0f,
+        -17.0f, 9.0f, 4.0f, 2.0f, 0.5f, -2.0f, 1.5f, -4.0f,
     };
     for (NSUInteger case_index = 0; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
         id<MTLFunction> native_function = [native_library newFunctionWithName:cases[case_index].name];
@@ -1182,12 +1197,19 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
                         function_binding.type == pipeline_binding.type &&
                         function_binding.access == pipeline_binding.access &&
                         function_binding.index == pipeline_binding.index;
+                    if (reflection_ok && cases[case_index].vector &&
+                        [function_binding conformsToProtocol:@protocol(MTLBufferBinding)]) {
+                        reflection_ok = ((id<MTLBufferBinding>)function_binding).bufferDataType == MTLDataTypeFloat4 &&
+                            ((id<MTLBufferBinding>)function_binding).bufferDataSize == sizeof(float) * 4;
+                    }
                 }
             }
         }
+        const NSUInteger scalar_count = cases[case_index].count *
+            (cases[case_index].vector ? 4 : 1);
         const BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&
-            memcmp(native_output.contents, adapter_output.contents, cases[case_index].count * sizeof(float)) == 0;
+            memcmp(native_output.contents, adapter_output.contents, scalar_count * sizeof(float)) == 0;
         if (!exact) {
             fprintf(stderr, "metal-pixel: source-defined CPU %s lowering mismatch\n",
                     cases[case_index].multiply ? "multiply" :

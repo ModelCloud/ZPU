@@ -12186,10 +12186,14 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
                                                                           range:NSMakeRange(0, compactSignature.length)];
         if (indexMatch == nil) return;
         NSString *indexName = [compactSignature substringWithRange:[indexMatch rangeAtIndex:1]];
-        NSString *expectedSignature = [NSString stringWithFormat:
+        NSString *expectedScalarSignature = [NSString stringWithFormat:
             @"deviceconstfloat*left[[buffer(0)]],deviceconstfloat*right[[buffer(1)]],"
              "devicefloat*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
-        if (![compactSignature isEqualToString:expectedSignature]) return;
+        NSString *expectedVectorSignature = [NSString stringWithFormat:
+            @"deviceconstfloat4*left[[buffer(0)]],deviceconstfloat4*right[[buffer(1)]],"
+             "devicefloat4*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        const BOOL vector = [compactSignature isEqualToString:expectedVectorSignature];
+        if (!vector && ![compactSignature isEqualToString:expectedScalarSignature]) return;
 
         NSString *assignment = [NSString stringWithFormat:
             @"output[%@]=left[%@]PLUSright[%@];", indexName, indexName, indexName];
@@ -12208,12 +12212,17 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         NSUInteger assignmentLength = isAdd ? addAssignment.length :
             (isSubtract ? subAssignment.length : mulAssignment.length);
         NSString *prefix = [compactBody substringToIndex:compactBody.length - assignmentLength];
-        NSString *expectedPrefix = isAdd || isSubtract ?
-            [NSString stringWithFormat:@"if(%@>=12)return;", indexName] :
-            [NSString stringWithFormat:@"if(%@>=10)return;", indexName];
+        NSString *expectedPrefix = vector ?
+            [NSString stringWithFormat:@"if(%@>=5)return;", indexName] :
+            (isAdd || isSubtract ?
+                [NSString stringWithFormat:@"if(%@>=12)return;", indexName] :
+                [NSString stringWithFormat:@"if(%@>=10)return;", indexName]);
         if (prefix.length != 0 && ![prefix isEqualToString:expectedPrefix]) return;
-        implementations[functionName] = isAdd ? zpu_cpu_add_f32_function_name :
-            (isSubtract ? zpu_cpu_sub_f32_function_name : zpu_cpu_mul_f32_function_name);
+        implementations[functionName] = vector ?
+            (isAdd ? zpu_cpu_add_f32x4_function_name :
+                (isSubtract ? zpu_cpu_sub_f32x4_function_name : zpu_cpu_mul_f32x4_function_name)) :
+            (isAdd ? zpu_cpu_add_f32_function_name :
+                (isSubtract ? zpu_cpu_sub_f32_function_name : zpu_cpu_mul_f32_function_name));
     }];
     return [implementations copy];
 }
