@@ -789,9 +789,15 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "struct SourceAliasArguments { SourceAliasColor color [[id(0)]]; "
          "SourceAliasScale scale [[id(1)]]; SourceAliasColors colors [[id(2)]]; };\n"
          "typedef SourceAliasArguments SourceAliasArgumentsTypedef;\n"
+         "using SourceAliasDevicePointer = device const float*;\n"
+         "typedef constant float* SourceAliasConstantPointer;\n"
+         "struct SourceAliasPointerArguments { SourceAliasDevicePointer data [[id(0)]]; "
+         "SourceAliasConstantPointer constants [[id(1)]]; };\n"
          "kernel void zpu_source_argument_buffer_using_alias(constant SourceAliasArguments &arguments [[buffer(18)]]) { "
          "(void)arguments; }\n"
          "kernel void zpu_source_argument_buffer_typedef_alias(constant SourceAliasArgumentsTypedef &arguments [[buffer(19)]]) { "
+         "(void)arguments; }\n"
+         "kernel void zpu_source_argument_buffer_pointer_alias(constant SourceAliasPointerArguments &arguments [[buffer(20)]]) { "
          "(void)arguments; }\n"
          "struct SourcePointerStructElement { float value; float4 color; };\n"
          "struct SourcePointerStructArguments { device const SourcePointerStructElement *items [[id(0)]]; "
@@ -823,7 +829,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 63) {
+        adapter_library.functionNames.count != 64) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -2123,6 +2129,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         [native_library newFunctionWithName:@"zpu_source_argument_buffer_typedef_alias"];
     id<MTLFunction> adapter_source_typedef_alias_function =
         [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_typedef_alias"];
+    id<MTLFunction> native_source_pointer_alias_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_pointer_alias"];
+    id<MTLFunction> adapter_source_pointer_alias_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_pointer_alias"];
     id<MTLArgumentEncoder> native_source_using_alias_encoder =
         [native_source_using_alias_function newArgumentEncoderWithBufferIndex:18];
     id<MTLArgumentEncoder> adapter_source_using_alias_encoder =
@@ -2131,6 +2141,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         [native_source_typedef_alias_function newArgumentEncoderWithBufferIndex:19];
     id<MTLArgumentEncoder> adapter_source_typedef_alias_encoder =
         [adapter_source_typedef_alias_function newArgumentEncoderWithBufferIndex:19];
+    id<MTLArgumentEncoder> native_source_pointer_alias_encoder =
+        [native_source_pointer_alias_function newArgumentEncoderWithBufferIndex:20];
+    id<MTLArgumentEncoder> adapter_source_pointer_alias_encoder =
+        [adapter_source_pointer_alias_function newArgumentEncoderWithBufferIndex:20];
     NSError *native_source_alias_pipeline_error = nil;
     NSError *adapter_source_alias_pipeline_error = nil;
     id<MTLComputePipelineState> native_source_alias_pipeline =
@@ -2139,12 +2153,21 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLComputePipelineState> adapter_source_alias_pipeline =
         [adapter_device newComputePipelineStateWithFunction:adapter_source_using_alias_function
                                                         error:&adapter_source_alias_pipeline_error];
+    NSError *native_source_pointer_alias_pipeline_error = nil;
+    NSError *adapter_source_pointer_alias_pipeline_error = nil;
+    id<MTLComputePipelineState> native_source_pointer_alias_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_source_pointer_alias_function
+                                                       error:&native_source_pointer_alias_pipeline_error];
+    id<MTLComputePipelineState> adapter_source_pointer_alias_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_source_pointer_alias_function
+                                                        error:&adapter_source_pointer_alias_pipeline_error];
     BOOL source_alias_reflection_ok = YES;
     if (@available(macOS 26.0, iOS 26.0, *)) {
-        for (NSUInteger aliasIndex = 0; aliasIndex < 2; ++aliasIndex) {
+        for (NSUInteger aliasIndex = 0; aliasIndex < 3; ++aliasIndex) {
             NSString *name = aliasIndex == 0 ?
                 @"zpu_source_argument_buffer_using_alias" :
-                @"zpu_source_argument_buffer_typedef_alias";
+                (aliasIndex == 1 ? @"zpu_source_argument_buffer_typedef_alias" :
+                 @"zpu_source_argument_buffer_pointer_alias");
             MTLFunctionReflection *native_reflection = [native_library reflectionForFunctionWithName:name];
             MTLFunctionReflection *adapter_reflection = [adapter_library reflectionForFunctionWithName:name];
             id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
@@ -2155,10 +2178,12 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             MTLStructType *adapter_struct = adapter_binding.bufferStructType;
             source_alias_reflection_ok = source_alias_reflection_ok &&
                 native_reflection != nil && adapter_reflection != nil && native_binding != nil &&
-                adapter_binding != nil && native_binding.index == (aliasIndex == 0 ? 18 : 19) &&
-                adapter_binding.index == (aliasIndex == 0 ? 18 : 19) && native_struct != nil &&
-                adapter_struct != nil && native_struct.members.count == 3 &&
-                adapter_struct.members.count == 3;
+                adapter_binding != nil && native_binding.index == (aliasIndex == 0 ? 18 :
+                    (aliasIndex == 1 ? 19 : 20)) &&
+                adapter_binding.index == (aliasIndex == 0 ? 18 :
+                    (aliasIndex == 1 ? 19 : 20)) && native_struct != nil &&
+                adapter_struct != nil && native_struct.members.count == (aliasIndex == 2 ? 2 : 3) &&
+                adapter_struct.members.count == (aliasIndex == 2 ? 2 : 3);
             if (source_alias_reflection_ok) {
                 for (NSUInteger memberIndex = 0; memberIndex < native_struct.members.count; ++memberIndex) {
                     MTLStructMember *native_member = native_struct.members[memberIndex];
@@ -2174,8 +2199,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     BOOL source_alias_bytes_ok = NO;
     const NSUInteger using_alias_length = native_source_using_alias_encoder.encodedLength;
     const NSUInteger typedef_alias_length = native_source_typedef_alias_encoder.encodedLength;
+    const NSUInteger pointer_alias_length = native_source_pointer_alias_encoder.encodedLength;
     if (using_alias_length != 0 && using_alias_length == adapter_source_using_alias_encoder.encodedLength &&
-        typedef_alias_length != 0 && typedef_alias_length == adapter_source_typedef_alias_encoder.encodedLength) {
+        typedef_alias_length != 0 && typedef_alias_length == adapter_source_typedef_alias_encoder.encodedLength &&
+        pointer_alias_length != 0 && pointer_alias_length == adapter_source_pointer_alias_encoder.encodedLength) {
         id<MTLBuffer> native_alias_buffer =
             [native_device newBufferWithLength:using_alias_length options:MTLResourceStorageModeShared];
         id<MTLBuffer> adapter_alias_buffer =
@@ -2184,8 +2211,12 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             [native_device newBufferWithLength:typedef_alias_length options:MTLResourceStorageModeShared];
         id<MTLBuffer> adapter_typedef_buffer =
             [adapter_device newBufferWithLength:typedef_alias_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_pointer_buffer =
+            [native_device newBufferWithLength:pointer_alias_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_pointer_buffer =
+            [adapter_device newBufferWithLength:pointer_alias_length options:MTLResourceStorageModeShared];
         if (native_alias_buffer != nil && adapter_alias_buffer != nil && native_typedef_buffer != nil &&
-            adapter_typedef_buffer != nil) {
+            adapter_typedef_buffer != nil && native_pointer_buffer != nil && adapter_pointer_buffer != nil) {
             for (NSUInteger index = 0; index < using_alias_length; ++index) {
                 ((uint8_t *)native_alias_buffer.contents)[index] = (uint8_t)(0x3c ^ index);
                 ((uint8_t *)adapter_alias_buffer.contents)[index] = (uint8_t)(0x3c ^ index);
@@ -2194,26 +2225,43 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
                 ((uint8_t *)native_typedef_buffer.contents)[index] = (uint8_t)(0xc3 ^ index);
                 ((uint8_t *)adapter_typedef_buffer.contents)[index] = (uint8_t)(0xc3 ^ index);
             }
+            for (NSUInteger index = 0; index < pointer_alias_length; ++index) {
+                ((uint8_t *)native_pointer_buffer.contents)[index] = (uint8_t)(0x5a ^ index);
+                ((uint8_t *)adapter_pointer_buffer.contents)[index] = (uint8_t)(0x5a ^ index);
+            }
             [native_source_using_alias_encoder setArgumentBuffer:native_alias_buffer offset:0];
             [adapter_source_using_alias_encoder setArgumentBuffer:adapter_alias_buffer offset:0];
             [native_source_typedef_alias_encoder setArgumentBuffer:native_typedef_buffer offset:0];
             [adapter_source_typedef_alias_encoder setArgumentBuffer:adapter_typedef_buffer offset:0];
+            [native_source_pointer_alias_encoder setArgumentBuffer:native_pointer_buffer offset:0];
+            [adapter_source_pointer_alias_encoder setArgumentBuffer:adapter_pointer_buffer offset:0];
             source_alias_bytes_ok = memcmp(native_alias_buffer.contents, adapter_alias_buffer.contents,
                                            using_alias_length) == 0 &&
                 memcmp(native_typedef_buffer.contents, adapter_typedef_buffer.contents,
-                       typedef_alias_length) == 0;
+                       typedef_alias_length) == 0 &&
+                memcmp(native_pointer_buffer.contents, adapter_pointer_buffer.contents,
+                       pointer_alias_length) == 0;
         }
     }
     if (native_source_using_alias_function == nil || adapter_source_using_alias_function == nil ||
         native_source_typedef_alias_function == nil || adapter_source_typedef_alias_function == nil ||
+        native_source_pointer_alias_function == nil || adapter_source_pointer_alias_function == nil ||
         native_source_using_alias_encoder == nil || adapter_source_using_alias_encoder == nil ||
         native_source_typedef_alias_encoder == nil || adapter_source_typedef_alias_encoder == nil ||
+        native_source_pointer_alias_encoder == nil || adapter_source_pointer_alias_encoder == nil ||
         native_source_alias_pipeline == nil || native_source_alias_pipeline_error != nil ||
         adapter_source_alias_pipeline == nil || adapter_source_alias_pipeline_error != nil ||
+        native_source_pointer_alias_pipeline == nil ||
+        native_source_pointer_alias_pipeline_error != nil ||
+        adapter_source_pointer_alias_pipeline == nil ||
+        adapter_source_pointer_alias_pipeline_error != nil ||
         native_source_using_alias_encoder.alignment != adapter_source_using_alias_encoder.alignment ||
         native_source_typedef_alias_encoder.alignment != adapter_source_typedef_alias_encoder.alignment ||
+        native_source_pointer_alias_encoder.alignment != adapter_source_pointer_alias_encoder.alignment ||
         !source_alias_reflection_ok || !source_alias_bytes_ok) {
         fail_with_error("source-defined argument type alias lowering failed",
+                        adapter_source_pointer_alias_pipeline_error ?:
+                        native_source_pointer_alias_pipeline_error ?:
                         adapter_source_alias_pipeline_error ?: native_source_alias_pipeline_error ?:
                         adapter_error ?: native_error);
         return 177;

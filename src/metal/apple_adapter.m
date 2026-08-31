@@ -12406,6 +12406,11 @@ static MTLArgumentDescriptor *zpu_source_argument_descriptor_for_data_type(MTLDa
 static NSString *zpu_source_resolve_type_alias(NSString *name,
                                                 NSDictionary<NSString *, NSString *> *aliases);
 static NSDictionary<NSString *, NSString *> *zpu_source_type_aliases(NSString *source);
+static BOOL zpu_source_split_address_qualified_type(NSString *name,
+                                                     NSString **addressSpace,
+                                                     BOOL *pointeeConst,
+                                                     NSString **baseType,
+                                                     NSString **indirection);
 
 /* Parse the validated Metal tensor-reference spelling used in argument
  * buffers. This is metadata-only: the adapter keeps tensor resources in ZPU
@@ -12612,6 +12617,7 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
                 candidatePointeeConst = YES;
                 pointee = [pointee substringFromIndex:5];
             }
+            pointee = zpu_source_resolve_type_alias(pointee, typeAliases ?: @{});
             if (pointee.length != 0 &&
                 (zpu_source_data_type_for_name(pointee, &dataType) || structBodies[pointee] != nil)) {
                 candidateElement = pointee;
@@ -12929,11 +12935,28 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             [building removeObject:resolvedStructName];
             return nil;
         }
+        NSString *fieldAddress = zpu_source_compact(zpu_source_match_string(rawField, match, 1));
+        NSString *fieldConst = zpu_source_compact(zpu_source_match_string(rawField, match, 2));
+        NSString *fieldIndirection = zpu_source_compact(zpu_source_match_string(rawField, match, 4));
         NSString *fieldTypeName = zpu_source_resolve_type_alias(
             zpu_source_match_string(rawField, match, 3), typeAliases ?: @{});
         if (fieldTypeName == nil) {
             [building removeObject:resolvedStructName];
             return nil;
+        }
+        if (fieldAddress.length == 0 && fieldConst.length == 0 && fieldIndirection.length == 0) {
+            NSString *aliasAddress = nil;
+            NSString *aliasBase = nil;
+            NSString *aliasIndirection = nil;
+            BOOL aliasPointeeConst = NO;
+            if (zpu_source_split_address_qualified_type(fieldTypeName, &aliasAddress,
+                                                        &aliasPointeeConst, &aliasBase,
+                                                        &aliasIndirection)) {
+                fieldAddress = aliasAddress;
+                fieldConst = aliasPointeeConst ? @"const" : @"";
+                fieldTypeName = aliasBase;
+                fieldIndirection = aliasIndirection;
+            }
         }
         NSUInteger typeArrayLength = 1;
         NSString *typeArrayElementName = nil;
@@ -12980,8 +13003,6 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         NSDictionary *typeStructLayout = nil;
         NSUInteger typeStructArgumentSpan = 1;
         NSDictionary *pointerStructLayout = nil;
-        NSString *fieldAddress = zpu_source_compact(zpu_source_match_string(rawField, match, 1));
-        NSString *fieldIndirection = zpu_source_compact(zpu_source_match_string(rawField, match, 4));
         if (![fieldTypeName hasPrefix:@"array<"] && fieldAddress.length == 0 &&
             fieldIndirection.length == 0 && structBodies[fieldTypeName] != nil) {
             typeStructLayout = zpu_source_argument_layout_for_struct(fieldTypeName, structBodies, building, typeAliases);
@@ -13007,10 +13028,10 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             }
         }
         [fields addObject:@{
-            @"address": zpu_source_compact(zpu_source_match_string(rawField, match, 1)),
-            @"const": zpu_source_compact(zpu_source_match_string(rawField, match, 2)),
+            @"address": fieldAddress,
+            @"const": fieldConst,
             @"type": fieldTypeName,
-            @"indirection": zpu_source_compact(zpu_source_match_string(rawField, match, 4)),
+            @"indirection": fieldIndirection,
             @"name": zpu_source_compact(zpu_source_match_string(rawField, match, 5)),
             @"arrayLength": declaratorArrayLength,
             @"typeArray": @([fieldTypeName hasPrefix:@"array<"]),
@@ -13518,6 +13539,46 @@ static NSString *zpu_source_resolve_type_alias(NSString *name,
     return nil;
 }
 
+/* Resolve an alias whose replacement is a complete address-qualified
+ * pointer/reference spelling, for example device const float * or
+ * constant Child &. This helper only decomposes the qualifiers; callers
+ * still validate the resulting base type and the legal direction of the
+ * pointer/reference for the particular Metal ABI position. */
+static BOOL zpu_source_split_address_qualified_type(NSString *name,
+                                                     NSString **addressSpace,
+                                                     BOOL *pointeeConst,
+                                                     NSString **baseType,
+                                                     NSString **indirection) {
+    if (name == nil || addressSpace == NULL || pointeeConst == NULL ||
+        baseType == NULL || indirection == NULL) return NO;
+    NSString *compactName = zpu_source_compact(name);
+    NSString *parsedAddress = nil;
+    for (NSString *candidate in @[@"device", @"constant", @"threadgroup"]) {
+        if ([compactName hasPrefix:candidate]) {
+            parsedAddress = candidate;
+            compactName = [compactName substringFromIndex:candidate.length];
+            break;
+        }
+    }
+    if (parsedAddress == nil || compactName.length < 2) return NO;
+    BOOL parsedConst = NO;
+    if ([compactName hasPrefix:@"const"]) {
+        parsedConst = YES;
+        compactName = [compactName substringFromIndex:5];
+    }
+    NSString *parsedIndirection = nil;
+    if ([compactName hasSuffix:@"*"] || [compactName hasSuffix:@"&"]) {
+        parsedIndirection = [compactName substringFromIndex:compactName.length - 1];
+        compactName = [compactName substringToIndex:compactName.length - 1];
+    }
+    if (parsedIndirection == nil || compactName.length == 0) return NO;
+    *addressSpace = parsedAddress;
+    *pointeeConst = parsedConst;
+    *baseType = compactName;
+    *indirection = parsedIndirection;
+    return YES;
+}
+
 /* Defined later with the argument-buffer reflection builder. Direct source
  * bindings may use the same validated ordinary-struct representation. */
 static MTLStructType *zpu_source_data_struct_type(NSDictionary *layout);
@@ -13639,6 +13700,20 @@ static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
     BOOL indirection = [declaration hasSuffix:@"*"] || [declaration hasSuffix:@"&"];
     if (indirection) declaration = [declaration substringToIndex:declaration.length - 1];
     NSString *typeName = zpu_source_resolve_type_alias(declaration, typeAliases ?: @{});
+    if (address == nil && !isConst && !indirection) {
+        NSString *aliasAddress = nil;
+        NSString *aliasBase = nil;
+        NSString *aliasIndirection = nil;
+        BOOL aliasPointeeConst = NO;
+        if (zpu_source_split_address_qualified_type(typeName, &aliasAddress,
+                                                    &aliasPointeeConst, &aliasBase,
+                                                    &aliasIndirection)) {
+            address = aliasAddress;
+            isConst = aliasPointeeConst;
+            indirection = YES;
+            typeName = aliasBase;
+        }
+    }
     if (typeName.length == 0) return nil;
     if ([attributeName isEqualToString:@"buffer"]) {
         MTLDataType resourceDataType = MTLDataTypeNone;
