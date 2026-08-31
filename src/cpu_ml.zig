@@ -950,6 +950,11 @@ const ProviderProbe = struct {
     destination_stride: usize = 0,
 };
 
+const DestinationMutationProbe = struct {
+    calls: usize = 0,
+    foreign_storage: [8]u32 = [_]u32{0} ** 8,
+};
+
 const OperationProbe = struct {
     calls: usize = 0,
     operation: u32 = 0,
@@ -996,6 +1001,17 @@ fn decliningProvider(context: ?*anyopaque, arguments: *const TransposeArguments)
     probe.calls += 1;
     _ = arguments;
     return @intFromEnum(Status.unsupported);
+}
+
+fn destinationMutationProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
+    const probe = @as(*DestinationMutationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.calls += 1;
+    // Providers receive a const argument record. This deliberate test-only
+    // mutation models an unsafe foreign provider attempting to redirect the
+    // output pointer; the staging boundary must reject it before any scatter.
+    const mutable_arguments = @constCast(arguments);
+    mutable_arguments.destination.data = @ptrCast(probe.foreign_storage[0..].ptr);
+    return @intFromEnum(Status.ok);
 }
 
 fn addOperationProvider(context: ?*anyopaque, arguments: *const OperationArguments) callconv(.c) c_int {
@@ -1200,6 +1216,35 @@ test "unsupported CPU provider falls back to exact ZPU transpose" {
     try std.testing.expectEqual(@as(u32, 16), destination_storage[6]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
+}
+
+test "CPU provider cannot redirect staged destination ownership" {
+    var source_storage = [_]u32{0} ** 12;
+    source_storage[0] = 1;
+    source_storage[1] = 2;
+    source_storage[4] = 3;
+    source_storage[5] = 4;
+    source_storage[8] = 5;
+    source_storage[9] = 6;
+    var destination_storage = [_]u32{0xcafebabe} ** 8;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const arguments = providerTestArguments(&source_storage, &destination_storage, dimensions, output_dimensions, strides, output_strides);
+    var probe = DestinationMutationProbe{};
+    const backend = Backend{
+        .abi_version = backend_abi_version,
+        .context = @ptrCast(&probe),
+        .transpose = destinationMutationProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_backend(&backend));
+    defer _ = zpu_cpu_ml_set_backend(null);
+
+    try std.testing.expectEqual(Status.invalid_argument, transpose(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqualSlices(u32, &([_]u32{0xcafebabe} ** 8), &destination_storage);
+    try std.testing.expectEqual(@as(u32, 0), probe.foreign_storage[0]);
 }
 
 test "optional CPU operation provider receives dense ZML views" {
