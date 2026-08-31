@@ -4054,7 +4054,7 @@ static BOOL zpu_sparse_texture_tail_tile_range(ZPUTexture *texture, NSUInteger l
         levelWidth > SIZE_MAX / bytesPerPixel || pixelX > levelWidth ||
         pixelY > levelHeight || pixelZ > levelDepth || pixelWidth > levelWidth - pixelX ||
         pixelHeight > levelHeight - pixelY ||
-        pixelZ > levelDepth - texture->_sparseTileSize.depth) return NO;
+        texture->_sparseTileSize.depth > levelDepth - pixelZ) return NO;
     const NSUInteger rowBytes = levelWidth * bytesPerPixel;
     if (pixelY > SIZE_MAX / rowBytes || pixelX > SIZE_MAX / bytesPerPixel) return NO;
     const NSUInteger planeBytes = rowBytes * levelHeight;
