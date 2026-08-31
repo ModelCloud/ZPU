@@ -541,6 +541,58 @@ test "unsupported CPU provider falls back to exact ZPU transpose" {
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
 }
 
+test "optional CPU provider preserves packed 4-bit tensor padding" {
+    var source_storage = [_]u8{0} ** 8;
+    source_storage[0] = 0x21;
+    source_storage[2] = 0x43;
+    source_storage[4] = 0x65;
+    var destination_storage = [_]u8{0xaa} ** 8;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    var arguments = TransposeArguments{
+        .source = .{
+            .data = source_storage[0..].ptr,
+            .byte_length = source_storage.len,
+            .offset_bytes = 0,
+            .rank = 2,
+            .element_bits = 4,
+            .dimensions = dimensions,
+            .strides = strides,
+        },
+        .destination = .{
+            .data = destination_storage[0..].ptr,
+            .byte_length = destination_storage.len,
+            .offset_bytes = 0,
+            .rank = 2,
+            .element_bits = 4,
+            .dimensions = output_dimensions,
+            .strides = output_strides,
+        },
+        .permutation = [_]u32{ 1, 0 } ++ [_]u32{0} ** (max_rank - 2),
+    };
+    var probe = ProviderProbe{};
+    const context: *anyopaque = @ptrCast(&probe);
+    const backend = Backend{
+        .abi_version = backend_abi_version,
+        .context = context,
+        .transpose = referenceProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_backend(&backend));
+    defer _ = zpu_cpu_ml_set_backend(null);
+
+    try std.testing.expectEqual(Status.ok, transpose(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 2), probe.source_stride);
+    try std.testing.expectEqual(@as(usize, 3), probe.destination_stride);
+    try std.testing.expectEqual(@as(u8, 0x31), destination_storage[0]);
+    try std.testing.expectEqual(@as(u8, 0xa5), destination_storage[1]);
+    try std.testing.expectEqual(@as(u8, 0x42), destination_storage[2]);
+    try std.testing.expectEqual(@as(u8, 0xa6), destination_storage[3]);
+    try std.testing.expectEqual(@as(u8, 0xaa), destination_storage[4]);
+}
+
 test "CPU transpose preserves Metal element strides and raw bytes" {
     var source_storage = [_]u32{0} ** 12;
     source_storage[0] = 0x3f800001;
