@@ -515,6 +515,7 @@ const PatchCommand = struct {
     factor_buffer_offset: usize,
     factor_instance_stride: usize,
     factor_scale: f32,
+    partition_mode: u8,
     max_tessellation_factor: usize,
     indirect_buffer: ?*Buffer,
     indirect_buffer_offset: usize,
@@ -534,13 +535,15 @@ const PatchCommand = struct {
 };
 
 // The registered patch profile deliberately has a bounded CPU tessellator.
-// Integer triangle factors up to 16 cover the portable profile while keeping
+// Integer and power-of-two triangle factors up to 16 cover the portable profile while keeping
 // the generated mesh on the command-buffer stack. Arbitrary tessellation
 // shaders, fractional factors, and non-uniform edge/inside factors remain
 // fail-closed at command commit. A factor scale is supported when it produces
-// one positive integer factor for all four values in the registered profile.
+// one positive partition factor for all four values in the registered profile.
 const cpu_patch_max_tessellation_factor: usize = 16;
 const cpu_patch_max_mesh_vertices: usize = cpu_patch_max_tessellation_factor * cpu_patch_max_tessellation_factor * 3;
+const cpu_tessellation_partition_pow2: u8 = 0;
+const cpu_tessellation_partition_integer: u8 = 1;
 
 fn interpolatePatchVertex(control: [3]abi.Vertex, weights: [3]usize, factor: usize) abi.Vertex {
     const denominator: f32 = @floatFromInt(factor);
@@ -593,6 +596,23 @@ fn tessellateUniformPatch(
         }
     }
     return count;
+}
+
+fn partitionTessellationFactor(value: f32, mode: u8, max_factor: usize) ?usize {
+    if (!std.math.isFinite(value) or value < 1.0 or max_factor == 0) return null;
+    return switch (mode) {
+        cpu_tessellation_partition_integer => if (@floor(value) == value and
+            value <= @as(f32, @floatFromInt(max_factor))) @intFromFloat(value) else null,
+        cpu_tessellation_partition_pow2 => blk: {
+            var factor: usize = 1;
+            while (@as(f32, @floatFromInt(factor)) < value) {
+                if (factor > max_factor / 2) break :blk null;
+                factor *= 2;
+            }
+            break :blk if (factor <= max_factor) factor else null;
+        },
+        else => null,
+    };
 }
 
 const VisibilitySlot = struct {
@@ -2600,11 +2620,13 @@ pub const CommandBuffer = struct {
                                 !std.math.isFinite(scaled_edge0) or !std.math.isFinite(scaled_edge1) or
                                 !std.math.isFinite(scaled_edge2) or !std.math.isFinite(scaled_inside)) continue;
                             if (scaled_edge0 != scaled_edge1 or scaled_edge0 != scaled_edge2 or
-                                scaled_edge0 != scaled_inside or @floor(scaled_edge0) != scaled_edge0 or
-                                scaled_edge0 < 1.0 or
-                                scaled_edge0 > @as(f32, @floatFromInt(resolved_patch.max_tessellation_factor)))
+                                scaled_edge0 != scaled_inside)
                                 return self.fail(error.UnsupportedOperation);
-                            const tessellation_factor: usize = @intFromFloat(scaled_edge0);
+                            const tessellation_factor = partitionTessellationFactor(
+                                scaled_edge0,
+                                resolved_patch.partition_mode,
+                                resolved_patch.max_tessellation_factor,
+                            ) orelse return self.fail(error.UnsupportedOperation);
 
                             const patch_index = if (resolved_patch.patch_index_buffer) |buffer|
                                 readU32Little(buffer.bytes, resolved_patch.patch_index_buffer_offset + local_patch * @sizeOf(u32))
@@ -3044,6 +3066,7 @@ pub const RenderEncoder = struct {
     tessellation_factor_buffer_offset: usize = 0,
     tessellation_factor_buffer_instance_stride: usize = @sizeOf(u16) * 4,
     tessellation_factor_scale: f32 = 1,
+    tessellation_partition_mode: u8 = cpu_tessellation_partition_integer,
     patch_max_tessellation_factor: usize = 1,
 
     pub fn deinit(self: *RenderEncoder) void {
@@ -4113,6 +4136,12 @@ pub const RenderEncoder = struct {
         self.tessellation_factor_scale = scale;
     }
 
+    pub fn setTessellationPartitionMode(self: *RenderEncoder, mode: u8) Error!void {
+        if (!self.open() or (mode != cpu_tessellation_partition_pow2 and
+            mode != cpu_tessellation_partition_integer)) return error.InvalidArgument;
+        self.tessellation_partition_mode = mode;
+    }
+
     pub fn setPatchMaxTessellationFactor(self: *RenderEncoder, max_factor: usize) Error!void {
         if (!self.open() or max_factor == 0 or max_factor > cpu_patch_max_tessellation_factor)
             return error.InvalidArgument;
@@ -4737,6 +4766,7 @@ pub const RenderEncoder = struct {
             .factor_buffer_offset = self.tessellation_factor_buffer_offset,
             .factor_instance_stride = self.tessellation_factor_buffer_instance_stride,
             .factor_scale = self.tessellation_factor_scale,
+            .partition_mode = self.tessellation_partition_mode,
             .max_tessellation_factor = self.patch_max_tessellation_factor,
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
@@ -9690,6 +9720,56 @@ test "CPU triangle patches apply an enabled integer factor scale" {
     try std.testing.expectEqualSlices(u8, scaled_texture.bytes, reference_texture.bytes);
 }
 
+test "CPU pow2 triangle patches round up to the next power of two" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const vertices = [_]abi.Vertex{
+        .{ .position = .{ -0.86, -0.72, 0.5, 1 }, .color = .{ .red = 0.91, .green = 0.17, .blue = 0.63, .alpha = 0.81 } },
+        .{ .position = .{ 0.78, -0.43, 0.5, 1 }, .color = .{ .red = 0.23, .green = 0.87, .blue = 0.31, .alpha = 0.59 } },
+        .{ .position = .{ -0.21, 0.84, 0.5, 1 }, .color = .{ .red = 0.19, .green = 0.41, .blue = 0.97, .alpha = 0.73 } },
+    };
+    const vertex_buffer = try createBuffer(device, @sizeOf(@TypeOf(vertices)), @ptrCast(&vertices));
+    defer destroyBuffer(vertex_buffer);
+    const pow2_factors = [_]u16{ 0x4200, 0x4200, 0x4200, 0x4200 };
+    const pow2_factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(pow2_factors)), @ptrCast(&pow2_factors));
+    defer destroyBuffer(pow2_factor_buffer);
+    const integer_factors = [_]u16{ 0x4400, 0x4400, 0x4400, 0x4400 };
+    const integer_factor_buffer = try createBuffer(device, @sizeOf(@TypeOf(integer_factors)), @ptrCast(&integer_factors));
+    defer destroyBuffer(integer_factor_buffer);
+    const pow2_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(pow2_texture);
+    const integer_texture = try createTexture(device, 9, 7, @intFromEnum(abi.PixelFormat.bgra8_unorm));
+    defer destroyTexture(integer_texture);
+
+    var pow2_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(pow2_commands);
+    var pow2_encoder = try beginRender(pow2_commands, pow2_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try pow2_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try pow2_encoder.setPatchMaxTessellationFactor(4);
+    try pow2_encoder.setTessellationPartitionMode(cpu_tessellation_partition_pow2);
+    try pow2_encoder.setTessellationFactorBuffer(pow2_factor_buffer, 0, @sizeOf(@TypeOf(pow2_factors)));
+    try pow2_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+    try pow2_encoder.endEncoding();
+    destroyRenderEncoder(pow2_encoder);
+
+    var integer_commands = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(integer_commands);
+    var integer_encoder = try beginRender(integer_commands, integer_texture, .{ .color = .{ .load_action = .clear, .store_action = .store, .clear_color = .{ .red = 0, .green = 0, .blue = 0, .alpha = 1 } } });
+    try integer_encoder.setVertexBuffer(vertex_buffer, 0, 0);
+    try integer_encoder.setPatchMaxTessellationFactor(4);
+    try integer_encoder.setTessellationFactorBuffer(integer_factor_buffer, 0, @sizeOf(@TypeOf(integer_factors)));
+    try integer_encoder.drawPatches(1, 3, 0, 1, null, 0, 1, 0, .none, null, 0);
+    try integer_encoder.endEncoding();
+    destroyRenderEncoder(integer_encoder);
+
+    try pow2_commands.commit();
+    try integer_commands.commit();
+    try std.testing.expectEqual(CommandStatus.completed, pow2_commands.status);
+    try std.testing.expectEqualSlices(u8, pow2_texture.bytes, integer_texture.bytes);
+}
+
 test "CPU line-filled integer triangle patches rasterize their generated grid" {
     const device = try createDevice();
     defer destroyDevice(device);
@@ -12737,6 +12817,14 @@ pub export fn zpu_metal_render_encoder_set_tessellation_factor_scale(
     scale: f32,
 ) callconv(.c) c_int {
     (encoder orelse return -1).setTessellationFactorScale(scale) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_render_encoder_set_tessellation_partition_mode(
+    encoder: ?*RenderEncoder,
+    mode: u8,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setTessellationPartitionMode(mode) catch |err| return errorCode(err);
     return 0;
 }
 

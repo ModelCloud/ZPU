@@ -416,7 +416,7 @@ triangle path:
   the registered
   `zpu_cpu_tessellated_triangle_vertex` plus
   `zpu_cpu_tessellated_triangle_fragment` profile accepts uniform integer
-  triangle factors from 1 through 16. Filled patches use the mathematically
+  triangle factors from 1 through 16 plus Metal's pow2 partition mode. Filled patches use the mathematically
   equivalent ordinary top-left-origin ZPU triangle path for pixel-stable
   coverage; line-filled patches rasterize the generated CPU triangle grid,
   including per-sample coverage and attachment-global 8-bit subpixel
@@ -518,13 +518,13 @@ triangle path:
   recorded attachment-global scissor and upper-left render target
 - legacy triangle-patch draws accept half-precision, per-patch-and-per-instance
   tessellation factors and execute the registered uniform integer triangle
-  profile for factors 1 through 16, including patch-index, control-point-index,
+  profile for factors 1 through 16 and pow2 partitioning, including patch-index, control-point-index,
   and indirect argument buffers. All of those buffers are ZPU-owned and read at
   commit time; direct and indirect `baseInstance` values select layered
   color/depth/stencil targets using the same upper-left pixel grid as ordinary
   draws. The CPU path also applies `setTessellationFactorScale:` when the
   scaled four factors remain one equal positive integer within the pipeline
-  maximum. Fractional or non-uniform factors, factors above the pipeline
+  maximum. Fractional or non-uniform factors, unsupported fractional partition modes, factors above the pipeline
   maximum, quad patches, and arbitrary tessellation shader profiles fail closed
 - compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
   and follow the same deferred lifetime rules
@@ -679,7 +679,7 @@ triangle path:
   and are applied at replay, while arbitrary mesh shader execution fails closed
   at replay
 - CPU indirect patch and indexed-patch command recording, copy, reset, and
-  replay for the registered uniform integer triangle profile; patch buffers,
+  replay for the registered uniform integer/pow2 triangle profile; patch buffers,
   tessellation-factor buffers, offsets, strides, and draw ranges are retained
   in the CPU-owned ICB, while fractional/non-uniform factors and arbitrary
   tessellation shader execution fail closed at replay
@@ -834,7 +834,7 @@ Metal ABI. The remaining framework surface includes additional compute and
 Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
 implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile and mesh profiles are CPU/ZPU-owned
 through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
-pipeline-data serializer; the registered uniform integer triangle-patch profile
+pipeline-data serializer; the registered uniform integer/pow2 triangle-patch profile
 is CPU/ZPU-owned through the legacy render encoder, layered render targets, and
 ICB path. Arbitrary tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
 synchronization families, arbitrary ray-tracing execution beyond the bounded triangle and

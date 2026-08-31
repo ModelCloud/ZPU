@@ -9,7 +9,7 @@
 /* Native ZPU CPU Metal-layer ABI. This is intentionally separate from the
  * Apple Objective-C framework ABI; it is the portable FFI surface used by
  * clients that select ZPU's CPU renderer. */
-#define ZPU_METAL_ABI_VERSION 38u
+#define ZPU_METAL_ABI_VERSION 39u
 
 typedef uint8_t zpu_metal_workload;
 enum {
@@ -463,7 +463,7 @@ enum {
 
 /* Triangle-patch kernels are explicit CPU/ZPU operations. They are not MSL
  * and do not invoke Apple's Metal tessellator. The bounded profile accepts
- * uniform integer factors 1 through 16; filled patches use the equivalent
+ * uniform integer factors 1 through 16 plus pow2 partitioning; filled patches use the equivalent
  * ordinary top-left-origin triangle while line-filled patches expose the
  * generated CPU triangle grid. */
 typedef uint8_t zpu_metal_patch_kernel;
@@ -476,6 +476,17 @@ enum {
     ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_NONE = 0,
     ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_UINT16 = 1,
     ZPU_METAL_TESSELLATION_CONTROL_POINT_INDEX_UINT32 = 2,
+};
+
+/* Values mirror MTLTessellationPartitionMode so the CPU patch path can
+ * preserve the pipeline's fixed-function partition rule without invoking
+ * Apple's tessellator. */
+typedef uint8_t zpu_metal_tessellation_partition_mode;
+enum {
+    ZPU_METAL_TESSELLATION_PARTITION_POW2 = 0,
+    ZPU_METAL_TESSELLATION_PARTITION_INTEGER = 1,
+    ZPU_METAL_TESSELLATION_PARTITION_FRACTIONAL_ODD = 2,
+    ZPU_METAL_TESSELLATION_PARTITION_FRACTIONAL_EVEN = 3,
 };
 
 typedef uint8_t zpu_metal_command_buffer_status;
@@ -693,6 +704,9 @@ int zpu_metal_render_encoder_set_visibility_result_type(zpu_metal_render_encoder
 /* Passing NULL unbinds the factor buffer, matching Metal's nullable selector. */
 int zpu_metal_render_encoder_set_tessellation_factor_buffer(zpu_metal_render_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, size_t instance_stride);
 int zpu_metal_render_encoder_set_tessellation_factor_scale(zpu_metal_render_encoder *encoder, float scale);
+/* Sets the fixed-function partition rule used by the registered CPU patch
+ * profile. The current portable implementation supports POW2 and INTEGER. */
+int zpu_metal_render_encoder_set_tessellation_partition_mode(zpu_metal_render_encoder *encoder, zpu_metal_tessellation_partition_mode mode);
 /* Sets the maximum factor enforced by the registered CPU triangle-patch
  * profile. The adapter supplies the value from the pipeline descriptor. */
 int zpu_metal_render_encoder_set_patch_max_tessellation_factor(zpu_metal_render_encoder *encoder, uint32_t max_factor);

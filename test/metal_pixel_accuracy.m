@@ -7157,7 +7157,7 @@ static int test_native_tessellation_patch_against_cpu(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLFunction> native_tessellated_vertex_function, id<MTLFunction> native_fragment_function,
     id<MTLFunction> adapter_patch_vertex_function, id<MTLFunction> adapter_patch_fragment_function,
-    uint16_t factor_half, float factor_scale) {
+    MTLTessellationPartitionMode partition_mode, uint16_t factor_half, float factor_scale) {
     enum { width = 9, height = 7, layers = 3, max_byte_count = width * height * 4 };
     const zpu_metal_vertex vertices[] = {
         {{-0.86f, -0.72f, 0.5f, 1.0f}, {0.41f, 0.67f, 0.23f, 0.91f}},
@@ -7176,7 +7176,7 @@ static int test_native_tessellation_patch_against_cpu(
     native_descriptor.vertexFunction = native_tessellated_vertex_function;
     native_descriptor.fragmentFunction = native_fragment_function;
     native_descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
-    native_descriptor.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+    native_descriptor.tessellationPartitionMode = partition_mode;
     native_descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
     native_descriptor.tessellationFactorStepFunction =
         MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
@@ -12121,16 +12121,24 @@ int main(void) {
             ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_tessellated_triangle_fragment");
         const int native_tessellation_result = test_native_tessellation_patch_against_cpu(
             device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
-            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4000, 1.0f);
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
+            MTLTessellationPartitionModeInteger, 0x4000, 1.0f);
         if (native_tessellation_result != 0) return native_tessellation_result;
         const int native_tessellation_factor4_result = test_native_tessellation_patch_against_cpu(
             device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
-            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x4400, 1.0f);
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
+            MTLTessellationPartitionModeInteger, 0x4400, 1.0f);
         if (native_tessellation_factor4_result != 0) return native_tessellation_factor4_result;
         const int native_tessellation_scaled_result = test_native_tessellation_patch_against_cpu(
             device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
-            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function, 0x3c00, 2.0f);
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
+            MTLTessellationPartitionModeInteger, 0x3c00, 2.0f);
         if (native_tessellation_scaled_result != 0) return native_tessellation_scaled_result;
+        const int native_tessellation_pow2_result = test_native_tessellation_patch_against_cpu(
+            device, adapter_device, native_tessellated_vertex_function, layered_fragment_function,
+            adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function,
+            MTLTessellationPartitionModePow2, 0x4200, 1.0f);
+        if (native_tessellation_pow2_result != 0) return native_tessellation_pow2_result;
         const int layered_patch_result = test_layered_patch_against_native(
             device, adapter_device, layered_vertex_function, fragment_function,
             adapter_layered_patch_vertex_function, adapter_layered_patch_fragment_function);

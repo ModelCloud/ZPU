@@ -961,6 +961,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     MTLPatchType _patchType;
     NSInteger _patchControlPointCount;
     MTLTessellationControlPointIndexType _tessellationControlPointIndexType;
+    MTLTessellationPartitionMode _tessellationPartitionMode;
     NSUInteger _patchMaxTessellationFactor;
     BOOL _tessellationFactorScaleEnabled;
 }
@@ -9228,6 +9229,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _patchType = _isPatchPipeline ? MTLPatchTypeTriangle : MTLPatchTypeNone;
         _patchControlPointCount = _isPatchPipeline ? 3 : -1;
         _tessellationControlPointIndexType = descriptor.tessellationControlPointIndexType;
+        _tessellationPartitionMode = descriptor.tessellationPartitionMode;
         _patchMaxTessellationFactor = _isPatchPipeline ? (NSUInteger)descriptor.maxTessellationFactor : 1;
         _tessellationFactorScaleEnabled = descriptor.tessellationFactorScaleEnabled;
         _blendingEnabled = attachment.blendingEnabled;
@@ -9411,6 +9413,7 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         _patchType = pipeline->_patchType;
         _patchControlPointCount = pipeline->_patchControlPointCount;
         _tessellationControlPointIndexType = pipeline->_tessellationControlPointIndexType;
+        _tessellationPartitionMode = pipeline->_tessellationPartitionMode;
         _patchMaxTessellationFactor = pipeline->_patchMaxTessellationFactor;
         _tessellationFactorScaleEnabled = pipeline->_tessellationFactorScaleEnabled;
         _reflection = pipeline->_reflection;
@@ -10751,14 +10754,15 @@ static BOOL zpu_apply_legacy_compute_descriptor(
              isEqualToString:zpu_cpu_patch_triangle_fragment_name] != patchPipeline ||
         (patchPipeline &&
          (vertexFunction.patchType != MTLPatchTypeTriangle || vertexFunction.patchControlPointCount != 3 ||
-          descriptor.tessellationPartitionMode != MTLTessellationPartitionModeInteger ||
+          (descriptor.tessellationPartitionMode != MTLTessellationPartitionModeInteger &&
+           descriptor.tessellationPartitionMode != MTLTessellationPartitionModePow2) ||
           descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
           descriptor.tessellationFactorStepFunction != MTLTessellationFactorStepFunctionPerPatchAndPerInstance ||
           descriptor.tessellationOutputWindingOrder != MTLWindingClockwise ||
           !isfinite(descriptor.maxTessellationFactor) ||
           descriptor.maxTessellationFactor < 1 || descriptor.maxTessellationFactor > 16 ||
           descriptor.rasterizationEnabled == NO))) {
-        zpu_set_error(error, @"ZPU CPU Metal supports only the registered uniform integer triangle patch profile with factors up to 16");
+        zpu_set_error(error, @"ZPU CPU Metal supports only the registered uniform integer or pow2 triangle patch profile with factors up to 16");
         return nil;
     }
     NSString *fragmentImplementationName = zpu_cpu_function_implementation_name(fragmentFunction);
@@ -21148,6 +21152,9 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
                 (zpu_metal_blend_factor)state->_destinationAlphaBlendFactor,
                 (zpu_metal_blend_operation)state->_alphaBlendOperation,
                 (zpu_metal_color_write_mask)state->_writeMask) != ZPU_METAL_OK ||
+            zpu_metal_render_encoder_set_tessellation_partition_mode(
+                _zpuEncoder, (zpu_metal_tessellation_partition_mode)(state->_isPatchPipeline ?
+                    state->_tessellationPartitionMode : MTLTessellationPartitionModeInteger)) != ZPU_METAL_OK ||
             zpu_metal_render_encoder_set_patch_max_tessellation_factor(
                 _zpuEncoder, (uint32_t)(state->_isPatchPipeline ? state->_patchMaxTessellationFactor : 1)) != ZPU_METAL_OK) {
             [_owner markError];
