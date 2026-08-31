@@ -2,7 +2,8 @@
 
 The CPU ML seam is also shipped independently of this Apple-shaped layer.
 `cpu-ml-install` installs `libzpu_cpu_ml.a` and `zpu/cpu_ml.h`; it has no
-Metal, Foundation, PJRT, or operating-system dependency. A ZML integration
+Metal, Foundation, PJRT, or OS-specific API dependency (it uses the target C
+runtime for ordinary allocation and memory helpers). A ZML integration
 must use ZML's CPU package explicitly and register its CPU callback through
 that ABI. The host OS is not a backend selector: running ZPU on macOS does
 not permit or select ZML's Metal/PJRT-GPU package. `metal-install` composes
@@ -957,8 +958,9 @@ The CPU ML package is intentionally a separate artifact. Its ABI is ordinary
 host CPU memory and does not select a backend from the host OS: arm64 providers
 may use AdvSIMD/NEON (including Apple silicon), while x86_64 providers may use
 AVX tiers when the provider's own target and runtime checks permit it. The
-standalone package never links Metal, Foundation, PJRT, or an Apple SDK; the
-Apple adapter only stages ZPU-owned tensors into that ABI. The portability gate
+standalone package never links Metal, Foundation, PJRT, or an Apple SDK; it
+only uses the target C runtime for ordinary CPU support. The Apple adapter only
+stages ZPU-owned tensors into that ABI. The portability gate
 cross-compiles this package for x86_64 Linux, arm64 Linux, and arm64 macOS to
 keep that separation reviewable.
 

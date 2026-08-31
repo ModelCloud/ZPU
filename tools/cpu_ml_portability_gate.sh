@@ -43,4 +43,4 @@ build_target x86_64-linux-gnu
 build_target aarch64-linux-gnu
 build_target aarch64-macos
 
-echo "cpu-ml-portability: standalone CPU ML package is Metal/PJRT/OS independent"
+echo "cpu-ml-portability: standalone CPU ML ABI has no Metal/Foundation/PJRT dependency"
