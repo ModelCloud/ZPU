@@ -651,8 +651,10 @@ triangle path:
   reports nanoseconds for this CPU clock domain; no hardware GPU timestamp is
   exposed
 - CPU-owned legacy timestamp counter sets/sample buffers; draw, dispatch, and
-  blit sample points resolve to `MTLCounterResultTimestamp` records in shared
-  ZPU buffers. Unsupported hardware-only counters remain unavailable rather
+  blit sample points and resolves are ordered CPU/ZPU commands, so samples
+  observe the same commit-time sequencing as neighboring work and resolve to
+  `MTLCounterResultTimestamp` records in ZPU buffers, including private
+  destinations. Unsupported hardware-only counters remain unavailable rather
   than being reported as fabricated statistics
 - CPU integer geometry for `sparseTileSizeWithTextureType:...`,
   `convertSparsePixelRegions:...`, and `convertSparseTileRegions:...`; supported

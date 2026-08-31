@@ -1192,6 +1192,8 @@ typedef BOOL (^ZPUIOOperationBlock)(NSError **error);
 
 typedef BOOL (^ZPUDeferredOperationBlock)(void);
 
+static BOOL zpu_defer_operation(ZPUCommandBuffer *owner, ZPUDeferredOperationBlock block);
+
 @interface ZPUDeferredOperation : NSObject {
 @public
     ZPUDeferredOperationBlock _block;
@@ -1275,6 +1277,7 @@ API_AVAILABLE(macos(13.0), ios(16.0))
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTLCounterSampleBufferDescriptor *)descriptor;
 - (BOOL)sampleAtIndex:(NSUInteger)index;
+- (void)invalidateCounterRange:(NSRange)range;
 @end
 
 #pragma clang diagnostic push
@@ -8459,6 +8462,13 @@ static uint64_t zpu_cpu_timestamp(void) {
     }
     return YES;
 }
+- (void)invalidateCounterRange:(NSRange)range {
+    if (range.location > _sampleCount || range.length > _sampleCount - range.location) return;
+    @synchronized (self) {
+        memset((uint8_t *)_entries.mutableBytes + range.location * sizeof(MTLCounterResultTimestamp), 0,
+               range.length * sizeof(MTLCounterResultTimestamp));
+    }
+}
 - (NSData *)resolveCounterRange:(NSRange)range {
     if (range.location > _sampleCount || range.length > _sampleCount - range.location) return nil;
     @synchronized (self) {
@@ -8472,6 +8482,15 @@ static uint64_t zpu_cpu_timestamp(void) {
 /* Pass descriptors expose a small array of counter attachments without a
  * count property. Metal permits four pass attachments; inspect that bounded
  * descriptor range and turn the timestamp samples into CPU-side events. */
+static BOOL zpu_defer_counter_sample(ZPUCommandBuffer *owner, ZPUCounterSampleBuffer *sample,
+                                     NSUInteger sampleIndex) {
+    if (owner == nil || sample == nil) return NO;
+    ZPUCounterSampleBuffer *retainedSample = sample;
+    return zpu_defer_operation(owner, ^BOOL {
+        return [retainedSample sampleAtIndex:sampleIndex];
+    });
+}
+
 static BOOL zpu_sample_pass_attachments(ZPUCommandBuffer *owner, id attachments, BOOL start) {
     if (attachments == nil) return YES;
     for (NSUInteger index = 0; index < 4; ++index) {
@@ -8482,7 +8501,7 @@ static BOOL zpu_sample_pass_attachments(ZPUCommandBuffer *owner, id attachments,
         if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [owner device]) return NO;
         const NSUInteger sampleIndex = start ? [attachment startOfEncoderSampleIndex] : [attachment endOfEncoderSampleIndex];
         if (sampleIndex == MTLCounterDontSample) continue;
-        if (![sample sampleAtIndex:sampleIndex]) return NO;
+        if (!zpu_defer_counter_sample(owner, sample, sampleIndex)) return NO;
         [owner retainResource:sample];
     }
     return YES;
@@ -8498,8 +8517,8 @@ static BOOL zpu_sample_render_pass_attachments(ZPUCommandBuffer *owner, id attac
         if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [owner device]) return NO;
         const NSUInteger vertexIndex = start ? [attachment startOfVertexSampleIndex] : [attachment endOfVertexSampleIndex];
         const NSUInteger fragmentIndex = start ? [attachment startOfFragmentSampleIndex] : [attachment endOfFragmentSampleIndex];
-        if (vertexIndex != MTLCounterDontSample && ![sample sampleAtIndex:vertexIndex]) return NO;
-        if (fragmentIndex != MTLCounterDontSample && ![sample sampleAtIndex:fragmentIndex]) return NO;
+        if (vertexIndex != MTLCounterDontSample && !zpu_defer_counter_sample(owner, sample, vertexIndex)) return NO;
+        if (fragmentIndex != MTLCounterDontSample && !zpu_defer_counter_sample(owner, sample, fragmentIndex)) return NO;
         [owner retainResource:sample];
     }
     return YES;
@@ -20372,7 +20391,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     (void)barrier;
     ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
     if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
-        ![sample sampleAtIndex:sampleIndex]) {
+        !zpu_defer_counter_sample(_owner, sample, sampleIndex)) {
         [_owner markError];
         return;
     }
@@ -22074,7 +22093,7 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
     (void)barrier;
     ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
     if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
-        ![sample sampleAtIndex:sampleIndex]) {
+        !zpu_defer_counter_sample(_owner, sample, sampleIndex)) {
         [_owner markError];
         return;
     }
@@ -22091,7 +22110,18 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
         [_owner markError];
         return;
     }
-    if (resolved.length != 0) memcpy((uint8_t *)destination.contents + destinationOffset, resolved.bytes, resolved.length);
+    ZPUCounterSampleBuffer *retainedSample = sample;
+    ZPUBuffer *retainedDestination = destination;
+    if (!zpu_defer_operation(_owner, ^BOOL {
+        NSData *commandResolved = [retainedSample resolveCounterRange:range];
+        return commandResolved != nil && commandResolved.length <= retainedDestination.length - destinationOffset &&
+            (commandResolved.length == 0 || zpu_metal_buffer_write(
+                retainedDestination->_zpuBuffer, destinationOffset, commandResolved.bytes,
+                commandResolved.length) == ZPU_METAL_OK);
+    })) {
+        [_owner markError];
+        return;
+    }
     [_owner retainResource:sample];
     [_owner retainResource:destination];
 }
@@ -24298,7 +24328,7 @@ static BOOL zpu_cpu_acceleration_build_payload(
     (void)barrier;
     ZPUCounterSampleBuffer *buffer = (ZPUCounterSampleBuffer *)sampleBuffer;
     if (![buffer isKindOfClass:[ZPUCounterSampleBuffer class]] || buffer->_owner != [_owner device] ||
-        ![buffer sampleAtIndex:sampleIndex]) [_owner markError];
+        !zpu_defer_counter_sample(_owner, buffer, sampleIndex)) [_owner markError];
     else [_owner retainResource:buffer];
 }
 - (void)barrierAfterQueueStages:(MTLStages)afterQueueStages beforeStages:(MTLStages)beforeStages
@@ -25847,7 +25877,7 @@ static BOOL zpu_compute_record_sampler_lod_clamps(ZPUComputeEncoder *encoder,
     (void)barrier;
     ZPUCounterSampleBuffer *sample = (ZPUCounterSampleBuffer *)sampleBuffer;
     if (![sample isKindOfClass:[ZPUCounterSampleBuffer class]] || sample->_owner != [_owner device] ||
-        ![sample sampleAtIndex:sampleIndex]) {
+        !zpu_defer_counter_sample(_owner, sample, sampleIndex)) {
         [_owner markError];
         return;
     }

@@ -34663,6 +34663,11 @@ int main(void) {
                                                   atSampleIndex:0 withBarrier:YES];
         [adapter_legacy_counter_encoder sampleCountersInBuffer:adapter_legacy_counter_sample_buffer
                                                   atSampleIndex:1 withBarrier:NO];
+        /* This adapter-private mutation occurs after the sample commands
+         * were recorded but before resolve. A command-time implementation
+         * recreates both samples at commit; an encoding-time implementation
+         * would resolve the invalidated zero entries. */
+        [(id)adapter_legacy_counter_sample_buffer invalidateCounterRange:NSMakeRange(0, 2)];
         [adapter_legacy_counter_encoder resolveCounters:adapter_legacy_counter_sample_buffer
                                                  inRange:NSMakeRange(0, 2)
                                       destinationBuffer:adapter_legacy_counter_buffer
