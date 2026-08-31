@@ -1915,6 +1915,7 @@ var mosaic_command_indices: [max_mosaic_command_refs]usize = undefined;
 var mosaic_command_spans: [max_batch_commands]MosaicRegionSpan = undefined;
 var mosaic_cached_spans: [max_batch_commands]MosaicRegionSpan = undefined;
 var mosaic_cached_geometry_revisions: [max_batch_commands]u64 = undefined;
+var mosaic_region_depth_min: [max_mosaic_work_items]u32 = undefined;
 const MosaicPlanCache = struct {
     valid: bool = false,
     commands_address: usize = 0,
@@ -2659,13 +2660,13 @@ fn drawPreparedBatchFastImpl(comptime color_only: bool, target: []u8, depth: []u
         // mathematically identical, but evaluating each triangle's own
         // barycentric start value preserves the reference rasterizer's exact
         // texel-boundary rounding at the shared diagonal.
-        const first = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip);
-        const second = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip);
+        const first = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip, null);
+        const second = rasterOpaqueTexturedTriangle(false, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip, null);
         return first + second;
     };
     if (comptime !color_only) if (prepared.count == 2 and prepared.opaque_quad.valid and prepared.opaque_quad.flat_color == null and prepared.spans_valid) {
-        const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip);
-        const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip);
+        const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip, null);
+        const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, lane_index, lane_count, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip, null);
         return first + second;
     };
     var triangle_index: usize = 0;
@@ -2785,7 +2786,7 @@ fn runParallelBatchPrepare(context: *ParallelBatchPrepare, lane_index: usize) vo
 // Once the caller has established the overlay contract, rasterize that quad
 // once instead of walking both triangles and testing the same depth. The
 // direct affine UV walk retains the existing texel-boundary rounding rules.
-inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, prelit: *const [256]u32, clip: ?Rect) usize {
+inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: []align(4) u32, depth_words: []align(4) u32, width: u32, height: u32, lane_index: usize, lane_count: usize, raster: *const BatchRasterTriangle, spans: *const [flat_span_rows]FlatSpan, prelit: *const [256]u32, clip: ?Rect, known_depth_min: ?*const u32) usize {
     const lane_min_y: i32 = @intCast(@as(usize, height) * lane_index / lane_count);
     const lane_max_y: i32 = @intCast(@as(usize, height) * (lane_index + 1) / lane_count);
     const clip_min_y = if (clip) |value| value.y else 0;
@@ -2796,6 +2797,7 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
     const last_y = @min(raster.max_y, lane_max_y, clip_max_y);
     if (first_y >= last_y) return 0;
     var pixels_written: usize = 0;
+    const depth_always_pass = if (comptime depth_test) if (known_depth_min) |minimum| raster.flat_depth_bits <= minimum.* else false else false;
     const du = raster.u_over_w_dx * raster.flat_reciprocal_w;
     const dv = raster.v_over_w_dx * raster.flat_reciprocal_w;
     const scaled_du = du * 15.999999;
@@ -2842,16 +2844,22 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
                         lane_u += raster.u_over_w_dx;
                     }
                     if (comptime depth_test) {
-                        const passes: @Vector(8, bool) = @as(@Vector(8, u32), @splat(raster.flat_depth_bits)) <= depth_words[pixel_index..][0..8].*;
-                        if (@reduce(.And, passes)) {
+                        if (depth_always_pass) {
                             depth_words[pixel_index..][0..8].* = @as(@Vector(8, u32), @splat(raster.flat_depth_bits));
                             color_words[pixel_index..][0..8].* = colors;
                             pixels_written += 8;
-                        } else inline for (0..8) |lane| if (passes[lane]) {
-                            depth_words[pixel_index + lane] = raster.flat_depth_bits;
-                            color_words[pixel_index + lane] = colors[lane];
-                            pixels_written += 1;
-                        };
+                        } else {
+                            const passes: @Vector(8, bool) = @as(@Vector(8, u32), @splat(raster.flat_depth_bits)) <= depth_words[pixel_index..][0..8].*;
+                            if (@reduce(.And, passes)) {
+                                depth_words[pixel_index..][0..8].* = @as(@Vector(8, u32), @splat(raster.flat_depth_bits));
+                                color_words[pixel_index..][0..8].* = colors;
+                                pixels_written += 8;
+                            } else inline for (0..8) |lane| if (passes[lane]) {
+                                depth_words[pixel_index + lane] = raster.flat_depth_bits;
+                                color_words[pixel_index + lane] = colors[lane];
+                                pixels_written += 1;
+                            };
+                        }
                     } else {
                         color_words[pixel_index..][0..8].* = colors;
                         pixels_written += 8;
@@ -2861,7 +2869,10 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
                 while (x < last_x) : (x += 1) {
                     const color = shadeUnitTexture16x16Row(stepped_u_over_w * raster.flat_reciprocal_w, texture_y, prelit);
                     if (comptime depth_test) {
-                        pixels_written += writeFlatColorSpanAtRow(true, color_words, depth_words, row_offset, @intCast(x), @intCast(x + 1), raster.flat_depth_bits, color);
+                        if (depth_always_pass)
+                            pixels_written += writeFlatColorSpanKnownPass(color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(x + 1), raster.flat_depth_bits, color)
+                        else
+                            pixels_written += writeFlatColorSpanAtRow(true, color_words, depth_words, row_offset, @intCast(x), @intCast(x + 1), raster.flat_depth_bits, color);
                     } else {
                         color_words[row_offset + @as(usize, @intCast(x))] = color;
                         pixels_written += 1;
@@ -2884,7 +2895,10 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
                 } else if (du == 0) {
                     run_last = last_x;
                 }
-                pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(x), @intCast(run_last), raster.flat_depth_bits, color);
+                if (depth_always_pass)
+                    pixels_written += writeFlatColorSpanKnownPass(color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(run_last), raster.flat_depth_bits, color)
+                else
+                    pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(x), @intCast(run_last), raster.flat_depth_bits, color);
                 stepped_u_over_w += raster.u_over_w_dx * @as(f32, @floatFromInt(run_last - x));
                 x = run_last;
             }
@@ -2917,7 +2931,10 @@ inline fn rasterOpaqueTexturedTriangle(comptime depth_test: bool, color_words: [
             }
             while (run_last < last_x and shadeUnitTexture16x16((stepped_u_over_w + raster.u_over_w_dx * @as(f32, @floatFromInt(run_last - x))) * raster.flat_reciprocal_w, (stepped_v_over_w + raster.v_over_w_dx * @as(f32, @floatFromInt(run_last - x))) * raster.flat_reciprocal_w, prelit) == color) run_last += 1;
             while (run_last > x + 1 and shadeUnitTexture16x16((stepped_u_over_w + raster.u_over_w_dx * @as(f32, @floatFromInt(run_last - 1 - x))) * raster.flat_reciprocal_w, (stepped_v_over_w + raster.v_over_w_dx * @as(f32, @floatFromInt(run_last - 1 - x))) * raster.flat_reciprocal_w, prelit) != color) run_last -= 1;
-            pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(x), @intCast(run_last), raster.flat_depth_bits, color);
+            if (depth_always_pass)
+                pixels_written += writeFlatColorSpanKnownPass(color_words, depth_words, width, @intCast(y), @intCast(x), @intCast(run_last), raster.flat_depth_bits, color)
+            else
+                pixels_written += writeFlatColorSpanAtRow(depth_test, color_words, depth_words, row_offset, @intCast(x), @intCast(run_last), raster.flat_depth_bits, color);
             const run_length: f32 = @floatFromInt(run_last - x);
             stepped_u_over_w += raster.u_over_w_dx * run_length;
             stepped_v_over_w += raster.v_over_w_dx * run_length;
@@ -3514,13 +3531,37 @@ fn clearPreparedSpansLane(context: *ParallelDraw, lane_index: usize) void {
 }
 
 const MosaicWorkClaimClass = enum { owner, same_llc, same_numa };
-const MosaicWorkClaim = struct { item: MosaicWorkItem, class: MosaicWorkClaimClass };
+const MosaicWorkClaim = struct { item: MosaicWorkItem, item_index: usize, class: MosaicWorkClaimClass };
 
 fn claimMosaicQueue(context: *MosaicBatchDraw, queue_index: usize, class: MosaicWorkClaimClass) ?MosaicWorkClaim {
     const queue = &context.queues[queue_index];
+    // Once the cursor reaches the immutable queue length, avoid another
+    // contended RMW. Workers otherwise keep issuing failed fetch-adds while
+    // they scan for work in neighboring topology domains.
+    if (queue.cursor.load(.monotonic) >= queue.item_count) return null;
     const position = queue.cursor.fetchAdd(1, .monotonic);
     if (position >= queue.item_count) return null;
-    return .{ .item = context.work_items[queue.first_item + position], .class = class };
+    const item_index = queue.first_item + position;
+    return .{ .item = context.work_items[item_index], .item_index = item_index, .class = class };
+}
+
+fn mosaicRegionDepthMinimum(depth_words: []align(4) u32, width: u32, rect: Rect) u32 {
+    var minimum_lanes: @Vector(8, u32) = @splat(std.math.maxInt(u32));
+    var minimum: u32 = std.math.maxInt(u32);
+    const first_x: usize = @intCast(@max(rect.x, 0));
+    const first_y: usize = @intCast(@max(rect.y, 0));
+    const last_x = @min(@as(usize, @intCast(width)), first_x + @as(usize, @intCast(rect.width)));
+    const last_y = first_y + @as(usize, @intCast(rect.height));
+    var y = first_y;
+    while (y < last_y) : (y += 1) {
+        var x = first_x;
+        while (x + 8 <= last_x) : (x += 8) {
+            const values: @Vector(8, u32) = depth_words[y * @as(usize, width) + x ..][0..8].*;
+            minimum_lanes = @select(u32, values < minimum_lanes, values, minimum_lanes);
+        }
+        while (x < last_x) : (x += 1) minimum = @min(minimum, depth_words[y * @as(usize, width) + x]);
+    }
+    return @min(minimum, @reduce(.Min, minimum_lanes));
 }
 
 fn claimMosaicWork(context: *MosaicBatchDraw, worker_index: usize) ?MosaicWorkClaim {
@@ -3560,6 +3601,26 @@ fn runMosaicBatch(context: *MosaicBatchDraw, worker_index: usize, comptime count
     }
     if (context.plan_failed.load(.acquire)) return;
     while (claimMosaicWork(context, worker_index)) |claim| {
+        var known_region_depth_min: ?*u32 = null;
+        // The scan is useful only for an entirely prepared region. If an
+        // earlier command requires the strict executor, that executor may
+        // write arbitrary depth and the summary must remain disabled. Avoid
+        // paying the scan on empty/strict regions and on counted validation
+        // submissions, which do not use the fast region kernel.
+        if (comptime !count_work and builtin.cpu.arch.endian() == .little) if (claim.item.command_count != 0 and @intFromPtr(context.target.ptr) & 3 == 0 and @intFromPtr(context.depth.ptr) & 3 == 0) {
+            var region_fast = true;
+            const probe_end = claim.item.command_first + claim.item.command_count;
+            for (context.command_indices[claim.item.command_first..probe_end]) |command_index| {
+                if (!context.prepared[command_index].batch_fast) {
+                    region_fast = false;
+                    break;
+                }
+            }
+            if (region_fast) {
+                known_region_depth_min = &mosaic_region_depth_min[claim.item_index];
+                known_region_depth_min.?.* = mosaicRegionDepthMinimum(std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(context.depth))), context.width, claim.item.rect);
+            }
+        };
         const command_end = claim.item.command_first + claim.item.command_count;
         for (context.command_indices[claim.item.command_first..command_end]) |command_index| {
             const command = context.commands[command_index];
@@ -3574,10 +3635,14 @@ fn runMosaicBatch(context: *MosaicBatchDraw, worker_index: usize, comptime count
             else
                 intersectRects(command.scissor, claim.item.rect);
             if (region_scissor.width == 0 or region_scissor.height == 0) continue;
-            if (comptime !count_work) if (prepared.batch_fast) if (drawPreparedBatchFastRegion(context.target, context.depth, context.width, context.height, prepared, region_scissor)) |pixels_written| {
+            if (comptime !count_work) if (prepared.batch_fast) if (drawPreparedBatchFastRegion(context.target, context.depth, context.width, context.height, prepared, region_scissor, known_region_depth_min)) |pixels_written| {
+                for (prepared.triangles[0..prepared.count]) |triangle| if (triangle.valid and triangle.batch_raster.ready) {
+                    known_region_depth_min.?.* = @min(known_region_depth_min.?.*, triangle.batch_raster.flat_depth_bits);
+                };
                 band.pixels_written += pixels_written;
                 continue;
             };
+            known_region_depth_min = null;
             var draw_counters = Counters{};
             band.pixels_written += drawInternal(
                 context.target,
@@ -4870,6 +4935,25 @@ fn drawPreparedBatchFastSerial(target: []u8, depth: []u8, width: u32, height: u3
     return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0, null);
 }
 
-fn drawPreparedBatchFastRegion(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, clip: Rect) ?usize {
+fn drawPreparedBatchFastRegion(target: []u8, depth: []u8, width: u32, height: u32, prepared: *const PreparedDraw, clip: Rect, known_depth_min: ?*u32) ?usize {
+    // Mosaic admits prepared draws before entering this region loop. Keep the
+    // common two-triangle quad executor on a direct path so every region does
+    // not re-enter the general batch dispatcher and re-check its fallback
+    // matrix. The same scalar kernels and span proofs are used below; this is
+    // only a dispatch specialization for the already-admitted shape.
+    if (builtin.cpu.arch.endian() == .little and @intFromPtr(target.ptr) & 3 == 0 and @intFromPtr(depth.ptr) & 3 == 0 and prepared.count == 2 and prepared.opaque_quad.valid and prepared.spans_valid) {
+        const color_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(target)));
+        const depth_words = std.mem.bytesAsSlice(u32, @as([]align(4) u8, @alignCast(depth)));
+        if (prepared.opaque_quad.flat_color) |color| {
+            if (prepared.quad_union_spans_external) |spans| return rasterPreparedFlatSpan(true, color_words, depth_words, width, height, 0, 1, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, spans, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color, clip);
+            if (rasterPreparedFlatColorQuad(true, color_words, depth_words, width, height, 0, 1, prepared.opaque_quad.min_y, prepared.opaque_quad.max_y, preparedSpan(prepared, 0), preparedSpan(prepared, 1), prepared.opaque_quad.depth_bits, color, clip)) |pixels| return pixels;
+        } else {
+            const first = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, 0, 1, &prepared.triangles[0].batch_raster, preparedSpan(prepared, 0), prepared.opaque_quad.prelit, clip, known_depth_min);
+            if (known_depth_min) |minimum| minimum.* = @min(minimum.*, prepared.triangles[0].batch_raster.flat_depth_bits);
+            const second = rasterOpaqueTexturedTriangle(true, color_words, depth_words, width, height, 0, 1, &prepared.triangles[1].batch_raster, preparedSpan(prepared, 1), prepared.opaque_quad.prelit, clip, known_depth_min);
+            if (known_depth_min) |minimum| minimum.* = @min(minimum.*, prepared.triangles[1].batch_raster.flat_depth_bits);
+            return first + second;
+        }
+    }
     return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0, clip);
 }

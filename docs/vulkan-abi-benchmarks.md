@@ -111,6 +111,23 @@ smoke run and remains sensitive to placement and cache state. These are
 workload-specific measurements, not claims about the upstream applications;
 the byte-identical color/depth oracle is the correctness gate.
 
+The next ABI pass adds a region-local normal-Z depth summary to Mosaic's owned
+supertile queues. Each region scans its existing depth attachment once; flat
+opaque prepared draws whose depth is no farther than the conservative regional
+minimum can then use the existing known-pass span writer without rereading
+every depth sample. The summary is disabled as soon as a strict fallback draw
+can write arbitrary depth, and the fast path remains private to Mosaic. All
+thirteen workload checksums remained identical. In three repeated smoke
+invocations on the same four-core placement, the vkQuake-shaped stream moved
+from a roughly
+6.03 ms median to 4.02 ms and vkQuake2 from roughly 7.10 ms to 4.24 ms; a
+Serious Sam-shaped stream remained within measurement noise. These numbers
+are host-specific evidence rather than a universal performance guarantee.
+`vkcube` is not part of this target.
+The queue claim loop also stops issuing failed atomic increments after an
+owned queue is exhausted, reducing scheduler tail contention without adding a
+centralized completion counter.
+
 ## Core-width scaling result
 
 The spatial bridge now uses all selected workers for the long stream. The
