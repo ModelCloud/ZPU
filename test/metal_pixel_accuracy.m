@@ -15860,6 +15860,49 @@ static int test_cpu_vector_buffer_arithmetic_against_native(
     return 0;
 }
 
+/* The CPU adapter must not silently discard MTL4 geometry state that changes
+ * ray traversal. Primitive data and a non-zero geometry intersection-table
+ * offset require an arbitrary intersection-function ABI, which this bounded
+ * CPU profile does not claim to implement. Verify that the size query fails
+ * closed instead of allocating a misleading placeholder AS. */
+static int test_cpu_metal4_acceleration_rejects_unrepresented_geometry_state(
+    id<MTLDevice> adapter_device, id<MTL4CommandAllocator> allocator,
+    id<MTL4CommandQueue> queue) API_AVAILABLE(macos(26.0), ios(26.0)) {
+    const float vertices[] = {
+        -0.75f, -0.75f, 0.0f,
+         0.75f, -0.75f, 0.0f,
+         0.00f,  0.75f, 0.0f,
+    };
+    id<MTLBuffer> vertex_buffer =
+        [adapter_device newBufferWithBytes:vertices length:sizeof(vertices)
+                                   options:MTLResourceStorageModeShared];
+    MTL4AccelerationStructureTriangleGeometryDescriptor *geometry =
+        [MTL4AccelerationStructureTriangleGeometryDescriptor new];
+    geometry.vertexBuffer = MTL4BufferRangeMake(vertex_buffer.gpuAddress, sizeof(vertices));
+    geometry.vertexStride = 3 * sizeof(float);
+    geometry.triangleCount = 1;
+    geometry.intersectionFunctionTableOffset = 1;
+    MTL4PrimitiveAccelerationStructureDescriptor *descriptor =
+        [MTL4PrimitiveAccelerationStructureDescriptor new];
+    descriptor.geometryDescriptors = @[geometry];
+    MTLAccelerationStructureSizes sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:descriptor];
+    MTL4AccelerationStructureMotionTriangleGeometryDescriptor *motion_geometry =
+        [MTL4AccelerationStructureMotionTriangleGeometryDescriptor new];
+    motion_geometry.triangleCount = 1;
+    descriptor.geometryDescriptors = @[motion_geometry];
+    MTLAccelerationStructureSizes motion_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:descriptor];
+    if (vertex_buffer == nil || geometry == nil || motion_geometry == nil || descriptor == nil ||
+        allocator == nil || queue == nil || sizes.accelerationStructureSize != 0 ||
+        sizes.buildScratchBufferSize != 0 || motion_sizes.accelerationStructureSize != 0 ||
+        motion_sizes.buildScratchBufferSize != 0) {
+        fail_with_error("Metal 4 CPU acceleration accepted unrepresented geometry state", nil);
+        return 193;
+    }
+    return 0;
+}
+
 int main(void) {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -28510,6 +28553,10 @@ int main(void) {
             fail_with_error("Metal 4 CPU acceleration commands failed", metal4_as_error);
             return 66;
         }
+        const int metal4_unrepresented_geometry_result =
+            test_cpu_metal4_acceleration_rejects_unrepresented_geometry_state(
+                adapter_device, metal4_allocator, metal4_queue);
+        if (metal4_unrepresented_geometry_result != 0) return metal4_unrepresented_geometry_result;
 
         /* GPU addresses are only meaningful for resources owned by the
          * device that records the command. A native buffer is used here only
