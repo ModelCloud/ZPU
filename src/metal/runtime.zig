@@ -32,6 +32,7 @@ const cpu_acceleration_structure_magic: u32 = 0x5a505541;
 const cpu_acceleration_structure_version: u32 = 1;
 const cpu_acceleration_structure_header_bytes: usize = 32;
 const cpu_acceleration_structure_triangle_bytes: usize = 9 * @sizeOf(f32);
+const cpu_acceleration_structure_flag_triangle_masks: u32 = 2;
 const max_viewport_count = 16;
 
 pub const TextureFormat = enum {
@@ -5892,16 +5893,23 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
     const texture = command.texture orelse return error.InvalidResource;
     if (texture.format != .rgba8_unorm) return error.UnsupportedFormat;
     const acceleration_structure = command.acceleration_structure orelse return error.InvalidCommand;
-        if (command.intersection_function_profile > 2) return error.UnsupportedOperation;
+    if (command.intersection_function_profile > 2) return error.UnsupportedOperation;
     if (!validBuffer(acceleration_structure) or acceleration_structure.device != texture.device) return error.InvalidResource;
     if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
     if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or
         readU32Little(acceleration_structure.bytes, 4) != cpu_acceleration_structure_version) return error.InvalidResource;
     const triangle_count: usize = @intCast(readU32Little(acceleration_structure.bytes, 8));
+    const flags = readU32Little(acceleration_structure.bytes, 12);
     const triangle_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 16));
     const triangle_bytes = std.math.mul(usize, triangle_count, cpu_acceleration_structure_triangle_bytes) catch return error.InvalidArgument;
     if (triangle_offset < cpu_acceleration_structure_header_bytes or
         !rangeValid(acceleration_structure.bytes.len, triangle_offset, triangle_bytes)) return error.InvalidArgument;
+    const mask_offset: usize = @intCast(readU32Little(acceleration_structure.bytes, 20));
+    if ((flags & cpu_acceleration_structure_flag_triangle_masks) != 0) {
+        const mask_bytes = std.math.mul(usize, triangle_count, @sizeOf(u32)) catch return error.InvalidArgument;
+        if (mask_offset < triangle_offset or mask_offset - triangle_offset < triangle_bytes or
+            !rangeValid(acceleration_structure.bytes.len, mask_offset, mask_bytes)) return error.InvalidArgument;
+    }
     const width = @min(command.threads_per_grid.width, texture.width);
     const height = @min(command.threads_per_grid.height, texture.height);
     var target = texture.asTarget();
@@ -5917,6 +5925,10 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
         var nearest: ?f32 = null;
         var triangle_index: usize = 0;
         while (triangle_index < triangle_count) : (triangle_index += 1) {
+            if ((flags & cpu_acceleration_structure_flag_triangle_masks) != 0 and
+                (readU32Little(acceleration_structure.bytes, mask_offset + triangle_index * @sizeOf(u32)) & std.math.maxInt(u32)) == 0) {
+                continue;
+            }
             const base = triangle_offset + triangle_index * cpu_acceleration_structure_triangle_bytes;
             const v0 = CpuRayVec3{
                 .x = readF32Little(acceleration_structure.bytes, base),

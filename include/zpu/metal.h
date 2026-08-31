@@ -447,10 +447,17 @@ enum {
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION 1u
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_HEADER_BYTES 32u
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_TRIANGLE_OFFSET 256u
+#define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS 2u
 
 /* Stable little-endian CPU payload shared by the Objective-C adapter and the
  * ZPU runtime. The payload is intentionally a registered profile rather than
- * an Apple hardware BVH representation. */
+ * an Apple hardware BVH representation. When
+ * ZPU_METAL_CPU_ACCELERATION_STRUCTURE_FLAG_TRIANGLE_MASKS is set, reserved[0]
+ * contains the little-endian offset of one uint32 visibility mask per
+ * serialized triangle. The fixed primary-ray profile uses Metal's default
+ * all-bits ray mask, so a zero instance mask is invisible while nonzero masks
+ * remain visible; this preserves the useful bounded subset without exposing
+ * an Apple hardware BVH layout. */
 typedef struct zpu_metal_cpu_acceleration_structure_header {
     uint32_t magic;
     uint32_t version;

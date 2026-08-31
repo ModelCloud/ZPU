@@ -5248,6 +5248,12 @@ static int test_cpu_indirect_trace_triangles_against_native(
         {0},
     };
     instance_data[1] = instance_data[0];
+    /* The second record is deliberately translated into the visible grid but
+     * carries a zero visibility mask. Native Metal's all-bits primary ray
+     * mask therefore sees only the first instance; the adapter must preserve
+     * that result in its CPU/ZPU payload instead of flattening masks away. */
+    instance_data[1].transformationMatrix.columns[3] = MTLPackedFloat3Make(1.0f, 0.0f, 0.0f);
+    instance_data[1].mask = 0;
     id<MTLBuffer> instance_descriptor_buffer =
         [adapter_device newBufferWithBytes:instance_data length:sizeof(instance_data)
                                    options:MTLResourceStorageModeShared];

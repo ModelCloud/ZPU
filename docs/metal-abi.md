@@ -733,8 +733,9 @@ triangle path:
   instance payloads from current ZPU-owned geometry; the fixed Float3 triangle
   trace profile traverses CPU-serialized legacy and Metal 4 primitive,
   bounded, and indirect instance geometry, including active instance-count
-  buffer ranges and packed affine transforms; arbitrary ray intersection
-  execution remains fail-closed
+  buffer ranges, packed affine transforms, and per-instance visibility masks;
+  zero-mask instances are filtered using the fixed all-bits primary-ray mask;
+  arbitrary ray intersection execution remains fail-closed
 - CPU render pipeline states resolve vertex/fragment function handles by
   owner, stage, and name, including Metal 4 binary-function metadata; foreign
   functions and unsupported stages fail closed. The Metal 4 device-level
