@@ -816,6 +816,11 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "device float4 *output [[buffer(1)]], "
          "texture2d<float, access::read> sourceTexture [[texture(2)]], "
          "sampler sourceSampler [[sampler(3)]]) {}\n"
+         "using SourceAliasMetadataInput = device const float*;\n"
+         "using SourceAliasMetadataTexture = texture2d<float, access::read>;\n"
+         "kernel void zpu_source_metadata_alias(SourceAliasMetadataInput input [[buffer(0)]], "
+         "SourceAliasMetadataTexture sourceTexture [[texture(1)]], "
+         "sampler sourceSampler [[sampler(2)]]) {}\n"
          "using namespace metal::raytracing;\n"
          "kernel void zpu_source_metadata_resources("
          "visible_function_table<float(float)> visibleTable [[buffer(4)]], "
@@ -829,7 +834,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 64) {
+        adapter_library.functionNames.count != 65) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -880,6 +885,59 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         adapter_metadata_function.functionType != MTLFunctionTypeKernel || !metadata_reflection_exact) {
         fail_with_error("source-defined direct binding reflection lowering failed", adapter_error ?: native_error);
         return 175;
+    }
+    id<MTLFunction> native_metadata_alias_function =
+        [native_library newFunctionWithName:@"zpu_source_metadata_alias"];
+    id<MTLFunction> adapter_metadata_alias_function =
+        [adapter_library newFunctionWithName:@"zpu_source_metadata_alias"];
+    BOOL metadata_alias_reflection_exact = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_metadata_alias"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_metadata_alias"];
+        metadata_alias_reflection_exact = native_reflection != nil &&
+            adapter_reflection != nil && native_reflection.bindings.count == 3 &&
+            adapter_reflection.bindings.count == native_reflection.bindings.count;
+        if (metadata_alias_reflection_exact) {
+            for (NSUInteger index = 0; index < native_reflection.bindings.count; ++index) {
+                id<MTLBinding> native_binding = native_reflection.bindings[index];
+                id<MTLBinding> adapter_binding = adapter_reflection.bindings[index];
+                metadata_alias_reflection_exact = metadata_alias_reflection_exact &&
+                    [native_binding.name isEqualToString:adapter_binding.name] &&
+                    native_binding.type == adapter_binding.type &&
+                    native_binding.access == adapter_binding.access &&
+                    native_binding.index == adapter_binding.index &&
+                    native_binding.isUsed == adapter_binding.isUsed;
+                if (metadata_alias_reflection_exact && native_binding.type == MTLBindingTypeBuffer) {
+                    id<MTLBufferBinding> native_buffer = (id<MTLBufferBinding>)native_binding;
+                    id<MTLBufferBinding> adapter_buffer = (id<MTLBufferBinding>)adapter_binding;
+                    metadata_alias_reflection_exact = native_buffer.bufferDataType == adapter_buffer.bufferDataType &&
+                        native_buffer.bufferDataSize == adapter_buffer.bufferDataSize &&
+                        native_buffer.bufferAlignment == adapter_buffer.bufferAlignment &&
+                        native_buffer.bufferPointerType.elementType ==
+                            adapter_buffer.bufferPointerType.elementType &&
+                        native_buffer.bufferPointerType.dataSize ==
+                            adapter_buffer.bufferPointerType.dataSize &&
+                        native_buffer.bufferPointerType.alignment ==
+                            adapter_buffer.bufferPointerType.alignment;
+                } else if (metadata_alias_reflection_exact && native_binding.type == MTLBindingTypeTexture) {
+                    id<MTLTextureBinding> native_texture = (id<MTLTextureBinding>)native_binding;
+                    id<MTLTextureBinding> adapter_texture = (id<MTLTextureBinding>)adapter_binding;
+                    metadata_alias_reflection_exact = native_texture.textureType == adapter_texture.textureType &&
+                        native_texture.textureDataType == adapter_texture.textureDataType &&
+                        native_texture.arrayLength == adapter_texture.arrayLength &&
+                        native_texture.isDepthTexture == adapter_texture.isDepthTexture;
+                }
+            }
+        }
+    }
+    if (native_metadata_alias_function == nil || adapter_metadata_alias_function == nil ||
+        adapter_metadata_alias_function.functionType != MTLFunctionTypeKernel ||
+        !metadata_alias_reflection_exact) {
+        fail_with_error("source-defined aliased direct binding reflection lowering failed",
+                        adapter_error ?: native_error);
+        return 178;
     }
     id<MTLFunction> native_metadata_resources_function =
         [native_library newFunctionWithName:@"zpu_source_metadata_resources"];

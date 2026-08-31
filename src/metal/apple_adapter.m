@@ -13678,6 +13678,27 @@ static ZPUBinding *zpu_source_direct_binding(NSString *parameter,
     NSError *nameError = nil;
     NSRegularExpression *nameExpression = [NSRegularExpression
         regularExpressionWithPattern:@"([A-Za-z_][A-Za-z0-9_]*)$" options:0 error:&nameError];
+    if (name == nil && nameExpression != nil && nameError == nil) {
+        NSArray<NSString *> *aliasNames = [[typeAliases allKeys]
+            sortedArrayUsingComparator:^NSComparisonResult(NSString *left, NSString *right) {
+            if (left.length > right.length) return NSOrderedAscending;
+            if (left.length < right.length) return NSOrderedDescending;
+            return [left compare:right];
+        }];
+        for (NSString *aliasName in aliasNames) {
+            if (![prefix hasPrefix:aliasName] || prefix.length <= aliasName.length) continue;
+            NSString *aliasParameterName = [prefix substringFromIndex:aliasName.length];
+            NSTextCheckingResult *aliasNameMatch = [nameExpression
+                firstMatchInString:aliasParameterName options:0
+                range:NSMakeRange(0, aliasParameterName.length)];
+            if (aliasNameMatch != nil && aliasNameMatch.range.location == 0 &&
+                NSMaxRange(aliasNameMatch.range) == aliasParameterName.length) {
+                name = aliasParameterName;
+                declaration = aliasName;
+                break;
+            }
+        }
+    }
     if (name == nil) {
         if (nameExpression == nil || nameError != nil) return nil;
         NSTextCheckingResult *nameMatch = [nameExpression firstMatchInString:prefix options:0

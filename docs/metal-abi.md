@@ -652,6 +652,8 @@ triangle path:
   resource spellings (`depth2d`, `depth2d_array`, `depth2d_ms`,
   `depth2d_ms_array`, `depthcube`, and `depthcube_array`) preserve native
   read-only texture reflection, including depth classification. Those
+  finite aliases are also resolved for direct empty-kernel buffer, texture,
+  and sampler reflection.
   executable functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler;
   metadata-only argument-buffer functions expose layout/encoder state without
