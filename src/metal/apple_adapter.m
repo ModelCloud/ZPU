@@ -1438,7 +1438,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     NSString *_label;
     NSString *_functionName;
     MTL4MachineLearningPipelineReflection *_reflection;
-    MTLTensorExtents *_inputDimensions[3];
+    MTLTensorExtents *_inputDimensions[ZPU_CPU_ML_MAX_NAMED_INPUTS + 1];
     NSUInteger _inputCount;
     BOOL _namedProvider;
     uint32_t _namedElementType;
@@ -5760,36 +5760,53 @@ static void zpu_append_named_cpu_ml_catalog(
     }
 }
 
-static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
-                                                 ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
-                                                 ZPUTensor *destination, uint32_t elementType,
-                                                 const uint32_t *permutation) {
-    if (functionName == nil || input0 == nil || inputCount == 0 ||
-        inputCount > ZPU_CPU_ML_MAX_INPUTS || destination == nil) {
+static int zpu_tensor_try_cpu_ml_named_operation_inputs(NSString *functionName,
+                                                        ZPUTensor *const *inputs, NSUInteger inputCount,
+                                                        ZPUTensor *destination, uint32_t elementType,
+                                                        const uint32_t *permutation) {
+    if (functionName == nil || inputs == NULL || inputCount == 0 ||
+        inputCount > ZPU_CPU_ML_MAX_NAMED_INPUTS || destination == nil) {
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
     }
     const char *name = functionName.UTF8String;
     const NSUInteger nameLength = [functionName lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
     if (name == NULL || nameLength == 0) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
-    zpu_cpu_ml_named_operation_arguments arguments;
+    zpu_cpu_ml_tensor_view inputViews[ZPU_CPU_ML_MAX_NAMED_INPUTS];
+    memset(inputViews, 0, sizeof(inputViews));
+    zpu_cpu_ml_tensor_view destinationView;
+    memset(&destinationView, 0, sizeof(destinationView));
+    uint32_t permutationValues[ZPU_CPU_ML_MAX_RANK] = {0};
+    zpu_cpu_ml_named_operation_arguments_v2 arguments;
     memset(&arguments, 0, sizeof(arguments));
     arguments.function_name = name;
     arguments.function_name_length = nameLength;
     arguments.input_count = (uint32_t)inputCount;
     arguments.element_type = elementType;
     if (permutation != NULL) {
-        memcpy(arguments.permutation, permutation, sizeof(arguments.permutation));
+        memcpy(permutationValues, permutation, sizeof(permutationValues));
     }
+    arguments.inputs = inputViews;
     for (NSUInteger index = 0; index < inputCount; ++index) {
-        ZPUTensor *input = index == 0 ? input0 : input1;
-        if (!zpu_tensor_make_cpu_ml_view(input, &arguments.inputs[index])) {
+        if (!zpu_tensor_make_cpu_ml_view(inputs[index], &inputViews[index])) {
             return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
         }
     }
-    if (!zpu_tensor_make_cpu_ml_view(destination, &arguments.destination)) {
+    if (!zpu_tensor_make_cpu_ml_view(destination, &destinationView)) {
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
     }
-    return zpu_cpu_ml_named_operation(&arguments);
+    arguments.destination = destinationView;
+    arguments.permutation = permutationValues;
+    return zpu_cpu_ml_named_operation_v2(&arguments);
+}
+
+static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
+                                                 ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
+                                                 ZPUTensor *destination, uint32_t elementType,
+                                                 const uint32_t *permutation) {
+    ZPUTensor *inputs[ZPU_CPU_ML_MAX_INPUTS] = {input0, input1};
+    if (inputCount > ZPU_CPU_ML_MAX_INPUTS) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    return zpu_tensor_try_cpu_ml_named_operation_inputs(functionName, inputs, inputCount,
+                                                        destination, elementType, permutation);
 }
 
 static BOOL zpu_tensor_transpose_reverse(ZPUTensor *source, ZPUTensor *destination) {
@@ -15105,17 +15122,16 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
         zpu_set_error(error, @"ZPU CPU Metal 4 supports only the registered tensor CPU profiles");
         return nil;
     }
-    MTLTensorExtents *inputDimensions[3] = {
-        [descriptor inputDimensionsAtBufferIndex:0],
-        [descriptor inputDimensionsAtBufferIndex:1],
-        [descriptor inputDimensionsAtBufferIndex:2],
-    };
+    MTLTensorExtents *inputDimensions[ZPU_CPU_ML_MAX_NAMED_INPUTS + 1] = {0};
     const NSUInteger inputCount = named ? (NSUInteger)namedSignature.input_count + 1 :
         (identity || transpose) ? 2 : ((addition || subtraction || division || multiplicationU8 || multiplicationI8 ||
                                    multiplicationU16 || multiplicationI16 || multiplicationU32 ||
                                    multiplicationI32 || multiplicationI4 || multiplicationU4 ||
                                    multiplication || multiplicationF16 || multiplicationBF16 ||
                                    matmul) ? 3 : 2);
+    for (NSUInteger index = 0; index < inputCount; ++index) {
+        inputDimensions[index] = [descriptor inputDimensionsAtBufferIndex:index];
+    }
     for (NSUInteger index = 0; index < inputCount; ++index) {
         if (inputDimensions[index] == nil) {
             continue;
@@ -17600,9 +17616,43 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     }
     const uint64_t *resourceIDs = (const uint64_t *)_argumentTable->_bufferResources.bytes;
     ZPUTensor *source = (ZPUTensor *)zpu_resource_for_id(resourceIDs[0]);
-    const BOOL hasRightInput = binary || (namedProvider && inputCount > 2);
+    ZPUTensor *namedInputs[ZPU_CPU_ML_MAX_NAMED_INPUTS] = {0};
+    BOOL namedInputResourcesValid = YES;
+    const BOOL sourceIsTensor = [source isKindOfClass:[ZPUTensor class]];
+    if (namedProvider) {
+        if (!sourceIsTensor) namedInputResourcesValid = NO;
+        for (NSUInteger index = 0; index < inputCount - 1; ++index) {
+            namedInputs[index] = (ZPUTensor *)zpu_resource_for_id(resourceIDs[index]);
+            if (![namedInputs[index] isKindOfClass:[ZPUTensor class]] ||
+                namedInputs[index]->_owner != _owner->_owner ||
+                (namedInputs[index]->_usage & MTLTensorUsageMachineLearning) == 0 ||
+                (sourceIsTensor && namedInputs[index]->_dataType != source->_dataType)) {
+                namedInputResourcesValid = NO;
+            }
+        }
+    }
+    const BOOL hasRightInput = binary;
     ZPUTensor *right = hasRightInput ? (ZPUTensor *)zpu_resource_for_id(resourceIDs[1]) : nil;
     ZPUTensor *destination = (ZPUTensor *)zpu_resource_for_id(resourceIDs[inputCount - 1]);
+    NSMutableArray<ZPUTensor *> *capturedNamedInputs =
+        (namedProvider && namedInputResourcesValid) ?
+        [NSMutableArray arrayWithCapacity:inputCount - 1] : nil;
+    if (namedProvider && namedInputResourcesValid) {
+        for (NSUInteger index = 0; index < inputCount - 1; ++index) {
+            [capturedNamedInputs addObject:namedInputs[index]];
+        }
+    }
+    BOOL namedInputDimensionsValid = YES;
+    if (namedProvider) {
+        for (NSUInteger index = 0; index < inputCount - 1; ++index) {
+            if (![namedInputs[index] isKindOfClass:[ZPUTensor class]] ||
+                namedInputs[index]->_dimensions == nil ||
+                !zpu_mtl4_ml_dimensions_match(pipeline->_inputDimensions[index],
+                                               namedInputs[index]->_dimensions)) {
+                namedInputDimensionsValid = NO;
+            }
+        }
+    }
     if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
         source->_owner != _owner->_owner || destination->_owner != _owner->_owner ||
         (source->_usage & MTLTensorUsageMachineLearning) == 0 ||
@@ -17611,6 +17661,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
                    (right->_usage & MTLTensorUsageMachineLearning) == 0)) ||
         source->_dataType != destination->_dataType || (hasRightInput && right->_dataType != source->_dataType) ||
         (namedProvider && zpu_cpu_ml_element_type(source) != pipeline->_namedElementType) ||
+        (namedProvider && (!namedInputResourcesValid || !namedInputDimensionsValid)) ||
         (multiplyU8 && source->_dataType != MTLTensorDataTypeUInt8) ||
         (multiplyI8 && source->_dataType != MTLTensorDataTypeInt8) ||
         (multiplyU16 && source->_dataType != MTLTensorDataTypeUInt16) ||
@@ -17676,8 +17727,13 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     if (!zpu_defer_operation(_owner->_legacyBuffer, ^BOOL {
         int providerStatus = ZPU_CPU_ML_STATUS_UNSUPPORTED;
         if (namedProvider) {
-            providerStatus = zpu_tensor_try_cpu_ml_named_operation(functionName, source, right,
-                pipeline->_inputCount - 1, destination, pipeline->_namedElementType, NULL);
+            ZPUTensor *deferredNamedInputs[ZPU_CPU_ML_MAX_NAMED_INPUTS] = {0};
+            for (NSUInteger index = 0; index < capturedNamedInputs.count; ++index) {
+                deferredNamedInputs[index] = capturedNamedInputs[index];
+            }
+            providerStatus = zpu_tensor_try_cpu_ml_named_operation_inputs(functionName,
+                deferredNamedInputs, pipeline->_inputCount - 1, destination,
+                pipeline->_namedElementType, NULL);
         } else {
             providerStatus = zpu_tensor_try_cpu_ml_operation(source, right, destination, cpuMlOperation);
         }
@@ -17735,6 +17791,11 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     }
     [_owner->_legacyBuffer retainResource:source];
     if (right != nil) [_owner->_legacyBuffer retainResource:right];
+    if (namedProvider) {
+        for (NSUInteger index = 1; index < inputCount - 1; ++index) {
+            [_owner->_legacyBuffer retainResource:namedInputs[index]];
+        }
+    }
     [_owner->_legacyBuffer retainResource:destination];
     [_owner->_legacyBuffer retainResource:zpuHeap];
 }

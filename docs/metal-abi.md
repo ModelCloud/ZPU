@@ -868,11 +868,16 @@ triangle path:
   Int4/UInt4 nibble storage before or after a ZML CPU call. The installed
   `zpu/cpu_ml.h` header exposes versioned `zpu_cpu_ml_set_backend`,
   `zpu_cpu_ml_set_operation_backend`, and
-  `zpu_cpu_ml_set_named_operation_backend` hooks. All provider forms receive
+  `zpu_cpu_ml_set_named_operation_backend` hooks; the additive
+  `zpu_cpu_ml_set_named_operation_backend_v2`/
+  `zpu_cpu_ml_named_operation_v2` pair carries larger graph input lists. All provider forms receive
   only offset-zero dense CPU views; the operation provider receives an
   explicit operation and element-type identifier, while a named provider
-  receives a bounded function name plus its input count and element type. This
-  named seam also has an optional versioned catalog hook; catalog entries are
+  receives a bounded function name plus its input count and element type. The
+  v1 named ABI retains its binary-compatible inline two-input shape. The
+  additive v2 named ABI uses borrowed pointers to up to 16 dense input views,
+  so a provider-owned graph entry point is not forced into a binary-op shape.
+  This named seam also has an optional versioned catalog hook; catalog entries are
   copied into `MTLLibrary.functionNames` only after the provider query accepts
   their UTF-8 name and tensor signature. This keeps dynamic ZML/cpu graph
   functions discoverable through the ordinary Metal-shaped library API while

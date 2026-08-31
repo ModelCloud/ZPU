@@ -10,6 +10,8 @@ struct probe {
     int named_query_calls;
     int named_calls;
     int catalog_calls;
+    int named_v2_query_calls;
+    int named_v2_calls;
 };
 
 static int add_u32(void *context, const zpu_cpu_ml_operation_arguments *arguments) {
@@ -78,6 +80,50 @@ static int named_catalog_name_at(void *context, size_t index, const char **funct
     ++probe->catalog_calls;
     *function_name = "zml_cpu_transpose";
     *function_name_length = strlen("zml_cpu_transpose");
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int named_sum3_query(void *context, const char *function_name, size_t function_name_length,
+                            zpu_cpu_ml_named_operation_signature *signature) {
+    struct probe *probe = (struct probe *)context;
+    if (probe == NULL || function_name == NULL || signature == NULL) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->named_v2_query_calls;
+    if (function_name_length != strlen("zml_cpu_sum3_f32") ||
+        memcmp(function_name, "zml_cpu_sum3_f32", function_name_length) != 0) {
+        return ZPU_CPU_ML_STATUS_UNSUPPORTED;
+    }
+    signature->input_count = 3;
+    signature->element_type = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int named_sum3(void *context, const zpu_cpu_ml_named_operation_arguments_v2 *arguments) {
+    struct probe *probe = (struct probe *)context;
+    if (probe == NULL || arguments == NULL || arguments->function_name == NULL ||
+        arguments->function_name_length != strlen("zml_cpu_sum3_f32") ||
+        memcmp(arguments->function_name, "zml_cpu_sum3_f32", arguments->function_name_length) != 0 ||
+        arguments->input_count != 3 || arguments->element_type != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->inputs == NULL || arguments->destination.data == NULL ||
+        arguments->destination.rank != 2 || arguments->destination.dimensions[0] != 2 ||
+        arguments->destination.dimensions[1] != 3 || arguments->destination.strides[0] != 1 ||
+        arguments->destination.strides[1] != 2) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->named_v2_calls;
+    for (size_t index = 0; index < 3; ++index) {
+        if (arguments->inputs[index].data == NULL || arguments->inputs[index].rank != 2 ||
+            arguments->inputs[index].dimensions[0] != 2 || arguments->inputs[index].dimensions[1] != 3 ||
+            arguments->inputs[index].strides[0] != 1 || arguments->inputs[index].strides[1] != 2) {
+            return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    float *output = (float *)arguments->destination.data;
+    const float *left = (const float *)arguments->inputs[0].data;
+    const float *middle = (const float *)arguments->inputs[1].data;
+    const float *right = (const float *)arguments->inputs[2].data;
+    for (size_t index = 0; index < 6; ++index) output[index] = left[index] + middle[index] + right[index];
     return ZPU_CPU_ML_STATUS_OK;
 }
 
@@ -203,5 +249,49 @@ int main(void) {
         transpose_output[7] != UINT32_C(0xcafebabe) ||
         zpu_cpu_ml_set_named_operation_catalog(NULL) != ZPU_CPU_ML_STATUS_OK ||
         zpu_cpu_ml_set_named_operation_backend(NULL) != ZPU_CPU_ML_STATUS_OK) return 92;
+
+    float sum3_left[12] = {1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0};
+    float sum3_middle[12] = {10, 20, 0, 0, 30, 40, 0, 0, 50, 60, 0, 0};
+    float sum3_right[12] = {100, 200, 0, 0, 300, 400, 0, 0, 500, 600, 0, 0};
+    float sum3_output[12];
+    for (size_t index = 0; index < 12; ++index) sum3_output[index] = 777.0f;
+    const zpu_cpu_ml_tensor_view sum3_inputs[3] = {
+        {.data = (uint8_t *)sum3_left, .byte_length = sizeof(sum3_left), .rank = 2,
+         .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4}},
+        {.data = (uint8_t *)sum3_middle, .byte_length = sizeof(sum3_middle), .rank = 2,
+         .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4}},
+        {.data = (uint8_t *)sum3_right, .byte_length = sizeof(sum3_right), .rank = 2,
+         .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4}},
+    };
+    const zpu_cpu_ml_named_operation_backend_v2 named_backend_v2 = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_V2_ABI_VERSION,
+        .context = &probe,
+        .query = named_sum3_query,
+        .operation = named_sum3,
+    };
+    zpu_cpu_ml_named_operation_signature v2_signature = {0, 0};
+    const zpu_cpu_ml_named_operation_arguments_v2 named_arguments_v2 = {
+        .function_name = "zml_cpu_sum3_f32",
+        .function_name_length = strlen("zml_cpu_sum3_f32"),
+        .input_count = 3,
+        .element_type = ZPU_CPU_ML_ELEMENT_FLOAT32,
+        .inputs = sum3_inputs,
+        .destination = {
+            .data = (uint8_t *)sum3_output, .byte_length = sizeof(sum3_output), .rank = 2,
+            .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4},
+        },
+        .permutation = (const uint32_t[]){0, 1},
+    };
+    if (zpu_cpu_ml_set_named_operation_backend_v2(&named_backend_v2) != ZPU_CPU_ML_STATUS_OK ||
+        zpu_cpu_ml_named_operation_supported("zml_cpu_sum3_f32", strlen("zml_cpu_sum3_f32"),
+                                             &v2_signature) != ZPU_CPU_ML_STATUS_OK ||
+        v2_signature.input_count != 3 || v2_signature.element_type != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        zpu_cpu_ml_named_operation_v2(&named_arguments_v2) != ZPU_CPU_ML_STATUS_OK ||
+        probe.named_v2_query_calls != 2 || probe.named_v2_calls != 1 ||
+        sum3_output[0] != 111.0f || sum3_output[1] != 222.0f ||
+        sum3_output[4] != 333.0f || sum3_output[5] != 444.0f ||
+        sum3_output[8] != 555.0f || sum3_output[9] != 666.0f ||
+        sum3_output[2] != 777.0f || sum3_output[3] != 777.0f ||
+        zpu_cpu_ml_set_named_operation_backend_v2(NULL) != ZPU_CPU_ML_STATUS_OK) return 93;
     return 0;
 }

@@ -14,6 +14,7 @@ const std = @import("std");
 
 pub const max_rank: usize = 16;
 pub const max_inputs: usize = 2;
+pub const max_named_inputs: usize = 16;
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -140,6 +141,32 @@ pub const NamedOperationBackend = extern struct {
 };
 pub const named_operation_backend_abi_version: u32 = 1;
 
+/// Additive named-provider ABI for graph entry points with more than two
+/// inputs.  The pointed arrays and tensor storage are borrowed only for the
+/// duration of the callback.  Keeping this separate from the v1 inline-array
+/// structure preserves binary compatibility for existing providers.
+pub const NamedOperationArgumentsV2 = extern struct {
+    function_name: ?[*]const u8,
+    function_name_length: usize,
+    input_count: u32,
+    element_type: u32,
+    reserved: u32,
+    inputs: ?[*]const TensorView,
+    destination: TensorView,
+    permutation: ?[*]const u32,
+};
+pub const NamedOperationV2Fn = *const fn (
+    context: ?*anyopaque,
+    arguments: *const NamedOperationArgumentsV2,
+) callconv(.c) c_int;
+pub const NamedOperationBackendV2 = extern struct {
+    abi_version: u32,
+    context: ?*anyopaque,
+    query: ?NamedOperationQueryFn,
+    operation: ?NamedOperationV2Fn,
+};
+pub const named_operation_backend_v2_abi_version: u32 = 2;
+
 /// Optional discovery callback for the named provider. The returned name is
 /// borrowed until the next catalog callback or catalog replacement; the caller
 /// copies it if it needs to retain it. Signatures are obtained through the
@@ -162,6 +189,7 @@ var backend_mutex: std.atomic.Mutex = .unlocked;
 var registered_backend: ?Backend = null;
 var registered_operation_backend: ?OperationBackend = null;
 var registered_named_operation_backend: ?NamedOperationBackend = null;
+var registered_named_operation_backend_v2: ?NamedOperationBackendV2 = null;
 var registered_named_operation_catalog: ?NamedOperationCatalog = null;
 
 fn lockBackend() void {
@@ -184,6 +212,12 @@ fn namedOperationBackendSnapshot() ?NamedOperationBackend {
     lockBackend();
     defer backend_mutex.unlock();
     return registered_named_operation_backend;
+}
+
+fn namedOperationBackendV2Snapshot() ?NamedOperationBackendV2 {
+    lockBackend();
+    defer backend_mutex.unlock();
+    return registered_named_operation_backend_v2;
 }
 
 fn namedOperationCatalogSnapshot() ?NamedOperationCatalog {
@@ -503,11 +537,17 @@ fn validNamedOperationName(name: ?[*]const u8, length: usize) bool {
 /// available. The caller owns the returned signature storage.
 pub fn namedOperationSupported(name: []const u8, signature: *NamedOperationSignature) Status {
     if (name.len == 0) return .invalid_argument;
-    const backend = namedOperationBackendSnapshot() orelse return .unsupported;
-    const callback = backend.query orelse return .unsupported;
-    const status = providerStatus(callback(backend.context, name.ptr, name.len, signature));
+    const v2_backend = namedOperationBackendV2Snapshot();
+    const status = if (v2_backend) |backend| blk: {
+        const callback = backend.query orelse break :blk Status.unsupported;
+        break :blk providerStatus(callback(backend.context, name.ptr, name.len, signature));
+    } else if (namedOperationBackendSnapshot()) |backend| blk: {
+        const callback = backend.query orelse break :blk Status.unsupported;
+        break :blk providerStatus(callback(backend.context, name.ptr, name.len, signature));
+    } else return .unsupported;
     if (status != .ok) return status;
-    if (signature.input_count == 0 or signature.input_count > max_inputs or
+    const input_limit = if (v2_backend != null) max_named_inputs else max_inputs;
+    if (signature.input_count == 0 or signature.input_count > input_limit or
         elementTypeFromRaw(signature.element_type) == null) return .invalid_argument;
     return .ok;
 }
@@ -534,60 +574,121 @@ pub fn namedOperationNameAt(index: usize, name: *?[*]const u8, length: *usize) S
 
 /// Stage a named provider operation through the same dense CPU boundary used
 /// by fixed operations. The provider receives the function name and no ZPU,
-/// Metal, or platform-specific storage/layout object.
-pub fn namedOperation(arguments: *const NamedOperationArguments) Status {
-    if (!validNamedOperationName(arguments.function_name, arguments.function_name_length)) {
+/// Metal, or platform-specific storage/layout object. `argument_capacity`
+/// preserves the v1 inline-array limit while allowing v2 pointer arguments to
+/// carry a larger graph input list.
+fn namedOperationWithViews(
+    function_name: [*]const u8,
+    function_name_length: usize,
+    input_count: u32,
+    element_type: u32,
+    inputs: [*]const TensorView,
+    destination: *const TensorView,
+    permutation: [*]const u32,
+    argument_capacity: usize,
+) Status {
+    if (!validNamedOperationName(function_name, function_name_length) or
+        input_count == 0 or input_count > max_named_inputs or input_count > argument_capacity)
+    {
         return .invalid_argument;
     }
-    const backend = namedOperationBackendSnapshot() orelse return .unsupported;
-    const query = backend.query orelse return .unsupported;
-    const callback = backend.operation orelse return .unsupported;
+    const v2_backend = namedOperationBackendV2Snapshot();
+    const legacy_backend = if (v2_backend == null) namedOperationBackendSnapshot() else null;
     var signature = NamedOperationSignature{ .input_count = 0, .element_type = 0 };
-    const name = arguments.function_name.?[0..arguments.function_name_length];
-    const query_status = providerStatus(query(backend.context, name.ptr, name.len, &signature));
-    if (query_status != .ok) return query_status;
-    if (signature.input_count == 0 or signature.input_count > max_inputs or
-        arguments.input_count != signature.input_count or
-        arguments.element_type != signature.element_type or
-        elementTypeFromRaw(arguments.element_type) == null) return .invalid_argument;
+    const name = function_name[0..function_name_length];
+    if (v2_backend) |backend| {
+        const query = backend.query orelse return .unsupported;
+        const query_status = providerStatus(query(backend.context, name.ptr, name.len, &signature));
+        if (query_status != .ok) return query_status;
+    } else if (legacy_backend) |backend| {
+        const query = backend.query orelse return .unsupported;
+        const query_status = providerStatus(query(backend.context, name.ptr, name.len, &signature));
+        if (query_status != .ok) return query_status;
+    } else return .unsupported;
+    if (signature.input_count == 0 or signature.input_count > argument_capacity or
+        signature.input_count != input_count or elementTypeFromRaw(signature.element_type) == null or
+        element_type != signature.element_type) return .invalid_argument;
 
-    var input_info: [max_inputs]?ViewInfo = @splat(null);
-    var input_storage: [max_inputs]?[]u8 = @splat(null);
+    var input_info: [max_named_inputs]?ViewInfo = @splat(null);
+    var input_storage: [max_named_inputs]?[]u8 = @splat(null);
     defer for (&input_storage) |*storage| {
         if (storage.*) |bytes| std.heap.c_allocator.free(bytes);
     };
-    var dense_inputs: [max_inputs]TensorView = undefined;
+    var dense_inputs: [max_named_inputs]TensorView = undefined;
     for (0..signature.input_count) |index| {
-        input_info[index] = validateView(&arguments.inputs[index]) orelse return .invalid_argument;
+        input_info[index] = validateView(&inputs[index]) orelse return .invalid_argument;
         const info = input_info[index].?;
         const byte_count = denseByteCount(info) orelse return .invalid_argument;
         const storage = std.heap.c_allocator.alloc(u8, byte_count) catch return .out_of_memory;
         input_storage[index] = storage;
         @memset(storage, 0);
-        if (!copySourceToDense(&arguments.inputs[index], info, storage)) return .invalid_argument;
-        dense_inputs[index] = makeDenseView(arguments.inputs[index], info, storage);
+        if (!copySourceToDense(&inputs[index], info, storage)) return .invalid_argument;
+        dense_inputs[index] = makeDenseView(inputs[index], info, storage);
     }
 
-    const destination_info = validateView(&arguments.destination) orelse return .invalid_argument;
+    const destination_info = validateView(destination) orelse return .invalid_argument;
     const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
     @memset(destination_storage, 0);
-    var dense_arguments = NamedOperationArguments{
-        .function_name = name.ptr,
-        .function_name_length = name.len,
-        .input_count = arguments.input_count,
-        .element_type = arguments.element_type,
-        .reserved = 0,
-        .inputs = dense_inputs,
-        .destination = makeDenseView(arguments.destination, destination_info, destination_storage),
-        .permutation = arguments.permutation,
-    };
-    const status = providerStatus(callback(backend.context, &dense_arguments));
+    var dense_permutation: [max_rank]u32 = @splat(0);
+    for (0..destination_info.rank) |index| dense_permutation[index] = permutation[index];
+
+    const status = if (v2_backend) |backend| blk: {
+        const callback = backend.operation orelse break :blk Status.unsupported;
+        var dense_arguments = NamedOperationArgumentsV2{
+            .function_name = name.ptr,
+            .function_name_length = name.len,
+            .input_count = input_count,
+            .element_type = element_type,
+            .reserved = 0,
+            .inputs = dense_inputs[0..signature.input_count].ptr,
+            .destination = makeDenseView(destination.*, destination_info, destination_storage),
+            .permutation = dense_permutation[0..].ptr,
+        };
+        break :blk providerStatus(callback(backend.context, &dense_arguments));
+    } else if (legacy_backend) |backend| blk: {
+        const callback = backend.operation orelse break :blk Status.unsupported;
+        var legacy_inputs: [max_inputs]TensorView = std.mem.zeroes([max_inputs]TensorView);
+        for (0..signature.input_count) |index| legacy_inputs[index] = dense_inputs[index];
+        var dense_arguments = NamedOperationArguments{
+            .function_name = name.ptr,
+            .function_name_length = name.len,
+            .input_count = input_count,
+            .element_type = element_type,
+            .reserved = 0,
+            .inputs = legacy_inputs,
+            .destination = makeDenseView(destination.*, destination_info, destination_storage),
+            .permutation = dense_permutation,
+        };
+        break :blk providerStatus(callback(backend.context, &dense_arguments));
+    } else Status.unsupported;
     if (status != .ok) return status;
-    const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
-    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
+
+    const dense_destination = if (v2_backend) |backend| blk: {
+        _ = backend;
+        // The v2 callback writes the same destination storage through its
+        // by-value TensorView. Reconstructing the view validates and scatters
+        // the borrowed dense bytes.
+        break :blk makeDenseView(destination.*, destination_info, destination_storage);
+    } else blk: {
+        break :blk makeDenseView(destination.*, destination_info, destination_storage);
+    };
+    const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
+    if (!copyDenseToDestination(&dense_destination, validated_dense_destination, destination, destination_info)) return .invalid_argument;
     return .ok;
+}
+
+pub fn namedOperation(arguments: *const NamedOperationArguments) Status {
+    const name = arguments.function_name orelse return .invalid_argument;
+    return namedOperationWithViews(name, arguments.function_name_length, arguments.input_count, arguments.element_type, arguments.inputs[0..].ptr, &arguments.destination, arguments.permutation[0..].ptr, max_inputs);
+}
+
+pub fn namedOperationV2(arguments: *const NamedOperationArgumentsV2) Status {
+    const name = arguments.function_name orelse return .invalid_argument;
+    const inputs = arguments.inputs orelse return .invalid_argument;
+    const permutation = arguments.permutation orelse return .invalid_argument;
+    return namedOperationWithViews(name, arguments.function_name_length, arguments.input_count, arguments.element_type, inputs, &arguments.destination, permutation, max_named_inputs);
 }
 
 /// Stage a Metal/ZPU view into dense CPU memory for the optional provider.
@@ -756,6 +857,22 @@ pub export fn zpu_cpu_ml_set_named_operation_backend(
     return @intFromEnum(Status.ok);
 }
 
+pub export fn zpu_cpu_ml_set_named_operation_backend_v2(
+    backend: ?*const NamedOperationBackendV2,
+) callconv(.c) c_int {
+    if (backend) |candidate| {
+        if (candidate.abi_version != named_operation_backend_v2_abi_version or
+            candidate.query == null or candidate.operation == null)
+        {
+            return @intFromEnum(Status.invalid_argument);
+        }
+    }
+    lockBackend();
+    defer backend_mutex.unlock();
+    registered_named_operation_backend_v2 = if (backend) |candidate| candidate.* else null;
+    return @intFromEnum(Status.ok);
+}
+
 pub export fn zpu_cpu_ml_set_named_operation_catalog(
     catalog: ?*const NamedOperationCatalog,
 ) callconv(.c) c_int {
@@ -789,6 +906,13 @@ pub export fn zpu_cpu_ml_named_operation(
 ) callconv(.c) c_int {
     const args = arguments orelse return @intFromEnum(Status.invalid_argument);
     return @intFromEnum(namedOperation(args));
+}
+
+pub export fn zpu_cpu_ml_named_operation_v2(
+    arguments: ?*const NamedOperationArgumentsV2,
+) callconv(.c) c_int {
+    const args = arguments orelse return @intFromEnum(Status.invalid_argument);
+    return @intFromEnum(namedOperationV2(args));
 }
 
 fn testView(comptime T: type, data: []T, rank: u32, dimensions: [max_rank]usize, strides: [max_rank]usize) TensorView {
@@ -830,6 +954,12 @@ const NamedOperationProbe = struct {
 const NamedOperationCatalogProbe = struct {
     names: []const []const u8,
     calls: usize = 0,
+};
+
+const NamedOperationV2Probe = struct {
+    query_calls: usize = 0,
+    operation_calls: usize = 0,
+    dense_stride: usize = 0,
 };
 
 fn referenceProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
@@ -920,6 +1050,48 @@ fn namedOperationNameAtProvider(
     probe.calls += 1;
     function_name.* = probe.names[index].ptr;
     function_name_length.* = probe.names[index].len;
+    return @intFromEnum(Status.ok);
+}
+
+fn namedSum3Query(context: ?*anyopaque, function_name: [*]const u8, function_name_length: usize, signature: *NamedOperationSignature) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV2Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.query_calls += 1;
+    if (!std.mem.eql(u8, function_name[0..function_name_length], "zml_cpu_sum3_f32")) {
+        return @intFromEnum(Status.unsupported);
+    }
+    signature.* = .{
+        .input_count = 3,
+        .element_type = @intFromEnum(ElementType.float32),
+    };
+    return @intFromEnum(Status.ok);
+}
+
+fn namedSum3Provider(context: ?*anyopaque, arguments: *const NamedOperationArgumentsV2) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV2Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.operation_calls += 1;
+    const function_name = arguments.function_name orelse return @intFromEnum(Status.invalid_argument);
+    if (!std.mem.eql(u8, function_name[0..arguments.function_name_length], "zml_cpu_sum3_f32") or
+        arguments.input_count != 3 or arguments.element_type != @intFromEnum(ElementType.float32))
+    {
+        return @intFromEnum(Status.invalid_argument);
+    }
+    const inputs = arguments.inputs orelse return @intFromEnum(Status.invalid_argument);
+    const output = @as([*]f32, @ptrCast(@alignCast(arguments.destination.data orelse return @intFromEnum(Status.invalid_argument))));
+    probe.dense_stride = arguments.destination.strides[1];
+    if (arguments.destination.offset_bytes != 0 or arguments.destination.strides[0] != 1 or
+        arguments.destination.strides[1] != 2)
+    {
+        return @intFromEnum(Status.invalid_argument);
+    }
+    for (0..6) |index| {
+        var value: f32 = 0;
+        for (0..3) |input_index| {
+            const input = inputs[input_index];
+            const data = @as([*]const f32, @ptrCast(@alignCast(input.data orelse return @intFromEnum(Status.invalid_argument))));
+            value += data[index];
+        }
+        output[index] = value;
+    }
     return @intFromEnum(Status.ok);
 }
 
@@ -1161,6 +1333,63 @@ test "named CPU provider catalog exposes discoverable function names" {
     );
     try std.testing.expectEqual(@as(?[*]const u8, null), function_name);
     try std.testing.expectEqual(@as(usize, 0), function_name_length);
+}
+
+test "named CPU provider v2 carries a generic three-input graph" {
+    var left_storage = [_]f32{0} ** 12;
+    var middle_storage = [_]f32{0} ** 12;
+    var right_storage = [_]f32{0} ** 12;
+    for (0..6) |index| {
+        const row = index / 2;
+        const column = index % 2;
+        const storage_index = column + row * 4;
+        left_storage[storage_index] = @floatFromInt(index + 1);
+        middle_storage[storage_index] = @floatFromInt((index + 1) * 10);
+        right_storage[storage_index] = @floatFromInt((index + 1) * 100);
+    }
+    var destination_storage = [_]f32{12345.0} ** 12;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const inputs = [_]TensorView{
+        testView(f32, &left_storage, 2, dimensions, strides),
+        testView(f32, &middle_storage, 2, dimensions, strides),
+        testView(f32, &right_storage, 2, dimensions, strides),
+    };
+    const arguments = NamedOperationArgumentsV2{
+        .function_name = "zml_cpu_sum3_f32",
+        .function_name_length = "zml_cpu_sum3_f32".len,
+        .input_count = 3,
+        .element_type = @intFromEnum(ElementType.float32),
+        .reserved = 0,
+        .inputs = inputs[0..].ptr,
+        .destination = testView(f32, &destination_storage, 2, dimensions, strides),
+        .permutation = ([_]u32{ 0, 1 } ++ [_]u32{0} ** (max_rank - 2))[0..].ptr,
+    };
+    var probe = NamedOperationV2Probe{};
+    const backend = NamedOperationBackendV2{
+        .abi_version = named_operation_backend_v2_abi_version,
+        .context = @ptrCast(&probe),
+        .query = namedSum3Query,
+        .operation = namedSum3Provider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_backend_v2(&backend));
+    defer _ = zpu_cpu_ml_set_named_operation_backend_v2(null);
+
+    var signature = NamedOperationSignature{ .input_count = 0, .element_type = 0 };
+    try std.testing.expectEqual(Status.ok, namedOperationSupported("zml_cpu_sum3_f32", &signature));
+    try std.testing.expectEqual(@as(u32, 3), signature.input_count);
+    try std.testing.expectEqual(Status.ok, namedOperationV2(&arguments));
+    try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
+    try std.testing.expectEqual(@as(usize, 2), probe.dense_stride);
+    try std.testing.expectEqual(@as(f32, 111), destination_storage[0]);
+    try std.testing.expectEqual(@as(f32, 222), destination_storage[1]);
+    try std.testing.expectEqual(@as(f32, 333), destination_storage[4]);
+    try std.testing.expectEqual(@as(f32, 444), destination_storage[5]);
+    try std.testing.expectEqual(@as(f32, 555), destination_storage[8]);
+    try std.testing.expectEqual(@as(f32, 666), destination_storage[9]);
+    try std.testing.expectEqual(@as(f32, 12345.0), destination_storage[2]);
+    try std.testing.expectEqual(@as(f32, 12345.0), destination_storage[3]);
 }
 
 test "optional CPU provider preserves packed 4-bit tensor padding" {

@@ -26,8 +26,10 @@ extern "C" {
 #define ZPU_CPU_ML_OPERATION_ABI_VERSION 1u
 #define ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION 1u
 #define ZPU_CPU_ML_NAMED_OPERATION_CATALOG_ABI_VERSION 1u
+#define ZPU_CPU_ML_NAMED_OPERATION_V2_ABI_VERSION 2u
 #define ZPU_CPU_ML_MAX_RANK 16u
 #define ZPU_CPU_ML_MAX_INPUTS 2u
+#define ZPU_CPU_ML_MAX_NAMED_INPUTS 16u
 
 enum {
     ZPU_CPU_ML_STATUS_OK = 0,
@@ -148,6 +150,34 @@ typedef struct zpu_cpu_ml_named_operation_backend {
     zpu_cpu_ml_named_operation_fn operation;
 } zpu_cpu_ml_named_operation_backend;
 
+/* The v1 named ABI keeps its inline two-input array for source compatibility.
+ * v2 is additive: the provider receives a pointer to a bounded input array,
+ * allowing a graph entry point to expose more than two inputs without
+ * changing the layout of zpu_cpu_ml_named_operation_arguments. All pointed
+ * storage is borrowed for the duration of the callback and remains ordinary
+ * dense CPU memory. */
+typedef struct zpu_cpu_ml_named_operation_arguments_v2 {
+    const char *function_name;
+    size_t function_name_length;
+    uint32_t input_count;
+    uint32_t element_type;
+    uint32_t reserved;
+    const zpu_cpu_ml_tensor_view *inputs;
+    zpu_cpu_ml_tensor_view destination;
+    const uint32_t *permutation;
+} zpu_cpu_ml_named_operation_arguments_v2;
+
+typedef int (*zpu_cpu_ml_named_operation_v2_fn)(
+    void *context,
+    const zpu_cpu_ml_named_operation_arguments_v2 *arguments);
+
+typedef struct zpu_cpu_ml_named_operation_backend_v2 {
+    uint32_t abi_version;
+    void *context;
+    zpu_cpu_ml_named_operation_query_fn query;
+    zpu_cpu_ml_named_operation_v2_fn operation;
+} zpu_cpu_ml_named_operation_backend_v2;
+
 /* Optional discovery for the same named provider. The callback returns a
  * borrowed UTF-8 byte string that remains valid until the next catalog call
  * or catalog replacement. The adapter copies it before asking for the next
@@ -190,6 +220,10 @@ int zpu_cpu_ml_named_operation_supported(
     zpu_cpu_ml_named_operation_signature *signature);
 int zpu_cpu_ml_set_named_operation_backend(
     const zpu_cpu_ml_named_operation_backend *backend);
+/* Passing NULL unregisters the additive v2 provider. If both versions are
+ * registered, v2 has precedence for named operations. */
+int zpu_cpu_ml_set_named_operation_backend_v2(
+    const zpu_cpu_ml_named_operation_backend_v2 *backend);
 /* Passing NULL unregisters optional named-function discovery. */
 int zpu_cpu_ml_set_named_operation_catalog(
     const zpu_cpu_ml_named_operation_catalog *catalog);
@@ -200,6 +234,8 @@ int zpu_cpu_ml_named_operation_name_at(
     size_t *function_name_length);
 int zpu_cpu_ml_named_operation(
     const zpu_cpu_ml_named_operation_arguments *arguments);
+int zpu_cpu_ml_named_operation_v2(
+    const zpu_cpu_ml_named_operation_arguments_v2 *arguments);
 
 #ifdef __cplusplus
 }
