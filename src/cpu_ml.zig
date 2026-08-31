@@ -526,19 +526,21 @@ pub fn operation(arguments: *const OperationArguments) Status {
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
     @memset(destination_storage, 0);
+    const dense_destination = makeDenseView(arguments.destination, destination_info, destination_storage);
     var dense_arguments = OperationArguments{
         .operation = arguments.operation,
         .element_type = arguments.element_type,
         .input_count = arguments.input_count,
         .reserved = 0,
         .inputs = dense_inputs,
-        .destination = makeDenseView(arguments.destination, destination_info, destination_storage),
+        .destination = dense_destination,
         .permutation = arguments.permutation,
     };
     const status = providerStatus(callback(backend.context, &dense_arguments));
     if (status != .ok) return status;
-    const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
-    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
+    if (!std.meta.eql(dense_arguments.destination, dense_destination)) return .invalid_argument;
+    const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
+    if (!copyDenseToDestination(&dense_destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
     return .ok;
 }
 
@@ -645,6 +647,7 @@ fn namedOperationWithViews(
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
     @memset(destination_storage, 0);
+    const dense_destination = makeDenseView(destination.*, destination_info, destination_storage);
     var dense_permutation: [max_rank]u32 = @splat(0);
     for (0..destination_info.rank) |index| dense_permutation[index] = permutation[index];
 
@@ -657,10 +660,12 @@ fn namedOperationWithViews(
             .element_type = element_type,
             .reserved = 0,
             .inputs = dense_inputs[0..signature.input_count].ptr,
-            .destination = makeDenseView(destination.*, destination_info, destination_storage),
+            .destination = dense_destination,
             .permutation = dense_permutation[0..].ptr,
         };
-        break :blk providerStatus(callback(backend.context, &dense_arguments));
+        const provider_status = providerStatus(callback(backend.context, &dense_arguments));
+        if (!std.meta.eql(dense_arguments.destination, dense_destination)) break :blk Status.invalid_argument;
+        break :blk provider_status;
     } else if (legacy_backend) |backend| blk: {
         const callback = backend.operation orelse break :blk Status.unsupported;
         var legacy_inputs: [max_inputs]TensorView = std.mem.zeroes([max_inputs]TensorView);
@@ -672,22 +677,15 @@ fn namedOperationWithViews(
             .element_type = element_type,
             .reserved = 0,
             .inputs = legacy_inputs,
-            .destination = makeDenseView(destination.*, destination_info, destination_storage),
+            .destination = dense_destination,
             .permutation = dense_permutation,
         };
-        break :blk providerStatus(callback(backend.context, &dense_arguments));
+        const provider_status = providerStatus(callback(backend.context, &dense_arguments));
+        if (!std.meta.eql(dense_arguments.destination, dense_destination)) break :blk Status.invalid_argument;
+        break :blk provider_status;
     } else Status.unsupported;
     if (status != .ok) return status;
 
-    const dense_destination = if (v2_backend) |backend| blk: {
-        _ = backend;
-        // The v2 callback writes the same destination storage through its
-        // by-value TensorView. Reconstructing the view validates and scatters
-        // the borrowed dense bytes.
-        break :blk makeDenseView(destination.*, destination_info, destination_storage);
-    } else blk: {
-        break :blk makeDenseView(destination.*, destination_info, destination_storage);
-    };
     const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
     if (!copyDenseToDestination(&dense_destination, validated_dense_destination, destination, destination_info)) return .invalid_argument;
     return .ok;
@@ -736,8 +734,9 @@ fn tryProvider(arguments: *const TransposeArguments, source_info: ViewInfo, dest
     const status = providerStatus(callback(backend.context, &dense_arguments));
     if (status != .ok) return status;
 
-    const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
-    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
+    if (!std.meta.eql(dense_arguments.destination, dense_destination)) return .invalid_argument;
+    const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
+    if (!copyDenseToDestination(&dense_destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
     return .ok;
 }
 
