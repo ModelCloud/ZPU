@@ -1770,6 +1770,67 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         return 173;
     }
 
+    NSError *native_source_arbitrary_pipeline_error = nil;
+    NSError *adapter_source_arbitrary_pipeline_error = nil;
+    id<MTLComputePipelineState> native_source_arbitrary_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_source_arbitrary_function
+                                                       error:&native_source_arbitrary_pipeline_error];
+    id<MTLComputePipelineState> adapter_source_arbitrary_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_source_arbitrary_function
+                                                        error:&adapter_source_arbitrary_pipeline_error];
+    const NSUInteger source_arbitrary_argument_length = native_source_arbitrary_encoder.encodedLength;
+    id<MTLBuffer> native_source_arbitrary_argument_buffer =
+        [native_device newBufferWithLength:source_arbitrary_argument_length
+                                   options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_source_arbitrary_argument_buffer =
+        [adapter_device newBufferWithLength:source_arbitrary_argument_length
+                                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> native_source_arbitrary_command_buffer = [native_queue commandBuffer];
+    id<MTLCommandBuffer> adapter_source_arbitrary_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_source_arbitrary_compute_encoder =
+        [native_source_arbitrary_command_buffer computeCommandEncoder];
+    id<MTLComputeCommandEncoder> adapter_source_arbitrary_compute_encoder =
+        [adapter_source_arbitrary_command_buffer computeCommandEncoder];
+    BOOL source_arbitrary_execution_ok = NO;
+    if (native_source_arbitrary_pipeline != nil && adapter_source_arbitrary_pipeline != nil &&
+        native_source_arbitrary_argument_buffer != nil && adapter_source_arbitrary_argument_buffer != nil &&
+        native_source_arbitrary_compute_encoder != nil && adapter_source_arbitrary_compute_encoder != nil &&
+        source_arbitrary_argument_length != 0) {
+        for (NSUInteger index = 0; index < source_arbitrary_argument_length; ++index) {
+            ((uint8_t *)native_source_arbitrary_argument_buffer.contents)[index] = (uint8_t)(0xa5 ^ index);
+            ((uint8_t *)adapter_source_arbitrary_argument_buffer.contents)[index] = (uint8_t)(0xa5 ^ index);
+        }
+        [native_source_arbitrary_encoder setArgumentBuffer:native_source_arbitrary_argument_buffer offset:0];
+        [adapter_source_arbitrary_encoder setArgumentBuffer:adapter_source_arbitrary_argument_buffer offset:0];
+        [native_source_arbitrary_compute_encoder setComputePipelineState:native_source_arbitrary_pipeline];
+        [native_source_arbitrary_compute_encoder setBuffer:native_source_arbitrary_argument_buffer offset:0 atIndex:3];
+        [native_source_arbitrary_compute_encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+                                           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [native_source_arbitrary_compute_encoder endEncoding];
+        [native_source_arbitrary_command_buffer commit];
+        [native_source_arbitrary_command_buffer waitUntilCompleted];
+        [adapter_source_arbitrary_compute_encoder setComputePipelineState:adapter_source_arbitrary_pipeline];
+        [adapter_source_arbitrary_compute_encoder setBuffer:adapter_source_arbitrary_argument_buffer offset:0 atIndex:3];
+        [adapter_source_arbitrary_compute_encoder dispatchThreads:MTLSizeMake(1, 1, 1)
+                                            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [adapter_source_arbitrary_compute_encoder endEncoding];
+        [adapter_source_arbitrary_command_buffer commit];
+        [adapter_source_arbitrary_command_buffer waitUntilCompleted];
+        source_arbitrary_execution_ok =
+            native_source_arbitrary_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_source_arbitrary_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            memcmp(native_source_arbitrary_argument_buffer.contents,
+                   adapter_source_arbitrary_argument_buffer.contents,
+                   source_arbitrary_argument_length) == 0;
+    }
+    if (native_source_arbitrary_pipeline == nil || native_source_arbitrary_pipeline_error != nil ||
+        adapter_source_arbitrary_pipeline == nil || adapter_source_arbitrary_pipeline_error != nil ||
+        !source_arbitrary_execution_ok) {
+        fail_with_error("source-defined argument buffer CPU no-op execution failed",
+                        adapter_source_arbitrary_pipeline_error ?: native_source_arbitrary_pipeline_error);
+        return 189;
+    }
+
     id<MTLFunction> native_source_wide_function =
         [native_library newFunctionWithName:@"zpu_source_argument_buffer_wide"];
     id<MTLFunction> adapter_source_wide_function =

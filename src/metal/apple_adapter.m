@@ -114,9 +114,9 @@ static NSString *const zpu_cpu_argument_buffer_nested_function_name = @"zpu_cpu_
  * the CPU adapter's supported reflection surface. */
 static NSString *const zpu_cpu_argument_buffer_recursive_function_name = @"zpu_cpu_argument_buffer_recursive";
 /* Source-defined argument buffers use this implementation marker after the
- * parser has produced a complete CPU-side descriptor tree.  The marker is
- * deliberately not an executable shader profile: the source body is limited
- * to a metadata-only reference to the argument buffer. */
+ * parser has produced a complete CPU-side descriptor tree.  The only admitted
+ * source body is a metadata-only `(void)arguments;` reference, which executes
+ * through the deferred CPU/ZPU no-op command rather than arbitrary MSL. */
 static NSString *const zpu_cpu_source_argument_buffer_function_name = @"zpu_cpu_source_argument_buffer";
 /* Metadata-only marker for direct source kernels whose bindings can be
  * reflected by the CPU parser but whose arbitrary body is intentionally not
@@ -18274,6 +18274,8 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_MUL_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_source_argument_buffer_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SOURCE_NOOP;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_source_metadata_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SOURCE_NOOP;
         } else {
