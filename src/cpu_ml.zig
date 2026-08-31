@@ -10,11 +10,55 @@
 //! semantics.  The reference implementation is also the exact-layout
 //! fallback for views that cannot be represented by a dense compiler buffer.
 
+const builtin = @import("builtin");
 const std = @import("std");
 
 pub const max_rank: usize = 16;
 pub const max_inputs: usize = 2;
 pub const max_named_inputs: usize = 16;
+
+pub const CpuArchitecture = enum(u32) {
+    unknown = 0,
+    arm64 = 1,
+    x86_64 = 2,
+};
+
+pub const cpu_feature_advsimd: u32 = 1 << 0;
+pub const cpu_feature_avx: u32 = 1 << 1;
+pub const cpu_feature_avx2: u32 = 1 << 2;
+
+/// Return the architecture selected when this artifact was compiled. This is
+/// intentionally not a runtime host probe: a ZML bridge owns runtime CPU
+/// checks and remains free to select scalar, AdvSIMD/NEON, or AVX code paths.
+pub fn compiledCpuArch() CpuArchitecture {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => .arm64,
+        .x86_64 => .x86_64,
+        else => .unknown,
+    };
+}
+
+/// Return ISA features enabled in this artifact's compile target. No
+/// platform headers, OS calls, or Metal/PJRT dependencies are involved.
+pub fn compiledCpuFeatures() u32 {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => if (builtin.cpu.features.isEnabled(@intFromEnum(std.Target.aarch64.Feature.neon)))
+            cpu_feature_advsimd
+        else
+            0,
+        .x86_64 => blk: {
+            var features: u32 = 0;
+            if (builtin.cpu.features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx))) {
+                features |= cpu_feature_avx;
+            }
+            if (builtin.cpu.features.isEnabled(@intFromEnum(std.Target.x86.Feature.avx2))) {
+                features |= cpu_feature_avx2;
+            }
+            break :blk features;
+        },
+        else => 0,
+    };
+}
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -827,6 +871,14 @@ pub export fn zpu_cpu_ml_set_backend(backend: ?*const Backend) callconv(.c) c_in
     defer backend_mutex.unlock();
     registered_backend = if (backend) |candidate| candidate.* else null;
     return @intFromEnum(Status.ok);
+}
+
+pub export fn zpu_cpu_ml_compiled_cpu_arch() callconv(.c) u32 {
+    return @intFromEnum(compiledCpuArch());
+}
+
+pub export fn zpu_cpu_ml_compiled_cpu_features() callconv(.c) u32 {
+    return compiledCpuFeatures();
 }
 
 pub export fn zpu_cpu_ml_transpose(arguments: ?*const TransposeArguments) callconv(.c) c_int {

@@ -31,12 +31,28 @@ extern "C" {
 #define ZPU_CPU_ML_MAX_INPUTS 2u
 #define ZPU_CPU_ML_MAX_NAMED_INPUTS 16u
 
+/* These are compile-target facts, not runtime feature probes. A provider
+ * must perform its own runtime checks before executing an optional ISA path;
+ * the values never inspect the host OS and never imply a Metal device. */
+#define ZPU_CPU_ML_CPU_ARCH_UNKNOWN 0u
+#define ZPU_CPU_ML_CPU_ARCH_ARM64 1u
+#define ZPU_CPU_ML_CPU_ARCH_X86_64 2u
+#define ZPU_CPU_ML_CPU_FEATURE_ADVSIMD (1u << 0)
+#define ZPU_CPU_ML_CPU_FEATURE_AVX (1u << 1)
+#define ZPU_CPU_ML_CPU_FEATURE_AVX2 (1u << 2)
+
 enum {
     ZPU_CPU_ML_STATUS_OK = 0,
     ZPU_CPU_ML_STATUS_INVALID_ARGUMENT = -1,
     ZPU_CPU_ML_STATUS_UNSUPPORTED = -2,
     ZPU_CPU_ML_STATUS_OUT_OF_MEMORY = -3,
 };
+
+/* The standalone package reports only the CPU family and ISA features baked
+ * into this artifact. It does not call sysctl, CPUID, PJRT, Metal, or any
+ * other host-specific API. */
+uint32_t zpu_cpu_ml_compiled_cpu_arch(void);
+uint32_t zpu_cpu_ml_compiled_cpu_features(void);
 
 /* strides are measured in logical elements; 4-bit elements use one nibble */
 typedef struct zpu_cpu_ml_tensor_view {

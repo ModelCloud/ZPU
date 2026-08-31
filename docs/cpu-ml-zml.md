@@ -10,6 +10,10 @@ distribution. It is a host-OS-neutral static library plus
 - arm64 providers may dispatch AdvSIMD/NEON kernels, including on Apple
   silicon, and x86_64 providers may dispatch an AVX tier after their own
   target/runtime checks;
+- `zpu_cpu_ml_compiled_cpu_arch()` and
+  `zpu_cpu_ml_compiled_cpu_features()` report only the ISA compiled into the
+  artifact. They are not runtime probes; a provider remains responsible for
+  checking the running CPU before selecting AVX/AVX2 or another optional path;
 - the optional Apple-shaped adapter stages ZPU-owned tensor views into this
   ABI and copies successful results back into ZPU-owned storage.
 

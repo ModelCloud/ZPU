@@ -128,6 +128,12 @@ static int named_sum3(void *context, const zpu_cpu_ml_named_operation_arguments_
 }
 
 int main(void) {
+    const uint32_t cpu_arch = zpu_cpu_ml_compiled_cpu_arch();
+    const uint32_t cpu_features = zpu_cpu_ml_compiled_cpu_features();
+    if (cpu_arch == ZPU_CPU_ML_CPU_ARCH_UNKNOWN ||
+        ((cpu_features & ZPU_CPU_ML_CPU_FEATURE_AVX2) != 0 &&
+         (cpu_features & ZPU_CPU_ML_CPU_FEATURE_AVX) == 0)) return 94;
+
     zpu_cpu_ml_operation_arguments malformed_operation = {0};
     malformed_operation.operation = ZPU_CPU_ML_OPERATION_ADD;
     malformed_operation.element_type = ZPU_CPU_ML_ELEMENT_UINT32;
