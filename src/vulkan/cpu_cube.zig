@@ -1912,13 +1912,17 @@ var mosaic_command_write_offsets: [max_mosaic_work_items]usize = undefined;
 const max_mosaic_command_refs: usize = max_batch_commands * 64;
 var mosaic_command_indices: [max_mosaic_command_refs]usize = undefined;
 var mosaic_cached_bounds: [max_batch_commands]Rect = undefined;
+var mosaic_cached_geometry_revisions: [max_batch_commands]u64 = undefined;
 const MosaicPlanCache = struct {
     valid: bool = false,
+    commands_address: usize = 0,
     command_count: usize = 0,
     width: u32 = 0,
     height: u32 = 0,
     item_count: usize = 0,
     command_ref_count: usize = 0,
+    key: u64 = 0,
+    key_complete: bool = false,
 };
 var mosaic_plan_cache: MosaicPlanCache = .{};
 const BatchStaticReplayCache = struct {
@@ -2038,6 +2042,22 @@ fn mosaicRegionSpan(bounds: Rect, width: u32, height: u32, columns: usize, rows:
     };
 }
 
+const MosaicPlanKey = struct { value: u64, complete: bool };
+
+fn mosaicPlanKey(commands: []const DrawCommand) MosaicPlanKey {
+    // Geometry revisions are the command-stream contract for immutable
+    // prepared geometry. Include the command-buffer address so identical
+    // revision numbers from two live streams cannot alias the cached plan.
+    var value: u64 = 0xcbf29ce484222325 ^ @as(u64, @intFromPtr(commands.ptr));
+    var complete = true;
+    for (commands) |command| {
+        if (command.geometry_revision == 0) complete = false;
+        value ^= command.geometry_revision +% 0x9e3779b97f4a7c15;
+        value *%= 0x100000001b3;
+    }
+    return .{ .value = value, .complete = complete };
+}
+
 fn assignMosaicQueues(item_count: usize, queue_count: usize, queues: *[max_parallel_band_count]MosaicQueue) void {
     var topology: [max_parallel_band_count]cpu_locality.CpuTopology = undefined;
     const topology_count = cpu_locality.selectedCpuTopology(&topology);
@@ -2053,12 +2073,13 @@ fn assignMosaicQueues(item_count: usize, queue_count: usize, queues: *[max_paral
     }
 }
 
-fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []const PreparedDraw, command_count: usize, queues: *[max_parallel_band_count]MosaicQueue) ?struct { items: []const MosaicWorkItem, command_indices: []const usize } {
+fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []const PreparedDraw, commands: []const DrawCommand, command_count: usize, queues: *[max_parallel_band_count]MosaicQueue) ?struct { items: []const MosaicWorkItem, command_indices: []const usize } {
     if (queue_count == 0 or queue_count > max_parallel_band_count or width > std.math.maxInt(i32) or height > std.math.maxInt(i32)) return null;
     const columns = (@as(usize, width) + mosaic_region_size - 1) / mosaic_region_size;
     const rows = (@as(usize, height) + mosaic_region_size - 1) / mosaic_region_size;
     const item_count = columns * rows;
-    if (columns == 0 or rows == 0 or item_count > max_mosaic_work_items or prepared.len < command_count) return null;
+    if (columns == 0 or rows == 0 or item_count > max_mosaic_work_items or prepared.len < command_count or commands.len < command_count) return null;
+    const plan_key = mosaicPlanKey(commands[0..command_count]);
 
     // A large textured primitive split across supertiles can change the
     // floating-point origin of the existing fast interpolator at the split.
@@ -2071,15 +2092,29 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
         if (command.batch_fast and (span.x1 - span.x0 > 1 or span.y1 - span.y0 > 1) and (command.bounds.width > 32 or command.bounds.height > 32)) return null;
     }
 
-    if (mosaic_plan_cache.valid and mosaic_plan_cache.command_count == command_count and mosaic_plan_cache.width == width and mosaic_plan_cache.height == height) {
+    if (mosaic_plan_cache.valid and mosaic_plan_cache.commands_address == @intFromPtr(commands.ptr) and mosaic_plan_cache.command_count == command_count and mosaic_plan_cache.width == width and mosaic_plan_cache.height == height and
+        mosaic_plan_cache.item_count == item_count and mosaic_plan_cache.key_complete == plan_key.complete and mosaic_plan_cache.key == plan_key.value)
+    {
+        if (plan_key.complete) {
+            var same_revisions = true;
+            for (commands[0..command_count], 0..) |command, index| {
+                if (mosaic_cached_geometry_revisions[index] != command.geometry_revision) {
+                    same_revisions = false;
+                    break;
+                }
+            }
+            if (!same_revisions) return null;
+            assignMosaicQueues(item_count, queue_count, queues);
+            return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
+        }
         var same_bounds = true;
-        for (prepared[0..command_count], 0..) |command, index| {
-            if (!std.meta.eql(mosaic_cached_bounds[index], command.bounds)) {
+        for (prepared[0..command_count], 0..) |prepared_command, index| {
+            if (!std.meta.eql(mosaic_cached_bounds[index], prepared_command.bounds)) {
                 same_bounds = false;
                 break;
             }
         }
-        if (same_bounds and mosaic_plan_cache.item_count == item_count) {
+        if (same_bounds) {
             assignMosaicQueues(item_count, queue_count, queues);
             return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..mosaic_plan_cache.command_ref_count] };
         }
@@ -2134,8 +2169,11 @@ fn buildMosaicWorkPlan(width: u32, height: u32, queue_count: usize, prepared: []
             mosaic_command_write_offsets[region_item_index] = output + 1;
         };
     }
-    for (prepared[0..command_count], 0..) |command, index| mosaic_cached_bounds[index] = command.bounds;
-    mosaic_plan_cache = .{ .valid = true, .command_count = command_count, .width = width, .height = height, .item_count = item_count, .command_ref_count = reference_count };
+    for (prepared[0..command_count], 0..) |command, index| {
+        mosaic_cached_bounds[index] = command.bounds;
+        mosaic_cached_geometry_revisions[index] = commands[index].geometry_revision;
+    }
+    mosaic_plan_cache = .{ .valid = true, .commands_address = @intFromPtr(commands.ptr), .command_count = command_count, .width = width, .height = height, .item_count = item_count, .command_ref_count = reference_count, .key = plan_key.value, .key_complete = plan_key.complete };
     assignMosaicQueues(item_count, queue_count, queues);
     return .{ .items = mosaic_work_items[0..item_count], .command_indices = mosaic_command_indices[0..reference_count] };
 }
@@ -3498,7 +3536,7 @@ fn runMosaicBatch(context: *MosaicBatchDraw, worker_index: usize, comptime count
         while (completed.load(.acquire) != context.queue_count) std.atomic.spinLoopHint();
     }
     if (worker_index == 0) {
-        if (buildMosaicWorkPlan(context.width, context.height, context.queue_count, context.prepared, context.commands.len, &context.queues)) |plan| {
+        if (buildMosaicWorkPlan(context.width, context.height, context.queue_count, context.prepared, context.commands, context.commands.len, &context.queues)) |plan| {
             context.work_items = plan.items;
             context.command_indices = plan.command_indices;
         } else {
@@ -4533,12 +4571,15 @@ test "dynamic parallel bands cover odd-height rows without gaps" {
 
 test "Mosaic work plan keeps ordered region references and balanced owners" {
     mosaic_plan_cache.valid = false;
+    var commands = [_]DrawCommand{ std.mem.zeroes(DrawCommand), std.mem.zeroes(DrawCommand) };
+    commands[0].geometry_revision = 1;
+    commands[1].geometry_revision = 2;
     var prepared = [_]PreparedDraw{
         .{ .bounds = .{ .x = 0, .y = 0, .width = 100, .height = 100 } },
         .{ .bounds = .{ .x = 200, .y = 200, .width = 100, .height = 100 } },
     };
     var queues: [max_parallel_band_count]MosaicQueue = undefined;
-    const plan = buildMosaicWorkPlan(300, 300, 2, &prepared, prepared.len, &queues) orelse return error.TestUnexpectedResult;
+    const plan = buildMosaicWorkPlan(300, 300, 2, &prepared, &commands, prepared.len, &queues) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 4), plan.items.len);
     try std.testing.expectEqual(@as(usize, 5), plan.command_indices.len);
     var owned_items: usize = 0;
