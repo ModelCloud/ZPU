@@ -15,6 +15,7 @@
 
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
+#include "zpu/cpu_ml.h"
 
 static const char *const kShaderSource =
     "#include <metal_stdlib>\n"
@@ -13984,9 +13985,43 @@ static int test_adapter_packed_depth_stencil_blit_options(id<MTLDevice> adapter_
     return 0;
 }
 
+typedef struct {
+    NSUInteger calls;
+} ZPUCPUMLProviderProbe;
+
+/* This callback stands in for an external ZML/cpu provider. It receives only
+ * dense CPU staging and proves that the Metal-shaped dispatch reaches the
+ * host-OS-neutral provider ABI before the native Metal oracle is run. */
+static int zpu_test_cpu_ml_divide_provider(
+    void *context, const zpu_cpu_ml_operation_arguments *arguments) {
+    ZPUCPUMLProviderProbe *probe = (ZPUCPUMLProviderProbe *)context;
+    if (probe == NULL || arguments == NULL ||
+        arguments->operation != ZPU_CPU_ML_OPERATION_DIVIDE ||
+        arguments->element_type != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->input_count != 2 || arguments->inputs[0].offset_bytes != 0 ||
+        arguments->inputs[1].offset_bytes != 0 || arguments->destination.offset_bytes != 0 ||
+        arguments->inputs[0].strides[0] != 1 || arguments->inputs[0].strides[1] != 4 ||
+        arguments->inputs[1].strides[0] != 1 || arguments->inputs[1].strides[1] != 4 ||
+        arguments->destination.strides[0] != 1 || arguments->destination.strides[1] != 4) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    const float *left = (const float *)arguments->inputs[0].data;
+    const float *right = (const float *)arguments->inputs[1].data;
+    float *destination = (float *)arguments->destination.data;
+    if (left == NULL || right == NULL || destination == NULL || arguments->inputs[0].rank != 2 ||
+        arguments->inputs[0].dimensions[0] != 4 || arguments->inputs[0].dimensions[1] != 3) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->calls;
+    for (NSUInteger index = 0; index < 12; ++index) destination[index] = left[index] / right[index];
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
 /* Float32 tensor division is a registered CPU profile. The native kernel is
  * only an arithmetic oracle; the adapter command buffer retains and reads
- * ZPU-owned tensors at commit time. */
+ * ZPU-owned tensors at commit time. This test additionally installs the
+ * optional ZML/cpu-shaped provider ABI, without using native Metal for the
+ * adapter execution. */
 static int test_metal4_cpu_float32_division_profile(
     id<MTLDevice> nativeDevice, id<MTLDevice> adapterDevice,
     id<MTLLibrary> nativeLibrary, id<MTLLibrary> adapterLibrary,
@@ -14068,7 +14103,15 @@ static int test_metal4_cpu_float32_division_profile(
     [commitOptions addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
         feedbackError = feedback.error;
     }];
+    ZPUCPUMLProviderProbe providerProbe = {0};
+    const zpu_cpu_ml_operation_backend provider = {
+        .abi_version = ZPU_CPU_ML_OPERATION_ABI_VERSION,
+        .context = &providerProbe,
+        .operation = zpu_test_cpu_ml_divide_provider,
+    };
+    const int providerRegistration = zpu_cpu_ml_set_operation_backend(&provider);
     [adapterQueue commit:commandBuffers count:1 options:commitOptions];
+    const int providerUnregistration = zpu_cpu_ml_set_operation_backend(NULL);
     if (output != nil) [output getBytes:adapterValues strides:strides
                         fromSliceOrigin:zero sliceDimensions:dimensions];
 
@@ -14095,7 +14138,8 @@ static int test_metal4_cpu_float32_division_profile(
     [nativeEncoder endEncoding];
     [nativeCommandBuffer commit];
     [nativeCommandBuffer waitUntilCompleted];
-    if (adapterError != nil || pipeline == nil || left == nil || right == nil || output == nil ||
+    if (providerRegistration != ZPU_CPU_ML_STATUS_OK || providerUnregistration != ZPU_CPU_ML_STATUS_OK ||
+        providerProbe.calls != 1 || adapterError != nil || pipeline == nil || left == nil || right == nil || output == nil ||
         table == nil || commandBuffer == nil || encoder == nil || feedbackError != nil ||
         nativeQueue == nil || nativeFunction == nil || nativePipeline == nil || nativeError != nil ||
         nativeCommandBuffer.status != MTLCommandBufferStatusCompleted || nativeOutput == nil ||

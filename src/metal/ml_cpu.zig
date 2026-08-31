@@ -13,6 +13,7 @@
 const std = @import("std");
 
 pub const max_rank: usize = 16;
+pub const max_inputs: usize = 2;
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -58,8 +59,54 @@ pub const Backend = extern struct {
     transpose: ?TransposeFn,
 };
 
+pub const Operation = enum(u32) {
+    identity = 1,
+    transpose = 2,
+    add = 3,
+    subtract = 4,
+    divide = 5,
+    multiply = 6,
+    matmul = 7,
+};
+
+pub const ElementType = enum(u32) {
+    float32 = 1,
+    float16 = 2,
+    bfloat16 = 3,
+    int8 = 4,
+    uint8 = 5,
+    int16 = 6,
+    uint16 = 7,
+    int32 = 8,
+    uint32 = 9,
+    int4 = 10,
+    uint4 = 11,
+};
+
+pub const OperationArguments = extern struct {
+    operation: u32,
+    element_type: u32,
+    input_count: u32,
+    reserved: u32,
+    inputs: [max_inputs]TensorView,
+    destination: TensorView,
+    permutation: [max_rank]u32,
+};
+
+pub const OperationFn = *const fn (
+    context: ?*anyopaque,
+    arguments: *const OperationArguments,
+) callconv(.c) c_int;
+pub const OperationBackend = extern struct {
+    abi_version: u32,
+    context: ?*anyopaque,
+    operation: ?OperationFn,
+};
+pub const operation_backend_abi_version: u32 = 1;
+
 var backend_mutex: std.atomic.Mutex = .unlocked;
 var registered_backend: ?Backend = null;
+var registered_operation_backend: ?OperationBackend = null;
 
 fn lockBackend() void {
     while (!backend_mutex.tryLock()) std.atomic.spinLoopHint();
@@ -69,6 +116,12 @@ fn backendSnapshot() ?Backend {
     lockBackend();
     defer backend_mutex.unlock();
     return registered_backend;
+}
+
+fn operationBackendSnapshot() ?OperationBackend {
+    lockBackend();
+    defer backend_mutex.unlock();
+    return registered_operation_backend;
 }
 
 fn checkedAdd(a: usize, b: usize) ?usize {
@@ -291,6 +344,94 @@ fn providerStatus(raw: c_int) Status {
     };
 }
 
+fn operationInputCount(kind: Operation) ?usize {
+    return switch (kind) {
+        .identity, .transpose => 1,
+        .add, .subtract, .divide, .multiply, .matmul => 2,
+    };
+}
+
+fn operationFromRaw(raw: u32) ?Operation {
+    return switch (raw) {
+        @intFromEnum(Operation.identity) => .identity,
+        @intFromEnum(Operation.transpose) => .transpose,
+        @intFromEnum(Operation.add) => .add,
+        @intFromEnum(Operation.subtract) => .subtract,
+        @intFromEnum(Operation.divide) => .divide,
+        @intFromEnum(Operation.multiply) => .multiply,
+        @intFromEnum(Operation.matmul) => .matmul,
+        else => null,
+    };
+}
+
+fn elementTypeFromRaw(raw: u32) ?ElementType {
+    return switch (raw) {
+        @intFromEnum(ElementType.float32) => .float32,
+        @intFromEnum(ElementType.float16) => .float16,
+        @intFromEnum(ElementType.bfloat16) => .bfloat16,
+        @intFromEnum(ElementType.int8) => .int8,
+        @intFromEnum(ElementType.uint8) => .uint8,
+        @intFromEnum(ElementType.int16) => .int16,
+        @intFromEnum(ElementType.uint16) => .uint16,
+        @intFromEnum(ElementType.int32) => .int32,
+        @intFromEnum(ElementType.uint32) => .uint32,
+        @intFromEnum(ElementType.int4) => .int4,
+        @intFromEnum(ElementType.uint4) => .uint4,
+        else => null,
+    };
+}
+
+/// Stage an operation's raw ZPU views into dense CPU views for the optional
+/// ZML/cpu provider. The provider never sees an Apple resource or an
+/// Apple-specific tensor layout. A successful provider call is scattered back
+/// into the original destination only after the callback returns successfully.
+pub fn operation(arguments: *const OperationArguments) Status {
+    const operation_kind = operationFromRaw(arguments.operation) orelse return .invalid_argument;
+    _ = elementTypeFromRaw(arguments.element_type) orelse return .invalid_argument;
+    const expected_inputs = operationInputCount(operation_kind) orelse return .invalid_argument;
+    if (arguments.input_count != expected_inputs) return .invalid_argument;
+    const backend = operationBackendSnapshot() orelse return .unsupported;
+    const callback = backend.operation orelse return .unsupported;
+
+    var input_info: [max_inputs]?ViewInfo = @splat(null);
+    var input_storage: [max_inputs]?[]u8 = @splat(null);
+    defer for (&input_storage) |*storage| {
+        if (storage.*) |bytes| std.heap.c_allocator.free(bytes);
+    };
+    var dense_inputs: [max_inputs]TensorView = undefined;
+    for (0..expected_inputs) |index| {
+        input_info[index] = validateView(&arguments.inputs[index]) orelse return .invalid_argument;
+        const info = input_info[index].?;
+        const byte_count = denseByteCount(info) orelse return .invalid_argument;
+        const storage = std.heap.c_allocator.alloc(u8, byte_count) catch return .out_of_memory;
+        input_storage[index] = storage;
+        @memset(storage, 0);
+        if (!copySourceToDense(&arguments.inputs[index], info, storage)) return .invalid_argument;
+        dense_inputs[index] = makeDenseView(arguments.inputs[index], info, storage);
+    }
+
+    const destination_info = validateView(&arguments.destination) orelse return .invalid_argument;
+    const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
+    const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
+    defer std.heap.c_allocator.free(destination_storage);
+    @memset(destination_storage, 0);
+    var dense_arguments = OperationArguments{
+        .operation = arguments.operation,
+        .element_type = arguments.element_type,
+        .input_count = arguments.input_count,
+        .reserved = 0,
+        .inputs = dense_inputs,
+        .destination = makeDenseView(arguments.destination, destination_info, destination_storage),
+        .permutation = arguments.permutation,
+    };
+    const status = providerStatus(callback(backend.context, &dense_arguments));
+    if (status != .ok) return status;
+    const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
+    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination,
+                                 &arguments.destination, destination_info)) return .invalid_argument;
+    return .ok;
+}
+
 /// Stage a Metal/ZPU view into dense CPU memory for the optional provider.
 ///
 /// ZML's CPU buffer import contract is intentionally narrower than Metal's
@@ -416,6 +557,23 @@ pub export fn zpu_cpu_ml_transpose(arguments: ?*const TransposeArguments) callco
     return @intFromEnum(transpose(args));
 }
 
+pub export fn zpu_cpu_ml_set_operation_backend(backend: ?*const OperationBackend) callconv(.c) c_int {
+    if (backend) |candidate| {
+        if (candidate.abi_version != operation_backend_abi_version or candidate.operation == null) {
+            return @intFromEnum(Status.invalid_argument);
+        }
+    }
+    lockBackend();
+    defer backend_mutex.unlock();
+    registered_operation_backend = if (backend) |candidate| candidate.* else null;
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn zpu_cpu_ml_operation(arguments: ?*const OperationArguments) callconv(.c) c_int {
+    const args = arguments orelse return @intFromEnum(Status.invalid_argument);
+    return @intFromEnum(operation(args));
+}
+
 fn testView(comptime T: type, data: []T, rank: u32, dimensions: [max_rank]usize, strides: [max_rank]usize) TensorView {
     return .{
         .data = @ptrCast(data.ptr),
@@ -436,6 +594,14 @@ const ProviderProbe = struct {
     destination_stride: usize = 0,
 };
 
+const OperationProbe = struct {
+    calls: usize = 0,
+    operation: u32 = 0,
+    element_type: u32 = 0,
+    source_stride: usize = 0,
+    destination_stride: usize = 0,
+};
+
 fn referenceProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
     const probe = @as(*ProviderProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
     probe.calls += 1;
@@ -451,6 +617,29 @@ fn decliningProvider(context: ?*anyopaque, arguments: *const TransposeArguments)
     probe.calls += 1;
     _ = arguments;
     return @intFromEnum(Status.unsupported);
+}
+
+fn addOperationProvider(context: ?*anyopaque, arguments: *const OperationArguments) callconv(.c) c_int {
+    const probe = @as(*OperationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.calls += 1;
+    probe.operation = arguments.operation;
+    probe.element_type = arguments.element_type;
+    probe.source_stride = arguments.inputs[0].strides[1];
+    probe.destination_stride = arguments.destination.strides[1];
+    if (arguments.operation != @intFromEnum(Operation.add) or
+        arguments.element_type != @intFromEnum(ElementType.uint32) or
+        arguments.input_count != 2 or arguments.inputs[0].offset_bytes != 0 or
+        arguments.inputs[1].offset_bytes != 0 or arguments.destination.offset_bytes != 0 or
+        arguments.inputs[0].strides[0] != 1 or arguments.inputs[0].strides[1] != 2 or
+        arguments.inputs[1].strides[0] != 1 or arguments.inputs[1].strides[1] != 2 or
+        arguments.destination.strides[0] != 1 or arguments.destination.strides[1] != 2) {
+        return @intFromEnum(Status.invalid_argument);
+    }
+    const left = @as([*]const u32, @ptrCast(@alignCast(arguments.inputs[0].data orelse return @intFromEnum(Status.invalid_argument))));
+    const right = @as([*]const u32, @ptrCast(@alignCast(arguments.inputs[1].data orelse return @intFromEnum(Status.invalid_argument))));
+    const output = @as([*]u32, @ptrCast(@alignCast(arguments.destination.data orelse return @intFromEnum(Status.invalid_argument))));
+    for (0..6) |index| output[index] = left[index] + right[index];
+    return @intFromEnum(Status.ok);
 }
 
 fn providerTestArguments(source_storage: []u32, destination_storage: []u32,
@@ -538,6 +727,69 @@ test "unsupported CPU provider falls back to exact ZPU transpose" {
     try std.testing.expectEqual(@as(u32, 14), destination_storage[5]);
     try std.testing.expectEqual(@as(u32, 16), destination_storage[6]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
+}
+
+test "optional CPU operation provider receives dense ZML views" {
+    var left_storage = [_]u32{0} ** 12;
+    var right_storage = [_]u32{0} ** 12;
+    left_storage[0] = 1;
+    left_storage[1] = 2;
+    left_storage[4] = 3;
+    left_storage[5] = 4;
+    left_storage[8] = 5;
+    left_storage[9] = 6;
+    right_storage[0] = 10;
+    right_storage[1] = 20;
+    right_storage[4] = 30;
+    right_storage[5] = 40;
+    right_storage[8] = 50;
+    right_storage[9] = 60;
+    var destination_storage = [_]u32{0xcafebabe} ** 12;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.add),
+        .element_type = @intFromEnum(ElementType.uint32),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{
+            .{ .data = @ptrCast(left_storage[0..].ptr), .byte_length = left_storage.len * @sizeOf(u32),
+               .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions,
+               .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+            .{ .data = @ptrCast(right_storage[0..].ptr), .byte_length = right_storage.len * @sizeOf(u32),
+               .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions,
+               .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+        },
+        .destination = .{ .data = @ptrCast(destination_storage[0..].ptr), .byte_length = destination_storage.len * @sizeOf(u32),
+            .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions,
+            .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+        .permutation = @splat(0),
+    };
+    var probe = OperationProbe{};
+    const backend = OperationBackend{
+        .abi_version = operation_backend_abi_version,
+        .context = @ptrCast(&probe),
+        .operation = addOperationProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_operation_backend(&backend));
+    defer _ = zpu_cpu_ml_set_operation_backend(null);
+
+    try std.testing.expectEqual(Status.ok, operation(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@intFromEnum(Operation.add), probe.operation);
+    try std.testing.expectEqual(@intFromEnum(ElementType.uint32), probe.element_type);
+    try std.testing.expectEqual(@as(usize, 2), probe.source_stride);
+    try std.testing.expectEqual(@as(usize, 2), probe.destination_stride);
+    try std.testing.expectEqual(@as(u32, 11), destination_storage[0]);
+    try std.testing.expectEqual(@as(u32, 22), destination_storage[1]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[2]);
+    try std.testing.expectEqual(@as(u32, 33), destination_storage[4]);
+    try std.testing.expectEqual(@as(u32, 44), destination_storage[5]);
+    try std.testing.expectEqual(@as(u32, 55), destination_storage[8]);
+    try std.testing.expectEqual(@as(u32, 66), destination_storage[9]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[2]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[6]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
 }
 

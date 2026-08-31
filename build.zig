@@ -384,6 +384,7 @@ pub fn build(b: *std.Build) void {
     run_cpu_ml_unit_tests.step.dependOn(&require_limited.step);
     const cpu_ml_unit_test_step = b.step("cpu-ml-test", "Run the host-OS-neutral CPU ML unit tests");
     cpu_ml_unit_test_step.dependOn(&run_cpu_ml_unit_tests.step);
+    const cpu_ml_c_api_step = b.step("cpu-ml-c-api", "Run the standalone host-OS-neutral CPU ML C ABI test");
 
     const metal_layer = b.addLibrary(.{
         .name = "zpu_metal",
@@ -447,6 +448,23 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
     test_step.dependOn(cpu_ml_unit_test_step);
+
+    if (!cross_compiling) {
+        const cpu_ml_c_api_tests = b.addExecutable(.{
+            .name = "zpu-cpu-ml-c-api-test",
+            .root_module = b.createModule(.{ .target = b.graph.host, .optimize = .Debug }),
+        });
+        cpu_ml_c_api_tests.root_module.addCSourceFile(.{ .file = b.path("test/cpu_ml_c_api.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        cpu_ml_c_api_tests.root_module.addIncludePath(b.path("include"));
+        cpu_ml_c_api_tests.root_module.link_libc = true;
+        cpu_ml_c_api_tests.root_module.linkLibrary(cpu_ml_layer);
+        const run_cpu_ml_c_api_tests = b.addRunArtifact(cpu_ml_c_api_tests);
+        run_cpu_ml_c_api_tests.step.dependOn(&require_limited.step);
+        cpu_ml_c_api_step.dependOn(&run_cpu_ml_c_api_tests.step);
+        test_step.dependOn(cpu_ml_c_api_step);
+    } else {
+        cpu_ml_c_api_step.dependOn(&cpu_ml_layer.step);
+    }
     const metal_c_api_step = b.step("metal-c-api", "Run the portable C ABI and malformed-input tests");
 
     if (!cross_compiling) {

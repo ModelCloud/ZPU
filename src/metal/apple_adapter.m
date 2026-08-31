@@ -5657,7 +5657,55 @@ static BOOL zpu_tensor_make_cpu_ml_view(ZPUTensor *tensor, zpu_cpu_ml_tensor_vie
     return zpu_tensor_read_extents(tensor->_dimensions, tensor->_dimensions.rank,
                                    view->dimensions, NO) &&
         zpu_tensor_read_extents(tensor->_strides, tensor->_dimensions.rank,
-                                 view->strides, NO);
+        view->strides, NO);
+}
+
+static uint32_t zpu_cpu_ml_element_type(ZPUTensor *tensor) {
+    if (tensor == nil) return 0;
+    switch (tensor->_dataType) {
+        case MTLTensorDataTypeFloat32: return ZPU_CPU_ML_ELEMENT_FLOAT32;
+        case MTLTensorDataTypeFloat16: return ZPU_CPU_ML_ELEMENT_FLOAT16;
+        case MTLTensorDataTypeBFloat16: return ZPU_CPU_ML_ELEMENT_BFLOAT16;
+        case MTLTensorDataTypeInt8: return ZPU_CPU_ML_ELEMENT_INT8;
+        case MTLTensorDataTypeUInt8: return ZPU_CPU_ML_ELEMENT_UINT8;
+        case MTLTensorDataTypeInt16: return ZPU_CPU_ML_ELEMENT_INT16;
+        case MTLTensorDataTypeUInt16: return ZPU_CPU_ML_ELEMENT_UINT16;
+        case MTLTensorDataTypeInt32: return ZPU_CPU_ML_ELEMENT_INT32;
+        case MTLTensorDataTypeUInt32: return ZPU_CPU_ML_ELEMENT_UINT32;
+        case MTLTensorDataTypeInt4: return ZPU_CPU_ML_ELEMENT_INT4;
+        case MTLTensorDataTypeUInt4: return ZPU_CPU_ML_ELEMENT_UINT4;
+        default: return 0;
+    }
+}
+
+static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
+                                           ZPUTensor *destination, uint32_t operation) {
+    if (source == nil || destination == nil || source->_dataType != destination->_dataType) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    const uint32_t elementType = zpu_cpu_ml_element_type(source);
+    if (elementType == 0) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    zpu_cpu_ml_operation_arguments arguments;
+    memset(&arguments, 0, sizeof(arguments));
+    arguments.operation = operation;
+    arguments.element_type = elementType;
+    arguments.input_count = right == nil ? 1 : 2;
+    if (!zpu_tensor_make_cpu_ml_view(source, &arguments.inputs[0]) ||
+        (right != nil && (!zpu_tensor_make_cpu_ml_view(right, &arguments.inputs[1]) ||
+                          right->_dataType != source->_dataType)) ||
+        !zpu_tensor_make_cpu_ml_view(destination, &arguments.destination)) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    if (operation == ZPU_CPU_ML_OPERATION_TRANSPOSE) {
+        if (source->_dimensions == nil || source->_dimensions.rank > ZPU_CPU_ML_MAX_RANK ||
+            source->_dimensions.rank != destination->_dimensions.rank) {
+            return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+        }
+        for (NSUInteger outputAxis = 0; outputAxis < source->_dimensions.rank; ++outputAxis) {
+            arguments.permutation[outputAxis] = (uint32_t)(source->_dimensions.rank - 1 - outputAxis);
+        }
+    }
+    return zpu_cpu_ml_operation(&arguments);
 }
 
 static BOOL zpu_tensor_transpose_reverse(ZPUTensor *source, ZPUTensor *destination) {
@@ -17343,6 +17391,12 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     const BOOL elementwise = addition || subtraction || division || integerMultiplication || multiplyF32 || multiplyF16 || multiplyBF16;
     const BOOL binary = elementwise || matmul;
     const NSUInteger inputCount = binary ? 3 : 2;
+    const uint32_t cpuMlOperation = identity ? ZPU_CPU_ML_OPERATION_IDENTITY :
+        transpose ? ZPU_CPU_ML_OPERATION_TRANSPOSE :
+        matmul ? ZPU_CPU_ML_OPERATION_MATMUL :
+        division ? ZPU_CPU_ML_OPERATION_DIVIDE :
+        addition ? ZPU_CPU_ML_OPERATION_ADD :
+        subtraction ? ZPU_CPU_ML_OPERATION_SUBTRACT : ZPU_CPU_ML_OPERATION_MULTIPLY;
     if (_ended || _owner == nil || _owner->_failed || _owner->_legacyBuffer == nil ||
         ![pipeline isKindOfClass:[ZPUMTL4MachineLearningPipeline class]] ||
         pipeline->_owner != _owner->_owner ||
@@ -17427,6 +17481,9 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         return;
     }
     if (!zpu_defer_operation(_owner->_legacyBuffer, ^BOOL {
+        const int providerStatus = zpu_tensor_try_cpu_ml_operation(source, right, destination, cpuMlOperation);
+        if (providerStatus == ZPU_CPU_ML_STATUS_OK) return YES;
+        if (providerStatus != ZPU_CPU_ML_STATUS_UNSUPPORTED) return NO;
         if (identity) return zpu_tensor_copy_identity(source, destination);
         if (transpose) return zpu_tensor_transpose_reverse(source, destination);
         if (subtractU8) return zpu_tensor_sub_u8(source, right, destination);

@@ -858,17 +858,19 @@ triangle path:
   adapter never routes them to native Metal
 
 - Any future ZML integration is CPU-only and optional. The adapter may use
-  ZML's generic CPU/PJRT compiler/runtime for dense tensor planning or
-  execution, but it must never select ZML's Metal platform or link its Metal
-  PJRT package. Metal tensor descriptors remain authoritative: the adapter
-  performs any required pack/unpack for explicit dimensions, element strides,
-  slice offsets, and Int4/UInt4 nibble storage before or after a ZML CPU call.
-  The installed `zpu/cpu_ml.h` header exposes the versioned
-  `zpu_cpu_ml_set_backend` hook for such a bridge; its transpose callback only
-  receives offset-zero dense CPU views, and returning `ZPU_CPU_ML_STATUS_UNSUPPORTED`
-  selects the exact ZPU reference implementation. Provider registration is
-  process-wide and the caller owns the provider context lifetime; unregister
-  only after its in-flight callbacks have completed.
+  only ZML's portable CPU package for dense tensor execution; it must never
+  select ZML's Metal platform or link its Metal/PJRT-GPU package. Metal tensor
+  descriptors remain authoritative: the adapter performs any required
+  pack/unpack for explicit dimensions, element strides, slice offsets, and
+  Int4/UInt4 nibble storage before or after a ZML CPU call. The installed
+  `zpu/cpu_ml.h` header exposes versioned `zpu_cpu_ml_set_backend` and
+  `zpu_cpu_ml_set_operation_backend` hooks. Both provider forms receive only
+  offset-zero dense CPU views; the operation provider also receives an
+  explicit operation and element-type identifier. Returning
+  `ZPU_CPU_ML_STATUS_UNSUPPORTED` selects the exact ZPU reference
+  implementation. Provider registration is process-wide and the caller owns
+  the provider context lifetime; unregister only after its in-flight callbacks
+  have completed.
   Backend selection is independent of the host operating system, so running
   ZPU on macOS does not imply a Metal execution target. If a target lacks a
   portable ZML CPU runtime artifact, the operation either uses the exact
