@@ -384,10 +384,15 @@ pub fn build(b: *std.Build) void {
         b.path("include/zpu/metal_apple.h"),
         "include/zpu/metal_apple.h",
     );
+    const install_cpu_ml_header = b.addInstallFile(
+        b.path("include/zpu/cpu_ml.h"),
+        "include/zpu/cpu_ml.h",
+    );
     const metal_install_step = b.step("metal-install", "Install the opt-in ZPU Metal-shaped static library");
     metal_install_step.dependOn(&install_metal_layer.step);
     metal_install_step.dependOn(&install_metal_header.step);
     metal_install_step.dependOn(&install_metal_apple_header.step);
+    metal_install_step.dependOn(&install_cpu_ml_header.step);
 
     const metal_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{

@@ -5,12 +5,16 @@
 #include <string.h>
 
 #include "zpu/metal.h"
+#include "zpu/cpu_ml.h"
 
 static int check_equal(const uint8_t *actual, const uint8_t *expected, size_t length) {
     return memcmp(actual, expected, length) == 0 ? 0 : 1;
 }
 
 int main(void) {
+    if (zpu_cpu_ml_set_backend(NULL) != ZPU_CPU_ML_STATUS_OK ||
+        zpu_cpu_ml_transpose(NULL) != ZPU_CPU_ML_STATUS_INVALID_ARGUMENT) return 90;
+
     uint8_t pixels[4 * 4 * 4];
     memset(pixels, 0xa5, sizeof(pixels));
 

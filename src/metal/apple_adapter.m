@@ -25,6 +25,7 @@
 
 #include "zpu/metal.h"
 #include "zpu/metal_apple.h"
+#include "zpu/cpu_ml.h"
 
 /* The portable runtime exposes this adapter-private hook so the richer
  * Objective-C sparse-resource model can still be inserted at an exact point
@@ -47,27 +48,6 @@ extern int zpu_metal_render_encoder_set_viewports_precise(
     zpu_metal_render_encoder *encoder, const zpu_metal_precise_viewport *viewports, size_t count);
 extern int zpu_metal_render_encoder_set_scissor_rects(
     zpu_metal_render_encoder *encoder, const zpu_metal_scissor_rect *scissors, size_t count);
-
-/* Portable CPU tensor backend ABI. This is intentionally private to the
- * adapter: ZPU owns the Metal object graph, while the raw-view executor can
- * later be replaced by an optional generic ZML CPU runner without importing
- * Metal or an Apple-only dependency into the CPU backend. */
-#define ZPU_METAL_CPU_ML_MAX_RANK 16u
-typedef struct zpu_metal_cpu_ml_tensor_view {
-    uint8_t *data;
-    size_t byte_length;
-    size_t offset_bytes;
-    uint32_t rank;
-    uint32_t element_bits;
-    size_t dimensions[ZPU_METAL_CPU_ML_MAX_RANK];
-    size_t strides[ZPU_METAL_CPU_ML_MAX_RANK];
-} zpu_metal_cpu_ml_tensor_view;
-typedef struct zpu_metal_cpu_ml_transpose_arguments {
-    zpu_metal_cpu_ml_tensor_view source;
-    zpu_metal_cpu_ml_tensor_view destination;
-    uint32_t permutation[ZPU_METAL_CPU_ML_MAX_RANK];
-} zpu_metal_cpu_ml_transpose_arguments;
-extern int zpu_metal_cpu_ml_transpose(const zpu_metal_cpu_ml_transpose_arguments *arguments);
 
 /* These enum members are introduced after the adapter's iOS 15 deployment
  * target. Their Metal ABI bit positions are stable, so keep the internal
@@ -5663,10 +5643,10 @@ static BOOL zpu_tensor_copy_identity(ZPUTensor *source, ZPUTensor *destination) 
     return YES;
 }
 
-static BOOL zpu_tensor_make_cpu_ml_view(ZPUTensor *tensor, zpu_metal_cpu_ml_tensor_view *view) {
+static BOOL zpu_tensor_make_cpu_ml_view(ZPUTensor *tensor, zpu_cpu_ml_tensor_view *view) {
     if (tensor == nil || view == NULL || tensor->_storageBuffer == nil ||
         tensor->_storageBuffer->_zpuBuffer == NULL || tensor->_dimensions == nil ||
-        tensor->_strides == nil || tensor->_dimensions.rank > ZPU_METAL_CPU_ML_MAX_RANK ||
+        tensor->_strides == nil || tensor->_dimensions.rank > ZPU_CPU_ML_MAX_RANK ||
         tensor->_storageBuffer.contents == NULL) return NO;
     memset(view, 0, sizeof(*view));
     view->data = (uint8_t *)tensor->_storageBuffer.contents;
@@ -5684,14 +5664,14 @@ static BOOL zpu_tensor_transpose_reverse(ZPUTensor *source, ZPUTensor *destinati
     if (source == nil || destination == nil || source->_owner == nil ||
         source->_owner != destination->_owner || source->_dimensions == nil ||
         destination->_dimensions == nil || source->_dimensions.rank != destination->_dimensions.rank ||
-        source->_dimensions.rank > ZPU_METAL_CPU_ML_MAX_RANK) return NO;
-    zpu_metal_cpu_ml_transpose_arguments arguments;
+        source->_dimensions.rank > ZPU_CPU_ML_MAX_RANK) return NO;
+    zpu_cpu_ml_transpose_arguments arguments;
     if (!zpu_tensor_make_cpu_ml_view(source, &arguments.source) ||
         !zpu_tensor_make_cpu_ml_view(destination, &arguments.destination)) return NO;
     for (NSUInteger outputAxis = 0; outputAxis < source->_dimensions.rank; ++outputAxis) {
         arguments.permutation[outputAxis] = (uint32_t)(source->_dimensions.rank - 1 - outputAxis);
     }
-    return zpu_metal_cpu_ml_transpose(&arguments) == 0;
+    return zpu_cpu_ml_transpose(&arguments) == ZPU_CPU_ML_STATUS_OK;
 }
 
 static BOOL zpu_tensor_binary_packed4(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination,

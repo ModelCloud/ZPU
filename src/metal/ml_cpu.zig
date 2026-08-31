@@ -43,6 +43,34 @@ pub const TransposeArguments = extern struct {
     permutation: [max_rank]u32,
 };
 
+/// Versioned optional CPU provider ABI.  The callback is deliberately
+/// operation-specific for now: it gives a future ZML bridge a small, stable
+/// insertion point without pretending that arbitrary ML graphs are already
+/// supported by this layer.
+pub const backend_abi_version: u32 = 1;
+pub const TransposeFn = *const fn (
+    context: ?*anyopaque,
+    arguments: *const TransposeArguments,
+) callconv(.c) c_int;
+pub const Backend = extern struct {
+    abi_version: u32,
+    context: ?*anyopaque,
+    transpose: ?TransposeFn,
+};
+
+var backend_mutex: std.atomic.Mutex = .unlocked;
+var registered_backend: ?Backend = null;
+
+fn lockBackend() void {
+    while (!backend_mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn backendSnapshot() ?Backend {
+    lockBackend();
+    defer backend_mutex.unlock();
+    return registered_backend;
+}
+
 fn checkedAdd(a: usize, b: usize) ?usize {
     if (b > std.math.maxInt(usize) - a) return null;
     return a + b;
@@ -224,6 +252,81 @@ fn copySourceToDense(source: *const TensorView, source_info: ViewInfo, dense: []
     return true;
 }
 
+fn denseByteCount(info: ViewInfo) ?usize {
+    if (info.element_bits == 4) return info.element_count / 2 + info.element_count % 2;
+    return checkedMul(info.element_count, info.element_bytes);
+}
+
+fn makeDenseView(template: TensorView, info: ViewInfo, storage: []u8) TensorView {
+    var view = template;
+    view.data = storage.ptr;
+    view.byte_length = storage.len;
+    view.offset_bytes = 0;
+    view.strides = undefined;
+    denseStrides(template.dimensions[0..info.rank], &view.strides);
+    return view;
+}
+
+fn copyDenseToDestination(dense: *const TensorView, dense_info: ViewInfo,
+                         destination: *const TensorView, destination_info: ViewInfo) bool {
+    var output_coordinates: [max_rank]usize = @splat(0);
+    for (0..destination_info.element_count) |element| {
+        const destination_element = logicalElementOffset(destination,
+            output_coordinates[0..destination_info.rank]) orelse return false;
+        if (!copyElement(dense, dense_info, element, destination, destination_info, destination_element)) {
+            return false;
+        }
+        incrementCoordinates(&output_coordinates, destination.dimensions[0..destination_info.rank]);
+    }
+    return true;
+}
+
+fn providerStatus(raw: c_int) Status {
+    return switch (raw) {
+        @intFromEnum(Status.ok) => .ok,
+        @intFromEnum(Status.invalid_argument) => .invalid_argument,
+        @intFromEnum(Status.unsupported) => .unsupported,
+        @intFromEnum(Status.out_of_memory) => .out_of_memory,
+        else => .invalid_argument,
+    };
+}
+
+/// Stage a Metal/ZPU view into dense CPU memory for the optional provider.
+///
+/// ZML's CPU buffer import contract is intentionally narrower than Metal's
+/// tensor view contract: the provider sees offset-zero, axis-0-fast, dense
+/// buffers only. A provider decline leaves the original destination untouched
+/// and falls through to the exact strided ZPU reference path.
+fn tryProvider(arguments: *const TransposeArguments, source_info: ViewInfo,
+               destination_info: ViewInfo) ?Status {
+    const backend = backendSnapshot() orelse return null;
+    const callback = backend.transpose orelse return .unsupported;
+    const source_bytes = denseByteCount(source_info) orelse return .invalid_argument;
+    const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
+    const source_storage = std.heap.c_allocator.alloc(u8, source_bytes) catch return .out_of_memory;
+    defer std.heap.c_allocator.free(source_storage);
+    const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
+    defer std.heap.c_allocator.free(destination_storage);
+    @memset(source_storage, 0);
+    @memset(destination_storage, 0);
+
+    if (!copySourceToDense(&arguments.source, source_info, source_storage)) return .invalid_argument;
+    const dense_source = makeDenseView(arguments.source, source_info, source_storage);
+    const dense_destination = makeDenseView(arguments.destination, destination_info, destination_storage);
+    var dense_arguments = TransposeArguments{
+        .source = dense_source,
+        .destination = dense_destination,
+        .permutation = arguments.permutation,
+    };
+    const status = providerStatus(callback(backend.context, &dense_arguments));
+    if (status != .ok) return status;
+
+    const validated_dense_destination = validateView(&dense_arguments.destination) orelse return .invalid_argument;
+    if (!copyDenseToDestination(&dense_arguments.destination, validated_dense_destination,
+                                 &arguments.destination, destination_info)) return .invalid_argument;
+    return .ok;
+}
+
 fn incrementCoordinates(coordinates: *[max_rank]usize, dimensions: []const usize) void {
     for (0..dimensions.len) |axis| {
         coordinates[axis] += 1;
@@ -232,10 +335,11 @@ fn incrementCoordinates(coordinates: *[max_rank]usize, dimensions: []const usize
     }
 }
 
-/// Execute a raw tensor transpose on CPU.  This function has no Metal or
-/// operating-system dependency and is suitable as the ABI-preserving fallback
-/// beneath either ZPU's scalar path or an optional ZML CPU plan.
-pub fn transpose(arguments: *const TransposeArguments) Status {
+/// Execute the exact raw-view tensor transpose. This is kept separate from
+/// `transpose` so an optional provider test/bridge can use the reference
+/// implementation on already-dense buffers without recursively re-entering
+/// provider dispatch.
+pub fn referenceTranspose(arguments: *const TransposeArguments) Status {
     const source_info = validateView(&arguments.source) orelse return .invalid_argument;
     const destination_info = validateView(&arguments.destination) orelse return .invalid_argument;
     if (!validatePermutation(arguments, source_info, destination_info)) return .invalid_argument;
@@ -283,7 +387,31 @@ pub fn transpose(arguments: *const TransposeArguments) Status {
     return .ok;
 }
 
-pub export fn zpu_metal_cpu_ml_transpose(arguments: ?*const TransposeArguments) callconv(.c) c_int {
+/// Execute through the optional CPU provider, then fall back to the exact
+/// ZPU implementation when no provider is installed or it returns unsupported.
+pub fn transpose(arguments: *const TransposeArguments) Status {
+    const source_info = validateView(&arguments.source) orelse return .invalid_argument;
+    const destination_info = validateView(&arguments.destination) orelse return .invalid_argument;
+    if (!validatePermutation(arguments, source_info, destination_info)) return .invalid_argument;
+    if (tryProvider(arguments, source_info, destination_info)) |status| {
+        if (status != .unsupported) return status;
+    }
+    return referenceTranspose(arguments);
+}
+
+pub export fn zpu_cpu_ml_set_backend(backend: ?*const Backend) callconv(.c) c_int {
+    if (backend) |candidate| {
+        if (candidate.abi_version != backend_abi_version or candidate.transpose == null) {
+            return @intFromEnum(Status.invalid_argument);
+        }
+    }
+    lockBackend();
+    defer backend_mutex.unlock();
+    registered_backend = if (backend) |candidate| candidate.* else null;
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn zpu_cpu_ml_transpose(arguments: ?*const TransposeArguments) callconv(.c) c_int {
     const args = arguments orelse return @intFromEnum(Status.invalid_argument);
     return @intFromEnum(transpose(args));
 }
@@ -298,6 +426,119 @@ fn testView(comptime T: type, data: []T, rank: u32, dimensions: [max_rank]usize,
         .dimensions = dimensions,
         .strides = strides,
     };
+}
+
+const ProviderProbe = struct {
+    calls: usize = 0,
+    source_offset: usize = 0,
+    destination_offset: usize = 0,
+    source_stride: usize = 0,
+    destination_stride: usize = 0,
+};
+
+fn referenceProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
+    const probe = @as(*ProviderProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.calls += 1;
+    probe.source_offset = arguments.source.offset_bytes;
+    probe.destination_offset = arguments.destination.offset_bytes;
+    probe.source_stride = arguments.source.strides[1];
+    probe.destination_stride = arguments.destination.strides[1];
+    return @intFromEnum(referenceTranspose(arguments));
+}
+
+fn decliningProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
+    const probe = @as(*ProviderProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.calls += 1;
+    _ = arguments;
+    return @intFromEnum(Status.unsupported);
+}
+
+fn providerTestArguments(source_storage: []u32, destination_storage: []u32,
+                         dimensions: [max_rank]usize, output_dimensions: [max_rank]usize,
+                         strides: [max_rank]usize, output_strides: [max_rank]usize) TransposeArguments {
+    return .{
+        .source = testView(u32, source_storage, 2, dimensions, strides),
+        .destination = testView(u32, destination_storage, 2, output_dimensions, output_strides),
+        .permutation = [_]u32{ 1, 0 } ++ [_]u32{0} ** (max_rank - 2),
+    };
+}
+
+test "optional CPU provider receives dense views and preserves raw layout" {
+    var source_storage = [_]u32{0} ** 12;
+    source_storage[0] = 1;
+    source_storage[1] = 2;
+    source_storage[4] = 3;
+    source_storage[5] = 4;
+    source_storage[8] = 5;
+    source_storage[9] = 6;
+    var destination_storage = [_]u32{0xdeadbeef} ** 8;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const arguments = providerTestArguments(&source_storage, &destination_storage,
+        dimensions, output_dimensions, strides, output_strides);
+    var probe = ProviderProbe{};
+    const context: *anyopaque = @ptrCast(&probe);
+    const backend = Backend{
+        .abi_version = backend_abi_version,
+        .context = context,
+        .transpose = referenceProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_backend(&backend));
+    defer _ = zpu_cpu_ml_set_backend(null);
+
+    try std.testing.expectEqual(Status.ok, transpose(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.source_offset);
+    try std.testing.expectEqual(@as(usize, 0), probe.destination_offset);
+    try std.testing.expectEqual(@as(usize, 2), probe.source_stride);
+    try std.testing.expectEqual(@as(usize, 3), probe.destination_stride);
+    try std.testing.expectEqual(@as(u32, 1), destination_storage[0]);
+    try std.testing.expectEqual(@as(u32, 3), destination_storage[1]);
+    try std.testing.expectEqual(@as(u32, 5), destination_storage[2]);
+    try std.testing.expectEqual(@as(u32, 2), destination_storage[4]);
+    try std.testing.expectEqual(@as(u32, 4), destination_storage[5]);
+    try std.testing.expectEqual(@as(u32, 6), destination_storage[6]);
+    try std.testing.expectEqual(@as(u32, 0xdeadbeef), destination_storage[3]);
+    try std.testing.expectEqual(@as(u32, 0xdeadbeef), destination_storage[7]);
+}
+
+test "unsupported CPU provider falls back to exact ZPU transpose" {
+    var source_storage = [_]u32{0} ** 12;
+    source_storage[0] = 11;
+    source_storage[1] = 12;
+    source_storage[4] = 13;
+    source_storage[5] = 14;
+    source_storage[8] = 15;
+    source_storage[9] = 16;
+    var destination_storage = [_]u32{0xcafebabe} ** 8;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const arguments = providerTestArguments(&source_storage, &destination_storage,
+        dimensions, output_dimensions, strides, output_strides);
+    var probe = ProviderProbe{};
+    const context: *anyopaque = @ptrCast(&probe);
+    const backend = Backend{
+        .abi_version = backend_abi_version,
+        .context = context,
+        .transpose = decliningProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_backend(&backend));
+    defer _ = zpu_cpu_ml_set_backend(null);
+
+    try std.testing.expectEqual(Status.ok, transpose(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(u32, 11), destination_storage[0]);
+    try std.testing.expectEqual(@as(u32, 13), destination_storage[1]);
+    try std.testing.expectEqual(@as(u32, 15), destination_storage[2]);
+    try std.testing.expectEqual(@as(u32, 12), destination_storage[4]);
+    try std.testing.expectEqual(@as(u32, 14), destination_storage[5]);
+    try std.testing.expectEqual(@as(u32, 16), destination_storage[6]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
 }
 
 test "CPU transpose preserves Metal element strides and raw bytes" {

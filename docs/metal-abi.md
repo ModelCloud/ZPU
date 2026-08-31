@@ -854,6 +854,12 @@ triangle path:
   PJRT package. Metal tensor descriptors remain authoritative: the adapter
   performs any required pack/unpack for explicit dimensions, element strides,
   slice offsets, and Int4/UInt4 nibble storage before or after a ZML CPU call.
+  The installed `zpu/cpu_ml.h` header exposes the versioned
+  `zpu_cpu_ml_set_backend` hook for such a bridge; its transpose callback only
+  receives offset-zero dense CPU views, and returning `ZPU_CPU_ML_STATUS_UNSUPPORTED`
+  selects the exact ZPU reference implementation. Provider registration is
+  process-wide and the caller owns the provider context lifetime; unregister
+  only after its in-flight callbacks have completed.
   Backend selection is independent of the host operating system, so running
   ZPU on macOS does not imply a Metal execution target. If a target lacks a
   portable ZML CPU runtime artifact, the operation either uses the exact
