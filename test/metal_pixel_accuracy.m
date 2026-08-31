@@ -24654,6 +24654,10 @@ int main(void) {
             [adapter_mtl4_compiled_pipeline newVisibleFunctionTableWithDescriptor:adapter_visible_descriptor];
         id<MTLFunctionHandle> adapter_table_handle = adapter_mtl4_render_function_handle;
         id<MTLFunctionHandle> adapter_table_handles[] = {adapter_table_handle, nil};
+        id<MTLFunction> adapter_intersection_table_function =
+            ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_intersection_triangle");
+        id<MTLFunctionHandle> adapter_intersection_table_handle =
+            [adapter_device functionHandleWithFunction:adapter_intersection_table_function];
         const id<MTLFunctionHandle> *empty_table_functions = NULL;
         [adapter_visible_function_table setFunction:adapter_table_handle atIndex:0];
         [adapter_visible_function_table setFunctions:empty_table_functions withRange:NSMakeRange(0, 0)];
@@ -24667,7 +24671,7 @@ int main(void) {
             [adapter_mtl4_compiled_pipeline newIntersectionFunctionTableWithDescriptor:adapter_intersection_descriptor];
         id<MTLBuffer> adapter_table_buffers[] = {adapter_vertex_buffer, nil};
         NSUInteger adapter_table_offsets[] = {0, 16};
-        id<MTLFunctionHandle> adapter_intersection_handles[] = {adapter_table_handle, nil};
+        id<MTLFunctionHandle> adapter_intersection_handles[] = {adapter_intersection_table_handle, nil};
         const id<MTLBuffer> *empty_table_buffers = NULL;
         const NSUInteger *empty_table_offsets = NULL;
         const id<MTLVisibleFunctionTable> *empty_table_visible_tables = NULL;
@@ -24678,7 +24682,7 @@ int main(void) {
         [adapter_intersection_function_table setBuffers:adapter_table_buffers
                                                 offsets:adapter_table_offsets
                                               withRange:NSMakeRange(0, 2)];
-        [adapter_intersection_function_table setFunction:adapter_table_handle atIndex:0];
+        [adapter_intersection_function_table setFunction:adapter_intersection_table_handle atIndex:0];
         [adapter_intersection_function_table setFunctions:empty_table_functions withRange:NSMakeRange(0, 0)];
         [adapter_intersection_function_table setFunctions:adapter_intersection_handles withRange:NSMakeRange(0, 2)];
         [adapter_intersection_function_table
@@ -24708,6 +24712,10 @@ int main(void) {
             adapter_intersection_function_table.device != adapter_device ||
             adapter_intersection_function_table.allocatedSize < 2 * sizeof(uint64_t) ||
             adapter_intersection_function_table.gpuResourceID._impl == 0 ||
+            adapter_intersection_table_function == nil ||
+            adapter_intersection_table_function.functionType != MTLFunctionTypeIntersection ||
+            adapter_intersection_table_handle == nil ||
+            adapter_intersection_table_handle.functionType != MTLFunctionTypeIntersection ||
             !adapter_function_handle_ids_ok ||
             adapter_mtl4_render_function_handle == nil ||
             adapter_mtl4_render_binary_handle == nil ||

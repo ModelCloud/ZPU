@@ -19014,6 +19014,12 @@ static BOOL zpu_function_table_handle_belongs_to_device(ZPUDevice *owner,
     return [handle isKindOfClass:[ZPUFunctionHandle class]] && handle->_owner == owner;
 }
 
+static BOOL zpu_intersection_function_table_handle_belongs_to_device(
+    ZPUDevice *owner, id<MTLFunctionHandle> function) {
+    if (!zpu_function_table_handle_belongs_to_device(owner, function)) return NO;
+    return function == nil || ((ZPUFunctionHandle *)function)->_functionType == MTLFunctionTypeIntersection;
+}
+
 static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
                                                           id<MTLBuffer> buffer) {
     if (buffer == nil) return YES;
@@ -19137,14 +19143,15 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     }
 }
 - (void)setFunction:(id<MTLFunctionHandle>)function atIndex:(NSUInteger)index {
-    if (index >= _functionCount || !zpu_function_table_handle_belongs_to_device(_owner, function)) return;
+    if (index >= _functionCount ||
+        !zpu_intersection_function_table_handle_belongs_to_device(_owner, function)) return;
     _functions[index] = function == nil ? (id)[NSNull null] : (id)function;
 }
 - (void)setFunctions:(const id<MTLFunctionHandle> __nullable [__nonnull])functions withRange:(NSRange)range {
     if (!zpu_function_table_range_valid(_functionCount, range) || range.length == 0) return;
     if (functions == NULL) return;
     for (NSUInteger offset = 0; offset < range.length; ++offset) {
-        if (!zpu_function_table_handle_belongs_to_device(_owner, functions[offset])) return;
+        if (!zpu_intersection_function_table_handle_belongs_to_device(_owner, functions[offset])) return;
     }
     for (NSUInteger offset = 0; offset < range.length; ++offset) {
         id<MTLFunctionHandle> function = functions[offset];
