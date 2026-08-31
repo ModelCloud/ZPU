@@ -387,15 +387,12 @@ fn copySourceToDense(source: *const TensorView, source_info: ViewInfo, dense: []
     if (dense.len < expected_bytes) return false;
 
     var coordinates: [max_rank]usize = @splat(0);
-    var dense_view: TensorView = .{
-        .data = dense.ptr,
-        .byte_length = dense.len,
-        .offset_bytes = 0,
-        .rank = @intCast(source_info.rank),
-        .element_bits = source_info.element_bits,
-        .dimensions = source.dimensions,
-        .strides = undefined,
-    };
+    var dense_view: TensorView = std.mem.zeroes(TensorView);
+    dense_view.data = dense.ptr;
+    dense_view.byte_length = dense.len;
+    dense_view.rank = @intCast(source_info.rank);
+    dense_view.element_bits = source_info.element_bits;
+    for (0..source_info.rank) |axis| dense_view.dimensions[axis] = source.dimensions[axis];
     denseStrides(source.dimensions[0..source_info.rank], &dense_view.strides);
     for (0..source_info.element_count) |element| {
         const source_element = logicalElementOffset(source, coordinates[0..source_info.rank]) orelse return false;
@@ -411,11 +408,12 @@ fn denseByteCount(info: ViewInfo) ?usize {
 }
 
 fn makeDenseView(template: TensorView, info: ViewInfo, storage: []u8) TensorView {
-    var view = template;
+    var view: TensorView = std.mem.zeroes(TensorView);
     view.data = storage.ptr;
     view.byte_length = storage.len;
-    view.offset_bytes = 0;
-    view.strides = undefined;
+    view.rank = @intCast(info.rank);
+    view.element_bits = info.element_bits;
+    for (0..info.rank) |axis| view.dimensions[axis] = template.dimensions[axis];
     denseStrides(template.dimensions[0..info.rank], &view.strides);
     return view;
 }
@@ -479,13 +477,28 @@ fn elementTypeFromRaw(raw: u32) ?ElementType {
     };
 }
 
+fn elementBitsForType(element_type: ElementType) u32 {
+    return switch (element_type) {
+        .float32, .int32, .uint32 => 32,
+        .float16, .bfloat16, .int16, .uint16 => 16,
+        .int8, .uint8 => 8,
+        .int4, .uint4 => 4,
+    };
+}
+
+fn validateTypedView(view: *const TensorView, element_type: ElementType) ?ViewInfo {
+    const info = validateView(view) orelse return null;
+    if (info.element_bits != elementBitsForType(element_type)) return null;
+    return info;
+}
+
 /// Stage an operation's raw ZPU views into dense CPU views for the optional
 /// ZML/cpu provider. The provider never sees an Apple resource or an
 /// Apple-specific tensor layout. A successful provider call is scattered back
 /// into the original destination only after the callback returns successfully.
 pub fn operation(arguments: *const OperationArguments) Status {
     const operation_kind = operationFromRaw(arguments.operation) orelse return .invalid_argument;
-    _ = elementTypeFromRaw(arguments.element_type) orelse return .invalid_argument;
+    const element_type = elementTypeFromRaw(arguments.element_type) orelse return .invalid_argument;
     const expected_inputs = operationInputCount(operation_kind) orelse return .invalid_argument;
     if (arguments.input_count != expected_inputs) return .invalid_argument;
     const backend = operationBackendSnapshot() orelse return .unsupported;
@@ -498,7 +511,7 @@ pub fn operation(arguments: *const OperationArguments) Status {
     };
     var dense_inputs: [max_inputs]TensorView = undefined;
     for (0..expected_inputs) |index| {
-        input_info[index] = validateView(&arguments.inputs[index]) orelse return .invalid_argument;
+        input_info[index] = validateTypedView(&arguments.inputs[index], element_type) orelse return .invalid_argument;
         const info = input_info[index].?;
         const byte_count = denseByteCount(info) orelse return .invalid_argument;
         const storage = std.heap.c_allocator.alloc(u8, byte_count) catch return .out_of_memory;
@@ -508,7 +521,7 @@ pub fn operation(arguments: *const OperationArguments) Status {
         dense_inputs[index] = makeDenseView(arguments.inputs[index], info, storage);
     }
 
-    const destination_info = validateView(&arguments.destination) orelse return .invalid_argument;
+    const destination_info = validateTypedView(&arguments.destination, element_type) orelse return .invalid_argument;
     const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
@@ -608,6 +621,7 @@ fn namedOperationWithViews(
     if (signature.input_count == 0 or signature.input_count > argument_capacity or
         signature.input_count != input_count or elementTypeFromRaw(signature.element_type) == null or
         element_type != signature.element_type) return .invalid_argument;
+    const signature_type = elementTypeFromRaw(signature.element_type).?;
 
     var input_info: [max_named_inputs]?ViewInfo = @splat(null);
     var input_storage: [max_named_inputs]?[]u8 = @splat(null);
@@ -616,7 +630,7 @@ fn namedOperationWithViews(
     };
     var dense_inputs: [max_named_inputs]TensorView = undefined;
     for (0..signature.input_count) |index| {
-        input_info[index] = validateView(&inputs[index]) orelse return .invalid_argument;
+        input_info[index] = validateTypedView(&inputs[index], signature_type) orelse return .invalid_argument;
         const info = input_info[index].?;
         const byte_count = denseByteCount(info) orelse return .invalid_argument;
         const storage = std.heap.c_allocator.alloc(u8, byte_count) catch return .out_of_memory;
@@ -626,7 +640,7 @@ fn namedOperationWithViews(
         dense_inputs[index] = makeDenseView(inputs[index], info, storage);
     }
 
-    const destination_info = validateView(destination) orelse return .invalid_argument;
+    const destination_info = validateTypedView(destination, signature_type) orelse return .invalid_argument;
     const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
@@ -941,6 +955,10 @@ const OperationProbe = struct {
     element_type: u32 = 0,
     source_stride: usize = 0,
     destination_stride: usize = 0,
+    source_tail_dimension: usize = 0,
+    source_tail_stride: usize = 0,
+    destination_tail_dimension: usize = 0,
+    destination_tail_stride: usize = 0,
 };
 
 const NamedOperationProbe = struct {
@@ -986,6 +1004,10 @@ fn addOperationProvider(context: ?*anyopaque, arguments: *const OperationArgumen
     probe.element_type = arguments.element_type;
     probe.source_stride = arguments.inputs[0].strides[1];
     probe.destination_stride = arguments.destination.strides[1];
+    probe.source_tail_dimension = arguments.inputs[0].dimensions[2];
+    probe.source_tail_stride = arguments.inputs[0].strides[2];
+    probe.destination_tail_dimension = arguments.destination.dimensions[2];
+    probe.destination_tail_stride = arguments.destination.strides[2];
     if (arguments.operation != @intFromEnum(Operation.add) or
         arguments.element_type != @intFromEnum(ElementType.uint32) or
         arguments.input_count != 2 or arguments.inputs[0].offset_bytes != 0 or
@@ -1195,17 +1217,18 @@ test "optional CPU operation provider receives dense ZML views" {
     right_storage[8] = 50;
     right_storage[9] = 60;
     var destination_storage = [_]u32{0xcafebabe} ** 12;
-    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const dimensions = [_]usize{ 2, 3, 99 } ++ [_]usize{0} ** (max_rank - 3);
+    const strides = [_]usize{ 1, 4, 77 } ++ [_]usize{0} ** (max_rank - 3);
     const arguments = OperationArguments{
         .operation = @intFromEnum(Operation.add),
         .element_type = @intFromEnum(ElementType.uint32),
         .input_count = 2,
         .reserved = 0,
         .inputs = .{
-            .{ .data = @ptrCast(left_storage[0..].ptr), .byte_length = left_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
-            .{ .data = @ptrCast(right_storage[0..].ptr), .byte_length = right_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+            .{ .data = @ptrCast(left_storage[0..].ptr), .byte_length = left_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = strides },
+            .{ .data = @ptrCast(right_storage[0..].ptr), .byte_length = right_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = strides },
         },
-        .destination = .{ .data = @ptrCast(destination_storage[0..].ptr), .byte_length = destination_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2) },
+        .destination = .{ .data = @ptrCast(destination_storage[0..].ptr), .byte_length = destination_storage.len * @sizeOf(u32), .offset_bytes = 0, .rank = 2, .element_bits = 32, .dimensions = dimensions, .strides = strides },
         .permutation = @splat(0),
     };
     var probe = OperationProbe{};
@@ -1223,6 +1246,10 @@ test "optional CPU operation provider receives dense ZML views" {
     try std.testing.expectEqual(@intFromEnum(ElementType.uint32), probe.element_type);
     try std.testing.expectEqual(@as(usize, 2), probe.source_stride);
     try std.testing.expectEqual(@as(usize, 2), probe.destination_stride);
+    try std.testing.expectEqual(@as(usize, 0), probe.source_tail_dimension);
+    try std.testing.expectEqual(@as(usize, 0), probe.source_tail_stride);
+    try std.testing.expectEqual(@as(usize, 0), probe.destination_tail_dimension);
+    try std.testing.expectEqual(@as(usize, 0), probe.destination_tail_stride);
     try std.testing.expectEqual(@as(u32, 11), destination_storage[0]);
     try std.testing.expectEqual(@as(u32, 22), destination_storage[1]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[2]);
@@ -1234,6 +1261,11 @@ test "optional CPU operation provider receives dense ZML views" {
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[3]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[6]);
     try std.testing.expectEqual(@as(u32, 0xcafebabe), destination_storage[7]);
+
+    var invalid_arguments = arguments;
+    invalid_arguments.element_type = @intFromEnum(ElementType.uint8);
+    try std.testing.expectEqual(Status.invalid_argument, operation(&invalid_arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }
 
 test "named CPU provider receives a portable graph name and dense transpose views" {
