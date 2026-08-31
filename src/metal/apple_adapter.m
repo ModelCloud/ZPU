@@ -13331,7 +13331,11 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             [indices addObject:@(binding.index)];
             [bindings addObject:binding];
         }
-        if (!valid || bindings.count == 0) return;
+        /* An empty body with only built-in inputs has no resource ABI and no
+         * observable work. It is safe to expose as the same deferred CPU/ZPU
+         * no-op as an empty resource kernel; arbitrary non-empty MSL remains
+         * outside this lowering path. */
+        if (!valid) return;
         [bindings sortUsingComparator:^NSComparisonResult(ZPUBinding *left, ZPUBinding *right) {
             return left.index < right.index ? NSOrderedAscending :
                 (left.index > right.index ? NSOrderedDescending : NSOrderedSame);

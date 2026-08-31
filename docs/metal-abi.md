@@ -634,7 +634,8 @@ triangle path:
   claiming executable arbitrary shader semantics. Layered CPU vertex/fragment
   profiles also expose their native-matching buffer reflection: the layered
   vertex reports its input vertex buffer, while the layered fragment reports no
-  resource bindings. Direct source kernels with an empty body additionally
+  resource bindings. Direct source kernels with an empty body (including
+  kernels whose only parameters are built-in grid inputs) additionally
   expose native-matching buffer/texture/sampler/function-table/acceleration
   resource reflection and execute as
   deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary

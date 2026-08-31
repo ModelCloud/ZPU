@@ -737,13 +737,14 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "visible_function_table<float(float)> visibleTable [[buffer(4)]], "
          "intersection_function_table<triangle_data> intersectionTable [[buffer(5)]], "
          "primitive_acceleration_structure primitiveStructure [[buffer(6)]], "
-         "instance_acceleration_structure instanceStructure [[buffer(7)]]) {}\n";
+         "instance_acceleration_structure instanceStructure [[buffer(7)]]) {}\n"
+         "kernel void zpu_source_empty_noop(uint3 tid [[thread_position_in_grid]]) {}\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 48) {
+        adapter_library.functionNames.count != 49) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -826,6 +827,37 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !metadata_resources_reflection_exact) {
         fail_with_error("source-defined resource binding reflection lowering failed", adapter_error ?: native_error);
         return 177;
+    }
+    id<MTLFunction> native_empty_noop_function =
+        [native_library newFunctionWithName:@"zpu_source_empty_noop"];
+    id<MTLFunction> adapter_empty_noop_function =
+        [adapter_library newFunctionWithName:@"zpu_source_empty_noop"];
+    BOOL empty_noop_reflection_exact = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_empty_noop_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_empty_noop"];
+        MTLFunctionReflection *adapter_empty_noop_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_empty_noop"];
+        empty_noop_reflection_exact = native_empty_noop_reflection != nil &&
+            adapter_empty_noop_reflection != nil &&
+            native_empty_noop_reflection.bindings.count == 0 &&
+            adapter_empty_noop_reflection.bindings.count == 0;
+    }
+    NSError *native_empty_noop_pipeline_error = nil;
+    NSError *adapter_empty_noop_pipeline_error = nil;
+    id<MTLComputePipelineState> native_empty_noop_pipeline =
+        [native_device newComputePipelineStateWithFunction:native_empty_noop_function
+                                                       error:&native_empty_noop_pipeline_error];
+    id<MTLComputePipelineState> adapter_empty_noop_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_empty_noop_function
+                                                       error:&adapter_empty_noop_pipeline_error];
+    if (native_empty_noop_function == nil || adapter_empty_noop_function == nil ||
+        adapter_empty_noop_function.functionType != MTLFunctionTypeKernel ||
+        native_empty_noop_pipeline == nil || adapter_empty_noop_pipeline == nil ||
+        !empty_noop_reflection_exact) {
+        fail_with_error("source-defined empty kernel no-op lowering failed",
+                        adapter_empty_noop_pipeline_error ?: native_empty_noop_pipeline_error);
+        return 179;
     }
     BOOL mtl4_pipeline_reflection_exact = YES;
     if (@available(macOS 26.0, iOS 26.0, *)) {
@@ -930,14 +962,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         0x9b, 0xac, 0xbd, 0xce, 0xdf, 0xe0, 0xf1, 0x02,
     };
     const uint32_t source_noop_indirect_arguments[3] = {3, 1, 1};
-    NSError *native_noop_pipeline_error = nil;
-    NSError *adapter_noop_pipeline_error = nil;
-    id<MTLComputePipelineState> native_noop_pipeline =
-        [native_device newComputePipelineStateWithFunction:native_metadata_function
-                                                       error:&native_noop_pipeline_error];
-    id<MTLComputePipelineState> adapter_noop_pipeline =
-        [adapter_device newComputePipelineStateWithFunction:adapter_metadata_function
-                                                       error:&adapter_noop_pipeline_error];
+    NSError *native_noop_pipeline_error = native_empty_noop_pipeline_error;
+    NSError *adapter_noop_pipeline_error = adapter_empty_noop_pipeline_error;
+    id<MTLComputePipelineState> native_noop_pipeline = native_empty_noop_pipeline;
+    id<MTLComputePipelineState> adapter_noop_pipeline = adapter_empty_noop_pipeline;
     id<MTLBuffer> native_noop_direct_buffer =
         [native_device newBufferWithBytes:source_noop_seed length:sizeof(source_noop_seed)
                                   options:MTLResourceStorageModeShared];
@@ -19940,10 +19968,12 @@ int main(void) {
             [adapter_device newLibraryWithSource:
                 @"// zpu_cpu_fill_gradient_rgba8\n"
                  "/* zpu_cpu_copy_rgba8_buffer_to_texture */\n"
-                 "kernel void zpu_cpu_fill_gradient_rgba8_suffix() {}"
+                 "kernel void zpu_cpu_fill_gradient_rgba8_suffix() { uint value = 1; (void)value; }"
                                                options:nil error:&adapter_false_positive_error];
         id<MTLLibrary> unsupported_adapter_library =
-            [adapter_device newLibraryWithSource:@"kernel void arbitrary_msl() {}" options:nil error:&adapter_library_error];
+            [adapter_device newLibraryWithSource:
+                @"kernel void arbitrary_msl(uint id [[thread_position_in_grid]]) { id += 1; }"
+                                                          options:nil error:&adapter_library_error];
         if (adapter_library == nil || adapter_library_function == nil ||
             adapter_constant_function == nil ||
             !adapter_stage_input_attributes_ok ||
