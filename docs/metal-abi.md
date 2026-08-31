@@ -612,7 +612,10 @@ triangle path:
   recursive child
   reflection, and scalar/vector types including 64-bit `long`/`ulong` and
   `bfloat`, plus validated function-table, Metal 4 command-resource, and
-  primitive/instance acceleration structure argument-buffer metadata. Those executable functions execute through ZPU's
+  primitive/instance acceleration structure argument-buffer metadata. Depth
+  resource spellings (`depth2d`, `depth2d_array`, `depthcube`, and
+  `depthcube_array`) preserve native read-only texture reflection, including
+  depth classification. Those executable functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler;
   metadata-only argument-buffer functions expose layout/encoder state without
   claiming executable arbitrary shader semantics. Layered CPU vertex/fragment

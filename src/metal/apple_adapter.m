@@ -12166,8 +12166,9 @@ static BOOL zpu_source_data_type_for_name(NSString *name, MTLDataType *dataType)
 }
 
 static BOOL zpu_source_texture_type_for_name(NSString *name, MTLTextureType *textureType,
-                                              MTLDataType *dataType, MTLBindingAccess *access) {
-    if (name == nil || textureType == NULL || dataType == NULL || access == NULL) return NO;
+                                              MTLDataType *dataType, MTLBindingAccess *access,
+                                              BOOL *depthTexture) {
+    if (name == nil || textureType == NULL || dataType == NULL || access == NULL || depthTexture == NULL) return NO;
     NSRange open = [name rangeOfString:@"<"];
     NSRange close = [name rangeOfString:@">" options:NSBackwardsSearch];
     if (open.location == NSNotFound || close.location == NSNotFound || close.location <= open.location) return NO;
@@ -12182,13 +12183,19 @@ static BOOL zpu_source_texture_type_for_name(NSString *name, MTLTextureType *tex
         @"texture2d_ms_array": @(MTLTextureType2DMultisampleArray),
         @"texture3d": @(MTLTextureType3D), @"texturecube": @(MTLTextureTypeCube),
         @"texturecube_array": @(MTLTextureTypeCubeArray),
+        @"depth2d": @(MTLTextureType2D), @"depth2d_array": @(MTLTextureType2DArray),
+        @"depthcube": @(MTLTextureTypeCube), @"depthcube_array": @(MTLTextureTypeCubeArray),
     };
     NSNumber *textureValue = textureTypes[kind];
     if (textureValue == nil) return NO;
+    const BOOL isDepthTexture = [kind hasPrefix:@"depth"];
+    if (isDepthTexture && *dataType != MTLDataTypeFloat) return NO;
     *textureType = (MTLTextureType)textureValue.unsignedIntegerValue;
     *access = MTLBindingAccessReadOnly;
+    *depthTexture = isDepthTexture;
     if (parts.count > 1) {
         NSString *qualifier = parts[1];
+        if (isDepthTexture && ![qualifier isEqualToString:@"access::read"]) return NO;
         if ([qualifier isEqualToString:@"access::read"]) *access = MTLBindingAccessReadOnly;
         else if ([qualifier isEqualToString:@"access::write"]) *access = MTLBindingAccessWriteOnly;
         else if ([qualifier isEqualToString:@"access::read_write"]) *access = MTLBindingAccessReadWrite;
@@ -12290,10 +12297,12 @@ static BOOL zpu_source_array_type_for_name(NSString *name, NSString **elementNam
     }
     BOOL isResource = zpu_source_resource_type_for_name(candidateElement, &dataType);
     BOOL isTexture = NO;
-    if (!isResource && [candidateElement hasPrefix:@"texture"]) {
+    if (!isResource && ([candidateElement hasPrefix:@"texture"] || [candidateElement hasPrefix:@"depth"])) {
         MTLTextureType textureType = MTLTextureType2D;
         MTLBindingAccess access = MTLBindingAccessReadOnly;
-        isTexture = zpu_source_texture_type_for_name(candidateElement, &textureType, &dataType, &access);
+        BOOL depthTexture = NO;
+        isTexture = zpu_source_texture_type_for_name(candidateElement, &textureType, &dataType, &access,
+                                                      &depthTexture);
     }
     if (!candidatePointer && !isResource && !zpu_source_data_type_for_name(candidateElement, &dataType) &&
         ![candidateElement isEqualToString:@"sampler"] && !isTexture) return NO;
@@ -12439,6 +12448,7 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
         MTLDataType elementDataType = MTLDataTypeNone;
         MTLBindingAccess access = MTLBindingAccessReadOnly;
         MTLTextureType textureType = MTLTextureType2D;
+        BOOL depthTexture = NO;
         BOOL resource = NO;
         NSString *pointeeConst = arrayPointer && arrayPointeeConst ? @"const" : field[@"const"];
         BOOL nested = [indirection isEqualToString:@"&"] && [address isEqualToString:@"constant"] &&
@@ -12456,8 +12466,9 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             dataType = MTLDataTypePointer;
             access = [pointeeConst isEqualToString:@"const"] ? MTLBindingAccessReadOnly :
                 MTLBindingAccessReadWrite;
-        } else if ([typeName hasPrefix:@"texture"]) {
-            if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access)) {
+        } else if ([typeName hasPrefix:@"texture"] || [typeName hasPrefix:@"depth"]) {
+            if (!zpu_source_texture_type_for_name(typeName, &textureType, &dataType, &access,
+                                                  &depthTexture)) {
                 [building removeObject:structName];
                 return nil;
             }
@@ -12492,12 +12503,13 @@ static NSDictionary *zpu_source_argument_layout_for_struct(
             memberMetadata[@(elementIndex)] = @{
                 @"kind": nested ? @"nested" :
                     ([indirection isEqualToString:@"*"] ? @"pointer" :
-                     ([typeName hasPrefix:@"texture"] ? @"texture" :
+                     (([typeName hasPrefix:@"texture"] || [typeName hasPrefix:@"depth"]) ? @"texture" :
                       ([typeName isEqualToString:@"sampler"] ? @"sampler" :
                        (resource ? @"resource" : @"constant")))),
                 @"elementDataType": @(elementDataType),
                 @"access": @(access),
                 @"textureType": @(textureType),
+                @"depthTexture": @(depthTexture),
             };
             if (nested) {
                 NSDictionary *childLayout = zpu_source_argument_layout_for_struct(
@@ -18528,13 +18540,11 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         MTLDataType elementDataType = (MTLDataType)[metadata[@"elementDataType"] unsignedIntegerValue];
         MTLBindingAccess access = (MTLBindingAccess)[metadata[@"access"] unsignedIntegerValue];
         MTLTextureType textureType = (MTLTextureType)[metadata[@"textureType"] unsignedIntegerValue];
-        /* Native Metal reflects constant `array<T,N>` members as an
-         * anonymous struct containing `__elems`, while resource arrays are
-         * exposed directly as MTLDataTypeArray. Preserve that distinction in
-         * the CPU reflection object. */
-        /* Apple's reflection ABI represents both scalar and pointer
-         * array<T,N> members as an anonymous struct containing __elems.
-         * Resource arrays such as textures remain MTLDataTypeArray. */
+        BOOL depthTexture = [metadata[@"depthTexture"] boolValue];
+        /* Native Metal reflects scalar and pointer `array<T,N>` members as
+         * an anonymous struct containing `__elems`, while resource arrays
+         * such as textures are exposed directly as MTLDataTypeArray.
+         * Preserve that distinction in the CPU reflection object. */
         MTLDataType memberDataType = arrayLength > 1 ?
             (([kind isEqualToString:@"constant"] || [kind isEqualToString:@"pointer"]) ?
                 MTLDataTypeStruct : MTLDataTypeArray) :
@@ -18570,6 +18580,7 @@ static MTLStructType *zpu_source_argument_struct_type(NSDictionary *layout) {
         } else if ([kind isEqualToString:@"texture"]) {
             textureReferenceType = [[ZPUTextureReferenceType alloc]
                 initWithTextureType:textureType dataType:elementDataType access:access];
+            textureReferenceType->_depthTexture = depthTexture;
         }
         if (arrayLength > 1) {
             NSUInteger elementSize = 0;

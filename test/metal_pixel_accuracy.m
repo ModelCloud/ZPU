@@ -693,13 +693,18 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "(void)arguments; }\n"
          "struct SourcePointerArrays { array<device const half *, 2> weights [[id(0)]]; };\n"
          "kernel void zpu_source_argument_buffer_pointer_arrays(constant SourcePointerArrays &arguments [[buffer(9)]]) { "
+         "(void)arguments; }\n"
+         "struct SourceDepthArguments { depth2d<float> depth [[id(0)]]; "
+         "depth2d_array<float> depthArray [[id(1)]]; depthcube<float> cube [[id(2)]]; "
+         "depthcube_array<float> cubeArray [[id(3)]]; };\n"
+         "kernel void zpu_source_argument_buffer_depth(constant SourceDepthArguments &arguments [[buffer(10)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 39) {
+        adapter_library.functionNames.count != 40) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1783,6 +1788,66 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_pointer_array_reflection_ok) {
         fail_with_error("source-defined pointer array layout lowering failed", adapter_error ?: native_error);
         return 181;
+    }
+
+    id<MTLFunction> native_source_depth_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_depth"];
+    id<MTLFunction> adapter_source_depth_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_depth"];
+    id<MTLArgumentEncoder> native_source_depth_encoder =
+        [native_source_depth_function newArgumentEncoderWithBufferIndex:10];
+    id<MTLArgumentEncoder> adapter_source_depth_encoder =
+        [adapter_source_depth_function newArgumentEncoderWithBufferIndex:10];
+    BOOL source_depth_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_depth"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_depth"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        source_depth_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 10 &&
+            adapter_binding.index == 10 && native_binding.bufferDataType == MTLDataTypeStruct &&
+            adapter_binding.bufferDataType == MTLDataTypeStruct &&
+            native_binding.bufferDataSize == adapter_binding.bufferDataSize &&
+            native_binding.bufferAlignment == adapter_binding.bufferAlignment &&
+            native_struct != nil && adapter_struct != nil && native_struct.members.count == 4 &&
+            adapter_struct.members.count == 4;
+        const MTLTextureType expected_texture_types[] = {
+            MTLTextureType2D, MTLTextureType2DArray, MTLTextureTypeCube, MTLTextureTypeCubeArray,
+        };
+        for (NSUInteger index = 0; source_depth_reflection_ok && index < 4; ++index) {
+            MTLStructMember *native_member = native_struct.members[index];
+            MTLStructMember *adapter_member = adapter_struct.members[index];
+            MTLTextureReferenceType *native_reference = native_member.textureReferenceType;
+            MTLTextureReferenceType *adapter_reference = adapter_member.textureReferenceType;
+            source_depth_reflection_ok = [native_member.name isEqualToString:adapter_member.name] &&
+                native_member.offset == adapter_member.offset &&
+                native_member.dataType == adapter_member.dataType &&
+                native_member.dataType == MTLDataTypeTexture &&
+                native_member.argumentIndex == adapter_member.argumentIndex &&
+                native_reference != nil && adapter_reference != nil &&
+                native_reference.textureType == adapter_reference.textureType &&
+                native_reference.textureType == expected_texture_types[index] &&
+                native_reference.textureDataType == adapter_reference.textureDataType &&
+                native_reference.textureDataType == MTLDataTypeFloat &&
+                native_reference.access == adapter_reference.access &&
+                native_reference.access == MTLBindingAccessReadOnly &&
+                native_reference.isDepthTexture && adapter_reference.isDepthTexture;
+        }
+    }
+    if (native_source_depth_function == nil || adapter_source_depth_function == nil ||
+        native_source_depth_encoder == nil || adapter_source_depth_encoder == nil ||
+        native_source_depth_encoder.encodedLength != adapter_source_depth_encoder.encodedLength ||
+        native_source_depth_encoder.alignment != adapter_source_depth_encoder.alignment ||
+        !source_depth_reflection_ok) {
+        fail_with_error("source-defined depth texture layout lowering failed", adapter_error ?: native_error);
+        return 182;
     }
     return 0;
 }
