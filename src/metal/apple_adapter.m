@@ -19262,16 +19262,21 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions {
     ZPUTensor *source = (ZPUTensor *)sourceTensor;
     ZPUTensor *destination = (ZPUTensor *)destinationTensor;
-    const BOOL packed = [source isKindOfClass:[ZPUTensor class]] && [destination isKindOfClass:[ZPUTensor class]] &&
-        (source->_elementBits < 8 || destination->_elementBits < 8);
+    /* Do not call the ZPU tensor helper until protocol objects have been
+     * checked. A foreign/native tensor can legally arrive here through the
+     * public MTLBlitCommandEncoder interface. */
+    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
+        source->_owner != [_owner device] || destination->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
+    const BOOL packed = source->_elementBits < 8 || destination->_elementBits < 8;
     const BOOL encoded = packed ?
         zpu_tensor_encode_packed_copy_slice(source, sourceOrigin, sourceDimensions, destination,
                                             destinationOrigin, destinationDimensions, _owner->_legacyBuffer) :
         zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
                                      destinationDimensions, _legacy->_zpuEncoder, YES);
-    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
-        source->_owner != [_owner device] || destination->_owner != [_owner device] ||
-        !encoded) {
+    if (!encoded) {
         [_owner markError];
         return;
     }
@@ -22169,16 +22174,21 @@ static BOOL zpu_argument_encoder_offset_for_index(ZPUArgumentEncoder *encoder,
 - (void)copyFromTensor:(id<MTLTensor>)sourceTensor sourceOrigin:(MTLTensorExtents *)sourceOrigin sourceDimensions:(MTLTensorExtents *)sourceDimensions toTensor:(id<MTLTensor>)destinationTensor destinationOrigin:(MTLTensorExtents *)destinationOrigin destinationDimensions:(MTLTensorExtents *)destinationDimensions API_AVAILABLE(macos(26.0), ios(26.0)) {
     ZPUTensor *source = (ZPUTensor *)sourceTensor;
     ZPUTensor *destination = (ZPUTensor *)destinationTensor;
-    const BOOL packed = [source isKindOfClass:[ZPUTensor class]] && [destination isKindOfClass:[ZPUTensor class]] &&
-        (source->_elementBits < 8 || destination->_elementBits < 8);
+    /* Native MTLTensor objects satisfy the public protocol but do not have
+     * the CPU adapter's ivar layout. Validate them before private access so
+     * foreign resources fail closed instead of reaching the ZPU encoder. */
+    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
+        source->_owner != [_owner device] || destination->_owner != [_owner device]) {
+        [_owner markError];
+        return;
+    }
+    const BOOL packed = source->_elementBits < 8 || destination->_elementBits < 8;
     const BOOL encoded = packed ?
         zpu_tensor_encode_packed_copy_slice(source, sourceOrigin, sourceDimensions, destination,
                                             destinationOrigin, destinationDimensions, _owner) :
         zpu_tensor_encode_copy_slice(source, sourceOrigin, sourceDimensions, destination, destinationOrigin,
                                      destinationDimensions, _zpuEncoder, NO);
-    if (![source isKindOfClass:[ZPUTensor class]] || ![destination isKindOfClass:[ZPUTensor class]] ||
-        source->_owner != [_owner device] || destination->_owner != [_owner device] ||
-        !encoded) {
+    if (!encoded) {
         [_owner markError];
         return;
     }

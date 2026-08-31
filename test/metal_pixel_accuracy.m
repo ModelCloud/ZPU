@@ -34498,6 +34498,69 @@ int main(void) {
                 return 112;
             }
 
+            /* A native MTLTensor is a valid object for the public protocol,
+             * but it is not a CPU/ZPU tensor. Both adapter encoder families
+             * must reject it before any private tensor helper dereferences
+             * its object layout. This is a safety regression as well as an
+             * ownership check: native Metal remains oracle-only here. */
+            NSError *foreign_tensor_creation_error = nil;
+            id<MTLBuffer> foreign_native_source_buffer =
+                [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> foreign_native_destination_buffer =
+                [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+            id<MTLTensor> foreign_native_source =
+                [foreign_native_source_buffer newTensorWithDescriptor:metal4_tensor_descriptor
+                                                                  offset:1
+                                                                    error:&foreign_tensor_creation_error];
+            id<MTLTensor> foreign_native_destination =
+                [foreign_native_destination_buffer newTensorWithDescriptor:metal4_tensor_descriptor
+                                                                     offset:2
+                                                                       error:&foreign_tensor_creation_error];
+            BOOL foreign_tensor_rejected = NO;
+            if (foreign_native_source != nil && foreign_native_destination != nil) {
+                id<MTL4CommandBuffer> foreign_metal4_command_buffer = [adapter_device newCommandBuffer];
+                id<MTL4ComputeCommandEncoder> foreign_metal4_encoder = nil;
+                __block NSError *foreign_metal4_error = nil;
+                if (foreign_metal4_command_buffer != nil && metal4_allocator != nil && metal4_queue != nil) {
+                    [foreign_metal4_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+                    foreign_metal4_encoder = [foreign_metal4_command_buffer computeCommandEncoder];
+                    [foreign_metal4_encoder copyFromTensor:foreign_native_source
+                                              sourceOrigin:metal4_tensor_zero
+                                          sourceDimensions:metal4_tensor_dimensions
+                                                  toTensor:foreign_native_destination
+                                         destinationOrigin:metal4_tensor_zero
+                                     destinationDimensions:metal4_tensor_dimensions];
+                    [foreign_metal4_encoder endEncoding];
+                    [foreign_metal4_command_buffer endCommandBuffer];
+                    id<MTL4CommandBuffer> foreign_metal4_buffers[] = {foreign_metal4_command_buffer};
+                    MTL4CommitOptions *foreign_metal4_options = ZPUMetalCreateCPUCommitOptions();
+                    [foreign_metal4_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                        foreign_metal4_error = feedback.error;
+                    }];
+                    [metal4_queue commit:foreign_metal4_buffers count:1 options:foreign_metal4_options];
+                    foreign_tensor_rejected = foreign_metal4_error != nil;
+                }
+
+                id<MTLCommandBuffer> foreign_legacy_command_buffer = [adapter_queue commandBuffer];
+                id<MTLBlitCommandEncoder> foreign_legacy_encoder =
+                    [foreign_legacy_command_buffer blitCommandEncoder];
+                [foreign_legacy_encoder copyFromTensor:foreign_native_source
+                                          sourceOrigin:metal4_tensor_zero
+                                      sourceDimensions:metal4_tensor_dimensions
+                                              toTensor:foreign_native_destination
+                                     destinationOrigin:metal4_tensor_zero
+                                 destinationDimensions:metal4_tensor_dimensions];
+                [foreign_legacy_encoder endEncoding];
+                [foreign_legacy_command_buffer commit];
+                [foreign_legacy_command_buffer waitUntilCompleted];
+                foreign_tensor_rejected = foreign_tensor_rejected &&
+                    foreign_legacy_command_buffer.status == MTLCommandBufferStatusError;
+            }
+            if (!foreign_tensor_rejected) {
+                fail_with_error("CPU tensor encoders accepted a foreign native tensor", foreign_tensor_creation_error);
+                return 118;
+            }
+
             MTLTensorDescriptor *metal4_subbyte_tensor_descriptor = [metal4_tensor_descriptor copy];
             metal4_subbyte_tensor_descriptor.dataType = MTLTensorDataTypeInt4;
             metal4_subbyte_tensor_descriptor.strides =
