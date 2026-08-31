@@ -5307,7 +5307,7 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         id<MTLBuffer> indirect_instance_count_buffer =
             [adapter_device newBufferWithBytes:&indirect_instance_count length:sizeof(indirect_instance_count)
                                        options:MTLResourceStorageModeShared];
-        MTLIndirectAccelerationStructureInstanceDescriptor indirect_instances[2] = {
+        MTLIndirectAccelerationStructureInstanceDescriptor indirect_instances[3] = {
             {
                 .transformationMatrix = {
                     .columns = {
@@ -5324,13 +5324,15 @@ static int test_cpu_legacy_trace_aabbs_against_native(
                 .accelerationStructureID = [acceleration_structure gpuResourceID],
             },
             {0},
+            {0},
         };
         indirect_instances[1] = indirect_instances[0];
-        /* The second record is translated into the visible grid but masked
-         * out. This proves that the CPU payload both transforms every active
-         * AABB and preserves the instance visibility mask. */
-        indirect_instances[1].transformationMatrix.columns[3] = MTLPackedFloat3Make(1.0f, 0.0f, 0.0f);
-        indirect_instances[1].mask = 0;
+        indirect_instances[1].transformationMatrix.columns[3] = MTLPackedFloat3Make(0.75f, 0.0f, 0.0f);
+        indirect_instances[2] = indirect_instances[0];
+        /* The third record is also visible in the raw grid, but its zero mask
+         * must prevent it from contributing to the CPU ray result. */
+        indirect_instances[2].transformationMatrix.columns[3] = MTLPackedFloat3Make(-0.75f, 0.0f, 0.0f);
+        indirect_instances[2].mask = 0;
         id<MTLBuffer> indirect_instance_descriptor_buffer =
             [adapter_device newBufferWithBytes:indirect_instances length:sizeof(indirect_instances)
                                        options:MTLResourceStorageModeShared];
@@ -5339,7 +5341,7 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         indirect_descriptor.instanceDescriptorBuffer = indirect_instance_descriptor_buffer;
         indirect_descriptor.instanceDescriptorBufferOffset = 0;
         indirect_descriptor.instanceDescriptorStride = sizeof(indirect_instances[0]);
-        indirect_descriptor.maxInstanceCount = 2;
+        indirect_descriptor.maxInstanceCount = 3;
         indirect_descriptor.instanceCountBuffer = indirect_instance_count_buffer;
         indirect_descriptor.instanceCountBufferOffset = 0;
         indirect_descriptor.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
@@ -5367,19 +5369,24 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         /* Sizing observes one active record, but the CPU adapter reserves the
          * valid max-instance payload so this deferred count can increase
          * before commit, matching the indirect descriptor contract. */
-        indirect_instance_count = 2;
+        indirect_instance_count = 3;
         memcpy(indirect_instance_count_buffer.contents, &indirect_instance_count,
                sizeof(indirect_instance_count));
         [indirect_build_command_buffer commit];
         [indirect_build_command_buffer waitUntilCompleted];
 
+        const float indirect_expected_bounds[] = {-0.80f, -0.70f, -0.10f, 1.55f, 0.70f, 0.10f};
+        id<MTLBuffer> native_indirect_bounds =
+            [native_device newBufferWithBytes:indirect_expected_bounds
+                                        length:sizeof(indirect_expected_bounds)
+                                       options:MTLResourceStorageModeShared];
         id<MTLTexture> native_indirect_texture = [native_device newTextureWithDescriptor:texture_descriptor];
         id<MTLTexture> adapter_indirect_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
         id<MTLCommandBuffer> native_indirect_command_buffer = [native_queue commandBuffer];
         id<MTLComputeCommandEncoder> native_indirect_encoder =
             [native_indirect_command_buffer computeCommandEncoder];
         [native_indirect_encoder setComputePipelineState:native_pipeline];
-        [native_indirect_encoder setBuffer:native_bounds offset:0 atIndex:0];
+        [native_indirect_encoder setBuffer:native_indirect_bounds offset:0 atIndex:0];
         [native_indirect_encoder setTexture:native_indirect_texture atIndex:0];
         [native_indirect_encoder dispatchThreads:MTLSizeMake(width, height, 1)
                           threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
@@ -5404,7 +5411,7 @@ static int test_cpu_legacy_trace_aabbs_against_native(
         [adapter_indirect_texture getBytes:adapter_indirect_pixels bytesPerRow:width * 4
                                fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
         const BOOL indirect_exact = indirect_build_command_buffer.status == MTLCommandBufferStatusCompleted &&
-            native_indirect_texture != nil && adapter_indirect_texture != nil &&
+            native_indirect_bounds != nil && native_indirect_texture != nil && adapter_indirect_texture != nil &&
             native_indirect_command_buffer != nil && native_indirect_encoder != nil &&
             native_indirect_command_buffer.status == MTLCommandBufferStatusCompleted &&
             adapter_indirect_command_buffer != nil && adapter_indirect_encoder != nil &&
