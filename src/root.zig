@@ -49,6 +49,7 @@ test {
     _ = @import("metal/abi.zig");
     _ = @import("metal/mapping.zig");
     _ = @import("metal/cpu.zig");
+    _ = @import("metal/ml_cpu.zig");
     _ = @import("metal/c_api.zig");
     _ = @import("metal/runtime.zig");
     _ = @import("render/pass_dag.zig");

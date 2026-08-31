@@ -419,7 +419,11 @@ triangle path:
   `zpu_cpu_ml_matmul_u8`, `zpu_cpu_ml_matmul_i8`, `zpu_cpu_ml_matmul_u16`,
   `zpu_cpu_ml_matmul_i16`, `zpu_cpu_ml_matmul_u32`, and
   `zpu_cpu_ml_matmul_i32` provide fixed-width rank-2 integer matrix
-  multiplication with modulo result-bit semantics through that same path.
+  multiplication with modulo result-bit semantics through that same path; the
+  registered `zpu_cpu_ml_transpose` profile performs a deferred reverse-axis
+  transpose through the portable CPU tensor layer, preserving explicit Metal
+  element strides, packed element widths, overlap semantics, and untouched
+  padding bytes.
   Arbitrary ML graphs and arbitrary-MSL compiler
   requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
@@ -451,7 +455,8 @@ triangle path:
   names and emit deterministic ZPU metadata scripts or the existing ZPU
   binary-archive format; these outputs are not Apple metal-tt scripts or
   native GPU binaries
-- the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_add_u8`,
+- the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_transpose`,
+  `zpu_cpu_ml_add_u8`,
   `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_sub_f32`, `zpu_cpu_ml_div_f32`,
   `zpu_cpu_ml_sub_u8`,
   `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`, `zpu_cpu_ml_sub_i16`,
