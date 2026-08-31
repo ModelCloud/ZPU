@@ -789,6 +789,11 @@ zpu_metal_compute_encoder *zpu_metal_command_buffer_compute_encoder(zpu_metal_co
 int zpu_metal_compute_encoder_set_kernel(zpu_metal_compute_encoder *encoder, zpu_metal_compute_kernel kernel);
 int zpu_metal_compute_encoder_set_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, uint32_t index);
 int zpu_metal_compute_encoder_set_acceleration_structure(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *acceleration_structure, uint32_t index);
+/* Selects a bounded CPU intersection-function profile for the fixed ray
+ * tracing kernel. Profile 0 uses the built-in triangle intersector; profile 1
+ * is the registered reject-all `zpu_cpu_intersection_triangle` function.
+ * This is adapter plumbing, not an Apple Metal handle or native GPU call. */
+int zpu_metal_compute_encoder_set_intersection_function_profile(zpu_metal_compute_encoder *encoder, uint32_t profile);
 int zpu_metal_compute_encoder_set_buffer_offset(zpu_metal_compute_encoder *encoder, size_t offset, uint32_t index);
 int zpu_metal_compute_encoder_set_bytes(zpu_metal_compute_encoder *encoder, const void *bytes, size_t length, uint32_t index);
 int zpu_metal_compute_encoder_set_texture(zpu_metal_compute_encoder *encoder, zpu_metal_texture *texture, uint32_t index);

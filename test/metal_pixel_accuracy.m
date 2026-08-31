@@ -4886,6 +4886,207 @@ static int test_cpu_trace_triangles_against_native(
     return 0;
 }
 
+/* A custom intersection function is still executed by the CPU/ZPU path. The
+ * native pipeline below is only an oracle: its registered triangle function
+ * rejects every candidate, so both textures must contain exact opaque black
+ * texels. Use an odd grid to catch accidental half-pixel or Y-origin flips. */
+static int test_cpu_intersection_function_against_native(
+    id<MTLDevice> native_device, id<MTLDevice> adapter_device,
+    id<MTLCommandQueue> native_queue, id<MTLCommandQueue> adapter_queue)
+    API_AVAILABLE(macos(11.0), ios(14.0)) {
+    enum { width = 9, height = 7, byte_count = width * height * 4 };
+    const float triangle_vertices[] = {
+        -0.80f, -0.65f, 0.0f,
+         0.80f, -0.65f, 0.0f,
+        -0.05f,  0.65f, 0.0f,
+    };
+    NSString *source =
+        @"#include <metal_stdlib>\nusing namespace metal; using namespace metal::raytracing;\n"
+         "[[intersection(triangle, triangle_data)]] bool zpu_cpu_intersection_triangle("
+         "uint primitiveIndex [[primitive_id]], uint geometryIndex [[geometry_id]], "
+         "float2 barycentricCoords [[barycentric_coord]]) { "
+         "(void)primitiveIndex; (void)geometryIndex; (void)barycentricCoords; return false; }\n"
+         "kernel void zpu_cpu_trace_triangles_rgba8("
+         "primitive_acceleration_structure accelerationStructure [[buffer(0)]], "
+         "intersection_function_table<triangle_data> intersectionFunctionTable [[buffer(1)]], "
+         "texture2d<float, access::write> output [[texture(0)]], "
+         "uint2 gid [[thread_position_in_grid]]) { "
+         "if (gid.x >= output.get_width() || gid.y >= output.get_height()) return; "
+         "float2 uv = (float2(gid) + 0.5) / float2(output.get_width(), output.get_height()); "
+         "ray r; r.origin = float3(2.0 * uv.x - 1.0, 1.0 - 2.0 * uv.y, 1.0); "
+         "r.direction = float3(0.0, 0.0, -1.0); r.min_distance = 0.0; r.max_distance = INFINITY; "
+         "intersector<triangle_data> triangleIntersector; "
+         "intersection_result<triangle_data> result = triangleIntersector.intersect("
+         "r, accelerationStructure, intersectionFunctionTable); "
+         "bool hit = result.type != intersection_type::none; "
+         "output.write(hit ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0), gid); }\n";
+    NSError *native_error = nil;
+    id<MTLLibrary> native_library =
+        [native_device newLibraryWithSource:source options:nil error:&native_error];
+    id<MTLFunction> native_function =
+        [native_library newFunctionWithName:@"zpu_cpu_trace_triangles_rgba8"];
+    id<MTLFunction> native_intersection_function =
+        [native_library newFunctionWithName:@"zpu_cpu_intersection_triangle"];
+    if (native_library == nil || native_function == nil || native_intersection_function == nil) {
+        fail_with_error("CPU custom intersection source compilation failed", native_error);
+        return 159;
+    }
+    MTLComputePipelineDescriptor *native_pipeline_descriptor = [MTLComputePipelineDescriptor new];
+    native_pipeline_descriptor.computeFunction = native_function;
+    MTLLinkedFunctions *native_linked_functions = [MTLLinkedFunctions new];
+    native_linked_functions.functions = @[native_intersection_function];
+    native_pipeline_descriptor.linkedFunctions = native_linked_functions;
+    id<MTLComputePipelineState> native_pipeline =
+        [native_device newComputePipelineStateWithDescriptor:native_pipeline_descriptor
+                                                       options:0 reflection:nil error:&native_error];
+    id<MTLFunction> adapter_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_trace_triangles_rgba8");
+    NSError *adapter_error = nil;
+    id<MTLComputePipelineState> adapter_pipeline =
+        [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_error];
+    id<MTLFunction> adapter_intersection_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_intersection_triangle");
+    MTLTextureDescriptor *texture_descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                            width:width height:height mipmapped:NO];
+    texture_descriptor.storageMode = MTLStorageModeShared;
+    texture_descriptor.usage = MTLTextureUsageShaderWrite;
+    id<MTLTexture> native_texture = [native_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLTexture> adapter_texture = [adapter_device newTextureWithDescriptor:texture_descriptor];
+    id<MTLBuffer> native_vertex_buffer =
+        [native_device newBufferWithBytes:triangle_vertices length:sizeof(triangle_vertices)
+                                  options:MTLResourceStorageModeShared];
+    id<MTLBuffer> adapter_vertex_buffer =
+        [adapter_device newBufferWithBytes:triangle_vertices length:sizeof(triangle_vertices)
+                                   options:MTLResourceStorageModeShared];
+    MTLAccelerationStructureTriangleGeometryDescriptor *native_geometry =
+        [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+    native_geometry.vertexBuffer = native_vertex_buffer;
+    native_geometry.vertexBufferOffset = 0;
+    native_geometry.vertexStride = sizeof(float) * 3;
+    native_geometry.triangleCount = 1;
+    MTLPrimitiveAccelerationStructureDescriptor *native_as_descriptor =
+        [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    native_as_descriptor.geometryDescriptors = @[native_geometry];
+    MTLAccelerationStructureSizes native_sizes =
+        [native_device accelerationStructureSizesWithDescriptor:native_as_descriptor];
+    id<MTLAccelerationStructure> native_acceleration_structure =
+        native_sizes.accelerationStructureSize == 0 ? nil :
+        [native_device newAccelerationStructureWithSize:native_sizes.accelerationStructureSize];
+    id<MTLBuffer> native_scratch = [native_device
+        newBufferWithLength:native_sizes.buildScratchBufferSize == 0 ? 1 : native_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    MTLAccelerationStructureTriangleGeometryDescriptor *adapter_geometry =
+        [MTLAccelerationStructureTriangleGeometryDescriptor descriptor];
+    adapter_geometry.vertexBuffer = adapter_vertex_buffer;
+    adapter_geometry.vertexBufferOffset = 0;
+    adapter_geometry.vertexStride = sizeof(float) * 3;
+    adapter_geometry.triangleCount = 1;
+    MTLPrimitiveAccelerationStructureDescriptor *adapter_as_descriptor =
+        [MTLPrimitiveAccelerationStructureDescriptor descriptor];
+    adapter_as_descriptor.geometryDescriptors = @[adapter_geometry];
+    MTLAccelerationStructureSizes adapter_sizes =
+        [adapter_device accelerationStructureSizesWithDescriptor:adapter_as_descriptor];
+    id<MTLAccelerationStructure> adapter_acceleration_structure =
+        adapter_sizes.accelerationStructureSize == 0 ? nil :
+        [adapter_device newAccelerationStructureWithSize:adapter_sizes.accelerationStructureSize];
+    id<MTLBuffer> adapter_scratch = [adapter_device
+        newBufferWithLength:adapter_sizes.buildScratchBufferSize == 0 ? 1 : adapter_sizes.buildScratchBufferSize
+                    options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> native_build_command_buffer = [native_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> native_build_encoder =
+        [native_build_command_buffer accelerationStructureCommandEncoder];
+    id<MTLCommandBuffer> adapter_build_command_buffer = [adapter_queue commandBuffer];
+    id<MTLAccelerationStructureCommandEncoder> adapter_build_encoder =
+        [adapter_build_command_buffer accelerationStructureCommandEncoder];
+    if (native_library == nil || native_function == nil || native_intersection_function == nil ||
+        native_pipeline == nil || adapter_function == nil || adapter_pipeline == nil ||
+        adapter_intersection_function == nil || native_texture == nil || adapter_texture == nil ||
+        native_vertex_buffer == nil || adapter_vertex_buffer == nil ||
+        native_acceleration_structure == nil || adapter_acceleration_structure == nil ||
+        native_scratch == nil || adapter_scratch == nil || native_build_encoder == nil ||
+        adapter_build_encoder == nil) {
+        fail_with_error("CPU custom intersection resources failed", native_error ?: adapter_error);
+        return 159;
+    }
+    [native_build_encoder buildAccelerationStructure:native_acceleration_structure
+                                           descriptor:native_as_descriptor
+                                        scratchBuffer:native_scratch scratchBufferOffset:0];
+    [native_build_encoder endEncoding];
+    [adapter_build_encoder buildAccelerationStructure:adapter_acceleration_structure
+                                            descriptor:adapter_as_descriptor
+                                         scratchBuffer:adapter_scratch scratchBufferOffset:0];
+    [adapter_build_encoder endEncoding];
+    [native_build_command_buffer commit];
+    [adapter_build_command_buffer commit];
+    [native_build_command_buffer waitUntilCompleted];
+    [adapter_build_command_buffer waitUntilCompleted];
+
+    MTLIntersectionFunctionTableDescriptor *native_table_descriptor =
+        [MTLIntersectionFunctionTableDescriptor new];
+    native_table_descriptor.functionCount = 1;
+    id<MTLIntersectionFunctionTable> native_table =
+        [native_pipeline newIntersectionFunctionTableWithDescriptor:native_table_descriptor];
+    id<MTLFunctionHandle> native_handle =
+        [native_pipeline functionHandleWithFunction:native_intersection_function];
+    if (native_table != nil && native_handle != nil) [native_table setFunction:native_handle atIndex:0];
+    MTLIntersectionFunctionTableDescriptor *adapter_table_descriptor =
+        [MTLIntersectionFunctionTableDescriptor new];
+    adapter_table_descriptor.functionCount = 1;
+    id<MTLIntersectionFunctionTable> adapter_table =
+        [adapter_pipeline newIntersectionFunctionTableWithDescriptor:adapter_table_descriptor];
+    id<MTLFunctionHandle> adapter_handle =
+        [adapter_device functionHandleWithFunction:adapter_intersection_function];
+    if (adapter_table != nil && adapter_handle != nil) [adapter_table setFunction:adapter_handle atIndex:0];
+
+    id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+    id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+    [native_encoder setComputePipelineState:native_pipeline];
+    [native_encoder setAccelerationStructure:native_acceleration_structure atBufferIndex:0];
+    [native_encoder setIntersectionFunctionTable:native_table atBufferIndex:1];
+    [native_encoder setTexture:native_texture atIndex:0];
+    [native_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+              threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [native_encoder endEncoding];
+    id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+    id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+    [adapter_encoder setComputePipelineState:adapter_pipeline];
+    [adapter_encoder setAccelerationStructure:adapter_acceleration_structure atBufferIndex:0];
+    [adapter_encoder setIntersectionFunctionTable:adapter_table atBufferIndex:1];
+    [adapter_encoder setTexture:adapter_texture atIndex:0];
+    [adapter_encoder dispatchThreads:MTLSizeMake(width, height, 1)
+               threadsPerThreadgroup:MTLSizeMake(4, 3, 1)];
+    [adapter_encoder endEncoding];
+    [native_command_buffer commit];
+    [adapter_command_buffer commit];
+    [native_command_buffer waitUntilCompleted];
+    [adapter_command_buffer waitUntilCompleted];
+    uint8_t native_pixels[byte_count] = {0};
+    uint8_t adapter_pixels[byte_count] = {0};
+    [native_texture getBytes:native_pixels bytesPerRow:width * 4
+                  fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    [adapter_texture getBytes:adapter_pixels bytesPerRow:width * 4
+                   fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        adapter_command_buffer.status == MTLCommandBufferStatusCompleted &&
+        native_table != nil && native_handle != nil && adapter_table != nil && adapter_handle != nil &&
+        memcmp(native_pixels, adapter_pixels, byte_count) == 0;
+    for (NSUInteger index = 0; exact && index < width * height; ++index) {
+        exact = native_pixels[index * 4 + 0] == 0 && native_pixels[index * 4 + 1] == 0 &&
+            native_pixels[index * 4 + 2] == 0 && native_pixels[index * 4 + 3] == 255;
+    }
+    if (!exact) {
+        size_t mismatch = 0;
+        while (mismatch < byte_count && native_pixels[mismatch] == adapter_pixels[mismatch]) mismatch += 1;
+        fprintf(stderr, "metal-pixel: CPU custom intersection mismatch at byte %zu: Metal=%u ZPU=%u\n",
+                mismatch, mismatch < byte_count ? native_pixels[mismatch] : 0,
+                mismatch < byte_count ? adapter_pixels[mismatch] : 0);
+        fail_with_error("CPU custom intersection command failed", native_error ?: adapter_error);
+        return 160;
+    }
+    return 0;
+}
+
 static int test_cpu_indirect_trace_triangles_against_native(
     id<MTLDevice> native_device, id<MTLDevice> adapter_device,
     id<MTLLibrary> native_library, id<MTLLibrary> adapter_library,
@@ -21458,6 +21659,9 @@ int main(void) {
             const int trace_oracle_result = test_cpu_trace_triangles_against_native(
                 device, adapter_device, library, adapter_library, queue, adapter_queue);
             if (trace_oracle_result != 0) return trace_oracle_result;
+            const int intersection_oracle_result = test_cpu_intersection_function_against_native(
+                device, adapter_device, queue, adapter_queue);
+            if (intersection_oracle_result != 0) return intersection_oracle_result;
         }
         if (@available(macOS 14.0, iOS 17.0, *)) {
             const int indirect_trace_oracle_result = test_cpu_indirect_trace_triangles_against_native(

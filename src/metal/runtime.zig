@@ -834,6 +834,7 @@ const ComputeCommand = struct {
     buffer_offset: usize,
     acceleration_structure: ?*Buffer = null,
     acceleration_structure_index: u32 = 0,
+    intersection_function_profile: u8 = 0,
     threads_per_grid: abi.Size,
     threads_per_threadgroup: abi.Size = .{ .width = 0, .height = 0, .depth = 0 },
     indirect_buffer: ?*Buffer = null,
@@ -5171,6 +5172,7 @@ pub const ComputeEncoder = struct {
     buffer_offset: usize = 0,
     acceleration_structure: ?*Buffer = null,
     acceleration_structure_index: u32 = 0,
+    intersection_function_profile: u8 = 0,
 
     pub fn deinit(self: *ComputeEncoder) void {
         self.magic = 0;
@@ -5263,6 +5265,7 @@ pub const ComputeEncoder = struct {
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
             .acceleration_structure_index = self.acceleration_structure_index,
+            .intersection_function_profile = self.intersection_function_profile,
             .threads_per_grid = threads_per_grid,
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
@@ -5299,6 +5302,11 @@ pub const ComputeEncoder = struct {
         }
         self.acceleration_structure = structure;
         self.acceleration_structure_index = index;
+    }
+
+    pub fn setIntersectionFunctionProfile(self: *ComputeEncoder, profile: u32) Error!void {
+        if (!self.open() or profile > 1) return error.UnsupportedOperation;
+        self.intersection_function_profile = @intCast(profile);
     }
 
     pub fn setBytes(self: *ComputeEncoder, bytes: ?[*]const u8, length: usize, index: u32) Error!void {
@@ -5434,6 +5442,7 @@ pub const ComputeEncoder = struct {
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
             .acceleration_structure_index = self.acceleration_structure_index,
+            .intersection_function_profile = self.intersection_function_profile,
             .threads_per_grid = threads_per_grid,
             .threads_per_threadgroup = threads_per_threadgroup,
             .array_slice = self.array_slices[self.textureIndexForKernel()],
@@ -5510,6 +5519,7 @@ pub const ComputeEncoder = struct {
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
             .acceleration_structure_index = self.acceleration_structure_index,
+            .intersection_function_profile = self.intersection_function_profile,
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 1 },
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
@@ -5552,6 +5562,7 @@ pub const ComputeEncoder = struct {
             .buffer_offset = self.buffer_offset,
             .acceleration_structure = self.acceleration_structure,
             .acceleration_structure_index = self.acceleration_structure_index,
+            .intersection_function_profile = self.intersection_function_profile,
             .threads_per_grid = .{ .width = 0, .height = 0, .depth = 1 },
             .indirect_buffer = indirect_buffer,
             .indirect_buffer_offset = indirect_buffer_offset,
@@ -5881,6 +5892,7 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
     const texture = command.texture orelse return error.InvalidResource;
     if (texture.format != .rgba8_unorm) return error.UnsupportedFormat;
     const acceleration_structure = command.acceleration_structure orelse return error.InvalidCommand;
+    if (command.intersection_function_profile > 1) return error.UnsupportedOperation;
     if (!validBuffer(acceleration_structure) or acceleration_structure.device != texture.device) return error.InvalidResource;
     if (!rangeValid(acceleration_structure.bytes.len, 0, cpu_acceleration_structure_header_bytes)) return error.InvalidArgument;
     if (readU32Little(acceleration_structure.bytes, 0) != cpu_acceleration_structure_magic or
@@ -5921,6 +5933,10 @@ fn executeTraceTriangles(command: ComputeCommand) Error!void {
                 .y = readF32Little(acceleration_structure.bytes, base + 28),
                 .z = readF32Little(acceleration_structure.bytes, base + 32),
             };
+            // Profile 1 is the CPU implementation of the registered reject-
+            // all intersection function. Keep traversal deterministic and
+            // skip the candidate exactly where Metal would reject it.
+            if (command.intersection_function_profile == 1) continue;
             if (cpuRayTriangleHit(origin, direction, v0, v1, v2)) |distance| {
                 if (nearest == null or distance < nearest.?) nearest = distance;
             }
@@ -9406,6 +9422,45 @@ test "CPU triangle trace uses the Metal top-left pixel grid" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, texture.bytes[(1 * texture.stride + 3 * 4)..][0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 255, 0, 0, 255 }, texture.bytes[(3 * texture.stride + 3 * 4)..][0..4]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[(4 * texture.stride + 3 * 4)..][0..4]);
+}
+
+test "CPU triangle intersection profile rejects candidates" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const texture = try createTexture(device, 7, 5, @intFromEnum(abi.PixelFormat.rgba8_unorm));
+    defer destroyTexture(texture);
+    const acceleration_structure = try createBuffer(device, 512, null);
+    defer destroyBuffer(acceleration_structure);
+    writeU32Little(acceleration_structure.bytes, 0, cpu_acceleration_structure_magic);
+    writeU32Little(acceleration_structure.bytes, 4, cpu_acceleration_structure_version);
+    writeU32Little(acceleration_structure.bytes, 8, 1);
+    writeU32Little(acceleration_structure.bytes, 12, 1);
+    writeU32Little(acceleration_structure.bytes, 16, cpu_acceleration_structure_header_bytes);
+    const vertices = [_]f32{
+        -0.80, -0.65, 0.0,
+        0.80,  -0.65, 0.0,
+        -0.05, 0.65,  0.0,
+    };
+    for (vertices, 0..) |value, index| {
+        std.mem.writeInt(u32, acceleration_structure.bytes[cpu_acceleration_structure_header_bytes + index * 4 ..][0..4], @bitCast(value), .little);
+    }
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(7);
+    try encoder.setTexture(texture, 0);
+    try encoder.setAccelerationStructure(acceleration_structure, 0);
+    try encoder.setIntersectionFunctionProfile(1);
+    try encoder.dispatchThreads(.{ .width = 7, .height = 5, .depth = 1 }, .{ .width = 7, .height = 5, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    for (0..texture.height) |y| for (0..texture.width) |x| {
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 255 }, texture.bytes[(y * texture.stride + x * 4)..][0..4]);
+    };
 }
 
 test "CPU compute acceleration bindings can be explicitly unbound" {
@@ -13496,6 +13551,11 @@ pub export fn zpu_metal_compute_encoder_set_buffer(encoder: ?*ComputeEncoder, bu
 
 pub export fn zpu_metal_compute_encoder_set_acceleration_structure(encoder: ?*ComputeEncoder, structure: ?*Buffer, index: u32) callconv(.c) c_int {
     (encoder orelse return -1).setAccelerationStructure(structure, index) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_set_intersection_function_profile(encoder: ?*ComputeEncoder, profile: u32) callconv(.c) c_int {
+    (encoder orelse return -1).setIntersectionFunctionProfile(profile) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -1746,6 +1746,10 @@ API_AVAILABLE(macos(26.0), ios(26.0))
      * buffer-to-texture copy kernel, so unrelated slot updates must not erase
      * the profile's selected resource. */
     ZPUTexture *_boundTextures[2];
+    /* Compute ray-tracing kernels consume the table bound at buffer(1). The
+     * table remains a CPU-owned object; this dictionary only snapshots the
+     * Metal command-state binding until dispatch. */
+    NSMutableDictionary *_boundIntersectionFunctionTables;
     /* Registered CPU kernels have no arbitrary MSL resource ABI. Preserve
      * valid non-executable texture/sampler slots as adapter-owned metadata so
      * ordinary Metal binding calls remain last-write-wins without rebasing a
@@ -1785,6 +1789,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 
 static NSUInteger zpu_compute_texture_index_for_kernel(zpu_metal_compute_kernel kernel);
 static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder);
+static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder);
 static BOOL zpu_compute_record_extra_texture(ZPUComputeEncoder *encoder,
                                               id<MTLTexture> texture, NSUInteger index);
 static BOOL zpu_compute_record_sampler(ZPUComputeEncoder *encoder,
@@ -18756,6 +18761,35 @@ static ZPUTexture *zpu_compute_bound_texture(ZPUComputeEncoder *encoder) {
     return encoder->_boundTextures[zpu_compute_texture_index_for_kernel(encoder->_kernel)];
 }
 
+/* The Objective-C compatibility layer translates exactly one registered
+ * intersection function into the CPU runtime's bounded profile. No native
+ * MTLFunctionHandle or table allocation is consulted during execution. */
+static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
+    if (encoder == nil || encoder->_kernel != ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8) return YES;
+    uint32_t profile = 0;
+    id value = encoder->_boundIntersectionFunctionTables[@1];
+    if (value != nil && value != (id)[NSNull null]) {
+        ZPUIntersectionFunctionTable *table = (ZPUIntersectionFunctionTable *)value;
+        if (![table isKindOfClass:[ZPUIntersectionFunctionTable class]] ||
+            table->_owner != [encoder->_owner device] || table->_functionCount == 0) return NO;
+        id function = table->_functions[0];
+        if (function != (id)[NSNull null]) {
+            ZPUFunctionHandle *handle = (ZPUFunctionHandle *)function;
+            if (![handle isKindOfClass:[ZPUFunctionHandle class]] || handle->_owner != [encoder->_owner device] ||
+                handle->_functionType != MTLFunctionTypeIntersection) return NO;
+            if ([handle->_name isEqualToString:zpu_cpu_intersection_triangle_function_name]) {
+                profile = 1;
+            } else {
+                /* A different custom function has no CPU implementation yet;
+                 * fail closed instead of silently changing its hit behavior. */
+                return NO;
+            }
+        }
+    }
+    return zpu_metal_compute_encoder_set_intersection_function_profile(
+        encoder->_zpuEncoder, profile) == ZPU_METAL_OK;
+}
+
 @implementation ZPUComputePipelineState
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error {
     if ((self = [super init])) {
@@ -19229,6 +19263,7 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         _kernel = 0;
         _boundTextures[0] = nil;
         _boundTextures[1] = nil;
+        _boundIntersectionFunctionTables = [NSMutableDictionary dictionary];
         _stageBindings = [NSMutableDictionary dictionary];
         _passDescriptor = nil;
         _ended = NO;
@@ -19403,7 +19438,12 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
-    if (intersectionFunctionTable != nil) [_owner retainResource:intersectionFunctionTable];
+    if (intersectionFunctionTable == nil) {
+        [_boundIntersectionFunctionTables removeObjectForKey:@(bufferIndex)];
+    } else {
+        _boundIntersectionFunctionTables[@(bufferIndex)] = intersectionFunctionTable;
+        [_owner retainResource:intersectionFunctionTable];
+    }
 }
 - (void)setIntersectionFunctionTables:(const id<MTLIntersectionFunctionTable> __nullable [__nonnull])intersectionFunctionTables withBufferRange:(NSRange)range API_AVAILABLE(macos(11.0), ios(14.0), tvos(16.0)) {
     if ((range.length != 0 && intersectionFunctionTables == NULL) || !zpu_u32_range_indices_fit(range)) {
@@ -19502,6 +19542,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
+    if (!zpu_compute_apply_intersection_profile(self)) {
+        [_owner markError];
+        return;
+    }
     if (_kernel == ZPU_METAL_COMPUTE_SOURCE_NOOP) {
         if (zpu_metal_compute_encoder_dispatch_threads(_zpuEncoder,
                 (zpu_metal_size){(uint32_t)threadsPerGrid.width, (uint32_t)threadsPerGrid.height,
@@ -19575,6 +19619,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         [_owner markError];
         return;
     }
+    if (!zpu_compute_apply_intersection_profile(self)) {
+        [_owner markError];
+        return;
+    }
     if (_kernel == ZPU_METAL_COMPUTE_SOURCE_NOOP) {
         const uint64_t gridWidth = (uint64_t)threadgroupsPerGrid.width * threadsPerThreadgroup.width;
         const uint64_t gridHeight = (uint64_t)threadgroupsPerGrid.height * threadsPerThreadgroup.height;
@@ -19634,6 +19682,10 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
         !zpu_u32(threadsPerThreadgroup.width, &(uint32_t){0}) ||
         !zpu_u32(threadsPerThreadgroup.height, &(uint32_t){0}) ||
         !zpu_u32(threadsPerThreadgroup.depth, &(uint32_t){0})) {
+        [_owner markError];
+        return;
+    }
+    if (!zpu_compute_apply_intersection_profile(self)) {
         [_owner markError];
         return;
     }

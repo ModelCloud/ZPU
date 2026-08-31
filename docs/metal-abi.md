@@ -718,9 +718,11 @@ triangle path:
   buffer bindings, opaque-intersection signatures, and visible-table links;
   they expose deterministic CPU resource metadata and IDs; valid table and
   acceleration-structure bindings on legacy compute encoders retain the same
-  CPU resources and preserve command ordering, while arbitrary function-pointer
-  dispatch and arbitrary ray tracing remain unsupported; the bounded triangle
-  trace profile is the explicit fixed-function exception
+  CPU resources and preserve command ordering. The fixed triangle trace
+  profile consumes the table bound at buffer 1 and executes the registered
+  reject-all `zpu_cpu_intersection_triangle` profile in the CPU command stream;
+  arbitrary function-pointer dispatch, other custom intersection functions,
+  and arbitrary ray tracing remain unsupported
 - CPU acceleration-structure resources expose deterministic ZPU-backed storage,
   heap placement, resource IDs, and descriptor-derived size queries. Their CPU
   command encoder supports build, refit, copy, compact-size, and compaction
