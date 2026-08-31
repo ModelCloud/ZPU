@@ -4269,6 +4269,39 @@ static int test_adapter_metal4_object_protocols(id<MTLDevice> adapter_device,
             return 166;
         }
     }
+    if (result == 0 && allocator != nil && queue != nil) {
+        /* Apple's allocator contract is stricter than ordinary command
+         * queue ordering: one allocator may service only one recording
+         * command buffer at a time, and ending that buffer makes the
+         * allocator immediately reusable. Exercise both rules through the
+         * public feedback path; no native Metal object participates here. */
+        id<MTL4CommandBuffer> busy_first = [adapter_device newCommandBuffer];
+        id<MTL4CommandBuffer> busy_second = [adapter_device newCommandBuffer];
+        id<MTL4CommandBuffer> reusable = [adapter_device newCommandBuffer];
+        if (busy_first == nil || busy_second == nil || reusable == nil) {
+            fprintf(stderr, "metal-pixel: Metal 4 allocator lifecycle fixture allocation failed\n");
+            return 167;
+        }
+        [busy_first beginCommandBufferWithAllocator:allocator];
+        [busy_second beginCommandBufferWithAllocator:allocator];
+        [busy_first endCommandBuffer];
+        [reusable beginCommandBufferWithAllocator:allocator];
+        [reusable endCommandBuffer];
+        id<MTL4CommandBuffer> reusable_buffers[] = {busy_first, reusable};
+        [queue commit:reusable_buffers count:2];
+
+        MTL4CommitOptions *busy_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *busy_error = nil;
+        [busy_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            busy_error = feedback.error;
+        }];
+        id<MTL4CommandBuffer> busy_buffers[] = {busy_second};
+        [queue commit:busy_buffers count:1 options:busy_options];
+        if (busy_options == nil || busy_error == nil) {
+            fprintf(stderr, "metal-pixel: Metal 4 allocator exclusivity/reuse contract failed\n");
+            return 168;
+        }
+    }
     return result;
 }
 
@@ -37497,10 +37530,20 @@ int main(void) {
         adapter_metal4_split_pass_b.colorAttachments[0].texture = adapter_metal4_split_texture;
         adapter_metal4_split_pass_b.colorAttachments[0].loadAction = MTLLoadActionLoad;
         adapter_metal4_split_pass_b.colorAttachments[0].storeAction = MTLStoreActionStore;
+        MTL4CommandAllocatorDescriptor *adapter_metal4_split_allocator_descriptor_a =
+            [MTL4CommandAllocatorDescriptor new];
+        MTL4CommandAllocatorDescriptor *adapter_metal4_split_allocator_descriptor_b =
+            [MTL4CommandAllocatorDescriptor new];
+        id<MTL4CommandAllocator> adapter_metal4_split_allocator_a =
+            [adapter_device newCommandAllocatorWithDescriptor:adapter_metal4_split_allocator_descriptor_a
+                                                          error:&metal4_error];
+        id<MTL4CommandAllocator> adapter_metal4_split_allocator_b =
+            [adapter_device newCommandAllocatorWithDescriptor:adapter_metal4_split_allocator_descriptor_b
+                                                          error:&metal4_error];
         id<MTL4CommandBuffer> adapter_metal4_split_command_buffer_a = [adapter_device newCommandBuffer];
         id<MTL4CommandBuffer> adapter_metal4_split_command_buffer_b = [adapter_device newCommandBuffer];
-        [adapter_metal4_split_command_buffer_a beginCommandBufferWithAllocator:metal4_allocator];
-        [adapter_metal4_split_command_buffer_b beginCommandBufferWithAllocator:metal4_allocator];
+        [adapter_metal4_split_command_buffer_a beginCommandBufferWithAllocator:adapter_metal4_split_allocator_a];
+        [adapter_metal4_split_command_buffer_b beginCommandBufferWithAllocator:adapter_metal4_split_allocator_b];
         id<MTL4RenderCommandEncoder> adapter_metal4_split_encoder_a =
             [adapter_metal4_split_command_buffer_a renderCommandEncoderWithDescriptor:adapter_metal4_split_pass_a
                                                                                 options:MTL4RenderEncoderOptionSuspending];
@@ -37531,7 +37574,8 @@ int main(void) {
                                      bytesPerRow:(NSUInteger)width * 4
                                       fromRegion:MTLRegionMake2D(0, 0, width, height)
                                      mipmapLevel:0];
-        if (adapter_metal4_split_texture == nil || adapter_metal4_split_command_buffer_a == nil ||
+        if (adapter_metal4_split_texture == nil || adapter_metal4_split_allocator_a == nil ||
+            adapter_metal4_split_allocator_b == nil || adapter_metal4_split_command_buffer_a == nil ||
             adapter_metal4_split_command_buffer_b == nil || adapter_metal4_split_encoder_a == nil ||
             adapter_metal4_split_encoder_b == nil ||
             memcmp(metal_origin_pixels, adapter_metal4_split_pixels, sizeof(metal_origin_pixels)) != 0) {

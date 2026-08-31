@@ -370,7 +370,9 @@ triangle path:
 - CPU-owned Metal 4 command allocators, command buffers, command queues, and
   argument tables; Metal 4 compute dispatches bridge process-local argument
   table resource IDs to ZPU-owned resources and execute through the same
-  deferred CPU kernels. `MTL4CommandQueueDescriptor.feedbackQueue` routes
+  deferred CPU kernels. Allocators serialize active recording ownership to
+  one command buffer and release it at `endCommandBuffer`, matching Apple's
+  pre-submit allocator reuse contract. `MTL4CommandQueueDescriptor.feedbackQueue` routes
   commit feedback handlers onto the caller-supplied serial dispatch queue;
   with no queue, the bounded CPU adapter preserves its synchronous feedback
   behavior

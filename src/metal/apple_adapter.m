@@ -1316,8 +1316,11 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 @public
     ZPUDevice *_owner;
     NSString *_label;
+    __weak id _activeCommandBuffer;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner descriptor:(MTL4CommandAllocatorDescriptor *)descriptor;
+- (BOOL)claimForCommandBuffer:(id)commandBuffer;
+- (void)releaseForCommandBuffer:(id)commandBuffer;
 @end
 
 API_AVAILABLE(macos(26.0), ios(26.0))
@@ -17224,6 +17227,19 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
 - (NSString *)label { return _label; }
 - (uint64_t)allocatedSize { return 0; }
 - (void)reset {}
+- (BOOL)claimForCommandBuffer:(id)commandBuffer {
+    if (commandBuffer == nil) return NO;
+    @synchronized (self) {
+        if (_activeCommandBuffer != nil) return NO;
+        _activeCommandBuffer = commandBuffer;
+        return YES;
+    }
+}
+- (void)releaseForCommandBuffer:(id)commandBuffer {
+    @synchronized (self) {
+        if (_activeCommandBuffer == commandBuffer) _activeCommandBuffer = nil;
+    }
+}
 @end
 
 @implementation ZPUMTL4CommitFeedback
@@ -17321,8 +17337,16 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
         [self markError];
         return;
     }
+    if (![zpuAllocator claimForCommandBuffer:self]) {
+        /* MTL4 allocators service one command buffer at a time. Ending the
+         * active command buffer releases this claim, even before submission,
+         * which is the reuse point specified by Apple's API. */
+        [self markError];
+        return;
+    }
     _legacyBuffer = (ZPUCommandBuffer *)[_legacyQueue commandBuffer];
     if (_legacyBuffer == nil) {
+        [zpuAllocator releaseForCommandBuffer:self];
         [self markError];
         return;
     }
@@ -17341,6 +17365,8 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
     _activeEncoder = nil;
     _recording = NO;
     _ended = YES;
+    [_allocator releaseForCommandBuffer:self];
+    _allocator = nil;
 }
 - (BOOL)commitCPU {
     if (!_ended || _submitted || _legacyBuffer == nil || _failed) {
