@@ -11842,45 +11842,164 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         }
 
         const struct {
+            NSString *sourceName;
             NSString *signature;
             NSString *body;
             NSString *implementation;
         } typedGradientProfiles[] = {
             {
+                @"zpu_source_r32_float",
                 @"texture2d<float,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
                 @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
                  "output.write((float(gid.x)+1.0)/8.0,gid);",
                 @"zpu_cpu_fill_gradient_r32_float",
             },
             {
+                @"zpu_source_rgba16_float",
                 @"texture2d<float,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
                 @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
                  "output.write(float4((float(gid.x)+1.0)/8.0,(float(gid.y)+1.0)/8.0,0.25,1.0),gid);",
                 @"zpu_cpu_fill_gradient_rgba16_float",
             },
             {
+                @"zpu_source_r32_uint",
                 @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
                 @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
                  "output.write(uint4(gid.x+1u,0u,0u,0u),gid);",
                 @"zpu_cpu_fill_gradient_r32_uint",
             },
             {
+                @"zpu_source_r32_sint",
                 @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
                 @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
                  "output.write(int4(int(gid.x)+1,0,0,0),gid);",
                 @"zpu_cpu_fill_gradient_r32_sint",
             },
             {
+                @"zpu_source_rgba32_uint",
                 @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
                 @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
-                 "output.write(uint4(gid.x+1u,gid.y+1u,gid.x+gid.y+1u,0xffffffffu),gid);",
+                "output.write(uint4(gid.x+1u,gid.y+1u,gid.x+gid.y+1u,0xffffffffu),gid);",
                 @"zpu_cpu_fill_gradient_rgba32_uint",
+            },
+            {
+                @"zpu_source_rgba32_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,-int(gid.y)-1,int(gid.x+gid.y),0x7fffffff),gid);",
+                @"zpu_cpu_fill_gradient_rgba32_sint",
+            },
+            {
+                @"zpu_source_rg32_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,gid.y+1u,0u,0u),gid);",
+                @"zpu_cpu_fill_gradient_rg32_uint",
+            },
+            {
+                @"zpu_source_rg32_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,-int(gid.y)-1,0,0),gid);",
+                @"zpu_cpu_fill_gradient_rg32_sint",
+            },
+            {
+                @"zpu_source_r8_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,0u,0u,0u),gid);",
+                @"zpu_cpu_fill_gradient_r8_uint",
+            },
+            {
+                @"zpu_source_r8_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,0,0,0),gid);",
+                @"zpu_cpu_fill_gradient_r8_sint",
+            },
+            {
+                @"zpu_source_rg8_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,gid.y+1u,0u,0u),gid);",
+                @"zpu_cpu_fill_gradient_rg8_uint",
+            },
+            {
+                @"zpu_source_rg8_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,-int(gid.y)-1,0,0),gid);",
+                @"zpu_cpu_fill_gradient_rg8_sint",
+            },
+            {
+                @"zpu_source_rgba8_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,gid.y+1u,gid.x+gid.y+1u,255u),gid);",
+                @"zpu_cpu_fill_gradient_rgba8_uint",
+            },
+            {
+                @"zpu_source_rgba8_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,-int(gid.y)-1,int(gid.x+gid.y),127),gid);",
+                @"zpu_cpu_fill_gradient_rgba8_sint",
+            },
+            {
+                @"zpu_source_r16_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,0u,0u,0u),gid);",
+                @"zpu_cpu_fill_gradient_r16_uint",
+            },
+            {
+                @"zpu_source_r16_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,0,0,0),gid);",
+                @"zpu_cpu_fill_gradient_r16_sint",
+            },
+            {
+                @"zpu_source_rg16_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,gid.y+1u,0u,0u),gid);",
+                @"zpu_cpu_fill_gradient_rg16_uint",
+            },
+            {
+                @"zpu_source_rg16_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,-int(gid.y)-1,0,0),gid);",
+                @"zpu_cpu_fill_gradient_rg16_sint",
+            },
+            {
+                @"zpu_source_rgba16_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,gid.y+1u,gid.x+gid.y+1u,65535u),gid);",
+                @"zpu_cpu_fill_gradient_rgba16_uint",
+            },
+            {
+                @"zpu_source_rgba16_sint",
+                @"texture2d<int,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(int4(int(gid.x)+1,-int(gid.y)-1,int(gid.x+gid.y),32767),gid);",
+                @"zpu_cpu_fill_gradient_rgba16_sint",
+            },
+            {
+                @"zpu_source_rgb10a2_uint",
+                @"texture2d<uint,access::write>output[[texture(0)]],uint2gid[[thread_position_in_grid]]",
+                @"if(gid.x>=output.get_width()||gid.y>=output.get_height())return;"
+                 "output.write(uint4(gid.x+1u,gid.y+1u,gid.x+gid.y+1u,3u),gid);",
+                @"zpu_cpu_fill_gradient_rgb10a2_uint",
             },
         };
         for (NSUInteger profileIndex = 0;
              profileIndex < sizeof(typedGradientProfiles) / sizeof(typedGradientProfiles[0]);
              ++profileIndex) {
-            if ([compactSignature isEqualToString:typedGradientProfiles[profileIndex].signature] &&
+            if ([functionName isEqualToString:typedGradientProfiles[profileIndex].sourceName] &&
+                [compactSignature isEqualToString:typedGradientProfiles[profileIndex].signature] &&
                 [compactBody isEqualToString:typedGradientProfiles[profileIndex].body]) {
                 implementations[functionName] = typedGradientProfiles[profileIndex].implementation;
                 return;
