@@ -12212,6 +12212,11 @@ static BOOL zpu_source_resource_type_for_name(NSString *name, MTLDataType *dataT
         return YES;
     }
     NSDictionary<NSString *, NSNumber *> *resourceTypes = @{
+        /* Metal 4 command resources are metadata-only handles here. Command
+         * encoding still retains and serializes ZPU-owned objects. */
+        @"command_buffer": @(MTLDataTypeIndirectCommandBuffer),
+        @"render_pipeline_state": @(MTLDataTypeRenderPipeline),
+        @"compute_pipeline_state": @(MTLDataTypeComputePipeline),
         @"primitive_acceleration_structure": @(MTLDataTypePrimitiveAccelerationStructure),
         @"instance_acceleration_structure": @(MTLDataTypeInstanceAccelerationStructure),
     };

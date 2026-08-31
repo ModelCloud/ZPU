@@ -675,13 +675,19 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "primitive_acceleration_structure primitiveStructure [[id(2)]]; "
          "instance_acceleration_structure instanceStructure [[id(3)]]; };\n"
          "kernel void zpu_source_argument_buffer_resources(constant SourceResourceArguments &arguments [[buffer(5)]]) { "
+         "(void)arguments; }\n"
+         "using namespace metal;\n"
+         "struct SourceCommandResources { command_buffer commandBuffer [[id(0)]]; "
+         "render_pipeline_state renderPipeline [[id(1)]]; "
+         "compute_pipeline_state computePipeline [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_command_resources(constant SourceCommandResources &arguments [[buffer(6)]]) { "
          "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 35) {
+        adapter_library.functionNames.count != 36) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1485,6 +1491,55 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_resource_reflection_ok) {
         fail_with_error("source-defined resource argument layout lowering failed", adapter_error ?: native_error);
         return 175;
+    }
+
+    id<MTLFunction> native_source_command_resource_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_command_resources"];
+    id<MTLFunction> adapter_source_command_resource_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_command_resources"];
+    id<MTLArgumentEncoder> native_source_command_resource_encoder =
+        [native_source_command_resource_function newArgumentEncoderWithBufferIndex:6];
+    id<MTLArgumentEncoder> adapter_source_command_resource_encoder =
+        [adapter_source_command_resource_function newArgumentEncoderWithBufferIndex:6];
+    BOOL source_command_resource_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_command_resources"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_command_resources"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        source_command_resource_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 6 &&
+            adapter_binding.index == 6 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 3 && adapter_struct.members.count == 3;
+        if (source_command_resource_reflection_ok) {
+            const MTLDataType expectedTypes[] = {
+                MTLDataTypeIndirectCommandBuffer, MTLDataTypeRenderPipeline,
+                MTLDataTypeComputePipeline,
+            };
+            for (NSUInteger index = 0; index < native_struct.members.count; ++index) {
+                MTLStructMember *native_member = native_struct.members[index];
+                MTLStructMember *adapter_member = adapter_struct.members[index];
+                source_command_resource_reflection_ok = source_command_resource_reflection_ok &&
+                    [native_member.name isEqualToString:adapter_member.name] &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.dataType == adapter_member.dataType &&
+                    native_member.dataType == expectedTypes[index];
+            }
+        }
+    }
+    if (native_source_command_resource_function == nil || adapter_source_command_resource_function == nil ||
+        native_source_command_resource_encoder == nil || adapter_source_command_resource_encoder == nil ||
+        native_source_command_resource_encoder.encodedLength != adapter_source_command_resource_encoder.encodedLength ||
+        native_source_command_resource_encoder.alignment != adapter_source_command_resource_encoder.alignment ||
+        !source_command_resource_reflection_ok) {
+        fail_with_error("source-defined command resource argument layout lowering failed", adapter_error ?: native_error);
+        return 176;
     }
     return 0;
 }
