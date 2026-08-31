@@ -664,13 +664,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "texture2d<uint, access::read> ids [[id(5)]]; half2 scale [[id(8)]]; };\n"
          "struct SourceArbitraryOuter { constant SourceArbitraryLeaf &leaf [[id(1)]]; "
          "sampler linearSampler [[id(4)]]; uint4 bias [[id(7)]]; };\n"
-         "kernel void zpu_source_argument_buffer_arbitrary(constant SourceArbitraryOuter &arguments [[buffer(3)]]) { (void)arguments; }\n";
+         "kernel void zpu_source_argument_buffer_arbitrary(constant SourceArbitraryOuter &arguments [[buffer(3)]]) { (void)arguments; }\n"
+         "struct SourceWideArguments { long signedValue [[id(0)]]; ulong unsignedValue [[id(1)]]; "
+         "bfloat4 bias [[id(2)]]; };\n"
+         "kernel void zpu_source_argument_buffer_wide(constant SourceWideArguments &arguments [[buffer(4)]]) { "
+         "(void)arguments; }\n";
     NSError *native_error = nil;
     NSError *adapter_error = nil;
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 33) {
+        adapter_library.functionNames.count != 34) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1386,6 +1390,50 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         !source_arbitrary_reflection_ok) {
         fail_with_error("source-defined arbitrary nested argument lowering failed", adapter_error ?: native_error);
         return 173;
+    }
+
+    id<MTLFunction> native_source_wide_function =
+        [native_library newFunctionWithName:@"zpu_source_argument_buffer_wide"];
+    id<MTLFunction> adapter_source_wide_function =
+        [adapter_library newFunctionWithName:@"zpu_source_argument_buffer_wide"];
+    id<MTLArgumentEncoder> native_source_wide_encoder =
+        [native_source_wide_function newArgumentEncoderWithBufferIndex:4];
+    id<MTLArgumentEncoder> adapter_source_wide_encoder =
+        [adapter_source_wide_function newArgumentEncoderWithBufferIndex:4];
+    BOOL source_wide_reflection_ok = YES;
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        MTLFunctionReflection *native_reflection =
+            [native_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_wide"];
+        MTLFunctionReflection *adapter_reflection =
+            [adapter_library reflectionForFunctionWithName:@"zpu_source_argument_buffer_wide"];
+        id<MTLBufferBinding> native_binding = native_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)native_reflection.bindings[0] : nil;
+        id<MTLBufferBinding> adapter_binding = adapter_reflection.bindings.count == 1 ?
+            (id<MTLBufferBinding>)adapter_reflection.bindings[0] : nil;
+        MTLStructType *native_struct = native_binding.bufferStructType;
+        MTLStructType *adapter_struct = adapter_binding.bufferStructType;
+        source_wide_reflection_ok = native_reflection != nil && adapter_reflection != nil &&
+            native_binding != nil && adapter_binding != nil && native_binding.index == 4 &&
+            adapter_binding.index == 4 && native_struct != nil && adapter_struct != nil &&
+            native_struct.members.count == 3 && adapter_struct.members.count == 3;
+        if (source_wide_reflection_ok) {
+            for (NSUInteger index = 0; index < native_struct.members.count; ++index) {
+                MTLStructMember *native_member = native_struct.members[index];
+                MTLStructMember *adapter_member = adapter_struct.members[index];
+                source_wide_reflection_ok = source_wide_reflection_ok &&
+                    [native_member.name isEqualToString:adapter_member.name] &&
+                    native_member.offset == adapter_member.offset &&
+                    native_member.dataType == adapter_member.dataType;
+            }
+        }
+    }
+    if (native_source_wide_function == nil || adapter_source_wide_function == nil ||
+        native_source_wide_encoder == nil || adapter_source_wide_encoder == nil ||
+        native_source_wide_encoder.encodedLength != adapter_source_wide_encoder.encodedLength ||
+        native_source_wide_encoder.alignment != adapter_source_wide_encoder.alignment ||
+        !source_wide_reflection_ok) {
+        fail_with_error("source-defined wide argument layout lowering failed", adapter_error ?: native_error);
+        return 174;
     }
     return 0;
 }

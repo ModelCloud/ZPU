@@ -605,8 +605,9 @@ triangle path:
   declaration is also lowered to the CPU recursive argument encoder, with
   native-matching parent/child layout metadata and resource slots. Strict
   metadata-only argument-buffer declarations additionally preserve arbitrary
-  supported member names, ids, buffer indices, arrays, and recursive child
-  reflection. Those executable functions execute through ZPU's
+  supported member names, ids, buffer indices, arrays, recursive child
+  reflection, and scalar/vector types including 64-bit `long`/`ulong` and
+  `bfloat`. Those executable functions execute through ZPU's
   existing CPU kernels/raster profiles and never through Apple's compiler;
   metadata-only argument-buffer functions expose layout/encoder state without
   claiming executable arbitrary shader semantics. Layered CPU vertex/fragment
