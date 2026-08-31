@@ -11823,14 +11823,10 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
 
         NSString *prefix = [compactBody substringToIndex:compactBody.length -
             (isAdd ? addAssignment.length : mulAssignment.length)];
-        if (prefix.length != 0) {
-            NSString *guardPattern = [NSString stringWithFormat:@"^if\\(%@>=[0-9]+\\)return;$", indexName];
-            NSError *guardError = nil;
-            NSRegularExpression *guardExpression = [NSRegularExpression
-                regularExpressionWithPattern:guardPattern options:0 error:&guardError];
-            if (guardExpression == nil || guardError != nil ||
-                [guardExpression firstMatchInString:prefix options:0 range:NSMakeRange(0, prefix.length)] == nil) return;
-        }
+        NSString *expectedPrefix = isAdd ?
+            [NSString stringWithFormat:@"if(%@>=12)return;", indexName] :
+            [NSString stringWithFormat:@"if(%@>=10)return;", indexName];
+        if (prefix.length != 0 && ![prefix isEqualToString:expectedPrefix]) return;
         implementations[functionName] = isAdd ? zpu_cpu_add_f32_function_name : zpu_cpu_mul_f32_function_name;
     }];
     return [implementations copy];

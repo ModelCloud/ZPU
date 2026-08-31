@@ -571,6 +571,17 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
+    NSError *mismatched_guard_error = nil;
+    id<MTLLibrary> mismatched_guard_library = [adapter_device newLibraryWithSource:
+        @"kernel void zpu_source_bad_bound(device const float *left [[buffer(0)]], "
+         "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 11) return; output[id] = left[id] + right[id]; }"
+                                                                                       options:nil
+                                                                                         error:&mismatched_guard_error];
+    if (mismatched_guard_library != nil || mismatched_guard_error == nil) {
+        fprintf(stderr, "metal-pixel: source lowering accepted a mismatched fixed CPU bound\n");
+        return 168;
+    }
 
     const struct {
         NSString *name;
