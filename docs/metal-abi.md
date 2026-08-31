@@ -842,6 +842,18 @@ triangle path:
   passes are represented as sequential ordinary CPU passes because the CPU
   implementation has no tile-memory stitching requirement. The
   adapter never routes them to native Metal
+
+- Any future ZML integration is CPU-only and optional. The adapter may use
+  ZML's generic CPU/PJRT compiler/runtime for dense tensor planning or
+  execution, but it must never select ZML's Metal platform or link its Metal
+  PJRT package. Metal tensor descriptors remain authoritative: the adapter
+  performs any required pack/unpack for explicit dimensions, element strides,
+  slice offsets, and Int4/UInt4 nibble storage before or after a ZML CPU call.
+  Backend selection is independent of the host operating system, so running
+  ZPU on macOS does not imply a Metal execution target. If a target lacks a
+  portable ZML CPU runtime artifact, the operation either uses the exact
+  ZPU CPU reference path or remains fail-closed; it must not silently switch
+  to native Metal.
 - classic Metal resource, pipeline, blit, event, indirect-command, and
   command-buffer selectors that have no portable CPU meaning are represented
   explicitly: metadata-only operations are deterministic no-ops, while
