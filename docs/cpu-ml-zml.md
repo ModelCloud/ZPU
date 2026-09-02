@@ -35,10 +35,17 @@ duration. The v3 callback has separate input/output arrays and element-type
 arrays, allowing a graph provider to own arbitrary graph wiring, transposes,
 and mixed-precision conversions without changing the Metal adapter. It never
 receives an `MTLTexture`, `MTLBuffer`, PJRT device buffer, or platform-specific
-layout object. A provider decline returns
+layout object. Argument records and view metadata are immutable; providers may
+write through destination data pointers, but may not redirect or reshape a
+staged view. A provider decline returns
 `ZPU_CPU_ML_STATUS_UNSUPPORTED`; fixed operations then use the exact portable
 ZPU CPU reference path for supported operation/type combinations, while named
 graph operations fail closed because there is no safe generic graph fallback.
+
+The specialized transpose backend remains compatible with the operation entry
+point: an operation with `ZPU_CPU_ML_OPERATION_TRANSPOSE` gives the registered
+transpose callback first chance, then tries the generic operation provider and
+finally the exact ZPU reference implementation if both providers decline.
 
 Backend selection is explicit provider registration, not `macOS` detection.
 Running ZPU on macOS therefore still uses the same CPU-only ZML contract as

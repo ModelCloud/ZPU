@@ -68,6 +68,11 @@ typedef struct zpu_cpu_ml_tensor_view {
     size_t strides[ZPU_CPU_ML_MAX_RANK];
 } zpu_cpu_ml_tensor_view;
 
+/* Provider argument records and view metadata are immutable for the callback
+ * duration. Providers may write through destination.data (and read through
+ * input.data), but must not redirect a data pointer or change dimensions,
+ * strides, offsets, counts, types, or permutation metadata. */
+
 /* permutation[output_axis] selects the source axis for that output axis */
 typedef struct zpu_cpu_ml_transpose_arguments {
     zpu_cpu_ml_tensor_view source;

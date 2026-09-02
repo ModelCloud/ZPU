@@ -533,6 +533,14 @@ fn providerStatus(raw: c_int) Status {
     };
 }
 
+fn tensorViewsEqual(left: []const TensorView, right: []const TensorView) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |left_view, right_view| {
+        if (!std.meta.eql(left_view, right_view)) return false;
+    }
+    return true;
+}
+
 fn operationInputCount(kind: Operation) ?usize {
     return switch (kind) {
         .identity, .transpose => 1,
@@ -876,10 +884,11 @@ pub fn operation(arguments: *const OperationArguments) Status {
     };
     if (operationBackendSnapshot()) |backend| {
         const callback = backend.operation orelse return .unsupported;
+        const expected_dense_arguments = dense_arguments;
         const status = providerStatus(callback(backend.context, &dense_arguments));
+        if (!std.meta.eql(dense_arguments, expected_dense_arguments)) return .invalid_argument;
         if (status != .unsupported) {
             if (status != .ok) return status;
-            if (!std.meta.eql(dense_arguments.destination, dense_destination)) return .invalid_argument;
             const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
             if (!copyDenseToDestination(&dense_destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
             return .ok;
@@ -1008,8 +1017,16 @@ fn namedOperationWithViews(
             .destination = dense_destination,
             .permutation = dense_permutation[0..].ptr,
         };
+        const expected_dense_arguments = dense_arguments;
+        const expected_dense_inputs = dense_inputs;
+        const expected_dense_permutation = dense_permutation;
         const provider_status = providerStatus(callback(backend.context, &dense_arguments));
-        if (!std.meta.eql(dense_arguments.destination, dense_destination)) break :blk Status.invalid_argument;
+        if (!std.meta.eql(dense_arguments, expected_dense_arguments) or
+            !tensorViewsEqual(dense_inputs[0..signature.input_count],
+                expected_dense_inputs[0..signature.input_count]) or
+            !std.mem.eql(u32, dense_permutation[0..], expected_dense_permutation[0..])) {
+            break :blk Status.invalid_argument;
+        }
         break :blk provider_status;
     } else if (legacy_backend) |backend| blk: {
         const callback = backend.operation orelse break :blk Status.unsupported;
@@ -1025,8 +1042,9 @@ fn namedOperationWithViews(
             .destination = dense_destination,
             .permutation = dense_permutation,
         };
+        const expected_dense_arguments = dense_arguments;
         const provider_status = providerStatus(callback(backend.context, &dense_arguments));
-        if (!std.meta.eql(dense_arguments.destination, dense_destination)) break :blk Status.invalid_argument;
+        if (!std.meta.eql(dense_arguments, expected_dense_arguments)) break :blk Status.invalid_argument;
         break :blk provider_status;
     } else Status.unsupported;
     if (status != .ok) return status;
@@ -1142,13 +1160,22 @@ fn namedOperationV3WithViews(
         .output_element_types = output_element_types,
         .permutation = dense_permutation[0..].ptr,
     };
+    const expected_dense_arguments = dense_arguments;
+    const expected_dense_inputs = dense_inputs;
+    const expected_dense_outputs = dense_outputs;
+    var expected_input_element_types: [max_named_inputs]u32 = @splat(0);
+    var expected_output_element_types: [max_named_outputs]u32 = @splat(0);
+    @memcpy(expected_input_element_types[0..input_count], input_element_types[0..input_count]);
+    @memcpy(expected_output_element_types[0..output_count], output_element_types[0..output_count]);
+    const expected_dense_permutation = dense_permutation;
     const status = providerStatus(callback(backend.context, &dense_arguments));
+    if (!std.meta.eql(dense_arguments, expected_dense_arguments) or
+        !tensorViewsEqual(dense_inputs[0..input_count], expected_dense_inputs[0..input_count]) or
+        !std.mem.eql(u32, input_element_types[0..input_count], expected_input_element_types[0..input_count]) or
+        !tensorViewsEqual(dense_outputs[0..output_count], expected_dense_outputs[0..output_count]) or
+        !std.mem.eql(u32, output_element_types[0..output_count], expected_output_element_types[0..output_count]) or
+        !std.mem.eql(u32, dense_permutation[0..], expected_dense_permutation[0..])) return .invalid_argument;
     if (status != .ok) return status;
-    if (!std.meta.eql(dense_arguments.inputs, dense_inputs[0..input_count].ptr) or
-        !std.meta.eql(dense_arguments.input_element_types, input_element_types) or
-        !std.meta.eql(dense_arguments.outputs, dense_outputs[0..output_count].ptr) or
-        !std.meta.eql(dense_arguments.output_element_types, output_element_types) or
-        !std.meta.eql(dense_arguments.permutation, dense_permutation[0..].ptr)) return .invalid_argument;
     const provider_outputs = dense_arguments.outputs orelse return .invalid_argument;
     for (0..output_count) |index| {
         // The provider may write through the output data pointers, but it
@@ -1574,6 +1601,14 @@ fn addOperationProvider(context: ?*anyopaque, arguments: *const OperationArgumen
     return @intFromEnum(Status.ok);
 }
 
+fn operationMetadataMutationProvider(context: ?*anyopaque, arguments: *const OperationArguments) callconv(.c) c_int {
+    const probe = @as(*OperationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.calls += 1;
+    const mutable_arguments = @constCast(arguments);
+    mutable_arguments.destination.strides[0] = 99;
+    return @intFromEnum(Status.ok);
+}
+
 fn namedTransposeQuery(context: ?*anyopaque, function_name: [*]const u8, function_name_length: usize, signature: *NamedOperationSignature) callconv(.c) c_int {
     const probe = @as(*NamedOperationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
     probe.query_calls += 1;
@@ -1666,6 +1701,14 @@ fn namedSum3Provider(context: ?*anyopaque, arguments: *const NamedOperationArgum
     return @intFromEnum(Status.ok);
 }
 
+fn namedSum3InputMutationProvider(context: ?*anyopaque, arguments: *const NamedOperationArgumentsV2) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV2Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.operation_calls += 1;
+    const inputs = @constCast(arguments.inputs orelse return @intFromEnum(Status.invalid_argument));
+    inputs[0].strides[0] = 99;
+    return @intFromEnum(Status.ok);
+}
+
 fn namedSplitQuery(context: ?*anyopaque, function_name: [*]const u8,
                    function_name_length: usize, signature: *NamedOperationSignatureV3) callconv(.c) c_int {
     const probe = @as(*NamedOperationV3Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
@@ -1716,6 +1759,14 @@ fn namedSplitProvider(context: ?*anyopaque, arguments: *const NamedOperationArgu
         first_output[index] = input[index] + 1.0;
         second_output[index] = input[index] * 2.0;
     }
+    return @intFromEnum(Status.ok);
+}
+
+fn namedSplitOutputMutationProvider(context: ?*anyopaque, arguments: *const NamedOperationArgumentsV3) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV3Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.operation_calls += 1;
+    const outputs = @constCast(arguments.outputs orelse return @intFromEnum(Status.invalid_argument));
+    outputs[0].strides[0] = 99;
     return @intFromEnum(Status.ok);
 }
 
@@ -1922,6 +1973,35 @@ test "optional CPU operation provider receives dense ZML views" {
     invalid_arguments.reserved = 1;
     try std.testing.expectEqual(Status.invalid_argument, operation(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "operation provider cannot mutate staged metadata" {
+    var left = [_]u32{1};
+    var right = [_]u32{2};
+    var output = [_]u32{0xcafebabe};
+    const dimensions = [_]usize{1} ++ [_]usize{0} ** (max_rank - 1);
+    const strides = [_]usize{1} ++ [_]usize{0} ** (max_rank - 1);
+    const arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.add),
+        .element_type = @intFromEnum(ElementType.uint32),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{ testView(u32, &left, 1, dimensions, strides), testView(u32, &right, 1, dimensions, strides) },
+        .destination = testView(u32, &output, 1, dimensions, strides),
+        .permutation = @splat(0),
+    };
+    var probe = OperationProbe{};
+    const backend = OperationBackend{
+        .abi_version = operation_backend_abi_version,
+        .context = @ptrCast(&probe),
+        .operation = operationMetadataMutationProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_operation_backend(&backend));
+    defer _ = zpu_cpu_ml_set_operation_backend(null);
+
+    try std.testing.expectEqual(Status.invalid_argument, operation(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(u32, 0xcafebabe), output[0]);
 }
 
 test "operation transpose preserves the legacy CPU provider bridge" {
@@ -2305,6 +2385,19 @@ test "named CPU provider v2 carries a generic three-input graph" {
     try std.testing.expectEqual(Status.invalid_argument, namedOperationV2(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
+
+    var mutation_probe = NamedOperationV2Probe{};
+    const mutation_backend = NamedOperationBackendV2{
+        .abi_version = named_operation_backend_v2_abi_version,
+        .context = @ptrCast(&mutation_probe),
+        .query = namedSum3Query,
+        .operation = namedSum3InputMutationProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_backend_v2(&mutation_backend));
+    @memset(&destination_storage, 12345.0);
+    try std.testing.expectEqual(Status.invalid_argument, namedOperationV2(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), mutation_probe.operation_calls);
+    try std.testing.expectEqual(@as(f32, 12345.0), destination_storage[0]);
 }
 
 test "named CPU provider v3 carries multi-output dense views" {
@@ -2369,6 +2462,21 @@ test "named CPU provider v3 carries multi-output dense views" {
     try std.testing.expectEqual(Status.invalid_argument, namedOperationV3(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
+
+    var mutation_probe = NamedOperationV3Probe{};
+    const mutation_backend = NamedOperationBackendV3{
+        .abi_version = named_operation_backend_v3_abi_version,
+        .context = @ptrCast(&mutation_probe),
+        .query = namedSplitQuery,
+        .operation = namedSplitOutputMutationProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_backend_v3(&mutation_backend));
+    @memset(&first_output_storage, 12345.0);
+    @memset(&second_output_storage, 12345.0);
+    try std.testing.expectEqual(Status.invalid_argument, namedOperationV3(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), mutation_probe.operation_calls);
+    try std.testing.expectEqual(@as(f32, 12345.0), first_output_storage[0]);
+    try std.testing.expectEqual(@as(f32, 12345.0), second_output_storage[0]);
 }
 
 test "v2 named entry point rejects over-limit legacy provider signatures" {
