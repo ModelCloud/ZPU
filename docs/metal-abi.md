@@ -338,8 +338,9 @@ triangle path:
   pure-math profiles, with the test suite applying the documented `1e-6`
   scale-aware comparison tolerance.
   A reusable `ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION` profile additionally
-  lowers composed scalar Float32 expressions over `input[id]` into a fixed,
-  validated SSA program. It supports parentheses, constants, unary `+/-`,
+  lowers composed scalar Float32 expressions over `input[id]` (or the
+  two-buffer `left[id]`/`right[id]` form) into a fixed, validated SSA program.
+  It supports parentheses, constants, unary `+/-`,
   `+`, `-`, `*`, `/`, common unary transcendental/rounding calls, and the
   bounded `pow`, `min`, `max`, `fma`, `clamp`, and `mix` calls. The program is
   copied by value into the deferred command and interpreted by ZPU on the CPU;

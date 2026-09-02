@@ -60,7 +60,8 @@ pub const Program = extern struct {
     instruction_count: u32 = 0,
     element_limit: u32 = 0,
     output_value: u8 = 0,
-    reserved: [3]u8 = .{ 0, 0, 0 },
+    input_count: u8 = 0,
+    reserved: [2]u8 = .{ 0, 0 },
     instructions: [max_instructions]Instruction = [_]Instruction{.{}} ** max_instructions,
 };
 
@@ -131,11 +132,13 @@ const Parser = struct {
             return value;
         }
         if (self.cursor >= self.source.len) return error.InvalidExpression;
-        if (self.source[self.cursor] == 'x' and
+        if ((self.source[self.cursor] == 'x' or self.source[self.cursor] == 'y') and
             (self.cursor + 1 == self.source.len or !identifierCharacter(self.source[self.cursor + 1])))
         {
+            const input_index: u8 = if (self.source[self.cursor] == 'x') 0 else 1;
             self.cursor += 1;
-            return self.emit(.input, 0, 0, 0, 0);
+            self.program.input_count = @max(self.program.input_count, input_index + 1);
+            return self.emit(.input, input_index, 0, 0, 0);
         }
         if (digit(self.source[self.cursor]) or self.source[self.cursor] == '.') return self.parseNumber();
         if (identifierStart(self.source[self.cursor])) return self.parseCall();
@@ -246,8 +249,12 @@ fn functionOp(name: []const u8, arity: u8) ?Op {
 }
 
 pub fn compile(source: []const u8, element_limit: u32, output: *Program) CompileError!void {
+    return compileWithInputCount(source, element_limit, 1, output);
+}
+
+pub fn compileWithInputCount(source: []const u8, element_limit: u32, input_count: u8, output: *Program) CompileError!void {
     output.* = .{};
-    if (source.len == 0 or element_limit == 0) return error.InvalidExpression;
+    if (source.len == 0 or element_limit == 0 or input_count == 0 or input_count > 2) return error.InvalidExpression;
     output.version = version;
     output.element_limit = element_limit;
     var parser = Parser{ .source = source, .program = output };
@@ -255,15 +262,22 @@ pub fn compile(source: []const u8, element_limit: u32, output: *Program) Compile
         output.* = .{};
         return err;
     };
+    if (output.input_count > input_count) {
+        output.* = .{};
+        return error.InvalidExpression;
+    }
+    output.input_count = input_count;
 }
 
 pub fn validate(program: *const Program) bool {
     if (program.version != version or program.element_limit == 0 or
+        program.input_count == 0 or program.input_count > 2 or
         program.instruction_count == 0 or program.instruction_count > max_instructions or
         program.output_value >= program.instruction_count) return false;
     for (program.instructions[0..program.instruction_count], 0..) |instruction, index| {
         if (instruction.op < @intFromEnum(Op.input) or instruction.op > @intFromEnum(Op.mix)) return false;
         const op: Op = @enumFromInt(instruction.op);
+        if (op == .input and instruction.a >= program.input_count) return false;
         const unary = switch (op) {
             .negate, .absolute, .floor, .ceil, .round, .trunc, .fract, .sin, .cos, .tan, .asin, .acos, .atan, .sinh, .cosh, .tanh, .exp, .exp2, .log, .log2, .sqrt, .rsqrt => true,
             else => false,
@@ -284,6 +298,10 @@ pub fn validate(program: *const Program) bool {
 }
 
 pub fn evaluate(program: *const Program, input: f32) error{InvalidProgram}!f32 {
+    return evaluateInputs(program, .{ input, 0 });
+}
+
+pub fn evaluateInputs(program: *const Program, inputs: [2]f32) error{InvalidProgram}!f32 {
     if (!validate(program)) return error.InvalidProgram;
     var values = [_]f32{0} ** max_instructions;
     for (program.instructions[0..program.instruction_count], 0..) |instruction, index| {
@@ -292,7 +310,7 @@ pub fn evaluate(program: *const Program, input: f32) error{InvalidProgram}!f32 {
         const b = values[instruction.b];
         const c = values[instruction.c];
         values[index] = switch (op) {
-            .input => input,
+            .input => inputs[instruction.a],
             .constant => instruction.immediate,
             .negate => -a,
             .add => a + b,
@@ -336,6 +354,14 @@ test "composed expression compiles and evaluates without allocation" {
     try compile("sin(x)*0.5+cos(x)", 12, &program);
     try std.testing.expect(validate(&program));
     try std.testing.expectApproxEqAbs(@sin(@as(f32, 0.75)) * 0.5 + @cos(@as(f32, 0.75)), try evaluate(&program, 0.75), 0.000001);
+}
+
+test "two-input expression preserves explicit input arity" {
+    var program: Program = .{};
+    try compileWithInputCount("fma(x,y,0.25)", 8, 2, &program);
+    try std.testing.expectEqual(@as(u8, 2), program.input_count);
+    try std.testing.expectApproxEqAbs(@as(f32, -5.75), try evaluateInputs(&program, .{ 2.0, -3.0 }), 0.000001);
+    try std.testing.expectError(error.InvalidExpression, compileWithInputCount("x+y", 8, 1, &program));
 }
 
 test "malformed and oversized expressions fail closed" {

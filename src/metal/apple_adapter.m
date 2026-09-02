@@ -217,7 +217,7 @@ static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel
         kernel == ZPU_METAL_COMPUTE_ADD_BF16 || kernel == ZPU_METAL_COMPUTE_MUL_BF16 ||
         kernel == ZPU_METAL_COMPUTE_SUB_BF16 || kernel == ZPU_METAL_COMPUTE_DIV_BF16 ||
         (kernel >= ZPU_METAL_COMPUTE_ADD_F16X2 && kernel <= ZPU_METAL_COMPUTE_DIV_BF16X4) ||
-        zpu_compute_buffer_integer_kernel(kernel);
+        zpu_compute_buffer_integer_kernel(kernel) || kernel == ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION;
 }
 
 static BOOL zpu_compute_buffer_unary_kernel(zpu_metal_compute_kernel kernel) {
@@ -9551,6 +9551,33 @@ static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_c
 }
 
 API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLComputePipelineReflection *zpu_f32_expression_pipeline_reflection(uint8_t inputCount) {
+    if (inputCount == 1) return zpu_compute_pipeline_reflection(ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION);
+    if (inputCount != 2) return nil;
+    NSMutableArray *arguments = [NSMutableArray array];
+    NSMutableArray *bindings = [NSMutableArray array];
+    for (NSUInteger index = 0; index < 3; ++index) {
+        NSString *name = index == 0 ? @"left" : (index == 1 ? @"right" : @"output");
+        const MTLBindingAccess access = index < 2 ? MTLBindingAccessReadOnly : MTLBindingAccessWriteOnly;
+        ZPUArgument *argument = zpu_reflection_argument(name, MTLArgumentTypeBuffer, access, index);
+        [argument setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
+        ZPUBinding *binding = zpu_reflection_binding(name, MTLBindingTypeBuffer, access, index);
+        [binding setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
+        [arguments addObject:argument];
+        [bindings addObject:binding];
+    }
+    return (MTLComputePipelineReflection *)[[ZPUComputePipelineReflection alloc]
+        initWithArguments:arguments bindings:bindings];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
+static MTLFunctionReflection *zpu_f32_expression_function_reflection(uint8_t inputCount) {
+    MTLComputePipelineReflection *pipeline = zpu_f32_expression_pipeline_reflection(inputCount);
+    return pipeline == nil ? nil : (MTLFunctionReflection *)[[ZPUFunctionReflection alloc]
+        initWithBindings:pipeline.bindings userAnnotation:nil];
+}
+
+API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLComputePipelineReflection *zpu_source_compute_pipeline_reflection(
     MTLFunctionReflection *functionReflection) {
     if (functionReflection == nil) return nil;
@@ -13532,7 +13559,32 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         BOOL isSubtract = [compactBody hasSuffix:subAssignment];
         BOOL isMultiply = [compactBody hasSuffix:mulAssignment];
         BOOL isDivide = [compactBody hasSuffix:divAssignment];
-        if (!isAdd && !isSubtract && !isMultiply && !isDivide) return;
+        if (!isAdd && !isSubtract && !isMultiply && !isDivide) {
+            if (!scalar) return;
+            NSString *escapedIndex = [NSRegularExpression escapedPatternForString:indexName];
+            NSString *bodyPattern = [NSString stringWithFormat:
+                @"^if\\(%@>=([0-9]+)\\)return;output\\[%@\\]=(.+);$", escapedIndex, escapedIndex];
+            NSRegularExpression *bodyExpression = [NSRegularExpression
+                regularExpressionWithPattern:bodyPattern options:0 error:nil];
+            NSTextCheckingResult *bodyMatch = [bodyExpression firstMatchInString:compactBody options:0
+                range:NSMakeRange(0, compactBody.length)];
+            if (bodyMatch == nil) return;
+            unsigned long long limitValue = strtoull(
+                [compactBody substringWithRange:[bodyMatch rangeAtIndex:1]].UTF8String, NULL, 10);
+            NSString *expression = [compactBody substringWithRange:[bodyMatch rangeAtIndex:2]];
+            expression = [expression stringByReplacingOccurrencesOfString:
+                [NSString stringWithFormat:@"left[%@]", indexName] withString:@"x"];
+            expression = [expression stringByReplacingOccurrencesOfString:
+                [NSString stringWithFormat:@"right[%@]", indexName] withString:@"y"];
+            NSData *expressionData = [expression dataUsingEncoding:NSUTF8StringEncoding];
+            zpu_metal_f32_expression_program program = {0};
+            if (limitValue == 0 || limitValue > UINT32_MAX || expressionData.length == 0 ||
+                zpu_metal_compile_f32_expression_inputs(expressionData.bytes, expressionData.length,
+                    (uint32_t)limitValue, 2, &program) != ZPU_METAL_OK) return;
+            implementations[functionName] = zpu_cpu_msl_f32_expression_function_name;
+            expressionPrograms[functionName] = [NSData dataWithBytes:&program length:sizeof(program)];
+            return;
+        }
         if (integer && isDivide) return;
 
         NSUInteger assignmentLength = isAdd ? addAssignment.length :
@@ -15553,7 +15605,9 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
     }
     if (sourceLowered) {
         if (@available(macOS 26.0, iOS 26.0, *)) {
-            function->_functionReflection = _sourceFunctionReflections[functionName];
+            function->_functionReflection = [implementationName isEqualToString:zpu_cpu_msl_f32_expression_function_name] ?
+                zpu_f32_expression_function_reflection(function->_f32ExpressionProgram.input_count) :
+                _sourceFunctionReflections[functionName];
         }
     }
     return (id<MTLFunction>)function;
@@ -15589,6 +15643,13 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
     }
     if ([implementationName isEqualToString:zpu_cpu_source_metadata_function_name]) {
         return _sourceFunctionReflections[functionName];
+    }
+    if ([implementationName isEqualToString:zpu_cpu_msl_f32_expression_function_name]) {
+        NSData *programData = _sourceComputePrograms[functionName];
+        if (programData.length != sizeof(zpu_metal_f32_expression_program)) return nil;
+        zpu_metal_f32_expression_program program = {0};
+        [programData getBytes:&program length:sizeof(program)];
+        return zpu_f32_expression_function_reflection(program.input_count);
     }
     return zpu_function_reflection(implementationName);
 }
@@ -20918,7 +20979,9 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
                     (MTLFunctionReflection *)cpuFunction->_functionReflection);
             }
             if (_reflection == nil && _kernel != 0) {
-                _reflection = zpu_compute_pipeline_reflection(_kernel);
+                _reflection = _kernel == ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION ?
+                    zpu_f32_expression_pipeline_reflection(_f32ExpressionProgram.input_count) :
+                    zpu_compute_pipeline_reflection(_kernel);
             }
         }
     }

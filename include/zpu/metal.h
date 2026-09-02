@@ -544,7 +544,8 @@ typedef struct zpu_metal_f32_expression_program {
     uint32_t instruction_count;
     uint32_t element_limit;
     uint8_t output_value;
-    uint8_t reserved[3];
+    uint8_t input_count;
+    uint8_t reserved[2];
     zpu_metal_f32_expression_instruction instructions[ZPU_METAL_F32_EXPRESSION_MAX_INSTRUCTIONS];
 } zpu_metal_f32_expression_program;
 
@@ -913,6 +914,8 @@ zpu_metal_compute_encoder *zpu_metal_command_buffer_compute_encoder(zpu_metal_co
  * runtime; this function does not invoke Apple's Metal compiler. */
 int zpu_metal_compile_f32_expression(const char *expression, size_t expression_length,
     uint32_t element_limit, zpu_metal_f32_expression_program *program);
+int zpu_metal_compile_f32_expression_inputs(const char *expression, size_t expression_length,
+    uint32_t element_limit, uint8_t input_count, zpu_metal_f32_expression_program *program);
 int zpu_metal_compute_encoder_set_kernel(zpu_metal_compute_encoder *encoder, zpu_metal_compute_kernel kernel);
 int zpu_metal_compute_encoder_set_f32_expression_program(zpu_metal_compute_encoder *encoder,
     const zpu_metal_f32_expression_program *program);

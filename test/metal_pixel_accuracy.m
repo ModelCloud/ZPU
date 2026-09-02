@@ -995,6 +995,10 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_unsupported_f32(device const float *input [[buffer(0)]], "
          "device float *output [[buffer(1)]], uint id [[thread_position_in_grid]]) { "
          "if (id >= 12) return; output[id] = sign(input[id]); }\n"
+         "kernel void zpu_source_composed_binary_f32(device const float *left [[buffer(0)]], "
+         "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; "
+         "output[id] = sin(left[id]) + cos(right[id]) * 0.25f; }\n"
          "kernel void zpu_source_add_i32(device const int *left [[buffer(0)]], "
          "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
@@ -1359,7 +1363,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 114 ||
+        adapter_library.functionNames.count != 115 ||
         [adapter_library newFunctionWithName:@"zpu_source_unsupported_f32"] != nil) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
@@ -1824,24 +1828,26 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         BOOL divide;
         NSUInteger width;
         NSUInteger storage_width;
+        BOOL approximate;
     } cases[] = {
-        {@"zpu_source_add_f32", 12, NO, NO, NO, 1, 1},
-        {@"zpu_source_mul_f32", 10, YES, NO, NO, 1, 1},
-        {@"zpu_source_sub_f32", 12, NO, YES, NO, 1, 1},
-        {@"zpu_source_div_f32", 12, NO, NO, YES, 1, 1},
-        {@"zpu_source_add_f32_const_after_type", 12, NO, NO, NO, 1, 1},
-        {@"zpu_source_add_f32x4", 5, NO, NO, NO, 4, 4},
-        {@"zpu_source_mul_f32x4", 5, YES, NO, NO, 4, 4},
-        {@"zpu_source_sub_f32x4", 5, NO, YES, NO, 4, 4},
-        {@"zpu_source_div_f32x4", 5, NO, NO, YES, 4, 4},
-        {@"zpu_source_add_f32x2", 5, NO, NO, NO, 2, 2},
-        {@"zpu_source_mul_f32x2", 5, YES, NO, NO, 2, 2},
-        {@"zpu_source_sub_f32x2", 5, NO, YES, NO, 2, 2},
-        {@"zpu_source_div_f32x2", 5, NO, NO, YES, 2, 2},
-        {@"zpu_source_add_f32x3", 5, NO, NO, NO, 3, 4},
-        {@"zpu_source_mul_f32x3", 5, YES, NO, NO, 3, 4},
-        {@"zpu_source_sub_f32x3", 5, NO, YES, NO, 3, 4},
-        {@"zpu_source_div_f32x3", 5, NO, NO, YES, 3, 4},
+        {@"zpu_source_add_f32", 12, NO, NO, NO, 1, 1, NO},
+        {@"zpu_source_mul_f32", 10, YES, NO, NO, 1, 1, NO},
+        {@"zpu_source_sub_f32", 12, NO, YES, NO, 1, 1, NO},
+        {@"zpu_source_div_f32", 12, NO, NO, YES, 1, 1, NO},
+        {@"zpu_source_add_f32_const_after_type", 12, NO, NO, NO, 1, 1, NO},
+        {@"zpu_source_add_f32x4", 5, NO, NO, NO, 4, 4, NO},
+        {@"zpu_source_mul_f32x4", 5, YES, NO, NO, 4, 4, NO},
+        {@"zpu_source_sub_f32x4", 5, NO, YES, NO, 4, 4, NO},
+        {@"zpu_source_div_f32x4", 5, NO, NO, YES, 4, 4, NO},
+        {@"zpu_source_add_f32x2", 5, NO, NO, NO, 2, 2, NO},
+        {@"zpu_source_mul_f32x2", 5, YES, NO, NO, 2, 2, NO},
+        {@"zpu_source_sub_f32x2", 5, NO, YES, NO, 2, 2, NO},
+        {@"zpu_source_div_f32x2", 5, NO, NO, YES, 2, 2, NO},
+        {@"zpu_source_add_f32x3", 5, NO, NO, NO, 3, 4, NO},
+        {@"zpu_source_mul_f32x3", 5, YES, NO, NO, 3, 4, NO},
+        {@"zpu_source_sub_f32x3", 5, NO, YES, NO, 3, 4, NO},
+        {@"zpu_source_div_f32x3", 5, NO, NO, YES, 3, 4, NO},
+        {@"zpu_source_composed_binary_f32", 12, NO, NO, NO, 1, 1, YES},
     };
     const float left_values[20] = {
         -3.5f, -2.25f, -0.0f, 0.5f, 1.25f, 2.0f,
@@ -1930,14 +1936,18 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         }
         const NSUInteger scalar_count = cases[case_index].count *
             cases[case_index].storage_width;
-        const BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
-            adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&
+        const BOOL values_match = cases[case_index].approximate ?
+            zpu_ml_float32_values_within_tolerance((const float *)native_output.contents,
+                (const float *)adapter_output.contents, scalar_count, kMetalMLPureMathTolerance) :
             memcmp(native_output.contents, adapter_output.contents, scalar_count * sizeof(float)) == 0;
+        const BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok && values_match;
         if (!exact) {
             fprintf(stderr, "metal-pixel: source-defined CPU %s lowering mismatch\n",
                     cases[case_index].multiply ? "multiply" :
                     (cases[case_index].subtract ? "subtract" :
-                    (cases[case_index].divide ? "divide" : "add")));
+                    (cases[case_index].divide ? "divide" :
+                    (cases[case_index].approximate ? "composed binary pure math" : "add"))));
             fail_with_error("source-defined CPU lowering execution failed",
                             adapter_pipeline_error ?: native_pipeline_error);
             return 167 + (int)case_index;

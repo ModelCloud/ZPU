@@ -876,6 +876,8 @@ const ComputeBufferUnaryCommand = struct {
     program: msl_expression.Program = .{},
     input: *Buffer,
     input_offset: usize,
+    second_input: ?*Buffer = null,
+    second_input_offset: usize = 0,
     output: *Buffer,
     output_offset: usize,
     threads_per_grid: abi.Size,
@@ -2910,10 +2912,12 @@ pub const CommandBuffer = struct {
             },
             .compute_buffer_unary => |compute| {
                 sparseSyncBuffer(compute.input);
+                sparseSyncOptionalBuffer(compute.second_input);
                 sparseSyncBuffer(compute.output);
                 sparseSyncOptionalBuffer(compute.indirect_buffer);
                 defer {
                     sparseFlushBuffer(compute.input);
+                    sparseFlushOptionalBuffer(compute.second_input);
                     sparseFlushBuffer(compute.output);
                     sparseFlushOptionalBuffer(compute.indirect_buffer);
                 }
@@ -5380,16 +5384,26 @@ pub const ComputeEncoder = struct {
             threads_per_threadgroup.depth != 1) return error.InvalidArgument;
         if (self.kernel == 102 and !msl_expression.validate(&self.f32_expression_program)) return error.InvalidCommand;
         const input = self.buffers[0] orelse return error.InvalidCommand;
-        const output = self.buffers[1] orelse return error.InvalidCommand;
+        const second_input = if (self.kernel == 102 and self.f32_expression_program.input_count == 2)
+            self.buffers[1] orelse return error.InvalidCommand
+        else
+            null;
+        const output_index: usize = if (second_input != null) 2 else 1;
+        const output = self.buffers[output_index] orelse return error.InvalidCommand;
         if (!validBuffer(input) or !validBuffer(output) or input.device != self.command_buffer.queue.device or
             output.device != input.device) return error.InvalidResource;
+        if (second_input) |value| {
+            if (!validBuffer(value) or value.device != input.device) return error.InvalidResource;
+        }
         _ = try self.command_buffer.append(.{ .compute_buffer_unary = .{
             .kernel = self.kernel,
             .program = self.f32_expression_program,
             .input = input,
             .input_offset = self.buffer_offsets[0],
+            .second_input = second_input,
+            .second_input_offset = if (second_input != null) self.buffer_offsets[1] else 0,
             .output = output,
-            .output_offset = self.buffer_offsets[1],
+            .output_offset = self.buffer_offsets[output_index],
             .threads_per_grid = threads_per_grid,
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
@@ -6364,6 +6378,11 @@ fn executeBufferUnary(command: ComputeBufferUnaryCommand) Error!void {
         command.threads_per_threadgroup.height != 1 or
         command.threads_per_threadgroup.depth != 1) return error.InvalidArgument;
     if (command.kernel == 102 and !msl_expression.validate(&command.program)) return error.InvalidArgument;
+    if (command.kernel == 102 and command.program.input_count == 2 and command.second_input == null)
+        return error.InvalidArgument;
+    if (command.second_input) |second_input| {
+        if (!validBuffer(second_input) or second_input.device != command.input.device) return error.InvalidArgument;
+    }
     const element_count = if (command.kernel == 102)
         @min(command.threads_per_grid.width, command.program.element_limit)
     else
@@ -6372,6 +6391,9 @@ fn executeBufferUnary(command: ComputeBufferUnaryCommand) Error!void {
         return error.InvalidArgument;
     if (!rangeValid(command.input.bytes.len, command.input_offset, byte_count) or
         !rangeValid(command.output.bytes.len, command.output_offset, byte_count)) return error.InvalidArgument;
+    if (command.second_input) |second_input| {
+        if (!rangeValid(second_input.bytes.len, command.second_input_offset, byte_count)) return error.InvalidArgument;
+    }
     for (0..element_count) |index| {
         const offset = index * @sizeOf(f32);
         const input = readF32Little(command.input.bytes, command.input_offset + offset);
@@ -6382,7 +6404,13 @@ fn executeBufferUnary(command: ComputeBufferUnaryCommand) Error!void {
             99 => @log(input),
             100 => std.math.sqrt(input),
             101 => std.math.tanh(input),
-            102 => msl_expression.evaluate(&command.program, input) catch return error.InvalidArgument,
+            102 => msl_expression.evaluateInputs(&command.program, .{
+                input,
+                if (command.second_input) |second_input|
+                    readF32Little(second_input.bytes, command.second_input_offset + offset)
+                else
+                    0,
+            }) catch return error.InvalidArgument,
             else => unreachable,
         };
         writeU32Little(command.output.bytes, command.output_offset + offset, @bitCast(result));
@@ -9901,6 +9929,42 @@ test "CPU composed Float32 expression is deferred and honors the source guard" {
     }
     try std.testing.expectEqual(sentinel, readF32Little(output.bytes, 4 * @sizeOf(f32)));
     try std.testing.expectEqual(sentinel, readF32Little(output.bytes, 5 * @sizeOf(f32)));
+}
+
+test "CPU composed Float32 expression consumes two ZPU buffers" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const left_values = [_]f32{ -1.5, -0.25, 0.0, 0.75 };
+    const right_values = [_]f32{ 0.5, 1.0, 1.5, 2.0 };
+    const output_values = [_]f32{0} ** left_values.len;
+    const left = try createBuffer(device, @sizeOf(@TypeOf(left_values)), @ptrCast(&left_values));
+    defer destroyBuffer(left);
+    const right = try createBuffer(device, @sizeOf(@TypeOf(right_values)), @ptrCast(&right_values));
+    defer destroyBuffer(right);
+    const output = try createBuffer(device, @sizeOf(@TypeOf(output_values)), @ptrCast(&output_values));
+    defer destroyBuffer(output);
+    var program: msl_expression.Program = .{};
+    try msl_expression.compileWithInputCount("sin(x)+cos(y)*0.25", 4, 2, &program);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(102);
+    try encoder.setF32ExpressionProgram(&program);
+    try encoder.setBuffer(left, 0, 0);
+    try encoder.setBuffer(right, 0, 1);
+    try encoder.setBuffer(output, 0, 2);
+    try encoder.dispatchThreads(.{ .width = 4, .height = 1, .depth = 1 }, .{ .width = 2, .height = 1, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    for (left_values, right_values, 0..) |left_value, right_value, index| {
+        const expected = @sin(left_value) + @cos(right_value) * 0.25;
+        try std.testing.expectApproxEqAbs(expected, readF32Little(output.bytes, index * @sizeOf(f32)), 0.000001);
+    }
 }
 
 test "CPU buffer multiply compute is deferred and slot-accurate" {
@@ -14356,12 +14420,22 @@ pub export fn zpu_metal_compile_f32_expression(
     element_limit: u32,
     program: ?*msl_expression.Program,
 ) callconv(.c) c_int {
+    return zpu_metal_compile_f32_expression_inputs(expression, expression_length, element_limit, 1, program);
+}
+
+pub export fn zpu_metal_compile_f32_expression_inputs(
+    expression: ?[*]const u8,
+    expression_length: usize,
+    element_limit: u32,
+    input_count: u8,
+    program: ?*msl_expression.Program,
+) callconv(.c) c_int {
     const output = program orelse return -1;
     const bytes = (expression orelse {
         output.* = .{};
         return -1;
     })[0..expression_length];
-    msl_expression.compile(bytes, element_limit, output) catch return -1;
+    msl_expression.compileWithInputCount(bytes, element_limit, input_count, output) catch return -1;
     return 0;
 }
 
