@@ -898,6 +898,7 @@ fn namedOperationWithViews(
         if (query_status != .ok) return query_status;
     } else return .unsupported;
     if (signature.input_count == 0 or signature.input_count > argument_capacity or
+        (v2_backend == null and signature.input_count > max_inputs) or
         signature.input_count != input_count or elementTypeFromRaw(signature.element_type) == null or
         element_type != signature.element_type) return .invalid_argument;
     const signature_type = elementTypeFromRaw(signature.element_type).?;
@@ -1419,6 +1420,27 @@ fn namedSum3Provider(context: ?*anyopaque, arguments: *const NamedOperationArgum
     return @intFromEnum(Status.ok);
 }
 
+fn legacyThreeInputQuery(context: ?*anyopaque, function_name: [*]const u8,
+                         function_name_length: usize, signature: *NamedOperationSignature) callconv(.c) c_int {
+    const probe = @as(*NamedOperationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.query_calls += 1;
+    if (!std.mem.eql(u8, function_name[0..function_name_length], "zml_cpu_legacy_three_input")) {
+        return @intFromEnum(Status.unsupported);
+    }
+    signature.* = .{
+        .input_count = 3,
+        .element_type = @intFromEnum(ElementType.float32),
+    };
+    return @intFromEnum(Status.ok);
+}
+
+fn legacyThreeInputProvider(context: ?*anyopaque, arguments: *const NamedOperationArguments) callconv(.c) c_int {
+    const probe = @as(*NamedOperationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    _ = arguments;
+    probe.operation_calls += 1;
+    return @intFromEnum(Status.invalid_argument);
+}
+
 fn providerTestArguments(source_storage: []u32, destination_storage: []u32, dimensions: [max_rank]usize, output_dimensions: [max_rank]usize, strides: [max_rank]usize, output_strides: [max_rank]usize) TransposeArguments {
     return .{
         .source = testView(u32, source_storage, 2, dimensions, strides),
@@ -1872,6 +1894,44 @@ test "named CPU provider v2 carries a generic three-input graph" {
     try std.testing.expectEqual(Status.invalid_argument, namedOperationV2(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
+}
+
+test "v2 named entry point rejects over-limit legacy provider signatures" {
+    var left_storage = [_]f32{1};
+    var middle_storage = [_]f32{2};
+    var right_storage = [_]f32{3};
+    var destination_storage = [_]f32{0};
+    const dimensions = [_]usize{1} ++ [_]usize{0} ** (max_rank - 1);
+    const strides = [_]usize{1} ++ [_]usize{0} ** (max_rank - 1);
+    const inputs = [_]TensorView{
+        testView(f32, &left_storage, 1, dimensions, strides),
+        testView(f32, &middle_storage, 1, dimensions, strides),
+        testView(f32, &right_storage, 1, dimensions, strides),
+    };
+    const arguments = NamedOperationArgumentsV2{
+        .function_name = "zml_cpu_legacy_three_input",
+        .function_name_length = "zml_cpu_legacy_three_input".len,
+        .input_count = 3,
+        .element_type = @intFromEnum(ElementType.float32),
+        .reserved = 0,
+        .inputs = inputs[0..].ptr,
+        .destination = testView(f32, &destination_storage, 1, dimensions, strides),
+        .permutation = ([_]u32{0} ++ [_]u32{0} ** (max_rank - 1))[0..].ptr,
+    };
+    var probe = NamedOperationProbe{};
+    const backend = NamedOperationBackend{
+        .abi_version = named_operation_backend_abi_version,
+        .context = @ptrCast(&probe),
+        .query = legacyThreeInputQuery,
+        .operation = legacyThreeInputProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_backend(&backend));
+    defer _ = zpu_cpu_ml_set_named_operation_backend(null);
+
+    try std.testing.expectEqual(Status.invalid_argument, namedOperationV2(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.query_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.operation_calls);
+    try std.testing.expectEqual(@as(f32, 0), destination_storage[0]);
 }
 
 test "optional CPU provider preserves packed 4-bit tensor padding" {
