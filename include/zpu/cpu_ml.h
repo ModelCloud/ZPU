@@ -225,6 +225,9 @@ typedef struct zpu_cpu_ml_named_operation_arguments_v3 {
     const uint32_t *input_element_types;
     zpu_cpu_ml_tensor_view *outputs;
     const uint32_t *output_element_types;
+    /* Points to ZPU_CPU_ML_MAX_RANK entries. The v3 graph provider owns the
+     * meaning of this optional metadata; it is zero-filled by the Metal
+     * adapter for named graph dispatches. */
     const uint32_t *permutation;
 } zpu_cpu_ml_named_operation_arguments_v3;
 

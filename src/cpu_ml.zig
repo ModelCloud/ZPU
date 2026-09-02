@@ -1131,7 +1131,13 @@ fn namedOperationV3WithViews(
         !std.meta.eql(dense_arguments.outputs, dense_outputs[0..output_count].ptr) or
         !std.meta.eql(dense_arguments.output_element_types, output_element_types) or
         !std.meta.eql(dense_arguments.permutation, dense_permutation[0..].ptr)) return .invalid_argument;
+    const provider_outputs = dense_arguments.outputs orelse return .invalid_argument;
     for (0..output_count) |index| {
+        // The provider may write through the output data pointers, but it
+        // must not redirect or reshape a staged view. Scattering a mutated
+        // view would otherwise let provider metadata escape the dense CPU
+        // boundary and could copy from an unrelated allocation.
+        if (!std.meta.eql(dense_outputs[index], provider_outputs[index])) return .invalid_argument;
         const info = output_info[index].?;
         if (!copyDenseToDestination(&dense_outputs[index], info, &outputs[index], info)) return .invalid_argument;
     }
