@@ -30794,6 +30794,84 @@ int main(void) {
             return 64;
         }
 
+        /* A -1 extent is Metal's runtime-dimension constraint, not an
+         * invalid negative tensor shape. Preserve it in reflection and
+         * resolve it against the concrete ZPU tensor at deferred dispatch.
+         * Keep the second axis static so this also checks per-axis matching. */
+        NSError *metal4_ml_runtime_identity_error = nil;
+        MTLTensorExtents *metal4_ml_runtime_identity_dimensions =
+            [[MTLTensorExtents alloc] initWithRank:2 values:(const NSInteger[]){-1, 3}];
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_runtime_identity_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_runtime_identity_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_identity_function_descriptor;
+        [metal4_ml_runtime_identity_descriptor setInputDimensions:metal4_ml_runtime_identity_dimensions
+                                                    atBufferIndex:0];
+        [metal4_ml_runtime_identity_descriptor setInputDimensions:metal4_ml_runtime_identity_dimensions
+                                                    atBufferIndex:1];
+        id<MTL4MachineLearningPipelineState> metal4_ml_runtime_identity_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_runtime_identity_descriptor error:&metal4_ml_runtime_identity_error];
+        id<MTLTensorBinding> metal4_ml_runtime_identity_input_binding =
+            metal4_ml_runtime_identity_pipeline.reflection.bindings.count > 0 ?
+                (id<MTLTensorBinding>)metal4_ml_runtime_identity_pipeline.reflection.bindings[0] : nil;
+        id<MTLTensorBinding> metal4_ml_runtime_identity_output_binding =
+            metal4_ml_runtime_identity_pipeline.reflection.bindings.count > 1 ?
+                (id<MTLTensorBinding>)metal4_ml_runtime_identity_pipeline.reflection.bindings[1] : nil;
+        [metal4_ml_identity_source replaceSliceOrigin:metal4_ml_identity_zero
+                                       sliceDimensions:metal4_ml_identity_dimensions
+                                             withBytes:metal4_ml_identity_committed
+                                               strides:metal4_ml_identity_packed_strides];
+        [metal4_ml_identity_destination replaceSliceOrigin:metal4_ml_identity_zero
+                                           sliceDimensions:metal4_ml_identity_dimensions
+                                                 withBytes:metal4_ml_identity_sentinel
+                                                   strides:metal4_ml_identity_packed_strides];
+        id<MTL4CommandBuffer> metal4_ml_runtime_identity_command_buffer =
+            [adapter_device newCommandBuffer];
+        [metal4_ml_runtime_identity_command_buffer beginCommandBufferWithAllocator:metal4_allocator];
+        id<MTL4MachineLearningCommandEncoder> metal4_ml_runtime_identity_encoder =
+            [metal4_ml_runtime_identity_command_buffer machineLearningCommandEncoder];
+        [metal4_ml_runtime_identity_encoder setPipelineState:metal4_ml_runtime_identity_pipeline];
+        [metal4_ml_runtime_identity_encoder setArgumentTable:metal4_ml_identity_table];
+        [metal4_ml_runtime_identity_encoder dispatchNetworkWithIntermediatesHeap:adapter_three_d_heap];
+        [metal4_ml_runtime_identity_encoder endEncoding];
+        [metal4_ml_runtime_identity_command_buffer endCommandBuffer];
+        id<MTL4CommandBuffer> metal4_ml_runtime_identity_command_buffers[] = {
+            metal4_ml_runtime_identity_command_buffer,
+        };
+        MTL4CommitOptions *metal4_ml_runtime_identity_options = ZPUMetalCreateCPUCommitOptions();
+        __block NSError *metal4_ml_runtime_identity_feedback_error = nil;
+        [metal4_ml_runtime_identity_options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+            metal4_ml_runtime_identity_feedback_error = feedback.error;
+        }];
+        [metal4_queue commit:metal4_ml_runtime_identity_command_buffers
+                        count:1
+                       options:metal4_ml_runtime_identity_options];
+        uint8_t metal4_ml_runtime_identity_values[sizeof(metal4_ml_identity_committed)] = {0};
+        [metal4_ml_identity_destination getBytes:metal4_ml_runtime_identity_values
+                                         strides:metal4_ml_identity_packed_strides
+                                fromSliceOrigin:metal4_ml_identity_zero
+                                sliceDimensions:metal4_ml_identity_dimensions];
+        if (metal4_ml_runtime_identity_pipeline == nil || metal4_ml_runtime_identity_error != nil ||
+            metal4_ml_runtime_identity_pipeline.reflection.bindings.count != 2 ||
+            metal4_ml_runtime_identity_input_binding == nil ||
+            metal4_ml_runtime_identity_output_binding == nil ||
+            metal4_ml_runtime_identity_input_binding.dimensions.rank != 2 ||
+            metal4_ml_runtime_identity_output_binding.dimensions.rank != 2 ||
+            [metal4_ml_runtime_identity_input_binding.dimensions extentAtDimensionIndex:0] != -1 ||
+            [metal4_ml_runtime_identity_input_binding.dimensions extentAtDimensionIndex:1] != 3 ||
+            [metal4_ml_runtime_identity_output_binding.dimensions extentAtDimensionIndex:0] != -1 ||
+            [metal4_ml_runtime_identity_output_binding.dimensions extentAtDimensionIndex:1] != 3 ||
+            metal4_ml_runtime_identity_command_buffer == nil ||
+            metal4_ml_runtime_identity_encoder == nil ||
+            metal4_ml_runtime_identity_feedback_error != nil ||
+            memcmp(metal4_ml_runtime_identity_values, metal4_ml_identity_committed,
+                   sizeof(metal4_ml_runtime_identity_values)) != 0) {
+            fail_with_error("Metal 4 CPU ML runtime dimensions failed",
+                            metal4_ml_runtime_identity_error ?: metal4_ml_runtime_identity_feedback_error);
+            return 65;
+        }
+
         /* ML operations share the command buffer's ordered ZPU stream. Put a
          * tensor copy before the identity dispatch, then change its source
          * after encoding. If ML work were still drained out-of-band at commit,

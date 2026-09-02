@@ -15840,6 +15840,8 @@ static id<MTLFunction> zpu_mtl4_resolve_library_function(
 - (NSArray *)bindings { return _bindings ?: @[]; }
 @end
 
+static BOOL zpu_mtl4_ml_dimension_constraints_valid(MTLTensorExtents *dimensions);
+
 API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     if ([functionName isEqualToString:zpu_cpu_ml_add_u8_function_name]) return MTLTensorDataTypeUInt8;
@@ -15977,8 +15979,7 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
         if (inputDimensions[index] == nil) {
             continue;
         }
-        NSUInteger values[MTL_TENSOR_MAX_RANK];
-        if (!zpu_tensor_read_extents(inputDimensions[index], inputDimensions[index].rank, values, NO)) {
+        if (!zpu_mtl4_ml_dimension_constraints_valid(inputDimensions[index])) {
             zpu_set_error(error, @"ZPU CPU Metal 4 ML input dimensions are invalid");
             return nil;
         }
@@ -18332,11 +18333,26 @@ static BOOL zpu_tensor_encode_packed_copy_slice(
 static BOOL zpu_mtl4_ml_dimensions_match(MTLTensorExtents *expected, MTLTensorExtents *actual) {
     if (expected == nil) return YES;
     if (actual == nil || expected.rank != actual.rank || expected.rank > MTL_TENSOR_MAX_RANK) return NO;
-    NSUInteger expectedValues[MTL_TENSOR_MAX_RANK];
     NSUInteger actualValues[MTL_TENSOR_MAX_RANK];
-    return zpu_tensor_read_extents(expected, expected.rank, expectedValues, NO) &&
-        zpu_tensor_read_extents(actual, actual.rank, actualValues, NO) &&
-        memcmp(expectedValues, actualValues, expected.rank * sizeof(NSUInteger)) == 0;
+    if (!zpu_tensor_read_extents(actual, actual.rank, actualValues, NO)) return NO;
+    for (NSUInteger index = 0; index < expected.rank; ++index) {
+        const NSInteger expectedValue = [expected extentAtDimensionIndex:index];
+        /* Metal 4 uses -1 for a runtime-resolved dimension. A descriptor
+         * constraint is therefore exact for positive extents and wildcard
+         * for -1, while the bound ZPU tensor must always be concrete. */
+        if (expectedValue < -1 || expectedValue == 0) return NO;
+        if (expectedValue > 0 && (NSUInteger)expectedValue != actualValues[index]) return NO;
+    }
+    return YES;
+}
+
+static BOOL zpu_mtl4_ml_dimension_constraints_valid(MTLTensorExtents *dimensions) {
+    if (dimensions == nil || dimensions.rank > MTL_TENSOR_MAX_RANK) return NO;
+    for (NSUInteger index = 0; index < dimensions.rank; ++index) {
+        const NSInteger value = [dimensions extentAtDimensionIndex:index];
+        if (value < -1 || value == 0) return NO;
+    }
+    return YES;
 }
 
 static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtents *right) {

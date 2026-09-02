@@ -831,10 +831,11 @@ triangle path:
 - Metal 4 CPU machine-learning pipeline reflection exposes tensor bindings as
   `MTLTensorBinding` objects, including the profile's tensor data type, Metal's
   required `int` index type, and optional descriptor-provided dimensions;
-  unspecified dimensions resolve from the bound ZPU tensors at dispatch and
-  elementwise profiles require matching extents. The polymorphic identity
-  profile reports `MTLTensorDataTypeNone` rather than claiming a single storage
-  format
+  unspecified dimensions resolve from the bound ZPU tensors at dispatch;
+  descriptor dimensions of `-1` are preserved as per-axis runtime wildcards,
+  while concrete bound ZPU tensors remain mandatory. Elementwise profiles still
+  require matching concrete extents. The polymorphic identity profile reports
+  `MTLTensorDataTypeNone` rather than claiming a single storage format
 - registered CPU library functions expose matching binding reflection with a
   `nil` user annotation; unregistered functions and arbitrary specialized
   descriptors remain unsupported. The fixed
