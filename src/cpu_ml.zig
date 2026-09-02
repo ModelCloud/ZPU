@@ -1694,6 +1694,13 @@ test "fixed CPU operations fall back to exact strided reference math" {
     try std.testing.expectEqual(Status.ok, operation(&half_arguments));
     try std.testing.expectEqualSlices(f16, &[_]f16{ 3.0, -1.0 }, &half_output);
 
+    var half_division_output = [_]f16{ -99.0, -99.0 };
+    var half_division_arguments = half_arguments;
+    half_division_arguments.operation = @intFromEnum(Operation.divide);
+    half_division_arguments.destination = testView(f16, &half_division_output, 1, vector_dimensions, vector_strides);
+    try std.testing.expectEqual(Status.ok, operation(&half_division_arguments));
+    try std.testing.expectEqualSlices(f16, &[_]f16{ 0.75, -4.0 }, &half_division_output);
+
     var bfloat_left = [_]u16{ 0x3f80, 0xc000 };
     var bfloat_right = [_]u16{ 0x4000, 0x3f80 };
     var bfloat_output = [_]u16{ 0xffff, 0xffff };
@@ -1708,6 +1715,13 @@ test "fixed CPU operations fall back to exact strided reference math" {
     };
     try std.testing.expectEqual(Status.ok, operation(&bfloat_arguments));
     try std.testing.expectEqualSlices(u16, &[_]u16{ 0x4040, 0xbf80 }, &bfloat_output);
+
+    var bfloat_division_output = [_]u16{ 0xffff, 0xffff };
+    var bfloat_division_arguments = bfloat_arguments;
+    bfloat_division_arguments.operation = @intFromEnum(Operation.divide);
+    bfloat_division_arguments.destination = testView(u16, &bfloat_division_output, 1, vector_dimensions, vector_strides);
+    try std.testing.expectEqual(Status.ok, operation(&bfloat_division_arguments));
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 0x3f00, 0xc000 }, &bfloat_division_output);
 
     var integer_left = [_]u8{ 0xff, 2, 3, 4 };
     var integer_right = [_]u8{ 2, 3, 4, 5 };
