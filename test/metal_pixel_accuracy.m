@@ -30290,6 +30290,32 @@ int main(void) {
             return 63;
         }
 
+        /* Input dimensions are independently optional in the Metal 4 ML
+         * descriptor. The adapter must not manufacture output reflection
+         * dimensions from input zero; dispatch still validates the concrete
+         * identity shape against the bound ZPU tensors. */
+        NSError *metal4_ml_dynamic_identity_error = nil;
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_dynamic_identity_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_dynamic_identity_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_identity_function_descriptor;
+        [metal4_ml_dynamic_identity_descriptor setInputDimensions:metal4_ml_identity_dimensions
+                                                    atBufferIndex:0];
+        id<MTL4MachineLearningPipelineState> metal4_ml_dynamic_identity_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_dynamic_identity_descriptor error:&metal4_ml_dynamic_identity_error];
+        id<MTLTensorBinding> metal4_ml_dynamic_identity_output_binding =
+            metal4_ml_dynamic_identity_pipeline.reflection.bindings.count > 1 ?
+                (id<MTLTensorBinding>)metal4_ml_dynamic_identity_pipeline.reflection.bindings[1] : nil;
+        if (metal4_ml_dynamic_identity_pipeline == nil || metal4_ml_dynamic_identity_error != nil ||
+            metal4_ml_dynamic_identity_pipeline.reflection.bindings.count != 2 ||
+            metal4_ml_dynamic_identity_output_binding == nil ||
+            metal4_ml_dynamic_identity_output_binding.dimensions != nil) {
+            fail_with_error("Metal 4 CPU ML dynamic identity reflection failed",
+                            metal4_ml_dynamic_identity_error);
+            return 64;
+        }
+
         /* ML operations share the command buffer's ordered ZPU stream. Put a
          * tensor copy before the identity dispatch, then change its source
          * after encoding. If ML work were still drained out-of-band at commit,

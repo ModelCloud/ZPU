@@ -15768,7 +15768,7 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
                                                                         access:MTLBindingAccessWriteOnly index:1];
             [output setTensorDataType:zpu_mtl4_ml_tensor_data_type(functionName)
                             indexType:MTLDataTypeInt
-                           dimensions:inputDimensions[1] ?: inputDimensions[0]];
+                           dimensions:inputDimensions[1]];
             _reflection = [[ZPUMTL4MachineLearningPipelineReflection alloc]
                 initWithBindings:@[input, output]];
         } else {
