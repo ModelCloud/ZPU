@@ -48,6 +48,10 @@ The specialized transpose backend remains compatible with the operation entry
 point: an operation with `ZPU_CPU_ML_OPERATION_TRANSPOSE` gives the registered
 transpose callback first chance, then tries the generic operation provider and
 finally the exact ZPU reference implementation if both providers decline.
+The Apple-shaped Metal adapter additionally probes a registered v3 named
+provider for the canonical `zpu_cpu_ml_transpose` entry before its v2/v1 named
+provider fallback, so a ZML/cpu graph bridge can own that transpose without
+requiring an adapter-local implementation.
 
 For a Metal 4 named one-input/one-output function whose name contains
 `transpose`, the adapter also derives `permutation[output_axis]` from the

@@ -16219,6 +16219,57 @@ static int zpu_test_cpu_ml_named_transpose_provider(
     return ZPU_CPU_ML_STATUS_OK;
 }
 
+static int zpu_test_cpu_ml_named_transpose_v3_query(
+    void *context, const char *functionName, size_t functionNameLength,
+    zpu_cpu_ml_named_operation_signature_v3 *signature) {
+    ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
+    if (probe == NULL || functionName == NULL || signature == NULL) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->queryCalls;
+    if (functionNameLength != strlen("zpu_cpu_ml_transpose") ||
+        memcmp(functionName, "zpu_cpu_ml_transpose", functionNameLength) != 0) {
+        return ZPU_CPU_ML_STATUS_UNSUPPORTED;
+    }
+    memset(signature, 0, sizeof(*signature));
+    signature->input_count = 1;
+    signature->output_count = 1;
+    signature->input_element_types[0] = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    signature->output_element_types[0] = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int zpu_test_cpu_ml_named_transpose_v3_provider(
+    void *context, const zpu_cpu_ml_named_operation_arguments_v3 *arguments) {
+    ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
+    if (probe == NULL || arguments == NULL || arguments->function_name == NULL ||
+        arguments->inputs == NULL || arguments->outputs == NULL ||
+        arguments->input_element_types == NULL || arguments->output_element_types == NULL ||
+        arguments->permutation == NULL || arguments->function_name_length != strlen("zpu_cpu_ml_transpose") ||
+        memcmp(arguments->function_name, "zpu_cpu_ml_transpose", arguments->function_name_length) != 0 ||
+        arguments->input_count != 1 || arguments->output_count != 1 ||
+        arguments->input_element_types[0] != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->output_element_types[0] != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->inputs[0].rank != 2 || arguments->outputs[0].rank != 2 ||
+        arguments->inputs[0].dimensions[0] != 2 || arguments->inputs[0].dimensions[1] != 3 ||
+        arguments->outputs[0].dimensions[0] != 3 || arguments->outputs[0].dimensions[1] != 2 ||
+        arguments->inputs[0].strides[0] != 1 || arguments->inputs[0].strides[1] != 2 ||
+        arguments->outputs[0].strides[0] != 1 || arguments->outputs[0].strides[1] != 3 ||
+        arguments->permutation[0] != 1 || arguments->permutation[1] != 0) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    const uint32_t *source = (const uint32_t *)arguments->inputs[0].data;
+    uint32_t *destination = (uint32_t *)arguments->outputs[0].data;
+    if (source == NULL || destination == NULL) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    ++probe->operationCalls;
+    for (NSUInteger y = 0; y < 2; ++y) {
+        for (NSUInteger x = 0; x < 3; ++x) {
+            destination[x + y * 3] = source[y + x * 2];
+        }
+    }
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
 static int zpu_test_cpu_ml_named_transpose_name_at(
     void *context, size_t index, const char **functionName, size_t *functionNameLength) {
     ZPUCPUMLNamedProviderProbe *probe = (ZPUCPUMLNamedProviderProbe *)context;
@@ -17192,15 +17243,15 @@ static int test_metal4_cpu_float32_transpose_profile(
         feedbackError = feedback.error;
     }];
     ZPUCPUMLNamedProviderProbe providerProbe = {0};
-    const zpu_cpu_ml_named_operation_backend provider = {
-        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION,
+    const zpu_cpu_ml_named_operation_backend_v3 canonicalProvider = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_V3_ABI_VERSION,
         .context = &providerProbe,
-        .query = zpu_test_cpu_ml_named_transpose_query,
-        .operation = zpu_test_cpu_ml_named_transpose_provider,
+        .query = zpu_test_cpu_ml_named_transpose_v3_query,
+        .operation = zpu_test_cpu_ml_named_transpose_v3_provider,
     };
-    const int providerRegistration = zpu_cpu_ml_set_named_operation_backend(&provider);
+    const int providerRegistration = zpu_cpu_ml_set_named_operation_backend_v3(&canonicalProvider);
     [adapterQueue commit:commandBuffers count:1 options:commitOptions];
-    const int providerUnregistration = zpu_cpu_ml_set_named_operation_backend(NULL);
+    const int providerUnregistration = zpu_cpu_ml_set_named_operation_backend_v3(NULL);
     if (destinationBuffer != nil && destinationBuffer.contents != NULL) {
         memcpy(adapterValues, destinationBuffer.contents, sizeof(adapterValues));
     }

@@ -5867,6 +5867,9 @@ static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
                                                  ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
                                                  ZPUTensor *destination, uint32_t elementType,
                                                  const uint32_t *permutation);
+static int zpu_tensor_try_cpu_ml_named_operation_outputs(
+    NSString *functionName, ZPUTensor *const *inputs, NSUInteger inputCount,
+    ZPUTensor *const *outputs, NSUInteger outputCount, const uint32_t *permutation);
 
 static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
                                            ZPUTensor *destination, uint32_t operation) {
@@ -5899,6 +5902,12 @@ static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
          * transpose name. It receives the same dense staging contract as a
          * named pipeline, while an unsupported provider still falls through
          * to the versioned fixed-operation provider/reference path below. */
+        ZPUTensor *namedInputs[] = {source};
+        ZPUTensor *namedOutputs[] = {destination};
+        const int namedV3Status = zpu_tensor_try_cpu_ml_named_operation_outputs(
+            zpu_cpu_ml_transpose_function_name, namedInputs, 1, namedOutputs, 1,
+            arguments.permutation);
+        if (namedV3Status != ZPU_CPU_ML_STATUS_UNSUPPORTED) return namedV3Status;
         const int namedStatus = zpu_tensor_try_cpu_ml_named_operation(
             zpu_cpu_ml_transpose_function_name, source, nil, 1, destination,
             elementType, arguments.permutation);
