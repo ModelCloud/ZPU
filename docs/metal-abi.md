@@ -479,7 +479,10 @@ triangle path:
   Every supported fixed Metal 4 ML dispatch enters the host-neutral
   `zpu_cpu_ml_operation` boundary; the Apple adapter retains only descriptor
   validation and ZPU tensor ownership, so it has no second arithmetic
-  implementation.
+  implementation. Before that fixed operation fallback, the adapter probes
+  the canonical profile name through the optional ZML/cpu named v3 ABI (then
+  v2/v1), so a translated graph can own the call while all resources remain
+  staged CPU/ZPU views.
   These source profiles preserve the exact `thread_position_in_grid` bounds
   used by their native Metal oracle and do not invoke Apple's compiler at
   execution time. The same bounded source lowering covers `half2/3/4` and

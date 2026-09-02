@@ -49,9 +49,12 @@ point: an operation with `ZPU_CPU_ML_OPERATION_TRANSPOSE` gives the registered
 transpose callback first chance, then tries the generic operation provider and
 finally the exact ZPU reference implementation if both providers decline.
 The Apple-shaped Metal adapter additionally probes a registered v3 named
-provider for the canonical `zpu_cpu_ml_transpose` entry before its v2/v1 named
-provider fallback, so a ZML/cpu graph bridge can own that transpose without
-requiring an adapter-local implementation.
+provider for each canonical fixed Metal profile (for example,
+`zpu_cpu_ml_transpose` or `zpu_cpu_ml_matmul_f32`) before its v2/v1 named
+provider fallback. A ZML/cpu graph bridge can therefore own a translated
+Metal ML call without requiring an adapter-local implementation; if it does
+not advertise the canonical name, the fixed operation provider/reference
+path remains unchanged.
 
 For a Metal 4 named one-input/one-output function whose name contains
 `transpose`, the adapter also derives `permutation[output_axis]` from the

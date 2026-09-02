@@ -5863,10 +5863,93 @@ static uint32_t zpu_cpu_ml_element_type(ZPUTensor *tensor) {
     }
 }
 
-static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
-                                                 ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
-                                                 ZPUTensor *destination, uint32_t elementType,
-                                                 const uint32_t *permutation);
+/* Fixed Metal 4 ML profiles have stable names as well as stable operation
+ * IDs. Prefer the named CPU graph ABI when a ZML/cpu bridge advertises that
+ * canonical name; the operation ABI remains the portable fallback. Keeping
+ * this mapping at the Apple-shaped boundary means the host-neutral CPU ML
+ * package does not need to know anything about Metal function names. */
+static NSString *zpu_cpu_ml_canonical_function_name(uint32_t operation,
+                                                    uint32_t elementType) {
+    if (operation == ZPU_CPU_ML_OPERATION_IDENTITY) return zpu_cpu_ml_identity_function_name;
+    if (operation == ZPU_CPU_ML_OPERATION_TRANSPOSE) return zpu_cpu_ml_transpose_function_name;
+    if (operation == ZPU_CPU_ML_OPERATION_ADD) {
+        switch (elementType) {
+            case ZPU_CPU_ML_ELEMENT_FLOAT32: return zpu_cpu_ml_add_f32_function_name;
+            case ZPU_CPU_ML_ELEMENT_FLOAT16: return zpu_cpu_ml_add_f16_function_name;
+            case ZPU_CPU_ML_ELEMENT_BFLOAT16: return zpu_cpu_ml_add_bf16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT8: return zpu_cpu_ml_add_i8_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT8: return zpu_cpu_ml_add_u8_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT16: return zpu_cpu_ml_add_i16_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT16: return zpu_cpu_ml_add_u16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT32: return zpu_cpu_ml_add_i32_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT32: return zpu_cpu_ml_add_u32_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT4: return zpu_cpu_ml_add_i4_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT4: return zpu_cpu_ml_add_u4_function_name;
+            default: return nil;
+        }
+    }
+    if (operation == ZPU_CPU_ML_OPERATION_SUBTRACT) {
+        switch (elementType) {
+            case ZPU_CPU_ML_ELEMENT_FLOAT32: return zpu_cpu_ml_sub_f32_function_name;
+            case ZPU_CPU_ML_ELEMENT_FLOAT16: return zpu_cpu_ml_sub_f16_function_name;
+            case ZPU_CPU_ML_ELEMENT_BFLOAT16: return zpu_cpu_ml_sub_bf16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT8: return zpu_cpu_ml_sub_i8_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT8: return zpu_cpu_ml_sub_u8_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT16: return zpu_cpu_ml_sub_i16_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT16: return zpu_cpu_ml_sub_u16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT32: return zpu_cpu_ml_sub_i32_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT32: return zpu_cpu_ml_sub_u32_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT4: return zpu_cpu_ml_sub_i4_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT4: return zpu_cpu_ml_sub_u4_function_name;
+            default: return nil;
+        }
+    }
+    if (operation == ZPU_CPU_ML_OPERATION_DIVIDE) {
+        switch (elementType) {
+            case ZPU_CPU_ML_ELEMENT_FLOAT32: return zpu_cpu_ml_div_f32_function_name;
+            case ZPU_CPU_ML_ELEMENT_FLOAT16: return zpu_cpu_ml_div_f16_function_name;
+            case ZPU_CPU_ML_ELEMENT_BFLOAT16: return zpu_cpu_ml_div_bf16_function_name;
+            default: return nil;
+        }
+    }
+    if (operation == ZPU_CPU_ML_OPERATION_MULTIPLY) {
+        switch (elementType) {
+            case ZPU_CPU_ML_ELEMENT_FLOAT32: return zpu_cpu_ml_mul_f32_function_name;
+            case ZPU_CPU_ML_ELEMENT_FLOAT16: return zpu_cpu_ml_mul_f16_function_name;
+            case ZPU_CPU_ML_ELEMENT_BFLOAT16: return zpu_cpu_ml_mul_bf16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT8: return zpu_cpu_ml_mul_i8_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT8: return zpu_cpu_ml_mul_u8_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT16: return zpu_cpu_ml_mul_i16_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT16: return zpu_cpu_ml_mul_u16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT32: return zpu_cpu_ml_mul_i32_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT32: return zpu_cpu_ml_mul_u32_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT4: return zpu_cpu_ml_mul_i4_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT4: return zpu_cpu_ml_mul_u4_function_name;
+            default: return nil;
+        }
+    }
+    if (operation == ZPU_CPU_ML_OPERATION_MATMUL) {
+        switch (elementType) {
+            case ZPU_CPU_ML_ELEMENT_FLOAT32: return zpu_cpu_ml_matmul_f32_function_name;
+            case ZPU_CPU_ML_ELEMENT_FLOAT16: return zpu_cpu_ml_matmul_f16_function_name;
+            case ZPU_CPU_ML_ELEMENT_BFLOAT16: return zpu_cpu_ml_matmul_bf16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT8: return zpu_cpu_ml_matmul_i8_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT8: return zpu_cpu_ml_matmul_u8_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT16: return zpu_cpu_ml_matmul_i16_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT16: return zpu_cpu_ml_matmul_u16_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT32: return zpu_cpu_ml_matmul_i32_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT32: return zpu_cpu_ml_matmul_u32_function_name;
+            case ZPU_CPU_ML_ELEMENT_INT4: return zpu_cpu_ml_matmul_i4_function_name;
+            case ZPU_CPU_ML_ELEMENT_UINT4: return zpu_cpu_ml_matmul_u4_function_name;
+            default: return nil;
+        }
+    }
+    return nil;
+}
+
+static int zpu_tensor_try_cpu_ml_named_operation_inputs(
+    NSString *functionName, ZPUTensor *const *inputs, NSUInteger inputCount,
+    ZPUTensor *destination, uint32_t elementType, const uint32_t *permutation);
 static int zpu_tensor_try_cpu_ml_named_operation_outputs(
     NSString *functionName, ZPUTensor *const *inputs, NSUInteger inputCount,
     ZPUTensor *const *outputs, NSUInteger outputCount, const uint32_t *permutation);
@@ -5898,19 +5981,18 @@ static int zpu_tensor_try_cpu_ml_operation(ZPUTensor *source, ZPUTensor *right,
         for (NSUInteger outputAxis = 0; outputAxis < source->_dimensions.rank; ++outputAxis) {
             arguments.permutation[outputAxis] = (uint32_t)(source->_dimensions.rank - 1 - outputAxis);
         }
-        /* A ZML/cpu provider may advertise the canonical Metal-shaped
-         * transpose name. It receives the same dense staging contract as a
-         * named pipeline, while an unsupported provider still falls through
-         * to the versioned fixed-operation provider/reference path below. */
-        ZPUTensor *namedInputs[] = {source};
+    }
+    NSString *canonicalName = zpu_cpu_ml_canonical_function_name(operation, elementType);
+    if (canonicalName != nil) {
+        ZPUTensor *namedInputs[] = {source, right};
         ZPUTensor *namedOutputs[] = {destination};
+        const NSUInteger inputCount = right == nil ? 1 : 2;
         const int namedV3Status = zpu_tensor_try_cpu_ml_named_operation_outputs(
-            zpu_cpu_ml_transpose_function_name, namedInputs, 1, namedOutputs, 1,
-            arguments.permutation);
+            canonicalName, namedInputs, inputCount, namedOutputs, 1, arguments.permutation);
         if (namedV3Status != ZPU_CPU_ML_STATUS_UNSUPPORTED) return namedV3Status;
-        const int namedStatus = zpu_tensor_try_cpu_ml_named_operation(
-            zpu_cpu_ml_transpose_function_name, source, nil, 1, destination,
-            elementType, arguments.permutation);
+        const int namedStatus = zpu_tensor_try_cpu_ml_named_operation_inputs(
+            canonicalName, namedInputs, inputCount, destination, elementType,
+            arguments.permutation);
         if (namedStatus != ZPU_CPU_ML_STATUS_UNSUPPORTED) return namedStatus;
     }
     return zpu_cpu_ml_operation(&arguments);
@@ -6043,16 +6125,6 @@ static int zpu_tensor_try_cpu_ml_named_operation_outputs(
     arguments.output_element_types = outputElementTypes;
     arguments.permutation = permutation;
     return zpu_cpu_ml_named_operation_v3(&arguments);
-}
-
-static int zpu_tensor_try_cpu_ml_named_operation(NSString *functionName,
-                                                 ZPUTensor *input0, ZPUTensor *input1, NSUInteger inputCount,
-                                                 ZPUTensor *destination, uint32_t elementType,
-                                                 const uint32_t *permutation) {
-    ZPUTensor *inputs[ZPU_CPU_ML_MAX_INPUTS] = {input0, input1};
-    if (inputCount > ZPU_CPU_ML_MAX_INPUTS) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
-    return zpu_tensor_try_cpu_ml_named_operation_inputs(functionName, inputs, inputCount,
-                                                        destination, elementType, permutation);
 }
 
 typedef struct {
