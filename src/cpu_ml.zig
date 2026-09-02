@@ -1022,9 +1022,9 @@ fn namedOperationWithViews(
         const expected_dense_permutation = dense_permutation;
         const provider_status = providerStatus(callback(backend.context, &dense_arguments));
         if (!std.meta.eql(dense_arguments, expected_dense_arguments) or
-            !tensorViewsEqual(dense_inputs[0..signature.input_count],
-                expected_dense_inputs[0..signature.input_count]) or
-            !std.mem.eql(u32, dense_permutation[0..], expected_dense_permutation[0..])) {
+            !tensorViewsEqual(dense_inputs[0..signature.input_count], expected_dense_inputs[0..signature.input_count]) or
+            !std.mem.eql(u32, dense_permutation[0..], expected_dense_permutation[0..]))
+        {
             break :blk Status.invalid_argument;
         }
         break :blk provider_status;
@@ -1211,8 +1211,7 @@ pub fn namedOperationV3(arguments: *const NamedOperationArgumentsV3) Status {
     const outputs = arguments.outputs orelse return .invalid_argument;
     const output_element_types = arguments.output_element_types orelse return .invalid_argument;
     const permutation = arguments.permutation orelse return .invalid_argument;
-    return namedOperationV3WithViews(name, arguments.function_name_length, arguments.input_count,
-        inputs, input_element_types, arguments.output_count, outputs, output_element_types, permutation);
+    return namedOperationV3WithViews(name, arguments.function_name_length, arguments.input_count, inputs, input_element_types, arguments.output_count, outputs, output_element_types, permutation);
 }
 
 /// Stage a strided ZPU view into dense CPU memory for the optional provider.
@@ -1709,8 +1708,7 @@ fn namedSum3InputMutationProvider(context: ?*anyopaque, arguments: *const NamedO
     return @intFromEnum(Status.ok);
 }
 
-fn namedSplitQuery(context: ?*anyopaque, function_name: [*]const u8,
-                   function_name_length: usize, signature: *NamedOperationSignatureV3) callconv(.c) c_int {
+fn namedSplitQuery(context: ?*anyopaque, function_name: [*]const u8, function_name_length: usize, signature: *NamedOperationSignatureV3) callconv(.c) c_int {
     const probe = @as(*NamedOperationV3Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
     probe.query_calls += 1;
     if (!std.mem.eql(u8, function_name[0..function_name_length], "zml_cpu_split_f32")) {
@@ -1770,8 +1768,7 @@ fn namedSplitOutputMutationProvider(context: ?*anyopaque, arguments: *const Name
     return @intFromEnum(Status.ok);
 }
 
-fn legacyThreeInputQuery(context: ?*anyopaque, function_name: [*]const u8,
-                         function_name_length: usize, signature: *NamedOperationSignature) callconv(.c) c_int {
+fn legacyThreeInputQuery(context: ?*anyopaque, function_name: [*]const u8, function_name_length: usize, signature: *NamedOperationSignature) callconv(.c) c_int {
     const probe = @as(*NamedOperationProbe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
     probe.query_calls += 1;
     if (!std.mem.eql(u8, function_name[0..function_name_length], "zml_cpu_legacy_three_input")) {
@@ -2168,19 +2165,31 @@ test "fixed CPU operations fall back to exact strided reference math" {
     var uint4_right = [_]u8{ 0x65, 0x87 };
     var uint4_output = [_]u8{ 0xa5, 0xa5 };
     const uint4_left_view = TensorView{
-        .data = @ptrCast(uint4_left[0..].ptr), .byte_length = uint4_left.len,
-        .offset_bytes = 0, .rank = 2, .element_bits = 4,
-        .dimensions = packed_dimensions, .strides = packed_strides,
+        .data = @ptrCast(uint4_left[0..].ptr),
+        .byte_length = uint4_left.len,
+        .offset_bytes = 0,
+        .rank = 2,
+        .element_bits = 4,
+        .dimensions = packed_dimensions,
+        .strides = packed_strides,
     };
     const uint4_right_view = TensorView{
-        .data = @ptrCast(uint4_right[0..].ptr), .byte_length = uint4_right.len,
-        .offset_bytes = 0, .rank = 2, .element_bits = 4,
-        .dimensions = packed_dimensions, .strides = packed_strides,
+        .data = @ptrCast(uint4_right[0..].ptr),
+        .byte_length = uint4_right.len,
+        .offset_bytes = 0,
+        .rank = 2,
+        .element_bits = 4,
+        .dimensions = packed_dimensions,
+        .strides = packed_strides,
     };
     const uint4_output_view = TensorView{
-        .data = @ptrCast(uint4_output[0..].ptr), .byte_length = uint4_output.len,
-        .offset_bytes = 0, .rank = 2, .element_bits = 4,
-        .dimensions = packed_dimensions, .strides = packed_strides,
+        .data = @ptrCast(uint4_output[0..].ptr),
+        .byte_length = uint4_output.len,
+        .offset_bytes = 0,
+        .rank = 2,
+        .element_bits = 4,
+        .dimensions = packed_dimensions,
+        .strides = packed_strides,
     };
     const uint4_arguments = OperationArguments{
         .operation = @intFromEnum(Operation.matmul),
@@ -2203,16 +2212,10 @@ test "fixed CPU operations fall back to exact strided reference math" {
         .input_count = 2,
         .reserved = 0,
         .inputs = .{
-            .{ .data = @ptrCast(int4_left[0..].ptr), .byte_length = int4_left.len,
-               .offset_bytes = 0, .rank = 2, .element_bits = 4,
-               .dimensions = packed_dimensions, .strides = packed_strides },
-            .{ .data = @ptrCast(int4_right[0..].ptr), .byte_length = int4_right.len,
-               .offset_bytes = 0, .rank = 2, .element_bits = 4,
-               .dimensions = packed_dimensions, .strides = packed_strides },
+            .{ .data = @ptrCast(int4_left[0..].ptr), .byte_length = int4_left.len, .offset_bytes = 0, .rank = 2, .element_bits = 4, .dimensions = packed_dimensions, .strides = packed_strides },
+            .{ .data = @ptrCast(int4_right[0..].ptr), .byte_length = int4_right.len, .offset_bytes = 0, .rank = 2, .element_bits = 4, .dimensions = packed_dimensions, .strides = packed_strides },
         },
-        .destination = .{ .data = @ptrCast(int4_output[0..].ptr), .byte_length = int4_output.len,
-                          .offset_bytes = 0, .rank = 2, .element_bits = 4,
-                          .dimensions = packed_dimensions, .strides = packed_strides },
+        .destination = .{ .data = @ptrCast(int4_output[0..].ptr), .byte_length = int4_output.len, .offset_bytes = 0, .rank = 2, .element_bits = 4, .dimensions = packed_dimensions, .strides = packed_strides },
         .permutation = [_]u32{0} ** max_rank,
     };
     try std.testing.expectEqual(Status.ok, operation(&int4_arguments));

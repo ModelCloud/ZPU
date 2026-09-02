@@ -6136,7 +6136,7 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
             (command.elements_per_thread != 1 or command.element_stride != 1)) or
         (narrow_vector_width != null and
             (command.elements_per_thread != narrow_vector_width.? or
-             command.element_stride != (if (narrow_vector_width.? == 3) 4 else narrow_vector_width.?))) or
+                command.element_stride != (if (narrow_vector_width.? == 3) 4 else narrow_vector_width.?))) or
         !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
