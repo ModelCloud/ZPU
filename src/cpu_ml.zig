@@ -1190,6 +1190,10 @@ fn namedOperationV3WithViews(
     }
 
     const callback = backend.operation orelse return .unsupported;
+    var dense_input_element_types: [max_named_inputs]u32 = @splat(0);
+    var dense_output_element_types: [max_named_outputs]u32 = @splat(0);
+    @memcpy(dense_input_element_types[0..input_count], input_element_types[0..input_count]);
+    @memcpy(dense_output_element_types[0..output_count], output_element_types[0..output_count]);
     var dense_permutation: [max_rank]u32 = @splat(0);
     @memcpy(&dense_permutation, permutation[0..max_rank]);
     var dense_arguments = NamedOperationArgumentsV3{
@@ -1199,9 +1203,9 @@ fn namedOperationV3WithViews(
         .output_count = output_count,
         .reserved = 0,
         .inputs = dense_inputs[0..input_count].ptr,
-        .input_element_types = input_element_types,
+        .input_element_types = dense_input_element_types[0..input_count].ptr,
         .outputs = dense_outputs[0..output_count].ptr,
-        .output_element_types = output_element_types,
+        .output_element_types = dense_output_element_types[0..output_count].ptr,
         .permutation = dense_permutation[0..].ptr,
     };
     const expected_dense_arguments = dense_arguments;
@@ -1215,9 +1219,9 @@ fn namedOperationV3WithViews(
     const status = providerStatus(callback(backend.context, &dense_arguments));
     if (!std.meta.eql(dense_arguments, expected_dense_arguments) or
         !tensorViewsEqual(dense_inputs[0..input_count], expected_dense_inputs[0..input_count]) or
-        !std.mem.eql(u32, input_element_types[0..input_count], expected_input_element_types[0..input_count]) or
+        !std.mem.eql(u32, dense_input_element_types[0..input_count], expected_input_element_types[0..input_count]) or
         !tensorViewsEqual(dense_outputs[0..output_count], expected_dense_outputs[0..output_count]) or
-        !std.mem.eql(u32, output_element_types[0..output_count], expected_output_element_types[0..output_count]) or
+        !std.mem.eql(u32, dense_output_element_types[0..output_count], expected_output_element_types[0..output_count]) or
         !std.mem.eql(u32, dense_permutation[0..], expected_dense_permutation[0..])) return .invalid_argument;
     if (status != .ok) return status;
     const provider_outputs = dense_arguments.outputs orelse return .invalid_argument;
@@ -1809,6 +1813,14 @@ fn namedSplitOutputMutationProvider(context: ?*anyopaque, arguments: *const Name
     probe.operation_calls += 1;
     const outputs = @constCast(arguments.outputs orelse return @intFromEnum(Status.invalid_argument));
     outputs[0].strides[0] = 99;
+    return @intFromEnum(Status.ok);
+}
+
+fn namedSplitElementTypeMutationProvider(context: ?*anyopaque, arguments: *const NamedOperationArgumentsV3) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV3Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.operation_calls += 1;
+    const input_element_types = @constCast(arguments.input_element_types orelse return @intFromEnum(Status.invalid_argument));
+    input_element_types[0] = @intFromEnum(ElementType.uint8);
     return @intFromEnum(Status.ok);
 }
 
@@ -2546,6 +2558,22 @@ test "named CPU provider v3 carries multi-output dense views" {
     @memset(&second_output_storage, 12345.0);
     try std.testing.expectEqual(Status.invalid_argument, namedOperationV3(&arguments));
     try std.testing.expectEqual(@as(usize, 1), mutation_probe.operation_calls);
+    try std.testing.expectEqual(@as(f32, 12345.0), first_output_storage[0]);
+    try std.testing.expectEqual(@as(f32, 12345.0), second_output_storage[0]);
+
+    var element_type_mutation_probe = NamedOperationV3Probe{};
+    const element_type_mutation_backend = NamedOperationBackendV3{
+        .abi_version = named_operation_backend_v3_abi_version,
+        .context = @ptrCast(&element_type_mutation_probe),
+        .query = namedSplitQuery,
+        .operation = namedSplitElementTypeMutationProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_backend_v3(&element_type_mutation_backend));
+    @memset(&first_output_storage, 12345.0);
+    @memset(&second_output_storage, 12345.0);
+    try std.testing.expectEqual(Status.invalid_argument, namedOperationV3(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), element_type_mutation_probe.operation_calls);
+    try std.testing.expectEqual(@intFromEnum(ElementType.float32), input_element_types[0]);
     try std.testing.expectEqual(@as(f32, 12345.0), first_output_storage[0]);
     try std.testing.expectEqual(@as(f32, 12345.0), second_output_storage[0]);
 }

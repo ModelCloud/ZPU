@@ -7053,7 +7053,10 @@ static BOOL zpu_tensor_div_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *de
     }
     return self;
 }
-- (BOOL)execute { return zpu_tensor_copy_identity(_source, _destination); }
+- (BOOL)execute {
+    return zpu_tensor_try_cpu_ml_operation(_source, nil, _destination,
+                                            ZPU_CPU_ML_OPERATION_IDENTITY) == ZPU_CPU_ML_STATUS_OK;
+}
 @end
 
 @implementation ZPUMTL4MachineLearningFenceOperation

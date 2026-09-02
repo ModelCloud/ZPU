@@ -37,7 +37,9 @@ and mixed-precision conversions without changing the Metal adapter. It never
 receives an `MTLTexture`, `MTLBuffer`, PJRT device buffer, or platform-specific
 layout object. Argument records and view metadata are immutable; providers may
 write through destination data pointers, but may not redirect or reshape a
-staged view. A provider decline returns
+staged view. The v3 binding-type arrays are copied into the staging record as
+well, so a provider cannot mutate the caller's signature metadata. A provider
+decline returns
 `ZPU_CPU_ML_STATUS_UNSUPPORTED`; fixed operations then use the exact portable
 ZPU CPU reference path for supported operation/type combinations, while named
 graph operations fail closed because there is no safe generic graph fallback.
