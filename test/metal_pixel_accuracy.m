@@ -16166,7 +16166,7 @@ static int zpu_test_cpu_ml_named_transpose_provider(
     const BOOL canonicalName = arguments->function_name_length == strlen("zpu_cpu_ml_transpose") &&
         memcmp(arguments->function_name, "zpu_cpu_ml_transpose", arguments->function_name_length) == 0;
     if (!zmlName && !canonicalName) return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
-    if (canonicalName && (arguments->permutation[0] != 1 || arguments->permutation[1] != 0)) {
+    if (arguments->permutation[0] != 1 || arguments->permutation[1] != 0) {
         return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
     }
     const uint32_t *source = (const uint32_t *)arguments->inputs[0].data;

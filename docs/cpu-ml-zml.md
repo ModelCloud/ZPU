@@ -47,6 +47,14 @@ point: an operation with `ZPU_CPU_ML_OPERATION_TRANSPOSE` gives the registered
 transpose callback first chance, then tries the generic operation provider and
 finally the exact ZPU reference implementation if both providers decline.
 
+For a Metal 4 named one-input/one-output function whose name contains
+`transpose`, the adapter also derives `permutation[output_axis]` from the
+runtime input/output extents when that mapping is unique. Repeated extents are
+ambiguous and remain zero-filled; a ZML graph provider must keep its own
+transpose semantics for those cases. This preserves the portable provider
+boundary while making ordinary shape-distinct ZML transposes receive the same
+axis metadata as direct CPU calls.
+
 Backend selection is explicit provider registration, not `macOS` detection.
 Running ZPU on macOS therefore still uses the same CPU-only ZML contract as
 running it on Linux or iOS. Apple Metal is used only by the optional

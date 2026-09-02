@@ -18535,6 +18535,42 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     return YES;
 }
 
+/* Metal 4 does not expose a permutation field on a machine-learning
+ * pipeline descriptor. A registered one-input/one-output ZML transpose can
+ * still receive useful metadata when its name identifies it as a transpose
+ * and the two runtime shapes make the mapping unique. Never guess when an
+ * extent is repeated: the provider owns the graph semantics in that case. */
+static BOOL zpu_mtl4_ml_named_transpose_permutation(NSString *functionName,
+                                                     ZPUTensor *source,
+                                                     ZPUTensor *destination,
+                                                     uint32_t *permutation) {
+    if (functionName == nil || source == nil || destination == nil || permutation == NULL ||
+        [functionName rangeOfString:@"transpose" options:NSCaseInsensitiveSearch].location == NSNotFound ||
+        source->_dimensions == nil || destination->_dimensions == nil ||
+        source->_dimensions.rank != destination->_dimensions.rank ||
+        source->_dimensions.rank > MTL_TENSOR_MAX_RANK) return NO;
+    const NSUInteger rank = source->_dimensions.rank;
+    NSUInteger sourceValues[MTL_TENSOR_MAX_RANK];
+    NSUInteger destinationValues[MTL_TENSOR_MAX_RANK];
+    if (!zpu_tensor_read_extents(source->_dimensions, rank, sourceValues, NO) ||
+        !zpu_tensor_read_extents(destination->_dimensions, rank, destinationValues, NO)) return NO;
+    BOOL usedSourceAxes[MTL_TENSOR_MAX_RANK] = {NO};
+    for (NSUInteger outputAxis = 0; outputAxis < rank; ++outputAxis) {
+        NSUInteger matchingSourceAxis = NSNotFound;
+        for (NSUInteger sourceAxis = 0; sourceAxis < rank; ++sourceAxis) {
+            if (!usedSourceAxes[sourceAxis] &&
+                sourceValues[sourceAxis] == destinationValues[outputAxis]) {
+                if (matchingSourceAxis != NSNotFound) return NO;
+                matchingSourceAxis = sourceAxis;
+            }
+        }
+        if (matchingSourceAxis == NSNotFound) return NO;
+        permutation[outputAxis] = (uint32_t)matchingSourceAxis;
+        usedSourceAxes[matchingSourceAxis] = YES;
+    }
+    return YES;
+}
+
 @implementation ZPUMTL4MachineLearningEncoder
 - (instancetype)initWithOwner:(ZPUMTL4CommandBuffer *)owner {
     if ((self = [super init])) _owner = owner;
@@ -18770,6 +18806,10 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
             for (NSUInteger index = 0; index < capturedOutputsV3.count; ++index) {
                 deferredOutputsV3[index] = capturedOutputsV3[index];
             }
+            if (pipeline->_namedInputCount == 1 && pipeline->_namedOutputCount == 1) {
+                (void)zpu_mtl4_ml_named_transpose_permutation(
+                    functionName, deferredInputsV3[0], deferredOutputsV3[0], providerPermutation);
+            }
             return zpu_tensor_try_cpu_ml_named_operation_outputs(functionName,
                 deferredInputsV3, pipeline->_namedInputCount,
                 deferredOutputsV3, pipeline->_namedOutputCount,
@@ -18898,12 +18938,17 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         int providerStatus = ZPU_CPU_ML_STATUS_UNSUPPORTED;
         if (namedProvider) {
             ZPUTensor *deferredNamedInputs[ZPU_CPU_ML_MAX_NAMED_INPUTS] = {0};
+            uint32_t providerPermutation[ZPU_CPU_ML_MAX_RANK] = {0};
             for (NSUInteger index = 0; index < capturedNamedInputs.count; ++index) {
                 deferredNamedInputs[index] = capturedNamedInputs[index];
             }
+            if (pipeline->_namedInputCount == 1 && pipeline->_namedOutputCount == 1) {
+                (void)zpu_mtl4_ml_named_transpose_permutation(
+                    functionName, deferredNamedInputs[0], destination, providerPermutation);
+            }
             providerStatus = zpu_tensor_try_cpu_ml_named_operation_inputs(functionName,
                 deferredNamedInputs, pipeline->_inputCount - 1, destination,
-                pipeline->_namedElementType, NULL);
+                pipeline->_namedElementType, providerPermutation);
         } else {
             providerStatus = zpu_tensor_try_cpu_ml_operation(source, right, destination, cpuMlOperation);
         }
