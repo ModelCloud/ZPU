@@ -546,6 +546,13 @@ static double zpu_ml_bfloat16_bits_to_double(uint16_t bits) {
     return (double)value;
 }
 
+static uint16_t zpu_ml_bfloat16_float_to_bits(float value) {
+    uint32_t float_bits = 0;
+    memcpy(&float_bits, &value, sizeof(float_bits));
+    float_bits += 0x7fffu + ((float_bits >> 16) & 1u);
+    return (uint16_t)(float_bits >> 16);
+}
+
 static BOOL zpu_ml_bfloat16_values_within_tolerance(const uint16_t *reference,
                                                     const uint16_t *actual,
                                                     size_t count,
@@ -2024,7 +2031,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         if (!exact) {
             fail_with_error("source-defined CPU narrow vector lowering execution failed",
                             adapter_pipeline_error ?: native_pipeline_error);
-            return 185 + (int)case_index;
+            return 197 + (int)case_index;
         }
     }
 
@@ -2044,7 +2051,43 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "uint id [[thread_position_in_grid]]) { if (id >= 4) return; output[id] = left[id] - right[id]; }\n"
          "kernel void zpu_source_div_bf16(device const bfloat *left [[buffer(0)]], "
          "device const bfloat *right [[buffer(1)]], device bfloat *output [[buffer(2)]], "
-         "uint id [[thread_position_in_grid]]) { if (id >= 4) return; output[id] = left[id] / right[id]; }";
+         "uint id [[thread_position_in_grid]]) { if (id >= 4) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_bf16x2(device const bfloat2 *left [[buffer(0)]], "
+         "device const bfloat2 *right [[buffer(1)]], device bfloat2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_bf16x2(device const bfloat2 *left [[buffer(0)]], "
+         "device const bfloat2 *right [[buffer(1)]], device bfloat2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_bf16x2(device const bfloat2 *left [[buffer(0)]], "
+         "device const bfloat2 *right [[buffer(1)]], device bfloat2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_div_bf16x2(device const bfloat2 *left [[buffer(0)]], "
+         "device const bfloat2 *right [[buffer(1)]], device bfloat2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_bf16x3(device const bfloat3 *left [[buffer(0)]], "
+         "device const bfloat3 *right [[buffer(1)]], device bfloat3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_bf16x3(device const bfloat3 *left [[buffer(0)]], "
+         "device const bfloat3 *right [[buffer(1)]], device bfloat3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_bf16x3(device const bfloat3 *left [[buffer(0)]], "
+         "device const bfloat3 *right [[buffer(1)]], device bfloat3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_div_bf16x3(device const bfloat3 *left [[buffer(0)]], "
+         "device const bfloat3 *right [[buffer(1)]], device bfloat3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_bf16x4(device const bfloat4 *left [[buffer(0)]], "
+         "device const bfloat4 *right [[buffer(1)]], device bfloat4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_bf16x4(device const bfloat4 *left [[buffer(0)]], "
+         "device const bfloat4 *right [[buffer(1)]], device bfloat4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_bf16x4(device const bfloat4 *left [[buffer(0)]], "
+         "device const bfloat4 *right [[buffer(1)]], device bfloat4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_div_bf16x4(device const bfloat4 *left [[buffer(0)]], "
+         "device const bfloat4 *right [[buffer(1)]], device bfloat4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] / right[id]; }";
     NSError *adapter_bfloat_source_error = nil;
     id<MTLLibrary> adapter_bfloat_library =
         [adapter_device newLibraryWithSource:bfloat_source options:nil error:&adapter_bfloat_source_error];
@@ -2094,6 +2137,115 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             fail_with_error("source-defined CPU BFloat16 lowering execution failed", adapter_pipeline_error ?:
                             adapter_bfloat_source_error);
             return 181 + (int)case_index;
+        }
+    }
+
+    const struct {
+        NSString *name;
+        NSUInteger width;
+        NSUInteger storage_width;
+        int operation;
+    } bfloat_vector_cases[] = {
+        {@"zpu_source_add_bf16x2", 2, 2, 0}, {@"zpu_source_mul_bf16x2", 2, 2, 1},
+        {@"zpu_source_sub_bf16x2", 2, 2, 2}, {@"zpu_source_div_bf16x2", 2, 2, 3},
+        {@"zpu_source_add_bf16x3", 3, 4, 0}, {@"zpu_source_mul_bf16x3", 3, 4, 1},
+        {@"zpu_source_sub_bf16x3", 3, 4, 2}, {@"zpu_source_div_bf16x3", 3, 4, 3},
+        {@"zpu_source_add_bf16x4", 4, 4, 0}, {@"zpu_source_mul_bf16x4", 4, 4, 1},
+        {@"zpu_source_sub_bf16x4", 4, 4, 2}, {@"zpu_source_div_bf16x4", 4, 4, 3},
+    };
+    const uint16_t bfloat_vector_left[20] = {
+        0x3fc0, 0xc000, 0x4040, 0x40a0, 0x3f80, 0x4000, 0x4080, 0x4100,
+        0x3f40, 0x4020, 0x4060, 0x40c0, 0x3fe0, 0x4010, 0x4090, 0x40e0,
+        0x3f60, 0xc040, 0x40b0, 0x4120,
+    };
+    const uint16_t bfloat_vector_right[20] = {
+        0x3f00, 0x4000, 0x3f80, 0x4000, 0x3f00, 0x3f80, 0x4000, 0x3fc0,
+        0x3f80, 0x3f00, 0x3fc0, 0x4000, 0x3f40, 0x3f80, 0x3f00, 0x3fc0,
+        0x4000, 0x3f80, 0x3f40, 0x4000,
+    };
+    for (NSUInteger case_index = 0;
+         case_index < sizeof(bfloat_vector_cases) / sizeof(bfloat_vector_cases[0]); ++case_index) {
+        const NSUInteger byte_length = 5 * bfloat_vector_cases[case_index].storage_width * sizeof(uint16_t);
+        uint16_t expected[20] = {0};
+        for (NSUInteger vector_index = 0; vector_index < 5; ++vector_index) {
+            for (NSUInteger lane = 0; lane < bfloat_vector_cases[case_index].width; ++lane) {
+                const NSUInteger value_index = vector_index * bfloat_vector_cases[case_index].storage_width + lane;
+                const float left_value = (float)zpu_ml_bfloat16_bits_to_double(bfloat_vector_left[value_index]);
+                const float right_value = (float)zpu_ml_bfloat16_bits_to_double(bfloat_vector_right[value_index]);
+                const float result = bfloat_vector_cases[case_index].operation == 0 ? left_value + right_value :
+                    (bfloat_vector_cases[case_index].operation == 1 ? left_value * right_value :
+                        (bfloat_vector_cases[case_index].operation == 2 ? left_value - right_value :
+                            left_value / right_value));
+                expected[value_index] = zpu_ml_bfloat16_float_to_bits(result);
+            }
+        }
+        id<MTLFunction> adapter_function =
+            [adapter_bfloat_library newFunctionWithName:bfloat_vector_cases[case_index].name];
+        NSError *adapter_pipeline_error = nil;
+        id<MTLComputePipelineState> adapter_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_pipeline_error];
+        id<MTLBuffer> adapter_left =
+            [adapter_device newBufferWithBytes:bfloat_vector_left length:byte_length
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_right =
+            [adapter_device newBufferWithBytes:bfloat_vector_right length:byte_length
+                                         options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_output =
+            [adapter_device newBufferWithLength:byte_length options:MTLResourceStorageModeShared];
+        if (adapter_output != nil) memset(adapter_output.contents, 0xa5, byte_length);
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+        if (adapter_pipeline != nil && adapter_left != nil && adapter_right != nil && adapter_output != nil &&
+            adapter_encoder != nil) {
+            [adapter_encoder setComputePipelineState:adapter_pipeline];
+            [adapter_encoder setBuffer:adapter_left offset:0 atIndex:0];
+            [adapter_encoder setBuffer:adapter_right offset:0 atIndex:1];
+            [adapter_encoder setBuffer:adapter_output offset:0 atIndex:2];
+            [adapter_encoder dispatchThreads:MTLSizeMake(5, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [adapter_encoder endEncoding];
+            [adapter_command_buffer commit];
+            [adapter_command_buffer waitUntilCompleted];
+        }
+        BOOL reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *reflection =
+                [adapter_bfloat_library reflectionForFunctionWithName:bfloat_vector_cases[case_index].name];
+            const MTLDataType expected_data_type = bfloat_vector_cases[case_index].width == 2 ? MTLDataTypeBFloat2 :
+                (bfloat_vector_cases[case_index].width == 3 ? MTLDataTypeBFloat3 : MTLDataTypeBFloat4);
+            reflection_ok = reflection != nil && reflection.bindings.count == 3;
+            if (reflection_ok) {
+                for (id<MTLBinding> binding in reflection.bindings) {
+                    reflection_ok = reflection_ok && binding.type == MTLBindingTypeBuffer &&
+                        [binding conformsToProtocol:@protocol(MTLBufferBinding)] &&
+                        ((id<MTLBufferBinding>)binding).bufferDataType == expected_data_type &&
+                        ((id<MTLBufferBinding>)binding).bufferDataSize ==
+                            bfloat_vector_cases[case_index].storage_width * sizeof(uint16_t);
+                }
+            }
+        }
+        BOOL logical_lanes_exact = adapter_output != nil;
+        BOOL adapter_padding_unchanged = adapter_output != nil;
+        for (NSUInteger vector_index = 0; vector_index < 5 && logical_lanes_exact; ++vector_index) {
+            const uint8_t *actual = (const uint8_t *)adapter_output.contents +
+                vector_index * bfloat_vector_cases[case_index].storage_width * sizeof(uint16_t);
+            const uint8_t *expected_bytes = (const uint8_t *)expected +
+                vector_index * bfloat_vector_cases[case_index].storage_width * sizeof(uint16_t);
+            logical_lanes_exact = memcmp(actual, expected_bytes,
+                bfloat_vector_cases[case_index].width * sizeof(uint16_t)) == 0;
+            if (bfloat_vector_cases[case_index].width == 3) {
+                adapter_padding_unchanged = adapter_padding_unchanged &&
+                    *(const uint16_t *)(actual + 3 * sizeof(uint16_t)) == 0xa5a5;
+            }
+        }
+        const BOOL exact = adapter_bfloat_library != nil && adapter_bfloat_source_error == nil &&
+            adapter_function != nil && adapter_pipeline != nil && adapter_pipeline_error == nil &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&
+            logical_lanes_exact && adapter_padding_unchanged;
+        if (!exact) {
+            fail_with_error("source-defined CPU BFloat16 vector lowering execution failed",
+                            adapter_pipeline_error ?: adapter_bfloat_source_error);
+            return 185 + (int)case_index;
         }
     }
 

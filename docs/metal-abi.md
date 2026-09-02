@@ -455,7 +455,10 @@ triangle path:
   BFloat16 arithmetic widens to Float32 before round-to-nearest-even packing.
   These source profiles preserve the exact `thread_position_in_grid` bounds
   used by their native Metal oracle and do not invoke Apple's compiler at
-  execution time.
+  execution time. The same bounded source lowering covers `half2/3/4` and
+  `bfloat2/3/4` buffer arithmetic; vector 3 preserves Metal's padded
+  four-lane, two-byte storage stride and all narrow vector execution remains
+  CPU/ZPU-owned.
   Arbitrary ML graphs and arbitrary-MSL compiler
   requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
