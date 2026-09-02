@@ -6066,7 +6066,7 @@ static BOOL zpu_tensor_transpose_reverse(ZPUTensor *source, ZPUTensor *destinati
         source->_owner != destination->_owner || source->_dimensions == nil ||
         destination->_dimensions == nil || source->_dimensions.rank != destination->_dimensions.rank ||
         source->_dimensions.rank > ZPU_CPU_ML_MAX_RANK) return NO;
-    zpu_cpu_ml_transpose_arguments arguments;
+    zpu_cpu_ml_transpose_arguments arguments = {0};
     if (!zpu_tensor_make_cpu_ml_view(source, &arguments.source) ||
         !zpu_tensor_make_cpu_ml_view(destination, &arguments.destination)) return NO;
     for (NSUInteger outputAxis = 0; outputAxis < source->_dimensions.rank; ++outputAxis) {

@@ -834,6 +834,26 @@ pub fn operation(arguments: *const OperationArguments) Status {
     }
 
     const destination_info = validateTypedView(&arguments.destination, element_type) orelse return .invalid_argument;
+
+    // Preserve the original, specialized transpose-provider ABI when a
+    // caller reaches this operation entry point. The generic operation
+    // provider is intentionally a separate extension; without this bridge a
+    // legacy transpose provider would be hidden by the exact reference path
+    // below and Metal-shaped transpose dispatches could not reach ZML/cpu.
+    if (operation_kind == .transpose) {
+        var transpose_arguments = TransposeArguments{
+            .source = arguments.inputs[0],
+            .destination = arguments.destination,
+            .permutation = arguments.permutation,
+        };
+        if (!validatePermutation(&transpose_arguments, input_info[0].?, destination_info)) {
+            return .invalid_argument;
+        }
+        if (tryProvider(&transpose_arguments, input_info[0].?, destination_info)) |status| {
+            if (status != .unsupported) return status;
+        }
+    }
+
     const destination_bytes = denseByteCount(destination_info) orelse return .invalid_argument;
 
     // Validate the complete portable ABI before looking for an optional
@@ -1902,6 +1922,48 @@ test "optional CPU operation provider receives dense ZML views" {
     invalid_arguments.reserved = 1;
     try std.testing.expectEqual(Status.invalid_argument, operation(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
+}
+
+test "operation transpose preserves the legacy CPU provider bridge" {
+    _ = zpu_cpu_ml_set_operation_backend(null);
+
+    var source_storage = [_]u32{0} ** 12;
+    source_storage[0] = 1;
+    source_storage[1] = 2;
+    source_storage[4] = 3;
+    source_storage[5] = 4;
+    source_storage[8] = 5;
+    source_storage[9] = 6;
+    var destination_storage = [_]u32{0xcafebabe} ** 8;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    const arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.transpose),
+        .element_type = @intFromEnum(ElementType.uint32),
+        .input_count = 1,
+        .reserved = 0,
+        .inputs = .{ testView(u32, &source_storage, 2, dimensions, strides), std.mem.zeroes(TensorView) },
+        .destination = testView(u32, &destination_storage, 2, output_dimensions, output_strides),
+        .permutation = [_]u32{ 1, 0 } ++ [_]u32{0} ** (max_rank - 2),
+    };
+    var probe = ProviderProbe{};
+    const backend = Backend{
+        .abi_version = backend_abi_version,
+        .context = @ptrCast(&probe),
+        .transpose = referenceProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_backend(&backend));
+    defer _ = zpu_cpu_ml_set_backend(null);
+
+    try std.testing.expectEqual(Status.ok, operation(&arguments));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.source_offset);
+    try std.testing.expectEqual(@as(usize, 0), probe.destination_offset);
+    try std.testing.expectEqual(@as(usize, 2), probe.source_stride);
+    try std.testing.expectEqual(@as(usize, 3), probe.destination_stride);
+    try std.testing.expectEqualSlices(u32, &[_]u32{ 1, 3, 5, 0xcafebabe, 2, 4, 6, 0xcafebabe }, &destination_storage);
 }
 
 test "CPU operation validates views before provider selection" {
