@@ -774,6 +774,10 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
     id<MTLLibrary> library = [adapter_device newDefaultLibrary];
     id<MTLFunction> function = ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_fill_gradient_rgba8");
+    id<MTLFunction> ml_div_f16_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_ml_div_f16");
+    id<MTLFunction> ml_div_bf16_function =
+        ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_ml_div_bf16");
     id<MTLFunction> default_intersection_function =
         [library newFunctionWithName:@"zpu_cpu_intersection_triangle"];
     id<MTLFunction> default_accept_intersection_function =
@@ -813,7 +817,8 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
         parallel_encoder = [[queue commandBuffer] parallelRenderCommandEncoderWithDescriptor:pass];
     }
     if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
-        library == nil || function == nil || default_intersection_function == nil ||
+        library == nil || function == nil || ml_div_f16_function == nil || ml_div_bf16_function == nil ||
+        default_intersection_function == nil ||
         default_accept_intersection_function == nil ||
         default_intersection_function.functionType != MTLFunctionTypeIntersection ||
         default_accept_intersection_function.functionType != MTLFunctionTypeIntersection ||

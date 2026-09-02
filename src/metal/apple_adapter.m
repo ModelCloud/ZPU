@@ -1423,7 +1423,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 /* Metal 4 exposes machine-learning encoding as a separate command-encoder
  * family. The registered identity, UInt8-add, Float32-add, and the
  * UInt8/Int8/UInt16/Int16/UInt32/Int32/Int4/UInt4/Float32/Float16/BFloat16-
- * subtract, and Float32-divide,
+ * subtract, and Float32/Float16/BFloat16-divide,
  * UInt32-add, UInt16-add, Int16-add, Int8-add, Float16-add, BFloat16-add,
  * Int4-add, UInt4-add, Int4/UInt4/UInt8/Int8/UInt16/Int16/UInt32/Int32-multiply,
  * Float16-multiply, and Float16/BFloat16/UInt8/Int8/UInt16/Int16/UInt32/Int32-
@@ -9937,6 +9937,8 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_ml_add_f32_function_name,
         zpu_cpu_ml_sub_f32_function_name,
         zpu_cpu_ml_div_f32_function_name,
+        zpu_cpu_ml_div_f16_function_name,
+        zpu_cpu_ml_div_bf16_function_name,
         zpu_cpu_ml_add_i32_function_name,
         zpu_cpu_ml_add_u32_function_name,
         zpu_cpu_ml_add_u16_function_name,
