@@ -449,6 +449,17 @@ enum {
     ZPU_METAL_COMPUTE_DIV_F32X3 = 44,
     /* Fixed CPU ray-query profile for Metal 4 bounding-box geometry. */
     ZPU_METAL_COMPUTE_TRACE_AABBS_RGBA8 = 45,
+    /* Bounded source-defined scalar half and bfloat arithmetic profiles.
+     * These retain the three-buffer/one-thread contract of the Float32
+     * profiles while executing entirely in the portable CPU runtime. */
+    ZPU_METAL_COMPUTE_ADD_F16 = 46,
+    ZPU_METAL_COMPUTE_MUL_F16 = 47,
+    ZPU_METAL_COMPUTE_SUB_F16 = 48,
+    ZPU_METAL_COMPUTE_DIV_F16 = 49,
+    ZPU_METAL_COMPUTE_ADD_BF16 = 50,
+    ZPU_METAL_COMPUTE_MUL_BF16 = 51,
+    ZPU_METAL_COMPUTE_SUB_BF16 = 52,
+    ZPU_METAL_COMPUTE_DIV_BF16 = 53,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

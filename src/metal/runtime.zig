@@ -5206,7 +5206,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 45) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 53) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5215,7 +5215,10 @@ pub const ComputeEncoder = struct {
             self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or
             self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or
             self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or
-            self.kernel == 42 or self.kernel == 43 or self.kernel == 44;
+            self.kernel == 42 or self.kernel == 43 or self.kernel == 44 or
+            self.kernel == 46 or self.kernel == 47 or self.kernel == 48 or
+            self.kernel == 49 or self.kernel == 50 or self.kernel == 51 or
+            self.kernel == 52 or self.kernel == 53;
     }
 
     fn appendBufferAdd(
@@ -6083,15 +6086,18 @@ fn executeTraceAabbs(command: ComputeCommand) Error!void {
 }
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
+    const narrow = command.kernel >= 46 and command.kernel <= 53;
     if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and command.kernel != 41 and
         command.kernel != 32 and command.kernel != 33 and command.kernel != 34 and
         command.kernel != 35 and command.kernel != 36 and command.kernel != 37 and
         command.kernel != 38 and command.kernel != 39 and command.kernel != 40 and
-        command.kernel != 42 and command.kernel != 43 and command.kernel != 44) or
+        command.kernel != 42 and command.kernel != 43 and command.kernel != 44 and
+        !narrow) or
         (command.elements_per_thread != 1 and command.elements_per_thread != 2 and
             command.elements_per_thread != 3 and command.elements_per_thread != 4) or
         (command.element_stride != 1 and command.element_stride != 2 and
             command.element_stride != 4) or
+        (narrow and (command.elements_per_thread != 1 or command.element_stride != 1)) or
         !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
@@ -6099,16 +6105,43 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
         command.threads_per_threadgroup.height != 1 or command.threads_per_threadgroup.depth != 1)
         return error.InvalidArgument;
     const storage_count = std.math.mul(usize, command.threads_per_grid.width, command.element_stride) catch return error.InvalidArgument;
-    const byte_count = std.math.mul(usize, storage_count, @sizeOf(f32)) catch return error.InvalidArgument;
+    const element_bytes: usize = if (narrow) @sizeOf(u16) else @sizeOf(f32);
+    const byte_count = std.math.mul(usize, storage_count, element_bytes) catch return error.InvalidArgument;
     if (!rangeValid(command.left.bytes.len, command.left_offset, byte_count) or
         !rangeValid(command.right.bytes.len, command.right_offset, byte_count) or
         !rangeValid(command.output.bytes.len, command.output_offset, byte_count)) return error.InvalidArgument;
     for (0..command.threads_per_grid.width) |index| {
         for (0..command.elements_per_thread) |lane| {
             const scalar_index = index * command.element_stride + lane;
-            const left_offset = command.left_offset + scalar_index * @sizeOf(f32);
-            const right_offset = command.right_offset + scalar_index * @sizeOf(f32);
-            const output_offset = command.output_offset + scalar_index * @sizeOf(f32);
+            const left_offset = command.left_offset + scalar_index * element_bytes;
+            const right_offset = command.right_offset + scalar_index * element_bytes;
+            const output_offset = command.output_offset + scalar_index * element_bytes;
+            if (narrow) {
+                if (command.kernel <= 49) {
+                    const left: f16 = @bitCast(readU16Little(command.left.bytes, left_offset));
+                    const right: f16 = @bitCast(readU16Little(command.right.bytes, right_offset));
+                    const result: f16 = switch (command.kernel) {
+                        46 => left + right,
+                        47 => left * right,
+                        48 => left - right,
+                        49 => left / right,
+                        else => unreachable,
+                    };
+                    writeU16Little(command.output.bytes, output_offset, @bitCast(result));
+                } else {
+                    const left = bfloat16FromBits(readU16Little(command.left.bytes, left_offset));
+                    const right = bfloat16FromBits(readU16Little(command.right.bytes, right_offset));
+                    const result = switch (command.kernel) {
+                        50 => left + right,
+                        51 => left * right,
+                        52 => left - right,
+                        53 => left / right,
+                        else => unreachable,
+                    };
+                    writeU16Little(command.output.bytes, output_offset, bfloat16ToBits(result));
+                }
+                continue;
+            }
             const left = readF32Little(command.left.bytes, left_offset);
             const right = readF32Little(command.right.bytes, right_offset);
             const result = switch (command.kernel) {
@@ -8275,6 +8308,16 @@ fn readF16Little(bytes: []const u8, offset: usize) f32 {
 fn writeU16Little(bytes: []u8, offset: usize, value: u16) void {
     bytes[offset] = @truncate(value);
     bytes[offset + 1] = @truncate(value >> 8);
+}
+
+fn bfloat16FromBits(value: u16) f32 {
+    return @bitCast(@as(u32, value) << 16);
+}
+
+fn bfloat16ToBits(value: f32) u16 {
+    const bits: u32 = @bitCast(value);
+    const rounded = bits +% (0x7fff + ((bits >> 16) & 1));
+    return @intCast(rounded >> 16);
 }
 
 fn readU32Little(bytes: []const u8, offset: usize) u32 {
