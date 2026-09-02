@@ -12581,8 +12581,16 @@ static BOOL zpu_source_contains_identifier(NSString *source, NSString *identifie
 }
 
 static NSString *zpu_source_compact(NSString *source) {
+    static NSRegularExpression *commentExpression;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        commentExpression = [NSRegularExpression
+            regularExpressionWithPattern:@"//[^\\r\\n]*|/\\*[\\s\\S]*?\\*/" options:0 error:nil];
+    });
+    NSString *withoutComments = [commentExpression
+        stringByReplacingMatchesInString:source options:0 range:NSMakeRange(0, source.length) withTemplate:@""];
     NSArray<NSString *> *parts =
-        [source componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        [withoutComments componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return [parts componentsJoinedByString:@""];
 }
 
