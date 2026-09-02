@@ -330,6 +330,13 @@ triangle path:
   division. Their source lowering admits only the exact division body and
   fixed dispatch bound; divide-by-zero and other arbitrary numerical shader
   behavior remain outside this registered profile.
+  The bounded `zpu_cpu_sin_f32`, `zpu_cpu_cos_f32`, `zpu_cpu_exp_f32`,
+  `zpu_cpu_log_f32`, `zpu_cpu_sqrt_f32`, and `zpu_cpu_tanh_f32` profiles use
+  two ZPU-owned Float32 buffers at bindings 0/1 and execute unary math in the
+  CPU/ZPU command stream. Source lowering admits only the exact intrinsic
+  assignment and fixed dispatch bound; native Metal is an oracle for these
+  pure-math profiles, with the test suite applying the documented `1e-6`
+  scale-aware comparison tolerance. Arbitrary MSL math remains rejected.
   The bounded `zpu_cpu_copy_rgba8_texture_to_texture` profile reads a
   ZPU-owned RGBA8 texture at binding 0 and writes a same-sized ZPU-owned
   RGBA8 texture at binding 1. Its CPU loop clips the dispatch to the output

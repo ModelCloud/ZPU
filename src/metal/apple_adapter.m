@@ -123,6 +123,12 @@ static NSString *const zpu_cpu_add_f32_function_name = @"zpu_cpu_add_f32";
 static NSString *const zpu_cpu_mul_f32_function_name = @"zpu_cpu_mul_f32";
 static NSString *const zpu_cpu_sub_f32_function_name = @"zpu_cpu_sub_f32";
 static NSString *const zpu_cpu_div_f32_function_name = @"zpu_cpu_div_f32";
+static NSString *const zpu_cpu_sin_f32_function_name = @"zpu_cpu_sin_f32";
+static NSString *const zpu_cpu_cos_f32_function_name = @"zpu_cpu_cos_f32";
+static NSString *const zpu_cpu_exp_f32_function_name = @"zpu_cpu_exp_f32";
+static NSString *const zpu_cpu_log_f32_function_name = @"zpu_cpu_log_f32";
+static NSString *const zpu_cpu_sqrt_f32_function_name = @"zpu_cpu_sqrt_f32";
+static NSString *const zpu_cpu_tanh_f32_function_name = @"zpu_cpu_tanh_f32";
 static NSString *const zpu_cpu_add_f16_function_name = @"zpu_cpu_add_f16";
 static NSString *const zpu_cpu_mul_f16_function_name = @"zpu_cpu_mul_f16";
 static NSString *const zpu_cpu_sub_f16_function_name = @"zpu_cpu_sub_f16";
@@ -211,6 +217,10 @@ static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel
         kernel == ZPU_METAL_COMPUTE_SUB_BF16 || kernel == ZPU_METAL_COMPUTE_DIV_BF16 ||
         (kernel >= ZPU_METAL_COMPUTE_ADD_F16X2 && kernel <= ZPU_METAL_COMPUTE_DIV_BF16X4) ||
         zpu_compute_buffer_integer_kernel(kernel);
+}
+
+static BOOL zpu_compute_buffer_unary_kernel(zpu_metal_compute_kernel kernel) {
+    return kernel >= ZPU_METAL_COMPUTE_SIN_F32 && kernel <= ZPU_METAL_COMPUTE_TANH_F32;
 }
 
 static BOOL zpu_compute_buffer_vector_kernel(zpu_metal_compute_kernel kernel) {
@@ -3733,7 +3743,8 @@ static void zpu_metal4_clear_compute_argument_table(ZPUComputeEncoder *legacy,
                                                       ZPUMTL4ArgumentTable *table) {
     if (legacy == nil || table == nil) return;
     for (NSUInteger index = 0; index < table->_maxBufferBindCount; ++index) {
-        if (index == 0 || (zpu_compute_buffer_arithmetic_kernel(legacy->_kernel) && index <= 2)) {
+        if (index == 0 || (zpu_compute_buffer_arithmetic_kernel(legacy->_kernel) && index <= 2) ||
+            (zpu_compute_buffer_unary_kernel(legacy->_kernel) && index == 1)) {
             [(id<MTLComputeCommandEncoder>)legacy setBuffer:nil offset:0 atIndex:index];
         }
         [(id<MTLComputeCommandEncoder>)legacy setAccelerationStructure:nil atBufferIndex:index];
@@ -9315,7 +9326,25 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_compute_kernel kernel) {
     NSMutableArray *arguments = [NSMutableArray array];
     NSMutableArray *bindings = [NSMutableArray array];
-    if (zpu_compute_buffer_arithmetic_kernel(kernel)) {
+    if (zpu_compute_buffer_unary_kernel(kernel)) {
+        ZPUArgument *input = zpu_reflection_argument(@"input", MTLArgumentTypeBuffer,
+                                                       MTLBindingAccessReadOnly, 0);
+        [input setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
+        ZPUBinding *inputBinding = zpu_reflection_binding(@"input", MTLBindingTypeBuffer,
+                                                           MTLBindingAccessReadOnly, 0);
+        [inputBinding setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
+        [arguments addObject:input];
+        [bindings addObject:inputBinding];
+
+        ZPUArgument *output = zpu_reflection_argument(@"output", MTLArgumentTypeBuffer,
+                                                       MTLBindingAccessWriteOnly, 1);
+        [output setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
+        ZPUBinding *outputBinding = zpu_reflection_binding(@"output", MTLBindingTypeBuffer,
+                                                            MTLBindingAccessWriteOnly, 1);
+        [outputBinding setBufferDataSize:sizeof(float) dataType:MTLDataTypeFloat];
+        [arguments addObject:output];
+        [bindings addObject:outputBinding];
+    } else if (zpu_compute_buffer_arithmetic_kernel(kernel)) {
         const BOOL vector4 = zpu_compute_buffer_float4_kernel(kernel);
         const BOOL vector3 = zpu_compute_buffer_float3_kernel(kernel);
         const BOOL vector2 = zpu_compute_buffer_vector_kernel(kernel) && !vector4 && !vector3;
@@ -10030,6 +10059,12 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         else if ([name isEqualToString:zpu_cpu_mul_f32_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32;
         else if ([name isEqualToString:zpu_cpu_sub_f32_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32;
         else if ([name isEqualToString:zpu_cpu_div_f32_function_name]) kernel = ZPU_METAL_COMPUTE_DIV_F32;
+        else if ([name isEqualToString:zpu_cpu_sin_f32_function_name]) kernel = ZPU_METAL_COMPUTE_SIN_F32;
+        else if ([name isEqualToString:zpu_cpu_cos_f32_function_name]) kernel = ZPU_METAL_COMPUTE_COS_F32;
+        else if ([name isEqualToString:zpu_cpu_exp_f32_function_name]) kernel = ZPU_METAL_COMPUTE_EXP_F32;
+        else if ([name isEqualToString:zpu_cpu_log_f32_function_name]) kernel = ZPU_METAL_COMPUTE_LOG_F32;
+        else if ([name isEqualToString:zpu_cpu_sqrt_f32_function_name]) kernel = ZPU_METAL_COMPUTE_SQRT_F32;
+        else if ([name isEqualToString:zpu_cpu_tanh_f32_function_name]) kernel = ZPU_METAL_COMPUTE_TANH_F32;
         else if ([name isEqualToString:zpu_cpu_add_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32X4;
         else if ([name isEqualToString:zpu_cpu_mul_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32X4;
         else if ([name isEqualToString:zpu_cpu_sub_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32X4;
@@ -10208,6 +10243,12 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_mul_f32_function_name,
         zpu_cpu_sub_f32_function_name,
         zpu_cpu_div_f32_function_name,
+        zpu_cpu_sin_f32_function_name,
+        zpu_cpu_cos_f32_function_name,
+        zpu_cpu_exp_f32_function_name,
+        zpu_cpu_log_f32_function_name,
+        zpu_cpu_sqrt_f32_function_name,
+        zpu_cpu_tanh_f32_function_name,
         zpu_cpu_add_f16_function_name,
         zpu_cpu_mul_f16_function_name,
         zpu_cpu_sub_f16_function_name,
@@ -13233,6 +13274,52 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             }
         }
 
+        /* Unary pure-math source profiles are deliberately exact-shape
+         * lowerings. They expose the ordinary two-buffer Metal ABI while
+         * executing through the CPU/ZPU runtime, so the native implementation
+         * remains an oracle only. */
+        NSError *unaryIndexError = nil;
+        NSRegularExpression *unaryIndexExpression = [NSRegularExpression
+            regularExpressionWithPattern:@"uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[thread_position_in_grid\\]\\]"
+                                   options:0 error:&unaryIndexError];
+        NSTextCheckingResult *unaryIndexMatch = unaryIndexExpression == nil || unaryIndexError != nil ? nil :
+            [unaryIndexExpression firstMatchInString:compactSignature options:0
+                                                range:NSMakeRange(0, compactSignature.length)];
+        if (unaryIndexMatch != nil) {
+            NSString *unaryIndexName = [compactSignature substringWithRange:[unaryIndexMatch rangeAtIndex:1]];
+            NSString *unarySignature = [NSString stringWithFormat:
+                @"deviceconstfloat*input[[buffer(0)]],devicefloat*output[[buffer(1)]],uint%@[[thread_position_in_grid]]",
+                unaryIndexName];
+            NSString *unaryConstAfterTypeSignature = [NSString stringWithFormat:
+                @"devicefloatconst*input[[buffer(0)]],devicefloat*output[[buffer(1)]],uint%@[[thread_position_in_grid]]",
+                unaryIndexName];
+            if ([compactSignature isEqualToString:unarySignature] ||
+                [compactSignature isEqualToString:unaryConstAfterTypeSignature]) {
+                const struct {
+                    NSString *intrinsic;
+                    NSString *implementation;
+                } unaryProfiles[] = {
+                    {@"sin", zpu_cpu_sin_f32_function_name},
+                    {@"cos", zpu_cpu_cos_f32_function_name},
+                    {@"exp", zpu_cpu_exp_f32_function_name},
+                    {@"log", zpu_cpu_log_f32_function_name},
+                    {@"sqrt", zpu_cpu_sqrt_f32_function_name},
+                    {@"tanh", zpu_cpu_tanh_f32_function_name},
+                };
+                for (NSUInteger profileIndex = 0;
+                     profileIndex < sizeof(unaryProfiles) / sizeof(unaryProfiles[0]);
+                     ++profileIndex) {
+                    NSString *expectedBody = [NSString stringWithFormat:
+                        @"if(%@>=12)return;output[%@]=%@(input[%@]);",
+                        unaryIndexName, unaryIndexName, unaryProfiles[profileIndex].intrinsic, unaryIndexName];
+                    if ([compactBody isEqualToString:expectedBody]) {
+                        implementations[functionName] = unaryProfiles[profileIndex].implementation;
+                        return;
+                    }
+                }
+            }
+        }
+
         NSError *indexError = nil;
         NSRegularExpression *indexExpression = [NSRegularExpression
             regularExpressionWithPattern:@"uint([A-Za-z_][A-Za-z0-9_]*)\\[\\[thread_position_in_grid\\]\\]"
@@ -15366,6 +15453,9 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                 zpu_cpu_add_i8_function_name, zpu_cpu_sub_i8_function_name,
                 zpu_cpu_mul_i8_function_name, zpu_cpu_add_u8_function_name,
                 zpu_cpu_sub_u8_function_name, zpu_cpu_mul_u8_function_name,
+                zpu_cpu_sin_f32_function_name, zpu_cpu_cos_f32_function_name,
+                zpu_cpu_exp_f32_function_name, zpu_cpu_log_f32_function_name,
+                zpu_cpu_sqrt_f32_function_name, zpu_cpu_tanh_f32_function_name,
             ]) {
                 if (![names containsObject:name]) {
                     [names addObject:name];
@@ -19666,7 +19756,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     if (table->_invalid) return NO;
     for (NSUInteger index = 0; index < table->_maxBufferBindCount; ++index) {
         if (index != 0 && zpu_metal4_argument_table_buffer_slot_empty(table, index)) {
-            if (zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel) && index <= 2) {
+            if ((zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel) && index <= 2) ||
+                (zpu_compute_buffer_unary_kernel(_legacy->_kernel) && index == 1)) {
                 [(id<MTLComputeCommandEncoder>)_legacy setBuffer:nil offset:0 atIndex:index];
             }
             [(id<MTLComputeCommandEncoder>)_legacy setAccelerationStructure:nil atBufferIndex:index];
@@ -19691,8 +19782,10 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
             [(id<MTLComputeCommandEncoder>)_legacy setIntersectionFunctionTable:
                 (id<MTLIntersectionFunctionTable>)resource atBufferIndex:index];
         } else if (index == 0 ||
-                   (index <= 2 && zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel))) {
-            if (zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel) && buffer == nil) {
+                   (index <= 2 && zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel)) ||
+                   (index == 1 && zpu_compute_buffer_unary_kernel(_legacy->_kernel))) {
+            if ((zpu_compute_buffer_arithmetic_kernel(_legacy->_kernel) ||
+                 zpu_compute_buffer_unary_kernel(_legacy->_kernel)) && buffer == nil) {
                 return NO;
             }
             const uint64_t *strides = (const uint64_t *)table->_bufferStrides.bytes;
@@ -20368,6 +20461,12 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_MUL_F32: return zpu_cpu_mul_f32_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32: return zpu_cpu_sub_f32_function_name;
         case ZPU_METAL_COMPUTE_DIV_F32: return zpu_cpu_div_f32_function_name;
+        case ZPU_METAL_COMPUTE_SIN_F32: return zpu_cpu_sin_f32_function_name;
+        case ZPU_METAL_COMPUTE_COS_F32: return zpu_cpu_cos_f32_function_name;
+        case ZPU_METAL_COMPUTE_EXP_F32: return zpu_cpu_exp_f32_function_name;
+        case ZPU_METAL_COMPUTE_LOG_F32: return zpu_cpu_log_f32_function_name;
+        case ZPU_METAL_COMPUTE_SQRT_F32: return zpu_cpu_sqrt_f32_function_name;
+        case ZPU_METAL_COMPUTE_TANH_F32: return zpu_cpu_tanh_f32_function_name;
         case ZPU_METAL_COMPUTE_ADD_F16: return zpu_cpu_add_f16_function_name;
         case ZPU_METAL_COMPUTE_MUL_F16: return zpu_cpu_mul_f16_function_name;
         case ZPU_METAL_COMPUTE_SUB_F16: return zpu_cpu_sub_f16_function_name;
@@ -20567,6 +20666,18 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_SUB_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_div_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_DIV_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sin_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SIN_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_cos_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_COS_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_exp_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_EXP_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_log_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_LOG_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sqrt_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SQRT_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_tanh_f32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_TANH_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f16_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F16;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f16_function_name]) {
@@ -27842,9 +27953,12 @@ static void zpu_replay_indirect_render_extra_buffers(ZPUIndirectRenderCommand *c
     if (_pipelineState != nil) [encoder setComputePipelineState:(id<MTLComputePipelineState>)_pipelineState];
     if (!_owner->_inheritBuffers) {
         [encoder setBuffer:nil offset:0 atIndex:0];
-        if (zpu_compute_buffer_arithmetic_kernel(pipeline->_kernel)) {
+        if (zpu_compute_buffer_arithmetic_kernel(pipeline->_kernel) ||
+            zpu_compute_buffer_unary_kernel(pipeline->_kernel)) {
             [encoder setBuffer:nil offset:0 atIndex:1];
-            [encoder setBuffer:nil offset:0 atIndex:2];
+            if (zpu_compute_buffer_arithmetic_kernel(pipeline->_kernel)) {
+                [encoder setBuffer:nil offset:0 atIndex:2];
+            }
         }
     }
     for (NSNumber *bufferIndex in _kernelBuffers) {

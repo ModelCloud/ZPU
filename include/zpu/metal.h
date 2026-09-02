@@ -509,6 +509,16 @@ enum {
     ZPU_METAL_COMPUTE_ADD_U8 = 93,
     ZPU_METAL_COMPUTE_SUB_U8 = 94,
     ZPU_METAL_COMPUTE_MUL_U8 = 95,
+    /* Bounded source-defined Float32 unary math profiles. Bind input at
+     * buffer(0), output at buffer(1), and dispatch one thread per element.
+     * These are CPU/ZPU operations; the native Metal spelling is used only
+     * by the oracle tests. */
+    ZPU_METAL_COMPUTE_SIN_F32 = 96,
+    ZPU_METAL_COMPUTE_COS_F32 = 97,
+    ZPU_METAL_COMPUTE_EXP_F32 = 98,
+    ZPU_METAL_COMPUTE_LOG_F32 = 99,
+    ZPU_METAL_COMPUTE_SQRT_F32 = 100,
+    ZPU_METAL_COMPUTE_TANH_F32 = 101,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

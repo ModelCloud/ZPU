@@ -870,6 +870,19 @@ const ComputeBufferAddCommand = struct {
     indirect_threads: bool = false,
 };
 
+const ComputeBufferUnaryCommand = struct {
+    kernel: u8,
+    input: *Buffer,
+    input_offset: usize,
+    output: *Buffer,
+    output_offset: usize,
+    threads_per_grid: abi.Size,
+    threads_per_threadgroup: abi.Size = .{ .width = 0, .height = 0, .depth = 0 },
+    indirect_buffer: ?*Buffer = null,
+    indirect_buffer_offset: usize = 0,
+    indirect_threads: bool = false,
+};
+
 const Command = union(enum) {
     begin_render: BeginRenderCommand,
     draw: DrawCommand,
@@ -887,6 +900,7 @@ const Command = union(enum) {
     fill_buffer: FillBufferCommand,
     compute: ComputeCommand,
     compute_buffer_add: ComputeBufferAddCommand,
+    compute_buffer_unary: ComputeBufferUnaryCommand,
     synchronize_buffer: *Buffer,
     sparse_buffer_mapping: SparseBufferMappingCommand,
     sparse_buffer_copy_mapping: SparseBufferCopyMappingCommand,
@@ -2891,6 +2905,54 @@ pub const CommandBuffer = struct {
                     }
                 }
                 executeBufferAdd(resolved) catch |err| return self.fail(err);
+            },
+            .compute_buffer_unary => |compute| {
+                sparseSyncBuffer(compute.input);
+                sparseSyncBuffer(compute.output);
+                sparseSyncOptionalBuffer(compute.indirect_buffer);
+                defer {
+                    sparseFlushBuffer(compute.input);
+                    sparseFlushBuffer(compute.output);
+                    sparseFlushOptionalBuffer(compute.indirect_buffer);
+                }
+                var resolved = compute;
+                if (compute.indirect_buffer) |indirect_buffer| {
+                    if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.queue.device or
+                        !rangeValid(indirect_buffer.bytes.len, compute.indirect_buffer_offset, if (compute.indirect_threads) 2 * @sizeOf(abi.Size) else @sizeOf(abi.Size)))
+                        return self.fail(error.InvalidArgument);
+                    if (compute.indirect_threads) {
+                        resolved.threads_per_grid = .{
+                            .width = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset),
+                            .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 4),
+                            .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 8),
+                        };
+                        resolved.threads_per_threadgroup = .{
+                            .width = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 12),
+                            .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 16),
+                            .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 20),
+                        };
+                    } else {
+                        const groups = abi.Size{
+                            .width = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset),
+                            .height = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 4),
+                            .depth = readU32Little(indirect_buffer.bytes, compute.indirect_buffer_offset + 8),
+                        };
+                        const grid_width = std.math.mul(u64, groups.width, compute.threads_per_threadgroup.width) catch
+                            return self.fail(error.InvalidArgument);
+                        const grid_height = std.math.mul(u64, groups.height, compute.threads_per_threadgroup.height) catch
+                            return self.fail(error.InvalidArgument);
+                        const grid_depth = std.math.mul(u64, groups.depth, compute.threads_per_threadgroup.depth) catch
+                            return self.fail(error.InvalidArgument);
+                        if (grid_width > std.math.maxInt(u32) or grid_height > std.math.maxInt(u32) or
+                            grid_depth > std.math.maxInt(u32)) return self.fail(error.InvalidArgument);
+                        resolved.threads_per_grid = .{
+                            .width = @intCast(grid_width),
+                            .height = @intCast(grid_height),
+                            .depth = @intCast(grid_depth),
+                        };
+                    }
+                }
+                executeBufferUnary(resolved) catch |err| return self.fail(err);
             },
             .compute => |compute| {
                 sparseSyncOptionalBuffer(compute.buffer);
@@ -5181,6 +5243,10 @@ fn isIntegerKernel(kernel: u8) bool {
     return kernel >= 78 and kernel <= 95;
 }
 
+fn isUnaryKernel(kernel: u8) bool {
+    return kernel >= 96 and kernel <= 101;
+}
+
 fn integerKernelElementBytes(kernel: u8) usize {
     return switch (kernel) {
         78...83 => @sizeOf(u32),
@@ -5240,7 +5306,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 95) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 101) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5251,6 +5317,10 @@ pub const ComputeEncoder = struct {
             self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or
             self.kernel == 42 or self.kernel == 43 or self.kernel == 44 or
             isNarrowKernel(self.kernel) or isIntegerKernel(self.kernel);
+    }
+
+    fn isBufferUnaryKernel(self: *const ComputeEncoder) bool {
+        return isUnaryKernel(self.kernel);
     }
 
     fn appendBufferAdd(
@@ -5280,6 +5350,35 @@ pub const ComputeEncoder = struct {
             .right_offset = self.buffer_offsets[1],
             .output = output,
             .output_offset = self.buffer_offsets[2],
+            .threads_per_grid = threads_per_grid,
+            .threads_per_threadgroup = threads_per_threadgroup,
+            .indirect_buffer = indirect_buffer,
+            .indirect_buffer_offset = indirect_buffer_offset,
+            .indirect_threads = indirect_threads,
+        } });
+    }
+
+    fn appendBufferUnary(
+        self: *ComputeEncoder,
+        threads_per_grid: abi.Size,
+        threads_per_threadgroup: abi.Size,
+        indirect_buffer: ?*Buffer,
+        indirect_buffer_offset: usize,
+        indirect_threads: bool,
+    ) Error!void {
+        if (!self.isBufferUnaryKernel() or threads_per_grid.height != 1 or threads_per_grid.depth != 1 or
+            threads_per_threadgroup.width == 0 or threads_per_threadgroup.height != 1 or
+            threads_per_threadgroup.depth != 1) return error.InvalidArgument;
+        const input = self.buffers[0] orelse return error.InvalidCommand;
+        const output = self.buffers[1] orelse return error.InvalidCommand;
+        if (!validBuffer(input) or !validBuffer(output) or input.device != self.command_buffer.queue.device or
+            output.device != input.device) return error.InvalidResource;
+        _ = try self.command_buffer.append(.{ .compute_buffer_unary = .{
+            .kernel = self.kernel,
+            .input = input,
+            .input_offset = self.buffer_offsets[0],
+            .output = output,
+            .output_offset = self.buffer_offsets[1],
             .threads_per_grid = threads_per_grid,
             .threads_per_threadgroup = threads_per_threadgroup,
             .indirect_buffer = indirect_buffer,
@@ -5464,6 +5563,9 @@ pub const ComputeEncoder = struct {
     pub fn dispatchThreads(self: *ComputeEncoder, threads_per_grid: abi.Size, threads_per_threadgroup: abi.Size) Error!void {
         if (!self.open() or self.kernel == 0) return error.InvalidCommand;
         if (self.kernel == 29) return self.appendSourceNoop(threads_per_grid, threads_per_threadgroup, null, 0, false);
+        if (self.isBufferUnaryKernel()) {
+            return self.appendBufferUnary(threads_per_grid, threads_per_threadgroup, null, 0, false);
+        }
         if (self.isBufferAddKernel()) {
             return self.appendBufferAdd(threads_per_grid, threads_per_threadgroup, null, 0, false);
         }
@@ -5506,6 +5608,15 @@ pub const ComputeEncoder = struct {
                 .depth = @intCast(grid_depth),
             }, threads_per_threadgroup, null, 0, false);
         }
+        if (self.isBufferUnaryKernel()) {
+            const grid_width = @as(u64, threadgroups_per_grid.width) * @as(u64, threads_per_threadgroup.width);
+            if (grid_width > std.math.maxInt(u32)) return error.InvalidArgument;
+            return self.dispatchThreads(.{
+                .width = @intCast(grid_width),
+                .height = threadgroups_per_grid.height,
+                .depth = threadgroups_per_grid.depth,
+            }, threads_per_threadgroup);
+        }
         if (self.isBufferAddKernel()) {
             const grid_width = @as(u64, threadgroups_per_grid.width) * @as(u64, threads_per_threadgroup.width);
             if (grid_width > std.math.maxInt(u32)) return error.InvalidArgument;
@@ -5537,6 +5648,12 @@ pub const ComputeEncoder = struct {
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
             return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 }, threads_per_threadgroup, indirect_buffer, indirect_buffer_offset, false);
+        }
+        if (self.isBufferUnaryKernel()) {
+            if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
+                indirect_buffer_offset % @alignOf(u32) != 0 or
+                !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, @sizeOf(abi.Size))) return error.InvalidArgument;
+            return self.appendBufferUnary(.{ .width = 0, .height = 1, .depth = 1 }, threads_per_threadgroup, indirect_buffer, indirect_buffer_offset, false);
         }
         if (self.isBufferAddKernel()) {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
@@ -5583,6 +5700,12 @@ pub const ComputeEncoder = struct {
                 indirect_buffer_offset % @alignOf(u32) != 0 or
                 !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
             return self.appendSourceNoop(.{ .width = 0, .height = 0, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
+        }
+        if (self.isBufferUnaryKernel()) {
+            if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
+                indirect_buffer_offset % @alignOf(u32) != 0 or
+                !rangeValid(indirect_buffer.bytes.len, indirect_buffer_offset, 2 * @sizeOf(abi.Size))) return error.InvalidArgument;
+            return self.appendBufferUnary(.{ .width = 0, .height = 0, .depth = 1 }, .{ .width = 1, .height = 1, .depth = 1 }, indirect_buffer, indirect_buffer_offset, true);
         }
         if (self.isBufferAddKernel()) {
             if (!validBuffer(indirect_buffer) or indirect_buffer.device != self.command_buffer.queue.device or
@@ -6218,6 +6341,34 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
             };
             std.mem.writeInt(u32, command.output.bytes[output_offset..][0..@sizeOf(f32)], @bitCast(result), .little);
         }
+    }
+}
+
+fn executeBufferUnary(command: ComputeBufferUnaryCommand) Error!void {
+    if (command.kernel < 96 or command.kernel > 101 or
+        !validBuffer(command.input) or !validBuffer(command.output) or
+        command.input.device != command.output.device or
+        command.threads_per_grid.height != 1 or command.threads_per_grid.depth != 1 or
+        command.threads_per_threadgroup.width == 0 or
+        command.threads_per_threadgroup.height != 1 or
+        command.threads_per_threadgroup.depth != 1) return error.InvalidArgument;
+    const byte_count = std.math.mul(usize, command.threads_per_grid.width, @sizeOf(f32)) catch
+        return error.InvalidArgument;
+    if (!rangeValid(command.input.bytes.len, command.input_offset, byte_count) or
+        !rangeValid(command.output.bytes.len, command.output_offset, byte_count)) return error.InvalidArgument;
+    for (0..command.threads_per_grid.width) |index| {
+        const offset = index * @sizeOf(f32);
+        const input = readF32Little(command.input.bytes, command.input_offset + offset);
+        const result: f32 = switch (command.kernel) {
+            96 => @sin(input),
+            97 => @cos(input),
+            98 => std.math.exp(input),
+            99 => @log(input),
+            100 => std.math.sqrt(input),
+            101 => std.math.tanh(input),
+            else => unreachable,
+        };
+        writeU32Little(command.output.bytes, command.output_offset + offset, @bitCast(result));
     }
 }
 
@@ -9653,6 +9804,47 @@ test "CPU buffer add compute is deferred and slot-accurate" {
     try std.testing.expectEqual(CommandStatus.completed, indirect_command_buffer.status);
     for (expected, 0..) |value, index| {
         try std.testing.expectEqual(value, readF32Little(output.bytes, (index + 2) * @sizeOf(f32)));
+    }
+}
+
+test "CPU unary math compute is deferred and slot-accurate" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const input_values = [_]f32{ 99.0, 0.125, 0.25, 0.5, 1.0, 2.0, 3.0 };
+    const kernels = [_]u8{ 96, 97, 98, 99, 100, 101 };
+    for (kernels) |kernel| {
+        var output_values = [_]f32{ 123.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        const input = try createBuffer(device, @sizeOf(@TypeOf(input_values)), @ptrCast(&input_values));
+        defer destroyBuffer(input);
+        const output = try createBuffer(device, @sizeOf(@TypeOf(output_values)), @ptrCast(&output_values));
+        defer destroyBuffer(output);
+        var command_buffer = try createCommandBuffer(queue);
+        defer destroyCommandBuffer(command_buffer);
+        var encoder = try beginCompute(command_buffer);
+        try encoder.setKernel(kernel);
+        try encoder.setBuffer(input, @sizeOf(f32), 0);
+        try encoder.setBuffer(output, @sizeOf(f32), 1);
+        try encoder.dispatchThreads(.{ .width = 6, .height = 1, .depth = 1 }, .{ .width = 2, .height = 1, .depth = 1 });
+        try encoder.endEncoding();
+        destroyComputeEncoder(encoder);
+        try std.testing.expectEqual(@as(f32, 0.0), readF32Little(output.bytes, @sizeOf(f32)));
+        try command_buffer.commit();
+        try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+        for (input_values[1..], 1..) |value, index| {
+            const expected: f32 = switch (kernel) {
+                96 => @sin(value),
+                97 => @cos(value),
+                98 => std.math.exp(value),
+                99 => @log(value),
+                100 => std.math.sqrt(value),
+                101 => std.math.tanh(value),
+                else => unreachable,
+            };
+            try std.testing.expectApproxEqAbs(expected, readF32Little(output.bytes, index * @sizeOf(f32)), 0.000001);
+        }
+        try std.testing.expectEqual(@as(f32, 123.0), readF32Little(output.bytes, 0));
     }
 }
 
