@@ -16606,6 +16606,8 @@ static int test_metal4_cpu_float_elementwise_profiles(
     id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
     id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
     const ZPUFloatElementwiseProfile profiles[] = {
+        {"zpu_cpu_ml_add_f16", "zpu_cpu_ml_add_f16_oracle", MTLTensorDataTypeFloat16, NO, NO},
+        {"zpu_cpu_ml_add_bf16", "zpu_cpu_ml_add_bf16_oracle", MTLTensorDataTypeBFloat16, NO, NO},
         {"zpu_cpu_ml_sub_f16", "zpu_cpu_ml_sub_f16_oracle", MTLTensorDataTypeFloat16, NO, NO},
         {"zpu_cpu_ml_sub_bf16", "zpu_cpu_ml_sub_bf16_oracle", MTLTensorDataTypeBFloat16, NO, NO},
         {"zpu_cpu_ml_mul_f16", "zpu_cpu_ml_mul_f16_oracle", MTLTensorDataTypeFloat16, YES, NO},
