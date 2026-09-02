@@ -449,7 +449,13 @@ triangle path:
   registered `zpu_cpu_ml_transpose` profile performs a deferred reverse-axis
   transpose through the portable CPU tensor layer, preserving explicit Metal
   element strides, packed element widths, overlap semantics, and untouched
-  padding bytes.
+  padding bytes. Source-defined scalar `half` and `bfloat` buffer kernels with
+  the canonical three-buffer arithmetic shape are also lowered to the same
+  CPU/ZPU arithmetic profiles; Float16 arithmetic is performed in Float16 and
+  BFloat16 arithmetic widens to Float32 before round-to-nearest-even packing.
+  These source profiles preserve the exact `thread_position_in_grid` bounds
+  used by their native Metal oracle and do not invoke Apple's compiler at
+  execution time.
   Arbitrary ML graphs and arbitrary-MSL compiler
   requests remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
