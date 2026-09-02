@@ -476,6 +476,10 @@ triangle path:
   the canonical three-buffer arithmetic shape are also lowered to the same
   CPU/ZPU arithmetic profiles; Float16 arithmetic is performed in Float16 and
   BFloat16 arithmetic widens to Float32 before round-to-nearest-even packing.
+  Every supported fixed Metal 4 ML dispatch enters the host-neutral
+  `zpu_cpu_ml_operation` boundary; the Apple adapter retains only descriptor
+  validation and ZPU tensor ownership, so it has no second arithmetic
+  implementation.
   These source profiles preserve the exact `thread_position_in_grid` bounds
   used by their native Metal oracle and do not invoke Apple's compiler at
   execution time. The same bounded source lowering covers `half2/3/4` and
