@@ -920,6 +920,12 @@ triangle path:
   v1 named ABI retains its binary-compatible inline two-input shape. The
   additive v2 named ABI uses borrowed pointers to up to 16 dense input views,
   so a provider-owned graph entry point is not forced into a binary-op shape.
+  The additive v3 named ABI adds up to 16 output views and independent input
+  and output element-type arrays, so multi-output and mixed-precision graph
+  entry points remain provider-owned; the Metal-shaped adapter only validates
+  bindings, stages dense CPU views, and scatters successful outputs back to
+  ZPU-owned tensors. It is limited to the Metal 4 argument-table maximum of
+  31 total bindings.
   This named seam also has an optional versioned catalog hook; catalog entries are
   copied into `MTLLibrary.functionNames` only after the provider query accepts
   their UTF-8 name and tensor signature. This keeps dynamic ZML/cpu graph

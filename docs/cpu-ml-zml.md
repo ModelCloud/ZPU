@@ -24,13 +24,18 @@ versioned callbacks in `zpu/cpu_ml.h`:
 
 1. use `zpu_cpu_ml_set_backend` for transpose;
 2. use `zpu_cpu_ml_set_operation_backend` for the fixed operation IDs;
-3. use the named-operation v1 or v2 ABI for provider-owned graph functions;
+3. use the named-operation v1/v2 ABI for single-output graph functions, or
+   the additive v3 ABI for multi-output and mixed-element-type graph
+   functions;
 4. optionally register the named catalog so those CPU functions are visible
    through the Metal-shaped function-name API.
 
 The callback receives dense, offset-zero CPU views borrowed for the callback
-duration. It never receives an `MTLTexture`, `MTLBuffer`, PJRT device buffer,
-or platform-specific layout object. A provider decline returns
+duration. The v3 callback has separate input/output arrays and element-type
+arrays, allowing a graph provider to own arbitrary graph wiring, transposes,
+and mixed-precision conversions without changing the Metal adapter. It never
+receives an `MTLTexture`, `MTLBuffer`, PJRT device buffer, or platform-specific
+layout object. A provider decline returns
 `ZPU_CPU_ML_STATUS_UNSUPPORTED`; fixed operations then use the exact portable
 ZPU CPU reference path for supported operation/type combinations, while named
 graph operations fail closed because there is no safe generic graph fallback.
