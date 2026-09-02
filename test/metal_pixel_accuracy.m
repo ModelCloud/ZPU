@@ -30872,6 +30872,55 @@ int main(void) {
             return 65;
         }
 
+        /* The range setter is the bulk form of the same descriptor contract:
+         * NSNull leaves a slot unspecified, while reset returns the
+         * descriptor to its empty state before the compiler consumes it. */
+        NSError *metal4_ml_range_error = nil;
+        MTL4MachineLearningPipelineDescriptor *metal4_ml_range_descriptor =
+            [MTL4MachineLearningPipelineDescriptor new];
+        metal4_ml_range_descriptor.label = @"zpu-cpu-ml-range";
+        metal4_ml_range_descriptor.machineLearningFunctionDescriptor =
+            metal4_ml_identity_function_descriptor;
+        NSArray *metal4_ml_range_dimensions = @[
+            metal4_ml_runtime_identity_dimensions,
+            [NSNull null],
+        ];
+        [metal4_ml_range_descriptor setInputDimensions:metal4_ml_range_dimensions
+                                             withRange:NSMakeRange(0, 2)];
+        MTLTensorExtents *metal4_ml_range_input_dimensions =
+            [metal4_ml_range_descriptor inputDimensionsAtBufferIndex:0];
+        id metal4_ml_range_unspecified_dimensions =
+            [metal4_ml_range_descriptor inputDimensionsAtBufferIndex:1];
+        id<MTL4MachineLearningPipelineState> metal4_ml_range_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_range_descriptor error:&metal4_ml_range_error];
+        [metal4_ml_range_descriptor reset];
+        NSError *metal4_ml_reset_error = nil;
+        id<MTL4MachineLearningPipelineState> metal4_ml_reset_pipeline =
+            [adapter_mtl4_compiler newMachineLearningPipelineStateWithDescriptor:
+                metal4_ml_range_descriptor error:&metal4_ml_reset_error];
+        id<MTLTensorBinding> metal4_ml_range_output_binding =
+            metal4_ml_range_pipeline.reflection.bindings.count > 1 ?
+                (id<MTLTensorBinding>)metal4_ml_range_pipeline.reflection.bindings[1] : nil;
+        if (metal4_ml_range_pipeline == nil || metal4_ml_range_error != nil ||
+            metal4_ml_range_input_dimensions == nil ||
+            metal4_ml_range_input_dimensions.rank != 2 ||
+            [metal4_ml_range_input_dimensions extentAtDimensionIndex:0] != -1 ||
+            [metal4_ml_range_input_dimensions extentAtDimensionIndex:1] != 3 ||
+            (metal4_ml_range_unspecified_dimensions != nil &&
+             metal4_ml_range_unspecified_dimensions != (id)[NSNull null]) ||
+            metal4_ml_range_output_binding == nil ||
+            metal4_ml_range_output_binding.dimensions != nil ||
+            metal4_ml_range_descriptor.label != nil ||
+            metal4_ml_range_descriptor.machineLearningFunctionDescriptor != nil ||
+            [metal4_ml_range_descriptor inputDimensionsAtBufferIndex:0] != nil ||
+            [metal4_ml_range_descriptor inputDimensionsAtBufferIndex:1] != nil ||
+            metal4_ml_reset_pipeline != nil || metal4_ml_reset_error == nil) {
+            fail_with_error("Metal 4 CPU ML range/reset descriptor semantics failed",
+                            metal4_ml_range_error ?: metal4_ml_reset_error);
+            return 66;
+        }
+
         /* ML operations share the command buffer's ordered ZPU stream. Put a
          * tensor copy before the identity dispatch, then change its source
          * after encoding. If ML work were still drained out-of-band at commit,

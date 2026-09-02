@@ -15973,7 +15973,19 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
                                    multiplication || multiplicationF16 || multiplicationBF16 ||
                                    matmul) ? 3 : 2);
     for (NSUInteger index = 0; index < inputCount; ++index) {
-        inputDimensions[index] = [descriptor inputDimensionsAtBufferIndex:index];
+        id dimensions = [descriptor inputDimensionsAtBufferIndex:index];
+        if (dimensions == nil || dimensions == (id)[NSNull null]) {
+            /* Apple's bulk setter represents an unspecified range entry as
+             * NSNull on some SDK revisions, even though the typed getter is
+             * documented as nullable. Normalize both forms at the ABI
+             * boundary so NSNull never reaches tensor validation/reflection. */
+            inputDimensions[index] = nil;
+        } else if (![dimensions isKindOfClass:[MTLTensorExtents class]]) {
+            zpu_set_error(error, @"ZPU CPU Metal 4 ML input dimensions are invalid");
+            return nil;
+        } else {
+            inputDimensions[index] = (MTLTensorExtents *)dimensions;
+        }
     }
     for (NSUInteger index = 0; index < inputCount; ++index) {
         if (inputDimensions[index] == nil) {
