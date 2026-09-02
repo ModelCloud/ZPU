@@ -536,6 +536,229 @@ fn validateTypedView(view: *const TensorView, element_type: ElementType) ?ViewIn
     return info;
 }
 
+fn sameShape(left: *const TensorView, right: *const TensorView) bool {
+    if (left.rank != right.rank) return false;
+    const rank: usize = left.rank;
+    for (0..rank) |axis| {
+        if (left.dimensions[axis] != right.dimensions[axis]) return false;
+    }
+    return true;
+}
+
+fn readElementBits(view: *const TensorView, info: ViewInfo, element: usize) ?u64 {
+    if (info.element_bits == 4) {
+        const value = readNibble(view, info, element) orelse return null;
+        return value;
+    }
+    const offset = byteOffset(view, info, element) orelse return null;
+    const data = view.data orelse return null;
+    if (offset > view.byte_length or info.element_bytes > view.byte_length - offset) return null;
+    var value: u64 = 0;
+    for (0..info.element_bytes) |byte| {
+        value |= @as(u64, data[offset + byte]) << @as(u6, @intCast(byte * 8));
+    }
+    return value;
+}
+
+fn writeElementBits(view: *const TensorView, info: ViewInfo, element: usize, value: u64) bool {
+    if (info.element_bits == 4) return writeNibble(view, info, element, @truncate(value));
+    const offset = byteOffset(view, info, element) orelse return false;
+    const data = view.data orelse return false;
+    if (offset > view.byte_length or info.element_bytes > view.byte_length - offset) return false;
+    for (0..info.element_bytes) |byte| {
+        data[offset + byte] = @truncate(value >> @as(u6, @intCast(byte * 8)));
+    }
+    return true;
+}
+
+fn f32FromBits(value: u64) f32 {
+    return @bitCast(@as(u32, @truncate(value)));
+}
+
+fn f32ToBits(value: f32) u64 {
+    return @as(u64, @as(u32, @bitCast(value)));
+}
+
+fn f16FromBits(value: u64) f16 {
+    return @bitCast(@as(u16, @truncate(value)));
+}
+
+fn f16ToBits(value: f16) u64 {
+    return @as(u64, @as(u16, @bitCast(value)));
+}
+
+fn bfloat16FromBits(value: u64) f32 {
+    const bits: u32 = @as(u32, @truncate(value)) << 16;
+    return @bitCast(bits);
+}
+
+fn bfloat16ToBits(value: f32) u64 {
+    const bits: u32 = @bitCast(value);
+    const rounded = bits +% (0x7fff + ((bits >> 16) & 1));
+    return @as(u64, rounded >> 16);
+}
+
+fn binaryElement(operation_kind: Operation, element_type: ElementType, left: u64, right: u64) ?u64 {
+    switch (element_type) {
+        .float32 => {
+            const left_value = f32FromBits(left);
+            const right_value = f32FromBits(right);
+            const result = switch (operation_kind) {
+                .add => left_value + right_value,
+                .subtract => left_value - right_value,
+                .divide => left_value / right_value,
+                .multiply => left_value * right_value,
+                else => return null,
+            };
+            return f32ToBits(result);
+        },
+        .float16 => {
+            const left_value = f16FromBits(left);
+            const right_value = f16FromBits(right);
+            const result: f16 = switch (operation_kind) {
+                .add => left_value + right_value,
+                .subtract => left_value - right_value,
+                .multiply => left_value * right_value,
+                .divide => return null,
+                else => return null,
+            };
+            return f16ToBits(result);
+        },
+        .bfloat16 => {
+            const left_value = bfloat16FromBits(left);
+            const right_value = bfloat16FromBits(right);
+            const result = switch (operation_kind) {
+                .add => left_value + right_value,
+                .subtract => left_value - right_value,
+                .multiply => left_value * right_value,
+                .divide => return null,
+                else => return null,
+            };
+            return bfloat16ToBits(result);
+        },
+        .int4, .uint4, .int8, .uint8, .int16, .uint16, .int32, .uint32 => {
+            if (operation_kind == .divide) return null;
+            const bits = elementBitsForType(element_type);
+            const mask = (@as(u64, 1) << @as(u6, @intCast(bits))) - 1;
+            return switch (operation_kind) {
+                .add => (left +% right) & mask,
+                .subtract => (left -% right) & mask,
+                .multiply => (left *% right) & mask,
+                else => null,
+            };
+        },
+    }
+}
+
+fn referenceOperation(operation_kind: Operation, element_type: ElementType, arguments: *const OperationArguments, input_info: [max_inputs]?ViewInfo, dense_inputs: [max_inputs]TensorView, dense_destination: TensorView, destination_info: ViewInfo) Status {
+    const source_info = input_info[0] orelse return .invalid_argument;
+    var output = dense_destination;
+
+    switch (operation_kind) {
+        .identity => {
+            if (!sameShape(&arguments.inputs[0], &arguments.destination)) return .invalid_argument;
+            if (!copyDenseToDestination(&dense_inputs[0], source_info, &arguments.destination, destination_info)) {
+                return .invalid_argument;
+            }
+            return .ok;
+        },
+        .transpose => {
+            var transpose_arguments = TransposeArguments{
+                .source = dense_inputs[0],
+                .destination = output,
+                .permutation = arguments.permutation,
+            };
+            const status = referenceTranspose(&transpose_arguments);
+            if (status != .ok) return status;
+            if (!copyDenseToDestination(&output, destination_info, &arguments.destination, destination_info)) {
+                return .invalid_argument;
+            }
+            return .ok;
+        },
+        .add, .subtract, .divide, .multiply => {
+            if (!sameShape(&arguments.inputs[0], &arguments.inputs[1]) or
+                !sameShape(&arguments.inputs[0], &arguments.destination)) return .invalid_argument;
+            const right_info = input_info[1] orelse return .invalid_argument;
+            for (0..source_info.element_count) |element| {
+                const left_value = readElementBits(&dense_inputs[0], source_info, element) orelse return .invalid_argument;
+                const right_value = readElementBits(&dense_inputs[1], right_info, element) orelse return .invalid_argument;
+                const result = binaryElement(operation_kind, element_type, left_value, right_value) orelse return .unsupported;
+                if (!writeElementBits(&output, destination_info, element, result)) return .invalid_argument;
+            }
+            if (!copyDenseToDestination(&output, destination_info, &arguments.destination, destination_info)) {
+                return .invalid_argument;
+            }
+            return .ok;
+        },
+        .matmul => {
+            if (element_type == .int4 or element_type == .uint4) return .unsupported;
+            const right_info = input_info[1] orelse return .invalid_argument;
+            if (source_info.rank != 2 or right_info.rank != 2 or destination_info.rank != 2 or
+                arguments.inputs[0].dimensions[1] != arguments.inputs[1].dimensions[0] or
+                arguments.destination.dimensions[0] != arguments.inputs[0].dimensions[0] or
+                arguments.destination.dimensions[1] != arguments.inputs[1].dimensions[1])
+            {
+                return .invalid_argument;
+            }
+            const rows = arguments.inputs[0].dimensions[0];
+            const reduction = arguments.inputs[0].dimensions[1];
+            const columns = arguments.inputs[1].dimensions[1];
+            for (0..rows) |row| {
+                for (0..columns) |column| {
+                    var result: u64 = 0;
+                    switch (element_type) {
+                        .float32 => {
+                            var sum: f32 = 0;
+                            for (0..reduction) |index| {
+                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
+                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
+                                sum = @mulAdd(f32, f32FromBits(left_value), f32FromBits(right_value), sum);
+                            }
+                            result = f32ToBits(sum);
+                        },
+                        .float16 => {
+                            var sum: f16 = 0;
+                            for (0..reduction) |index| {
+                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
+                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
+                                sum = @mulAdd(f16, f16FromBits(left_value), f16FromBits(right_value), sum);
+                            }
+                            result = f16ToBits(sum);
+                        },
+                        .bfloat16 => {
+                            var sum: f32 = 0;
+                            for (0..reduction) |index| {
+                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
+                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
+                                sum += bfloat16FromBits(left_value) * bfloat16FromBits(right_value);
+                            }
+                            result = bfloat16ToBits(sum);
+                        },
+                        .int8, .uint8, .int16, .uint16, .int32, .uint32 => {
+                            const bits = elementBitsForType(element_type);
+                            const mask = (@as(u64, 1) << @as(u6, @intCast(bits))) - 1;
+                            var sum: u64 = 0;
+                            for (0..reduction) |index| {
+                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
+                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
+                                sum = (sum +% ((left_value & mask) *% (right_value & mask))) & mask;
+                            }
+                            result = sum;
+                        },
+                        .int4, .uint4 => unreachable,
+                    }
+                    const output_element = row * columns + column;
+                    if (!writeElementBits(&output, destination_info, output_element, result)) return .invalid_argument;
+                }
+            }
+            if (!copyDenseToDestination(&output, destination_info, &arguments.destination, destination_info)) {
+                return .invalid_argument;
+            }
+            return .ok;
+        },
+    }
+}
+
 /// Stage an operation's raw ZPU views into dense CPU views for the optional
 /// ZML/cpu provider. The provider never sees an Apple resource or an
 /// Apple-specific tensor layout. A successful provider call is scattered back
@@ -569,9 +792,8 @@ pub fn operation(arguments: *const OperationArguments) Status {
     // Validate the complete portable ABI before looking for an optional
     // provider. A malformed call must have the same result whether a ZML/cpu
     // provider is installed or not; `unsupported` is reserved for a valid
-    // operation for which no provider is currently available.
-    const backend = operationBackendSnapshot() orelse return .unsupported;
-    const callback = backend.operation orelse return .unsupported;
+    // operation/type combination for which this portable layer has no
+    // reference implementation.
     const destination_storage = std.heap.c_allocator.alloc(u8, destination_bytes) catch return .out_of_memory;
     defer std.heap.c_allocator.free(destination_storage);
     @memset(destination_storage, 0);
@@ -585,12 +807,18 @@ pub fn operation(arguments: *const OperationArguments) Status {
         .destination = dense_destination,
         .permutation = arguments.permutation,
     };
-    const status = providerStatus(callback(backend.context, &dense_arguments));
-    if (status != .ok) return status;
-    if (!std.meta.eql(dense_arguments.destination, dense_destination)) return .invalid_argument;
-    const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
-    if (!copyDenseToDestination(&dense_destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
-    return .ok;
+    if (operationBackendSnapshot()) |backend| {
+        const callback = backend.operation orelse return .unsupported;
+        const status = providerStatus(callback(backend.context, &dense_arguments));
+        if (status != .unsupported) {
+            if (status != .ok) return status;
+            if (!std.meta.eql(dense_arguments.destination, dense_destination)) return .invalid_argument;
+            const validated_dense_destination = validateView(&dense_destination) orelse return .invalid_argument;
+            if (!copyDenseToDestination(&dense_destination, validated_dense_destination, &arguments.destination, destination_info)) return .invalid_argument;
+            return .ok;
+        }
+    }
+    return referenceOperation(operation_kind, element_type, arguments, input_info, dense_inputs, dense_destination, destination_info);
 }
 
 fn validNamedOperationName(name: ?[*]const u8, length: usize) bool {
@@ -1381,6 +1609,101 @@ test "CPU operation validates views before provider selection" {
     arguments.element_type = @intFromEnum(ElementType.uint32);
     arguments.input_count = 2;
     try std.testing.expectEqual(Status.invalid_argument, operation(&arguments));
+}
+
+test "fixed CPU operations fall back to exact strided reference math" {
+    _ = zpu_cpu_ml_set_operation_backend(null);
+
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const strided = [_]usize{ 1, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    var left = [_]f32{ 1, 2, 999, 3, 4, 999, 5, 6 };
+    var right = [_]f32{ 10, 20, 999, 30, 40, 999, 50, 60 };
+    var output = [_]f32{ -99, -99, -99, -99, -99, -99, -99, -99 };
+    const arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.add),
+        .element_type = @intFromEnum(ElementType.float32),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{ testView(f32, &left, 2, dimensions, strided), testView(f32, &right, 2, dimensions, strided) },
+        .destination = testView(f32, &output, 2, dimensions, strided),
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&arguments));
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 11, 22, -99, 33, 44, -99, 55, 66 }, &output);
+
+    const left_dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const right_dimensions = [_]usize{ 3, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_dimensions = [_]usize{ 2, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const left_strides = [_]usize{ 1, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const right_strides = [_]usize{ 1, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const output_strides = [_]usize{ 1, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    var matrix_left = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    var matrix_right = [_]f32{ 7, 8, 9, 10, 11, 12 };
+    var matrix_output = [_]f32{ -99, -99, -99, -99 };
+    const matrix_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.matmul),
+        .element_type = @intFromEnum(ElementType.float32),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{
+            testView(f32, &matrix_left, 2, left_dimensions, left_strides),
+            testView(f32, &matrix_right, 2, right_dimensions, right_strides),
+        },
+        .destination = testView(f32, &matrix_output, 2, output_dimensions, output_strides),
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&matrix_arguments));
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 58, 64, 139, 154 }, &matrix_output);
+
+    const vector_dimensions = [_]usize{2} ++ [_]usize{0} ** (max_rank - 1);
+    const vector_strides = [_]usize{1} ++ [_]usize{0} ** (max_rank - 1);
+    var half_left = [_]f16{ 1.5, -2.0 };
+    var half_right = [_]f16{ 2.0, 0.5 };
+    var half_output = [_]f16{ -99.0, -99.0 };
+    const half_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.multiply),
+        .element_type = @intFromEnum(ElementType.float16),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{ testView(f16, &half_left, 1, vector_dimensions, vector_strides), testView(f16, &half_right, 1, vector_dimensions, vector_strides) },
+        .destination = testView(f16, &half_output, 1, vector_dimensions, vector_strides),
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&half_arguments));
+    try std.testing.expectEqualSlices(f16, &[_]f16{ 3.0, -1.0 }, &half_output);
+
+    var bfloat_left = [_]u16{ 0x3f80, 0xc000 };
+    var bfloat_right = [_]u16{ 0x4000, 0x3f80 };
+    var bfloat_output = [_]u16{ 0xffff, 0xffff };
+    const bfloat_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.add),
+        .element_type = @intFromEnum(ElementType.bfloat16),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{ testView(u16, &bfloat_left, 1, vector_dimensions, vector_strides), testView(u16, &bfloat_right, 1, vector_dimensions, vector_strides) },
+        .destination = testView(u16, &bfloat_output, 1, vector_dimensions, vector_strides),
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&bfloat_arguments));
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 0x4040, 0xbf80 }, &bfloat_output);
+
+    var integer_left = [_]u8{ 0xff, 2, 3, 4 };
+    var integer_right = [_]u8{ 2, 3, 4, 5 };
+    var integer_output = [_]u8{ 0, 0, 0, 0 };
+    const integer_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.matmul),
+        .element_type = @intFromEnum(ElementType.uint8),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{
+            testView(u8, &integer_left, 2, [_]usize{ 2, 2 } ++ [_]usize{0} ** (max_rank - 2), [_]usize{ 1, 2 } ++ [_]usize{0} ** (max_rank - 2)),
+            testView(u8, &integer_right, 2, [_]usize{ 2, 2 } ++ [_]usize{0} ** (max_rank - 2), [_]usize{ 1, 2 } ++ [_]usize{0} ** (max_rank - 2)),
+        },
+        .destination = testView(u8, &integer_output, 2, [_]usize{ 2, 2 } ++ [_]usize{0} ** (max_rank - 2), [_]usize{ 1, 2 } ++ [_]usize{0} ** (max_rank - 2)),
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&integer_arguments));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 6, 7, 22, 29 }, &integer_output);
 }
 
 test "named CPU provider receives a portable graph name and dense transpose views" {

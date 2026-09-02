@@ -223,10 +223,11 @@ int zpu_cpu_ml_transpose(const zpu_cpu_ml_transpose_arguments *arguments);
 /* Passing NULL unregisters the optional operation provider. */
 int zpu_cpu_ml_set_operation_backend(const zpu_cpu_ml_operation_backend *backend);
 
-/* Dispatch one registered operation through a CPU provider. This function
- * returns ZPU_CPU_ML_STATUS_UNSUPPORTED when no operation provider is
- * installed or the provider declines; the caller may then use its exact ZPU
- * reference path. */
+/* Dispatch one registered operation through the optional CPU provider and
+ * then the exact portable ZPU reference path. A provider may return
+ * ZPU_CPU_ML_STATUS_UNSUPPORTED to select that reference path; unsupported
+ * is returned only when the operation/type combination has no reference
+ * implementation. */
 int zpu_cpu_ml_operation(const zpu_cpu_ml_operation_arguments *arguments);
 
 /* Query and execute a provider-owned named CPU operation. The function name

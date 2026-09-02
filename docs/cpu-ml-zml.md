@@ -31,9 +31,9 @@ versioned callbacks in `zpu/cpu_ml.h`:
 The callback receives dense, offset-zero CPU views borrowed for the callback
 duration. It never receives an `MTLTexture`, `MTLBuffer`, PJRT device buffer,
 or platform-specific layout object. A provider decline returns
-`ZPU_CPU_ML_STATUS_UNSUPPORTED`; fixed operations may then use the exact ZPU
-CPU reference path, while named graph operations fail closed because there is
-no safe generic graph fallback.
+`ZPU_CPU_ML_STATUS_UNSUPPORTED`; fixed operations then use the exact portable
+ZPU CPU reference path for supported operation/type combinations, while named
+graph operations fail closed because there is no safe generic graph fallback.
 
 Backend selection is explicit provider registration, not `macOS` detection.
 Running ZPU on macOS therefore still uses the same CPU-only ZML contract as
