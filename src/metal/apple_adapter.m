@@ -12866,10 +12866,27 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         NSString *expectedVector3Signature = [NSString stringWithFormat:
             @"deviceconstfloat3*left[[buffer(0)]],deviceconstfloat3*right[[buffer(1)]],"
              "devicefloat3*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
-        const BOOL vector = [compactSignature isEqualToString:expectedVectorSignature];
-        const BOOL vector2 = [compactSignature isEqualToString:expectedVector2Signature];
-        const BOOL vector3 = [compactSignature isEqualToString:expectedVector3Signature];
-        if (!vector && !vector2 && !vector3 && ![compactSignature isEqualToString:expectedScalarSignature]) return;
+        NSString *expectedScalarConstAfterTypeSignature = [NSString stringWithFormat:
+            @"devicefloatconst*left[[buffer(0)]],devicefloatconst*right[[buffer(1)]],"
+             "devicefloat*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedVectorConstAfterTypeSignature = [NSString stringWithFormat:
+            @"devicefloat4const*left[[buffer(0)]],devicefloat4const*right[[buffer(1)]],"
+             "devicefloat4*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedVector2ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"devicefloat2const*left[[buffer(0)]],devicefloat2const*right[[buffer(1)]],"
+             "devicefloat2*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedVector3ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"devicefloat3const*left[[buffer(0)]],devicefloat3const*right[[buffer(1)]],"
+             "devicefloat3*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        const BOOL vector = [compactSignature isEqualToString:expectedVectorSignature] ||
+            [compactSignature isEqualToString:expectedVectorConstAfterTypeSignature];
+        const BOOL vector2 = [compactSignature isEqualToString:expectedVector2Signature] ||
+            [compactSignature isEqualToString:expectedVector2ConstAfterTypeSignature];
+        const BOOL vector3 = [compactSignature isEqualToString:expectedVector3Signature] ||
+            [compactSignature isEqualToString:expectedVector3ConstAfterTypeSignature];
+        const BOOL scalar = [compactSignature isEqualToString:expectedScalarSignature] ||
+            [compactSignature isEqualToString:expectedScalarConstAfterTypeSignature];
+        if (!vector && !vector2 && !vector3 && !scalar) return;
 
         NSString *assignment = [NSString stringWithFormat:
             @"output[%@]=left[%@]PLUSright[%@];", indexName, indexName, indexName];

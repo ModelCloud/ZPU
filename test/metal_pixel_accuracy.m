@@ -897,6 +897,9 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_div_f32(device const float *left [[buffer(0)]], "
          "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_f32_const_after_type(device float const *left [[buffer(0)]], "
+         "device float const *right [[buffer(1)]], device float *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
          "kernel void zpu_source_add_f32x4(device const float4 *left [[buffer(0)]], "
          "device const float4 *right [[buffer(1)]], device float4 *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
@@ -1155,7 +1158,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 72) {
+        adapter_library.functionNames.count != 73) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1624,6 +1627,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         {@"zpu_source_mul_f32", 10, YES, NO, NO, 1, 1},
         {@"zpu_source_sub_f32", 12, NO, YES, NO, 1, 1},
         {@"zpu_source_div_f32", 12, NO, NO, YES, 1, 1},
+        {@"zpu_source_add_f32_const_after_type", 12, NO, NO, NO, 1, 1},
         {@"zpu_source_add_f32x4", 5, NO, NO, NO, 4, 4},
         {@"zpu_source_mul_f32x4", 5, YES, NO, NO, 4, 4},
         {@"zpu_source_sub_f32x4", 5, NO, YES, NO, 4, 4},
