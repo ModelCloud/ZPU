@@ -425,6 +425,14 @@ static const char *const kShaderSource =
     "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; "
     "output[gid] = zpu_cpu_float_to_bfloat16(zpu_cpu_bfloat16_to_float(left[gid]) - "
     "zpu_cpu_bfloat16_to_float(right[gid])); }\n"
+    "kernel void zpu_cpu_ml_div_f16_oracle(device const half *left [[buffer(0)]], "
+    "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; output[gid] = left[gid] / right[gid]; }\n"
+    "kernel void zpu_cpu_ml_div_bf16_oracle(device const ushort *left [[buffer(0)]], "
+    "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+    "uint gid [[thread_position_in_grid]]) { if (gid >= 12) return; "
+    "output[gid] = zpu_cpu_float_to_bfloat16(zpu_cpu_bfloat16_to_float(left[gid]) / "
+    "zpu_cpu_bfloat16_to_float(right[gid])); }\n"
     "kernel void zpu_cpu_ml_sub_i4_oracle(device const uchar *left [[buffer(0)]], "
     "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
     "uint gid [[thread_position_in_grid]]) { if (gid >= 6) return; "
@@ -16089,6 +16097,7 @@ typedef struct {
     const char *oracleName;
     MTLTensorDataType dataType;
     BOOL multiply;
+    BOOL divide;
 } ZPUFloatElementwiseProfile;
 
 /* Half and bfloat16 elementwise operations use the pure-math oracle tolerance;
@@ -16099,10 +16108,12 @@ static int test_metal4_cpu_float_elementwise_profiles(
     id<MTL4Compiler> adapterCompiler, id<MTL4CommandQueue> adapterQueue,
     id<MTL4CommandAllocator> adapterAllocator, id<MTLHeap> adapterHeap) {
     const ZPUFloatElementwiseProfile profiles[] = {
-        {"zpu_cpu_ml_sub_f16", "zpu_cpu_ml_sub_f16_oracle", MTLTensorDataTypeFloat16, NO},
-        {"zpu_cpu_ml_sub_bf16", "zpu_cpu_ml_sub_bf16_oracle", MTLTensorDataTypeBFloat16, NO},
-        {"zpu_cpu_ml_mul_f16", "zpu_cpu_ml_mul_f16_oracle", MTLTensorDataTypeFloat16, YES},
-        {"zpu_cpu_ml_mul_bf16", "zpu_cpu_ml_mul_bf16_oracle", MTLTensorDataTypeBFloat16, YES},
+        {"zpu_cpu_ml_sub_f16", "zpu_cpu_ml_sub_f16_oracle", MTLTensorDataTypeFloat16, NO, NO},
+        {"zpu_cpu_ml_sub_bf16", "zpu_cpu_ml_sub_bf16_oracle", MTLTensorDataTypeBFloat16, NO, NO},
+        {"zpu_cpu_ml_mul_f16", "zpu_cpu_ml_mul_f16_oracle", MTLTensorDataTypeFloat16, YES, NO},
+        {"zpu_cpu_ml_mul_bf16", "zpu_cpu_ml_mul_bf16_oracle", MTLTensorDataTypeBFloat16, YES, NO},
+        {"zpu_cpu_ml_div_f16", "zpu_cpu_ml_div_f16_oracle", MTLTensorDataTypeFloat16, NO, YES},
+        {"zpu_cpu_ml_div_bf16", "zpu_cpu_ml_div_bf16_oracle", MTLTensorDataTypeBFloat16, NO, YES},
     };
     const uint16_t leftValues[2][12] = {
         {0x3c00u, 0x4000u, 0x4400u, 0x4800u, 0x4c00u, 0x5000u,
@@ -23064,6 +23075,8 @@ int main(void) {
             "kernel void zpu_cpu_ml_matmul_f32() {}\n"
             "kernel void zpu_cpu_ml_mul_f16() {}\n"
             "kernel void zpu_cpu_ml_mul_bf16() {}\n"
+            "kernel void zpu_cpu_ml_div_f16() {}\n"
+            "kernel void zpu_cpu_ml_div_bf16() {}\n"
             "kernel void zpu_cpu_ml_matmul_f16() {}\n"
             "kernel void zpu_cpu_argument_buffer() {}\n"
             "kernel void zpu_cpu_argument_buffer_array() {}\n"
@@ -23737,7 +23750,7 @@ int main(void) {
             !adapter_specialized_link_ok ||
             ![adapter_library_function.name isEqualToString:@"zpu_cpu_fill_gradient_rgba8"] ||
             adapter_library_function.functionType != MTLFunctionTypeKernel ||
-            adapter_library.functionNames.count != 86 ||
+            adapter_library.functionNames.count != 88 ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fragment"].functionType != MTLFunctionTypeFragment ||
             [adapter_library newFunctionWithName:@"zpu_cpu_vertex"].functionType != MTLFunctionTypeVertex ||
             [adapter_library newFunctionWithName:@"zpu_cpu_fill_gradient_rgba8_array"] == nil ||
@@ -23784,6 +23797,8 @@ int main(void) {
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f32"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_f16"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_mul_bf16"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_ml_div_f16"].functionType != MTLFunctionTypeKernel ||
+            [adapter_library newFunctionWithName:@"zpu_cpu_ml_div_bf16"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_ml_matmul_f16"].functionType != MTLFunctionTypeKernel ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer"] == nil ||
             [adapter_library newFunctionWithName:@"zpu_cpu_argument_buffer_array"] == nil ||

@@ -619,7 +619,7 @@ fn binaryElement(operation_kind: Operation, element_type: ElementType, left: u64
                 .add => left_value + right_value,
                 .subtract => left_value - right_value,
                 .multiply => left_value * right_value,
-                .divide => return null,
+                .divide => left_value / right_value,
                 else => return null,
             };
             return f16ToBits(result);
@@ -631,7 +631,7 @@ fn binaryElement(operation_kind: Operation, element_type: ElementType, left: u64
                 .add => left_value + right_value,
                 .subtract => left_value - right_value,
                 .multiply => left_value * right_value,
-                .divide => return null,
+                .divide => left_value / right_value,
                 else => return null,
             };
             return bfloat16ToBits(result);

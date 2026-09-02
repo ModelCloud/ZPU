@@ -401,6 +401,9 @@ triangle path:
   subtraction through that same ZPU-owned storage path; the registered
   `zpu_cpu_ml_div_f32` profile performs deferred elementwise Float32 division
   through the same ZPU-owned storage path for nonzero divisors; the registered
+  `zpu_cpu_ml_div_f16` and `zpu_cpu_ml_div_bf16` profiles perform deferred
+  Float16 and BFloat16 division through the same ZPU-owned storage path, with
+  BFloat16 widening and round-to-nearest-even packing; the registered
   `zpu_cpu_ml_sub_u8`, `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`,
   `zpu_cpu_ml_sub_i16`, `zpu_cpu_ml_sub_u32`, `zpu_cpu_ml_sub_i32`,
   `zpu_cpu_ml_sub_i4`, and `zpu_cpu_ml_sub_u4` profiles perform deferred
@@ -486,6 +489,7 @@ triangle path:
 - the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_transpose`,
   `zpu_cpu_ml_add_u8`,
   `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_sub_f32`, `zpu_cpu_ml_div_f32`,
+  `zpu_cpu_ml_div_f16`, `zpu_cpu_ml_div_bf16`,
   `zpu_cpu_ml_sub_u8`,
   `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`, `zpu_cpu_ml_sub_i16`,
   `zpu_cpu_ml_sub_u32`, `zpu_cpu_ml_sub_i32`, `zpu_cpu_ml_sub_i4`,

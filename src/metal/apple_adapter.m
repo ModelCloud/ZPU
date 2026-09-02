@@ -95,6 +95,8 @@ static NSString *const zpu_cpu_ml_sub_u4_function_name = @"zpu_cpu_ml_sub_u4";
 static NSString *const zpu_cpu_ml_sub_f16_function_name = @"zpu_cpu_ml_sub_f16";
 static NSString *const zpu_cpu_ml_sub_bf16_function_name = @"zpu_cpu_ml_sub_bf16";
 static NSString *const zpu_cpu_ml_div_f32_function_name = @"zpu_cpu_ml_div_f32";
+static NSString *const zpu_cpu_ml_div_f16_function_name = @"zpu_cpu_ml_div_f16";
+static NSString *const zpu_cpu_ml_div_bf16_function_name = @"zpu_cpu_ml_div_bf16";
 static NSString *const zpu_cpu_ml_mul_u8_function_name = @"zpu_cpu_ml_mul_u8";
 static NSString *const zpu_cpu_ml_mul_i8_function_name = @"zpu_cpu_ml_mul_i8";
 static NSString *const zpu_cpu_ml_mul_u16_function_name = @"zpu_cpu_ml_mul_u16";
@@ -235,12 +237,16 @@ static BOOL zpu_cpu_ml_sub_or_div_function_name_supported(NSString *name) {
         [name isEqualToString:zpu_cpu_ml_sub_bf16_function_name] ||
         [name isEqualToString:zpu_cpu_ml_sub_i4_function_name] ||
         [name isEqualToString:zpu_cpu_ml_sub_u4_function_name] ||
-        [name isEqualToString:zpu_cpu_ml_div_f32_function_name];
+        [name isEqualToString:zpu_cpu_ml_div_f32_function_name] ||
+        [name isEqualToString:zpu_cpu_ml_div_f16_function_name] ||
+        [name isEqualToString:zpu_cpu_ml_div_bf16_function_name];
 }
 
 static BOOL zpu_cpu_ml_sub_function_name_supported(NSString *name) {
     return zpu_cpu_ml_sub_or_div_function_name_supported(name) &&
-        ![name isEqualToString:zpu_cpu_ml_div_f32_function_name];
+        ![name isEqualToString:zpu_cpu_ml_div_f32_function_name] &&
+        ![name isEqualToString:zpu_cpu_ml_div_f16_function_name] &&
+        ![name isEqualToString:zpu_cpu_ml_div_bf16_function_name];
 }
 
 static BOOL zpu_cpu_ml_named_function_signature(NSString *functionName,
@@ -14648,6 +14654,8 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             zpu_cpu_ml_add_f32_function_name,
             zpu_cpu_ml_sub_f32_function_name,
             zpu_cpu_ml_div_f32_function_name,
+            zpu_cpu_ml_div_f16_function_name,
+            zpu_cpu_ml_div_bf16_function_name,
             zpu_cpu_ml_add_i32_function_name,
             zpu_cpu_ml_add_u32_function_name,
             zpu_cpu_ml_add_u16_function_name,
@@ -14767,6 +14775,21 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
             [names addObject:zpu_cpu_intersection_aabb_accept_function_name];
             implementations[zpu_cpu_intersection_aabb_accept_function_name] =
                 zpu_cpu_intersection_aabb_accept_function_name;
+        }
+        /* The built-in library is a CPU profile table rather than a native
+         * metallib. Keep newly added Float16 and BFloat16 division profiles
+         * discoverable from that table without exposing them for arbitrary
+         * source text that does not declare them. */
+        if ([source hasPrefix:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 "] &&
+            [source rangeOfString:@"zpu_cpu_ml_matmul_i32"].location != NSNotFound) {
+            if (![names containsObject:zpu_cpu_ml_div_f16_function_name]) {
+                [names addObject:zpu_cpu_ml_div_f16_function_name];
+                implementations[zpu_cpu_ml_div_f16_function_name] = zpu_cpu_ml_div_f16_function_name;
+            }
+            if (![names containsObject:zpu_cpu_ml_div_bf16_function_name]) {
+                [names addObject:zpu_cpu_ml_div_bf16_function_name];
+                implementations[zpu_cpu_ml_div_bf16_function_name] = zpu_cpu_ml_div_bf16_function_name;
+            }
         }
         /* A CPU ZML provider may publish named graph entry points without
          * putting them into the source metadata string. Add the provider's
@@ -15293,6 +15316,8 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type(NSString *functionName) {
     if ([functionName isEqualToString:zpu_cpu_ml_sub_u4_function_name]) return MTLTensorDataTypeUInt4;
     if ([functionName isEqualToString:zpu_cpu_ml_sub_f16_function_name]) return MTLTensorDataTypeFloat16;
     if ([functionName isEqualToString:zpu_cpu_ml_sub_bf16_function_name]) return MTLTensorDataTypeBFloat16;
+    if ([functionName isEqualToString:zpu_cpu_ml_div_f16_function_name]) return MTLTensorDataTypeFloat16;
+    if ([functionName isEqualToString:zpu_cpu_ml_div_bf16_function_name]) return MTLTensorDataTypeBFloat16;
     if ([functionName isEqualToString:zpu_cpu_ml_add_i32_function_name]) return MTLTensorDataTypeInt32;
     if ([functionName isEqualToString:zpu_cpu_ml_add_u32_function_name]) return MTLTensorDataTypeUInt32;
     if ([functionName isEqualToString:zpu_cpu_ml_add_u16_function_name]) return MTLTensorDataTypeUInt16;
@@ -15356,6 +15381,8 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
     const BOOL addition = zpu_cpu_ml_add_function_name_supported(functionName);
     const BOOL subtraction = zpu_cpu_ml_sub_function_name_supported(functionName);
     const BOOL division = [functionName isEqualToString:zpu_cpu_ml_div_f32_function_name];
+    const BOOL divisionF16 = [functionName isEqualToString:zpu_cpu_ml_div_f16_function_name];
+    const BOOL divisionBF16 = [functionName isEqualToString:zpu_cpu_ml_div_bf16_function_name];
     const BOOL multiplicationU8 = [functionName isEqualToString:zpu_cpu_ml_mul_u8_function_name];
     const BOOL multiplicationI8 = [functionName isEqualToString:zpu_cpu_ml_mul_i8_function_name];
     const BOOL multiplicationU16 = [functionName isEqualToString:zpu_cpu_ml_mul_u16_function_name];
@@ -15380,11 +15407,13 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
         matmulU16 || matmulI16 || matmulU32 || matmulI32;
     zpu_cpu_ml_named_operation_signature namedSignature = {0, 0};
     const BOOL named = !identity && !transpose && !addition && !subtraction && !division &&
+        !divisionF16 && !divisionBF16 &&
         !multiplicationU8 && !multiplicationI8 && !multiplicationU16 && !multiplicationI16 &&
         !multiplicationU32 && !multiplicationI32 && !multiplicationI4 && !multiplicationU4 &&
         !multiplication && !multiplicationF16 && !multiplicationBF16 && !matmul &&
         zpu_cpu_ml_named_function_signature(functionName, &namedSignature);
-    if (owner == nil || descriptor == nil || (!identity && !transpose && !addition && !subtraction && !division && !multiplicationU8 &&
+    if (owner == nil || descriptor == nil || (!identity && !transpose && !addition && !subtraction && !division &&
+                                              !divisionF16 && !divisionBF16 && !multiplicationU8 &&
                                               !multiplicationI8 && !multiplicationU16 &&
                                               !multiplicationI16 && !multiplicationU32 &&
                                               !multiplicationI32 && !multiplicationI4 &&
@@ -15396,7 +15425,8 @@ static MTLTensorDataType zpu_mtl4_ml_tensor_data_type_from_cpu_element(uint32_t 
     }
     MTLTensorExtents *inputDimensions[ZPU_CPU_ML_MAX_NAMED_INPUTS + 1] = {0};
     const NSUInteger inputCount = named ? (NSUInteger)namedSignature.input_count + 1 :
-        (identity || transpose) ? 2 : ((addition || subtraction || division || multiplicationU8 || multiplicationI8 ||
+        (identity || transpose) ? 2 : ((addition || subtraction || division || divisionF16 || divisionBF16 ||
+                                   multiplicationU8 || multiplicationI8 ||
                                    multiplicationU16 || multiplicationI16 || multiplicationU32 ||
                                    multiplicationI32 || multiplicationI4 || multiplicationU4 ||
                                    multiplication || multiplicationF16 || multiplicationBF16 ||
@@ -17890,6 +17920,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     const BOOL subtractF16 = [functionName isEqualToString:zpu_cpu_ml_sub_f16_function_name];
     const BOOL subtractBF16 = [functionName isEqualToString:zpu_cpu_ml_sub_bf16_function_name];
     const BOOL divideF32 = [functionName isEqualToString:zpu_cpu_ml_div_f32_function_name];
+    const BOOL divideF16 = [functionName isEqualToString:zpu_cpu_ml_div_f16_function_name];
+    const BOOL divideBF16 = [functionName isEqualToString:zpu_cpu_ml_div_bf16_function_name];
     const BOOL multiplyU8 = [functionName isEqualToString:zpu_cpu_ml_mul_u8_function_name];
     const BOOL multiplyI8 = [functionName isEqualToString:zpu_cpu_ml_mul_i8_function_name];
     const BOOL multiplyU16 = [functionName isEqualToString:zpu_cpu_ml_mul_u16_function_name];
@@ -17917,7 +17949,7 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
     const BOOL subtraction = subtractU8 || subtractI8 || subtractU16 || subtractI16 ||
         subtractU32 || subtractI32 || subtractI4 || subtractU4 || subtractF32 ||
         subtractF16 || subtractBF16;
-    const BOOL division = divideF32;
+    const BOOL division = divideF32 || divideF16 || divideBF16;
     const BOOL integerMultiplication = multiplyU8 || multiplyI8 || multiplyU16 || multiplyI16 ||
         multiplyU32 || multiplyI32 || multiplyI4 || multiplyU4;
     const BOOL elementwise = addition || subtraction || division || integerMultiplication || multiplyF32 || multiplyF16 || multiplyBF16;
@@ -18014,6 +18046,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         (subtractF16 && source->_dataType != MTLTensorDataTypeFloat16) ||
         (subtractBF16 && source->_dataType != MTLTensorDataTypeBFloat16) ||
         (divideF32 && source->_dataType != MTLTensorDataTypeFloat32) ||
+        (divideF16 && source->_dataType != MTLTensorDataTypeFloat16) ||
+        (divideBF16 && source->_dataType != MTLTensorDataTypeBFloat16) ||
         (matmulF32 && source->_dataType != MTLTensorDataTypeFloat32) ||
         (matmulF16 && source->_dataType != MTLTensorDataTypeFloat16) ||
         (matmulBF16 && source->_dataType != MTLTensorDataTypeBFloat16) ||
