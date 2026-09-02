@@ -16,6 +16,7 @@ const std = @import("std");
 pub const max_rank: usize = 16;
 pub const max_inputs: usize = 2;
 pub const max_named_inputs: usize = 16;
+pub const max_named_outputs: usize = 16;
 
 pub const CpuArchitecture = enum(u32) {
     unknown = 0,
@@ -211,6 +212,47 @@ pub const NamedOperationBackendV2 = extern struct {
 };
 pub const named_operation_backend_v2_abi_version: u32 = 2;
 
+/// Additive named-provider ABI for graph functions with multiple outputs or
+/// per-binding element types. The older named ABIs remain source and binary
+/// compatible for providers that do not need this metadata.
+pub const NamedOperationSignatureV3 = extern struct {
+    input_count: u32,
+    output_count: u32,
+    input_element_types: [max_named_inputs]u32,
+    output_element_types: [max_named_outputs]u32,
+};
+
+pub const NamedOperationQueryV3Fn = *const fn (
+    context: ?*anyopaque,
+    function_name: [*]const u8,
+    function_name_length: usize,
+    signature: *NamedOperationSignatureV3,
+) callconv(.c) c_int;
+
+pub const NamedOperationArgumentsV3 = extern struct {
+    function_name: ?[*]const u8,
+    function_name_length: usize,
+    input_count: u32,
+    output_count: u32,
+    reserved: u32,
+    inputs: ?[*]const TensorView,
+    input_element_types: ?[*]const u32,
+    outputs: ?[*]TensorView,
+    output_element_types: ?[*]const u32,
+    permutation: ?[*]const u32,
+};
+pub const NamedOperationV3Fn = *const fn (
+    context: ?*anyopaque,
+    arguments: *const NamedOperationArgumentsV3,
+) callconv(.c) c_int;
+pub const NamedOperationBackendV3 = extern struct {
+    abi_version: u32,
+    context: ?*anyopaque,
+    query: ?NamedOperationQueryV3Fn,
+    operation: ?NamedOperationV3Fn,
+};
+pub const named_operation_backend_v3_abi_version: u32 = 3;
+
 /// Optional discovery callback for the named provider. The returned name is
 /// borrowed until the next catalog callback or catalog replacement; the caller
 /// copies it if it needs to retain it. Signatures are obtained through the
@@ -234,6 +276,7 @@ var registered_backend: ?Backend = null;
 var registered_operation_backend: ?OperationBackend = null;
 var registered_named_operation_backend: ?NamedOperationBackend = null;
 var registered_named_operation_backend_v2: ?NamedOperationBackendV2 = null;
+var registered_named_operation_backend_v3: ?NamedOperationBackendV3 = null;
 var registered_named_operation_catalog: ?NamedOperationCatalog = null;
 
 fn lockBackend() void {
@@ -262,6 +305,12 @@ fn namedOperationBackendV2Snapshot() ?NamedOperationBackendV2 {
     lockBackend();
     defer backend_mutex.unlock();
     return registered_named_operation_backend_v2;
+}
+
+fn namedOperationBackendV3Snapshot() ?NamedOperationBackendV3 {
+    lockBackend();
+    defer backend_mutex.unlock();
+    return registered_named_operation_backend_v3;
 }
 
 fn namedOperationCatalogSnapshot() ?NamedOperationCatalog {
@@ -969,6 +1018,126 @@ fn namedOperationWithViews(
     return .ok;
 }
 
+/// Query the additive v3 provider ABI. Unlike the legacy signature, v3 keeps
+/// input and output counts and element types per binding so a CPU graph
+/// provider can represent mixed-precision networks without making the Metal
+/// adapter guess or convert the graph.
+pub fn namedOperationSupportedV3(name: []const u8, signature: *NamedOperationSignatureV3) Status {
+    if (name.len == 0) return .invalid_argument;
+    const backend = namedOperationBackendV3Snapshot() orelse return .unsupported;
+    const callback = backend.query orelse return .unsupported;
+    var candidate = std.mem.zeroes(NamedOperationSignatureV3);
+    const status = providerStatus(callback(backend.context, name.ptr, name.len, &candidate));
+    if (status != .ok) return status;
+    if (candidate.input_count == 0 or candidate.input_count > max_named_inputs or
+        candidate.output_count == 0 or candidate.output_count > max_named_outputs) return .invalid_argument;
+    for (0..candidate.input_count) |index| {
+        if (elementTypeFromRaw(candidate.input_element_types[index]) == null) return .invalid_argument;
+    }
+    for (0..candidate.output_count) |index| {
+        if (elementTypeFromRaw(candidate.output_element_types[index]) == null) return .invalid_argument;
+    }
+    signature.* = candidate;
+    return .ok;
+}
+
+/// Stage a v3 named provider call into dense, offset-zero CPU views. Outputs
+/// are copied back independently only after the provider returns success, so
+/// one graph call can safely expose multiple ZPU-owned output tensors.
+fn namedOperationV3WithViews(
+    function_name: [*]const u8,
+    function_name_length: usize,
+    input_count: u32,
+    inputs: [*]const TensorView,
+    input_element_types: [*]const u32,
+    output_count: u32,
+    outputs: [*]TensorView,
+    output_element_types: [*]const u32,
+    permutation: [*]const u32,
+) Status {
+    if (!validNamedOperationName(function_name, function_name_length) or
+        input_count == 0 or input_count > max_named_inputs or
+        output_count == 0 or output_count > max_named_outputs) return .invalid_argument;
+    const backend = namedOperationBackendV3Snapshot() orelse return .unsupported;
+    const query = backend.query orelse return .unsupported;
+    var signature = std.mem.zeroes(NamedOperationSignatureV3);
+    const name = function_name[0..function_name_length];
+    const query_status = providerStatus(query(backend.context, name.ptr, name.len, &signature));
+    if (query_status != .ok) return query_status;
+    if (signature.input_count != input_count or signature.output_count != output_count) return .invalid_argument;
+    for (0..input_count) |index| {
+        if (signature.input_element_types[index] != input_element_types[index] or
+            elementTypeFromRaw(signature.input_element_types[index]) == null) return .invalid_argument;
+    }
+    for (0..output_count) |index| {
+        if (signature.output_element_types[index] != output_element_types[index] or
+            elementTypeFromRaw(signature.output_element_types[index]) == null) return .invalid_argument;
+    }
+
+    var input_info: [max_named_inputs]?ViewInfo = @splat(null);
+    var input_storage: [max_named_inputs]?[]u8 = @splat(null);
+    defer for (&input_storage) |*storage| {
+        if (storage.*) |bytes| std.heap.c_allocator.free(bytes);
+    };
+    var dense_inputs: [max_named_inputs]TensorView = undefined;
+    for (0..input_count) |index| {
+        const element_type = elementTypeFromRaw(input_element_types[index]).?;
+        input_info[index] = validateTypedView(&inputs[index], element_type) orelse return .invalid_argument;
+        const info = input_info[index].?;
+        const byte_count = denseByteCount(info) orelse return .invalid_argument;
+        const storage = std.heap.c_allocator.alloc(u8, byte_count) catch return .out_of_memory;
+        input_storage[index] = storage;
+        @memset(storage, 0);
+        if (!copySourceToDense(&inputs[index], info, storage)) return .invalid_argument;
+        dense_inputs[index] = makeDenseView(inputs[index], info, storage);
+    }
+
+    var output_info: [max_named_outputs]?ViewInfo = @splat(null);
+    var output_storage: [max_named_outputs]?[]u8 = @splat(null);
+    defer for (&output_storage) |*storage| {
+        if (storage.*) |bytes| std.heap.c_allocator.free(bytes);
+    };
+    var dense_outputs: [max_named_outputs]TensorView = undefined;
+    for (0..output_count) |index| {
+        const element_type = elementTypeFromRaw(output_element_types[index]).?;
+        output_info[index] = validateTypedView(&outputs[index], element_type) orelse return .invalid_argument;
+        const info = output_info[index].?;
+        const byte_count = denseByteCount(info) orelse return .invalid_argument;
+        const storage = std.heap.c_allocator.alloc(u8, byte_count) catch return .out_of_memory;
+        output_storage[index] = storage;
+        @memset(storage, 0);
+        dense_outputs[index] = makeDenseView(outputs[index], info, storage);
+    }
+
+    const callback = backend.operation orelse return .unsupported;
+    var dense_permutation: [max_rank]u32 = @splat(0);
+    @memcpy(&dense_permutation, permutation[0..max_rank]);
+    var dense_arguments = NamedOperationArgumentsV3{
+        .function_name = name.ptr,
+        .function_name_length = name.len,
+        .input_count = input_count,
+        .output_count = output_count,
+        .reserved = 0,
+        .inputs = dense_inputs[0..input_count].ptr,
+        .input_element_types = input_element_types,
+        .outputs = dense_outputs[0..output_count].ptr,
+        .output_element_types = output_element_types,
+        .permutation = dense_permutation[0..].ptr,
+    };
+    const status = providerStatus(callback(backend.context, &dense_arguments));
+    if (status != .ok) return status;
+    if (!std.meta.eql(dense_arguments.inputs, dense_inputs[0..input_count].ptr) or
+        !std.meta.eql(dense_arguments.input_element_types, input_element_types) or
+        !std.meta.eql(dense_arguments.outputs, dense_outputs[0..output_count].ptr) or
+        !std.meta.eql(dense_arguments.output_element_types, output_element_types) or
+        !std.meta.eql(dense_arguments.permutation, dense_permutation[0..].ptr)) return .invalid_argument;
+    for (0..output_count) |index| {
+        const info = output_info[index].?;
+        if (!copyDenseToDestination(&dense_outputs[index], info, &outputs[index], info)) return .invalid_argument;
+    }
+    return .ok;
+}
+
 pub fn namedOperation(arguments: *const NamedOperationArguments) Status {
     if (arguments.reserved != 0) return .invalid_argument;
     const name = arguments.function_name orelse return .invalid_argument;
@@ -981,6 +1150,18 @@ pub fn namedOperationV2(arguments: *const NamedOperationArgumentsV2) Status {
     const inputs = arguments.inputs orelse return .invalid_argument;
     const permutation = arguments.permutation orelse return .invalid_argument;
     return namedOperationWithViews(name, arguments.function_name_length, arguments.input_count, arguments.element_type, inputs, &arguments.destination, permutation, max_named_inputs);
+}
+
+pub fn namedOperationV3(arguments: *const NamedOperationArgumentsV3) Status {
+    if (arguments.reserved != 0) return .invalid_argument;
+    const name = arguments.function_name orelse return .invalid_argument;
+    const inputs = arguments.inputs orelse return .invalid_argument;
+    const input_element_types = arguments.input_element_types orelse return .invalid_argument;
+    const outputs = arguments.outputs orelse return .invalid_argument;
+    const output_element_types = arguments.output_element_types orelse return .invalid_argument;
+    const permutation = arguments.permutation orelse return .invalid_argument;
+    return namedOperationV3WithViews(name, arguments.function_name_length, arguments.input_count,
+        inputs, input_element_types, arguments.output_count, outputs, output_element_types, permutation);
 }
 
 /// Stage a strided ZPU view into dense CPU memory for the optional provider.
@@ -1142,6 +1323,16 @@ pub export fn zpu_cpu_ml_named_operation_supported(
     return @intFromEnum(namedOperationSupported(name[0..function_name_length], output));
 }
 
+pub export fn zpu_cpu_ml_named_operation_supported_v3(
+    function_name: ?[*]const u8,
+    function_name_length: usize,
+    signature: ?*NamedOperationSignatureV3,
+) callconv(.c) c_int {
+    const name = function_name orelse return @intFromEnum(Status.invalid_argument);
+    const output = signature orelse return @intFromEnum(Status.invalid_argument);
+    return @intFromEnum(namedOperationSupportedV3(name[0..function_name_length], output));
+}
+
 pub export fn zpu_cpu_ml_set_named_operation_backend(
     backend: ?*const NamedOperationBackend,
 ) callconv(.c) c_int {
@@ -1171,6 +1362,22 @@ pub export fn zpu_cpu_ml_set_named_operation_backend_v2(
     lockBackend();
     defer backend_mutex.unlock();
     registered_named_operation_backend_v2 = if (backend) |candidate| candidate.* else null;
+    return @intFromEnum(Status.ok);
+}
+
+pub export fn zpu_cpu_ml_set_named_operation_backend_v3(
+    backend: ?*const NamedOperationBackendV3,
+) callconv(.c) c_int {
+    if (backend) |candidate| {
+        if (candidate.abi_version != named_operation_backend_v3_abi_version or
+            candidate.query == null or candidate.operation == null)
+        {
+            return @intFromEnum(Status.invalid_argument);
+        }
+    }
+    lockBackend();
+    defer backend_mutex.unlock();
+    registered_named_operation_backend_v3 = if (backend) |candidate| candidate.* else null;
     return @intFromEnum(Status.ok);
 }
 
@@ -1214,6 +1421,13 @@ pub export fn zpu_cpu_ml_named_operation_v2(
 ) callconv(.c) c_int {
     const args = arguments orelse return @intFromEnum(Status.invalid_argument);
     return @intFromEnum(namedOperationV2(args));
+}
+
+pub export fn zpu_cpu_ml_named_operation_v3(
+    arguments: ?*const NamedOperationArgumentsV3,
+) callconv(.c) c_int {
+    const args = arguments orelse return @intFromEnum(Status.invalid_argument);
+    return @intFromEnum(namedOperationV3(args));
 }
 
 fn testView(comptime T: type, data: []T, rank: u32, dimensions: [max_rank]usize, strides: [max_rank]usize) TensorView {
@@ -1270,6 +1484,14 @@ const NamedOperationV2Probe = struct {
     query_calls: usize = 0,
     operation_calls: usize = 0,
     dense_stride: usize = 0,
+};
+
+const NamedOperationV3Probe = struct {
+    query_calls: usize = 0,
+    operation_calls: usize = 0,
+    input_stride: usize = 0,
+    first_output_stride: usize = 0,
+    second_output_stride: usize = 0,
 };
 
 fn referenceProvider(context: ?*anyopaque, arguments: *const TransposeArguments) callconv(.c) c_int {
@@ -1416,6 +1638,59 @@ fn namedSum3Provider(context: ?*anyopaque, arguments: *const NamedOperationArgum
             value += data[index];
         }
         output[index] = value;
+    }
+    return @intFromEnum(Status.ok);
+}
+
+fn namedSplitQuery(context: ?*anyopaque, function_name: [*]const u8,
+                   function_name_length: usize, signature: *NamedOperationSignatureV3) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV3Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.query_calls += 1;
+    if (!std.mem.eql(u8, function_name[0..function_name_length], "zml_cpu_split_f32")) {
+        return @intFromEnum(Status.unsupported);
+    }
+    signature.* = std.mem.zeroes(NamedOperationSignatureV3);
+    signature.input_count = 1;
+    signature.output_count = 2;
+    signature.input_element_types[0] = @intFromEnum(ElementType.float32);
+    signature.output_element_types[0] = @intFromEnum(ElementType.float32);
+    signature.output_element_types[1] = @intFromEnum(ElementType.float32);
+    return @intFromEnum(Status.ok);
+}
+
+fn namedSplitProvider(context: ?*anyopaque, arguments: *const NamedOperationArgumentsV3) callconv(.c) c_int {
+    const probe = @as(*NamedOperationV3Probe, @ptrCast(@alignCast(context orelse return @intFromEnum(Status.invalid_argument))));
+    probe.operation_calls += 1;
+    const function_name = arguments.function_name orelse return @intFromEnum(Status.invalid_argument);
+    const inputs = arguments.inputs orelse return @intFromEnum(Status.invalid_argument);
+    const input_element_types = arguments.input_element_types orelse return @intFromEnum(Status.invalid_argument);
+    const outputs = arguments.outputs orelse return @intFromEnum(Status.invalid_argument);
+    const output_element_types = arguments.output_element_types orelse return @intFromEnum(Status.invalid_argument);
+    const permutation = arguments.permutation orelse return @intFromEnum(Status.invalid_argument);
+    if (!std.mem.eql(u8, function_name[0..arguments.function_name_length], "zml_cpu_split_f32") or
+        arguments.input_count != 1 or arguments.output_count != 2 or
+        input_element_types[0] != @intFromEnum(ElementType.float32) or
+        output_element_types[0] != @intFromEnum(ElementType.float32) or
+        output_element_types[1] != @intFromEnum(ElementType.float32) or permutation[0] != 0)
+    {
+        return @intFromEnum(Status.invalid_argument);
+    }
+    probe.input_stride = inputs[0].strides[1];
+    probe.first_output_stride = outputs[0].strides[1];
+    probe.second_output_stride = outputs[1].strides[1];
+    if (inputs[0].offset_bytes != 0 or outputs[0].offset_bytes != 0 or outputs[1].offset_bytes != 0 or
+        inputs[0].strides[0] != 1 or inputs[0].strides[1] != 2 or
+        outputs[0].strides[0] != 1 or outputs[0].strides[1] != 2 or
+        outputs[1].strides[0] != 1 or outputs[1].strides[1] != 2)
+    {
+        return @intFromEnum(Status.invalid_argument);
+    }
+    const input = @as([*]const f32, @ptrCast(@alignCast(inputs[0].data orelse return @intFromEnum(Status.invalid_argument))));
+    const first_output = @as([*]f32, @ptrCast(@alignCast(outputs[0].data orelse return @intFromEnum(Status.invalid_argument))));
+    const second_output = @as([*]f32, @ptrCast(@alignCast(outputs[1].data orelse return @intFromEnum(Status.invalid_argument))));
+    for (0..6) |index| {
+        first_output[index] = input[index] + 1.0;
+        second_output[index] = input[index] * 2.0;
     }
     return @intFromEnum(Status.ok);
 }
@@ -1906,6 +2181,70 @@ test "named CPU provider v2 carries a generic three-input graph" {
     var invalid_arguments = arguments;
     invalid_arguments.reserved = 1;
     try std.testing.expectEqual(Status.invalid_argument, namedOperationV2(&invalid_arguments));
+    try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
+}
+
+test "named CPU provider v3 carries multi-output dense views" {
+    var input_storage = [_]f32{0} ** 12;
+    input_storage[0] = 1;
+    input_storage[1] = 2;
+    input_storage[4] = 3;
+    input_storage[5] = 4;
+    input_storage[8] = 5;
+    input_storage[9] = 6;
+    var first_output_storage = [_]f32{12345.0} ** 12;
+    var second_output_storage = [_]f32{12345.0} ** 12;
+    const dimensions = [_]usize{ 2, 3 } ++ [_]usize{0} ** (max_rank - 2);
+    const strides = [_]usize{ 1, 4 } ++ [_]usize{0} ** (max_rank - 2);
+    var inputs = [_]TensorView{testView(f32, &input_storage, 2, dimensions, strides)};
+    var outputs = [_]TensorView{
+        testView(f32, &first_output_storage, 2, dimensions, strides),
+        testView(f32, &second_output_storage, 2, dimensions, strides),
+    };
+    const input_element_types = [_]u32{@intFromEnum(ElementType.float32)};
+    const output_element_types = [_]u32{
+        @intFromEnum(ElementType.float32),
+        @intFromEnum(ElementType.float32),
+    };
+    const arguments = NamedOperationArgumentsV3{
+        .function_name = "zml_cpu_split_f32",
+        .function_name_length = "zml_cpu_split_f32".len,
+        .input_count = 1,
+        .output_count = 2,
+        .reserved = 0,
+        .inputs = inputs[0..].ptr,
+        .input_element_types = input_element_types[0..].ptr,
+        .outputs = outputs[0..].ptr,
+        .output_element_types = output_element_types[0..].ptr,
+        .permutation = ([_]u32{0} ++ [_]u32{0} ** (max_rank - 1))[0..].ptr,
+    };
+    var probe = NamedOperationV3Probe{};
+    const backend = NamedOperationBackendV3{
+        .abi_version = named_operation_backend_v3_abi_version,
+        .context = @ptrCast(&probe),
+        .query = namedSplitQuery,
+        .operation = namedSplitProvider,
+    };
+    try std.testing.expectEqual(@as(c_int, 0), zpu_cpu_ml_set_named_operation_backend_v3(&backend));
+    defer _ = zpu_cpu_ml_set_named_operation_backend_v3(null);
+
+    var signature = std.mem.zeroes(NamedOperationSignatureV3);
+    try std.testing.expectEqual(Status.ok, namedOperationSupportedV3("zml_cpu_split_f32", &signature));
+    try std.testing.expectEqual(@as(u32, 1), signature.input_count);
+    try std.testing.expectEqual(@as(u32, 2), signature.output_count);
+    try std.testing.expectEqual(Status.ok, namedOperationV3(&arguments));
+    try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
+    try std.testing.expectEqual(@as(usize, 2), probe.input_stride);
+    try std.testing.expectEqual(@as(usize, 2), probe.first_output_stride);
+    try std.testing.expectEqual(@as(usize, 2), probe.second_output_stride);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 3, 12345, 12345, 4, 5, 12345, 12345, 6, 7, 12345, 12345 }, &first_output_storage);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2, 4, 12345, 12345, 6, 8, 12345, 12345, 10, 12, 12345, 12345 }, &second_output_storage);
+
+    var invalid_arguments = arguments;
+    invalid_arguments.reserved = 1;
+    try std.testing.expectEqual(Status.invalid_argument, namedOperationV3(&invalid_arguments));
     try std.testing.expectEqual(@as(usize, 2), probe.query_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.operation_calls);
 }

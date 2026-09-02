@@ -28,9 +28,11 @@ extern "C" {
 #define ZPU_CPU_ML_NAMED_OPERATION_ABI_VERSION 1u
 #define ZPU_CPU_ML_NAMED_OPERATION_CATALOG_ABI_VERSION 1u
 #define ZPU_CPU_ML_NAMED_OPERATION_V2_ABI_VERSION 2u
+#define ZPU_CPU_ML_NAMED_OPERATION_V3_ABI_VERSION 3u
 #define ZPU_CPU_ML_MAX_RANK 16u
 #define ZPU_CPU_ML_MAX_INPUTS 2u
 #define ZPU_CPU_ML_MAX_NAMED_INPUTS 16u
+#define ZPU_CPU_ML_MAX_NAMED_OUTPUTS 16u
 
 /* These are compile-target facts, not runtime feature probes. A provider
  * must perform its own runtime checks before executing an optional ISA path;
@@ -195,6 +197,48 @@ typedef struct zpu_cpu_ml_named_operation_backend_v2 {
     zpu_cpu_ml_named_operation_v2_fn operation;
 } zpu_cpu_ml_named_operation_backend_v2;
 
+/* Additive named-provider ABI for graph entry points with multiple outputs or
+ * different input/output element types. The v1/v2 single-output ABI remains
+ * unchanged. A v3 provider receives only dense CPU views and owns all graph
+ * semantics, including layout conversions, quantization, and CPU ISA choice.
+ */
+typedef struct zpu_cpu_ml_named_operation_signature_v3 {
+    uint32_t input_count;
+    uint32_t output_count;
+    uint32_t input_element_types[ZPU_CPU_ML_MAX_NAMED_INPUTS];
+    uint32_t output_element_types[ZPU_CPU_ML_MAX_NAMED_OUTPUTS];
+} zpu_cpu_ml_named_operation_signature_v3;
+
+typedef int (*zpu_cpu_ml_named_operation_query_v3_fn)(
+    void *context,
+    const char *function_name,
+    size_t function_name_length,
+    zpu_cpu_ml_named_operation_signature_v3 *signature);
+
+typedef struct zpu_cpu_ml_named_operation_arguments_v3 {
+    const char *function_name;
+    size_t function_name_length;
+    uint32_t input_count;
+    uint32_t output_count;
+    uint32_t reserved;
+    const zpu_cpu_ml_tensor_view *inputs;
+    const uint32_t *input_element_types;
+    zpu_cpu_ml_tensor_view *outputs;
+    const uint32_t *output_element_types;
+    const uint32_t *permutation;
+} zpu_cpu_ml_named_operation_arguments_v3;
+
+typedef int (*zpu_cpu_ml_named_operation_v3_fn)(
+    void *context,
+    const zpu_cpu_ml_named_operation_arguments_v3 *arguments);
+
+typedef struct zpu_cpu_ml_named_operation_backend_v3 {
+    uint32_t abi_version;
+    void *context;
+    zpu_cpu_ml_named_operation_query_v3_fn query;
+    zpu_cpu_ml_named_operation_v3_fn operation;
+} zpu_cpu_ml_named_operation_backend_v3;
+
 /* Optional discovery for the same named provider. The callback returns a
  * borrowed UTF-8 byte string that remains valid until the next catalog call
  * or catalog replacement. The adapter copies it before asking for the next
@@ -242,6 +286,10 @@ int zpu_cpu_ml_set_named_operation_backend(
  * registered, v2 has precedence for named operations. */
 int zpu_cpu_ml_set_named_operation_backend_v2(
     const zpu_cpu_ml_named_operation_backend_v2 *backend);
+/* Passing NULL unregisters the additive v3 provider. If registered, v3 is
+ * selected before v2/v1 for named functions it advertises. */
+int zpu_cpu_ml_set_named_operation_backend_v3(
+    const zpu_cpu_ml_named_operation_backend_v3 *backend);
 /* Passing NULL unregisters optional named-function discovery. */
 int zpu_cpu_ml_set_named_operation_catalog(
     const zpu_cpu_ml_named_operation_catalog *catalog);
@@ -254,6 +302,12 @@ int zpu_cpu_ml_named_operation(
     const zpu_cpu_ml_named_operation_arguments *arguments);
 int zpu_cpu_ml_named_operation_v2(
     const zpu_cpu_ml_named_operation_arguments_v2 *arguments);
+int zpu_cpu_ml_named_operation_supported_v3(
+    const char *function_name,
+    size_t function_name_length,
+    zpu_cpu_ml_named_operation_signature_v3 *signature);
+int zpu_cpu_ml_named_operation_v3(
+    const zpu_cpu_ml_named_operation_arguments_v3 *arguments);
 
 #ifdef __cplusplus
 }

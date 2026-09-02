@@ -12,6 +12,8 @@ struct probe {
     int catalog_calls;
     int named_v2_query_calls;
     int named_v2_calls;
+    int named_v3_query_calls;
+    int named_v3_calls;
 };
 
 static int add_u32(void *context, const zpu_cpu_ml_operation_arguments *arguments) {
@@ -124,6 +126,56 @@ static int named_sum3(void *context, const zpu_cpu_ml_named_operation_arguments_
     const float *middle = (const float *)arguments->inputs[1].data;
     const float *right = (const float *)arguments->inputs[2].data;
     for (size_t index = 0; index < 6; ++index) output[index] = left[index] + middle[index] + right[index];
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int named_split_query(void *context, const char *function_name, size_t function_name_length,
+                             zpu_cpu_ml_named_operation_signature_v3 *signature) {
+    struct probe *probe = (struct probe *)context;
+    if (probe == NULL || function_name == NULL || signature == NULL) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->named_v3_query_calls;
+    if (function_name_length != strlen("zml_cpu_split_f32") ||
+        memcmp(function_name, "zml_cpu_split_f32", function_name_length) != 0) {
+        return ZPU_CPU_ML_STATUS_UNSUPPORTED;
+    }
+    memset(signature, 0, sizeof(*signature));
+    signature->input_count = 1;
+    signature->output_count = 2;
+    signature->input_element_types[0] = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    signature->output_element_types[0] = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    signature->output_element_types[1] = ZPU_CPU_ML_ELEMENT_FLOAT32;
+    return ZPU_CPU_ML_STATUS_OK;
+}
+
+static int named_split(void *context, const zpu_cpu_ml_named_operation_arguments_v3 *arguments) {
+    struct probe *probe = (struct probe *)context;
+    if (probe == NULL || arguments == NULL || arguments->function_name == NULL ||
+        arguments->function_name_length != strlen("zml_cpu_split_f32") ||
+        memcmp(arguments->function_name, "zml_cpu_split_f32", arguments->function_name_length) != 0 ||
+        arguments->input_count != 1 || arguments->output_count != 2 ||
+        arguments->inputs == NULL || arguments->input_element_types == NULL ||
+        arguments->outputs == NULL || arguments->output_element_types == NULL ||
+        arguments->permutation == NULL ||
+        arguments->input_element_types[0] != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->output_element_types[0] != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->output_element_types[1] != ZPU_CPU_ML_ELEMENT_FLOAT32 ||
+        arguments->inputs[0].data == NULL || arguments->outputs[0].data == NULL ||
+        arguments->outputs[1].data == NULL || arguments->inputs[0].strides[0] != 1 ||
+        arguments->inputs[0].strides[1] != 2 || arguments->outputs[0].strides[0] != 1 ||
+        arguments->outputs[0].strides[1] != 2 || arguments->outputs[1].strides[0] != 1 ||
+        arguments->outputs[1].strides[1] != 2) {
+        return ZPU_CPU_ML_STATUS_INVALID_ARGUMENT;
+    }
+    ++probe->named_v3_calls;
+    const float *input = (const float *)arguments->inputs[0].data;
+    float *first = (float *)arguments->outputs[0].data;
+    float *second = (float *)arguments->outputs[1].data;
+    for (size_t index = 0; index < 6; ++index) {
+        first[index] = input[index] + 1.0f;
+        second[index] = input[index] * 2.0f;
+    }
     return ZPU_CPU_ML_STATUS_OK;
 }
 
@@ -304,5 +356,58 @@ int main(void) {
         sum3_output[8] != 555.0f || sum3_output[9] != 666.0f ||
         sum3_output[2] != 777.0f || sum3_output[3] != 777.0f ||
         zpu_cpu_ml_set_named_operation_backend_v2(NULL) != ZPU_CPU_ML_STATUS_OK) return 93;
+
+    float split_input[12] = {1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0};
+    float split_first[12];
+    float split_second[12];
+    for (size_t index = 0; index < 12; ++index) {
+        split_first[index] = 777.0f;
+        split_second[index] = 888.0f;
+    }
+    const zpu_cpu_ml_tensor_view split_inputs[1] = {
+        {.data = (uint8_t *)split_input, .byte_length = sizeof(split_input), .rank = 2,
+         .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4}},
+    };
+    zpu_cpu_ml_tensor_view split_outputs[2] = {
+        {.data = (uint8_t *)split_first, .byte_length = sizeof(split_first), .rank = 2,
+         .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4}},
+        {.data = (uint8_t *)split_second, .byte_length = sizeof(split_second), .rank = 2,
+         .element_bits = 32, .dimensions = {2, 3}, .strides = {1, 4}},
+    };
+    const uint32_t split_input_types[1] = {ZPU_CPU_ML_ELEMENT_FLOAT32};
+    const uint32_t split_output_types[2] = {ZPU_CPU_ML_ELEMENT_FLOAT32, ZPU_CPU_ML_ELEMENT_FLOAT32};
+    const uint32_t split_permutation[ZPU_CPU_ML_MAX_RANK] = {0};
+    const zpu_cpu_ml_named_operation_backend_v3 named_backend_v3 = {
+        .abi_version = ZPU_CPU_ML_NAMED_OPERATION_V3_ABI_VERSION,
+        .context = &probe,
+        .query = named_split_query,
+        .operation = named_split,
+    };
+    zpu_cpu_ml_named_operation_signature_v3 v3_signature = {0};
+    const zpu_cpu_ml_named_operation_arguments_v3 named_arguments_v3 = {
+        .function_name = "zml_cpu_split_f32",
+        .function_name_length = strlen("zml_cpu_split_f32"),
+        .input_count = 1,
+        .output_count = 2,
+        .reserved = 0,
+        .inputs = split_inputs,
+        .input_element_types = split_input_types,
+        .outputs = split_outputs,
+        .output_element_types = split_output_types,
+        .permutation = split_permutation,
+    };
+    if (zpu_cpu_ml_set_named_operation_backend_v3(&named_backend_v3) != ZPU_CPU_ML_STATUS_OK ||
+        zpu_cpu_ml_named_operation_supported_v3("zml_cpu_split_f32", strlen("zml_cpu_split_f32"),
+                                                &v3_signature) != ZPU_CPU_ML_STATUS_OK ||
+        v3_signature.input_count != 1 || v3_signature.output_count != 2 ||
+        zpu_cpu_ml_named_operation_v3(&named_arguments_v3) != ZPU_CPU_ML_STATUS_OK ||
+        probe.named_v3_query_calls != 2 || probe.named_v3_calls != 1 ||
+        split_first[0] != 2.0f || split_first[1] != 3.0f || split_first[4] != 4.0f ||
+        split_first[5] != 5.0f || split_first[8] != 6.0f || split_first[9] != 7.0f ||
+        split_second[0] != 2.0f || split_second[1] != 4.0f || split_second[4] != 6.0f ||
+        split_second[5] != 8.0f || split_second[8] != 10.0f || split_second[9] != 12.0f ||
+        split_first[2] != 777.0f || split_first[3] != 777.0f ||
+        split_second[2] != 888.0f || split_second[3] != 888.0f ||
+        zpu_cpu_ml_set_named_operation_backend_v3(NULL) != ZPU_CPU_ML_STATUS_OK) return 94;
     return 0;
 }
