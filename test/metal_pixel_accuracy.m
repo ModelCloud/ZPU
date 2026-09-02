@@ -778,6 +778,14 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
         ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_ml_div_f16");
     id<MTLFunction> ml_div_bf16_function =
         ZPUMetalCreateCPUFunction(adapter_device, @"zpu_cpu_ml_div_bf16");
+    BOOL default_narrow_shader_functions = YES;
+    for (NSString *name in @[
+        @"zpu_cpu_add_f16", @"zpu_cpu_mul_f16", @"zpu_cpu_sub_f16", @"zpu_cpu_div_f16",
+        @"zpu_cpu_add_bf16", @"zpu_cpu_mul_bf16", @"zpu_cpu_sub_bf16", @"zpu_cpu_div_bf16",
+    ]) {
+        default_narrow_shader_functions = default_narrow_shader_functions &&
+            [library newFunctionWithName:name].functionType == MTLFunctionTypeKernel;
+    }
     id<MTLFunction> default_intersection_function =
         [library newFunctionWithName:@"zpu_cpu_intersection_triangle"];
     id<MTLFunction> default_accept_intersection_function =
@@ -818,6 +826,7 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     }
     if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
         library == nil || function == nil || ml_div_f16_function == nil || ml_div_bf16_function == nil ||
+        !default_narrow_shader_functions ||
         default_intersection_function == nil ||
         default_accept_intersection_function == nil ||
         default_intersection_function.functionType != MTLFunctionTypeIntersection ||
@@ -1184,7 +1193,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 73) {
+        adapter_library.functionNames.count != 77) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }

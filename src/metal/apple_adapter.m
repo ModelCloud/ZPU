@@ -6712,7 +6712,7 @@ static BOOL zpu_tensor_sub_i32(ZPUTensor *left, ZPUTensor *right, ZPUTensor *des
 }
 
 static BOOL zpu_tensor_binary_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination,
-                                  BOOL multiply, BOOL subtract) {
+                                  BOOL multiply, BOOL subtract, BOOL divide) {
     if (left == nil || right == nil || destination == nil || left->_owner == nil ||
         left->_owner != right->_owner || left->_owner != destination->_owner ||
         left->_dataType != MTLTensorDataTypeFloat16 || right->_dataType != MTLTensorDataTypeFloat16 ||
@@ -6754,7 +6754,7 @@ static BOOL zpu_tensor_binary_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *
         memcpy(&leftValue, &leftValues[index], sizeof(leftValue));
         memcpy(&rightValue, &rightValues[index], sizeof(rightValue));
         resultValue = multiply ? leftValue * rightValue :
-            (subtract ? leftValue - rightValue : leftValue + rightValue);
+            (subtract ? leftValue - rightValue : (divide ? leftValue / rightValue : leftValue + rightValue));
         memcpy(&resultValues[index], &resultValue, sizeof(resultValue));
     }
     return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
@@ -6762,15 +6762,19 @@ static BOOL zpu_tensor_binary_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *
 }
 
 static BOOL zpu_tensor_add_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
-    return zpu_tensor_binary_f16(left, right, destination, NO, NO);
+    return zpu_tensor_binary_f16(left, right, destination, NO, NO, NO);
 }
 
 static BOOL zpu_tensor_mul_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
-    return zpu_tensor_binary_f16(left, right, destination, YES, NO);
+    return zpu_tensor_binary_f16(left, right, destination, YES, NO, NO);
 }
 
 static BOOL zpu_tensor_sub_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
-    return zpu_tensor_binary_f16(left, right, destination, NO, YES);
+    return zpu_tensor_binary_f16(left, right, destination, NO, YES, NO);
+}
+
+static BOOL zpu_tensor_div_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
+    return zpu_tensor_binary_f16(left, right, destination, NO, NO, YES);
 }
 
 static float zpu_bfloat16_to_float(uint16_t value) {
@@ -6788,7 +6792,7 @@ static uint16_t zpu_float_to_bfloat16(float value) {
 }
 
 static BOOL zpu_tensor_binary_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination,
-                                   BOOL multiply, BOOL subtract) {
+                                   BOOL multiply, BOOL subtract, BOOL divide) {
     if (left == nil || right == nil || destination == nil || left->_owner == nil ||
         left->_owner != right->_owner || left->_owner != destination->_owner ||
         left->_dataType != MTLTensorDataTypeBFloat16 || right->_dataType != MTLTensorDataTypeBFloat16 ||
@@ -6827,22 +6831,27 @@ static BOOL zpu_tensor_binary_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor 
         const float leftValue = zpu_bfloat16_to_float(leftValues[index]);
         const float rightValue = zpu_bfloat16_to_float(rightValues[index]);
         resultValues[index] = zpu_float_to_bfloat16(multiply ? leftValue * rightValue :
-                                                    (subtract ? leftValue - rightValue : leftValue + rightValue));
+                                                    (subtract ? leftValue - rightValue :
+                                                     (divide ? leftValue / rightValue : leftValue + rightValue)));
     }
     return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
                                       resultPacked.bytes, YES);
 }
 
 static BOOL zpu_tensor_add_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
-    return zpu_tensor_binary_bf16(left, right, destination, NO, NO);
+    return zpu_tensor_binary_bf16(left, right, destination, NO, NO, NO);
 }
 
 static BOOL zpu_tensor_mul_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
-    return zpu_tensor_binary_bf16(left, right, destination, YES, NO);
+    return zpu_tensor_binary_bf16(left, right, destination, YES, NO, NO);
 }
 
 static BOOL zpu_tensor_sub_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
-    return zpu_tensor_binary_bf16(left, right, destination, NO, YES);
+    return zpu_tensor_binary_bf16(left, right, destination, NO, YES, NO);
+}
+
+static BOOL zpu_tensor_div_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
+    return zpu_tensor_binary_bf16(left, right, destination, NO, NO, YES);
 }
 
 @implementation ZPUMTL4MachineLearningIdentityOperation
@@ -11802,7 +11811,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
 }
 - (id<MTLLibrary>)newDefaultLibrary {
     return (id<MTLLibrary>)[[ZPULibrary alloc] initWithOwner:self
-                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_copy_rgba8_texture_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_fill_gradient_rgba32_uint zpu_cpu_fill_gradient_rgba32_sint zpu_cpu_fill_gradient_r32_uint zpu_cpu_fill_gradient_r32_sint zpu_cpu_fill_gradient_rg32_uint zpu_cpu_fill_gradient_rg32_sint zpu_cpu_fill_gradient_r8_uint zpu_cpu_fill_gradient_r8_sint zpu_cpu_fill_gradient_rg8_uint zpu_cpu_fill_gradient_rg8_sint zpu_cpu_fill_gradient_rgba8_uint zpu_cpu_fill_gradient_rgba8_sint zpu_cpu_fill_gradient_r16_uint zpu_cpu_fill_gradient_r16_sint zpu_cpu_fill_gradient_rg16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgba16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgb10a2_uint zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_sub_f32 zpu_cpu_div_f32 zpu_cpu_add_f32x4 zpu_cpu_mul_f32x4 zpu_cpu_sub_f32x4 zpu_cpu_div_f32x4 zpu_cpu_add_f32x2 zpu_cpu_mul_f32x2 zpu_cpu_sub_f32x2 zpu_cpu_div_f32x2 zpu_cpu_add_f32x3 zpu_cpu_mul_f32x3 zpu_cpu_sub_f32x3 zpu_cpu_div_f32x3 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rgba32_uint_fragment zpu_cpu_rgba32_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_transpose zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_sub_f32 zpu_cpu_ml_div_f32 zpu_cpu_ml_sub_u8 zpu_cpu_ml_sub_i8 zpu_cpu_ml_sub_u16 zpu_cpu_ml_sub_i16 zpu_cpu_ml_sub_u32 zpu_cpu_ml_sub_i32 zpu_cpu_ml_sub_f16 zpu_cpu_ml_sub_bf16 zpu_cpu_ml_sub_i4 zpu_cpu_ml_sub_u4 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_u8 zpu_cpu_ml_mul_i8 zpu_cpu_ml_mul_u16 zpu_cpu_ml_mul_i16 zpu_cpu_ml_mul_u32 zpu_cpu_ml_mul_i32 zpu_cpu_ml_mul_i4 zpu_cpu_ml_mul_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_ml_matmul_u8 zpu_cpu_ml_matmul_i8 zpu_cpu_ml_matmul_u16 zpu_cpu_ml_matmul_i16 zpu_cpu_ml_matmul_u32 zpu_cpu_ml_matmul_i32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
+                                                        source:@"zpu_cpu_vertex zpu_cpu_fragment zpu_cpu_fill_gradient_rgba8 zpu_cpu_copy_rgba8_buffer_to_texture zpu_cpu_copy_rgba8_texture_to_texture zpu_cpu_fill_gradient_rgba8_array zpu_cpu_fill_gradient_rgba8_3d zpu_cpu_fill_gradient_r32_float zpu_cpu_fill_gradient_rgba16_float zpu_cpu_fill_gradient_rgba32_uint zpu_cpu_fill_gradient_rgba32_sint zpu_cpu_fill_gradient_r32_uint zpu_cpu_fill_gradient_r32_sint zpu_cpu_fill_gradient_rg32_uint zpu_cpu_fill_gradient_rg32_sint zpu_cpu_fill_gradient_r8_uint zpu_cpu_fill_gradient_r8_sint zpu_cpu_fill_gradient_rg8_uint zpu_cpu_fill_gradient_rg8_sint zpu_cpu_fill_gradient_rgba8_uint zpu_cpu_fill_gradient_rgba8_sint zpu_cpu_fill_gradient_r16_uint zpu_cpu_fill_gradient_r16_sint zpu_cpu_fill_gradient_rg16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgba16_uint zpu_cpu_fill_gradient_rg16_sint zpu_cpu_fill_gradient_rgb10a2_uint zpu_cpu_add_f32 zpu_cpu_mul_f32 zpu_cpu_sub_f32 zpu_cpu_div_f32 zpu_cpu_add_f16 zpu_cpu_mul_f16 zpu_cpu_sub_f16 zpu_cpu_div_f16 zpu_cpu_add_bf16 zpu_cpu_mul_bf16 zpu_cpu_sub_bf16 zpu_cpu_div_bf16 zpu_cpu_add_f32x4 zpu_cpu_mul_f32x4 zpu_cpu_sub_f32x4 zpu_cpu_div_f32x4 zpu_cpu_add_f32x2 zpu_cpu_mul_f32x2 zpu_cpu_sub_f32x2 zpu_cpu_div_f32x2 zpu_cpu_add_f32x3 zpu_cpu_mul_f32x3 zpu_cpu_sub_f32x3 zpu_cpu_div_f32x3 zpu_cpu_trace_triangles_rgba8 zpu_cpu_tile_gradient_rgba8 zpu_cpu_mesh_gradient_rgba8 zpu_cpu_mesh_gradient_fragment zpu_cpu_position_gradient_fragment zpu_cpu_tessellated_triangle_vertex zpu_cpu_tessellated_triangle_fragment zpu_cpu_layered_vertex zpu_cpu_layered_fragment zpu_cpu_r8_uint_fragment zpu_cpu_r8_sint_fragment zpu_cpu_r16_uint_fragment zpu_cpu_r16_sint_fragment zpu_cpu_rg8_uint_fragment zpu_cpu_rg8_sint_fragment zpu_cpu_r32_uint_fragment zpu_cpu_r32_sint_fragment zpu_cpu_rgba8_uint_fragment zpu_cpu_rgba8_sint_fragment zpu_cpu_rgb10a2_uint_fragment zpu_cpu_rgba16_uint_fragment zpu_cpu_rgba16_sint_fragment zpu_cpu_rgba32_uint_fragment zpu_cpu_rgba32_sint_fragment zpu_cpu_rg32_uint_fragment zpu_cpu_ml_identity zpu_cpu_ml_transpose zpu_cpu_ml_add_u8 zpu_cpu_ml_add_f32 zpu_cpu_ml_sub_f32 zpu_cpu_ml_div_f32 zpu_cpu_ml_sub_u8 zpu_cpu_ml_sub_i8 zpu_cpu_ml_sub_u16 zpu_cpu_ml_sub_i16 zpu_cpu_ml_sub_u32 zpu_cpu_ml_sub_i32 zpu_cpu_ml_sub_f16 zpu_cpu_ml_sub_bf16 zpu_cpu_ml_sub_i4 zpu_cpu_ml_sub_u4 zpu_cpu_ml_add_i32 zpu_cpu_ml_add_u32 zpu_cpu_ml_add_u16 zpu_cpu_ml_add_i16 zpu_cpu_ml_add_i8 zpu_cpu_ml_add_f16 zpu_cpu_ml_add_bf16 zpu_cpu_ml_add_i4 zpu_cpu_ml_add_u4 zpu_cpu_ml_mul_u8 zpu_cpu_ml_mul_i8 zpu_cpu_ml_mul_u16 zpu_cpu_ml_mul_i16 zpu_cpu_ml_mul_u32 zpu_cpu_ml_mul_i32 zpu_cpu_ml_mul_i4 zpu_cpu_ml_mul_u4 zpu_cpu_ml_mul_f32 zpu_cpu_ml_mul_f16 zpu_cpu_ml_mul_bf16 zpu_cpu_ml_matmul_f32 zpu_cpu_ml_matmul_f16 zpu_cpu_ml_matmul_bf16 zpu_cpu_ml_matmul_u8 zpu_cpu_ml_matmul_i8 zpu_cpu_ml_matmul_u16 zpu_cpu_ml_matmul_i16 zpu_cpu_ml_matmul_u32 zpu_cpu_ml_matmul_i32 zpu_cpu_tensor_argument_buffer zpu_cpu_tensor_argument_buffer_array"];
 }
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error API_AVAILABLE(macos(10.12), ios(10.0)) {
     (void)bundle;
@@ -18176,6 +18185,8 @@ static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor 
         if (subtractF16) return zpu_tensor_sub_f16(source, right, destination);
         if (subtractBF16) return zpu_tensor_sub_bf16(source, right, destination);
         if (divideF32) return zpu_tensor_div_f32(source, right, destination);
+        if (divideF16) return zpu_tensor_div_f16(source, right, destination);
+        if (divideBF16) return zpu_tensor_div_bf16(source, right, destination);
         if (multiplyF32) return zpu_tensor_mul_f32(source, right, destination);
         if (multiplyU8) return zpu_tensor_mul_u8(source, right, destination);
         if (multiplyI8) return zpu_tensor_mul_i8(source, right, destination);
