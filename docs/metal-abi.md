@@ -440,13 +440,16 @@ triangle path:
   registered `zpu_cpu_ml_mul_f32` and `zpu_cpu_ml_mul_f16` profiles perform
   deferred elementwise Float32 and Float16 multiplication, and the registered
   `zpu_cpu_ml_matmul_f32`, `zpu_cpu_ml_matmul_f16`, and
-  `zpu_cpu_ml_matmul_bf16` profiles perform deferred rank-2 Float32, Float16,
-  and BFloat16 matrix multiplication through the same ZPU-owned storage path;
+  `zpu_cpu_ml_matmul_bf16` profiles perform deferred Float32, Float16, and
+  BFloat16 matrix multiplication through the same ZPU-owned storage path.
+  Axes 0 and 1 are rows/reduction, while equal axes 2 through rank-1 are
+  independent batch dimensions; rank-2 remains the original matrix behavior;
   `zpu_cpu_ml_matmul_u8`, `zpu_cpu_ml_matmul_i8`, `zpu_cpu_ml_matmul_u16`,
   `zpu_cpu_ml_matmul_i16`, `zpu_cpu_ml_matmul_u32`, and
   `zpu_cpu_ml_matmul_i32`, `zpu_cpu_ml_matmul_i4`, and
-  `zpu_cpu_ml_matmul_u4` provide fixed-width rank-2 integer matrix
-  multiplication with modulo result-bit semantics through that same path; the
+  `zpu_cpu_ml_matmul_u4` provide fixed-width integer matrix multiplication
+  with modulo result-bit semantics through that same path and the same batch
+  dimension rules; the
   registered `zpu_cpu_ml_transpose` profile performs a deferred reverse-axis
   transpose through the portable CPU tensor layer, preserving explicit Metal
   element strides, packed element widths, overlap semantics, and untouched

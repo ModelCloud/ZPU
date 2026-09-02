@@ -6270,50 +6270,110 @@ static BOOL zpu_tensor_div_f32(ZPUTensor *left, ZPUTensor *right, ZPUTensor *des
     return zpu_tensor_binary_f32(left, right, destination, NO, NO, YES);
 }
 
+typedef struct {
+    NSUInteger rank;
+    NSUInteger rows;
+    NSUInteger reduction;
+    NSUInteger columns;
+    NSUInteger batchCount;
+    NSUInteger leftMatrixCount;
+    NSUInteger rightMatrixCount;
+    NSUInteger destinationMatrixCount;
+    NSUInteger leftCount;
+    NSUInteger rightCount;
+    NSUInteger destinationCount;
+} ZPUTensorMatmulShape;
+
+/* ZPU keeps dimension zero as the fastest logical axis. The bounded ML
+ * profiles use axes 0 and 1 as rows/reduction and treat equal axes 2..rank-1
+ * as batches. Rank 2 therefore remains exactly the original matrix profile. */
+static BOOL zpu_tensor_matmul_shape(ZPUTensor *left, ZPUTensor *right,
+                                    ZPUTensor *destination, ZPUTensorMatmulShape *shape) {
+    if (left == nil || right == nil || destination == nil || shape == NULL ||
+        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil ||
+        left->_dimensions.rank != right->_dimensions.rank ||
+        left->_dimensions.rank != destination->_dimensions.rank || left->_dimensions.rank < 2 ||
+        left->_dimensions.rank > MTL_TENSOR_MAX_RANK) return NO;
+    const NSUInteger rank = left->_dimensions.rank;
+    NSUInteger leftDimensions[MTL_TENSOR_MAX_RANK] = {0};
+    NSUInteger rightDimensions[MTL_TENSOR_MAX_RANK] = {0};
+    NSUInteger destinationDimensions[MTL_TENSOR_MAX_RANK] = {0};
+    if (!zpu_tensor_read_extents(left->_dimensions, rank, leftDimensions, NO) ||
+        !zpu_tensor_read_extents(right->_dimensions, rank, rightDimensions, NO) ||
+        !zpu_tensor_read_extents(destination->_dimensions, rank, destinationDimensions, NO)) return NO;
+    if (leftDimensions[0] == 0 || leftDimensions[1] == 0 || rightDimensions[1] == 0 ||
+        leftDimensions[1] != rightDimensions[0] || destinationDimensions[0] != leftDimensions[0] ||
+        destinationDimensions[1] != rightDimensions[1]) return NO;
+    for (NSUInteger axis = 2; axis < rank; ++axis) {
+        if (leftDimensions[axis] == 0 || leftDimensions[axis] != rightDimensions[axis] ||
+            leftDimensions[axis] != destinationDimensions[axis]) return NO;
+    }
+    const NSUInteger rows = leftDimensions[0];
+    const NSUInteger reduction = leftDimensions[1];
+    const NSUInteger columns = rightDimensions[1];
+    if (rows > SIZE_MAX / reduction || reduction > SIZE_MAX / columns ||
+        rows > SIZE_MAX / columns) return NO;
+    const NSUInteger leftMatrixCount = rows * reduction;
+    const NSUInteger rightMatrixCount = reduction * columns;
+    const NSUInteger destinationMatrixCount = rows * columns;
+    NSUInteger batchCount = 1;
+    for (NSUInteger axis = 2; axis < rank; ++axis) {
+        if (batchCount > SIZE_MAX / leftDimensions[axis]) return NO;
+        batchCount *= leftDimensions[axis];
+    }
+    if (batchCount > SIZE_MAX / leftMatrixCount || batchCount > SIZE_MAX / rightMatrixCount ||
+        batchCount > SIZE_MAX / destinationMatrixCount) return NO;
+    *shape = (ZPUTensorMatmulShape){
+        .rank = rank,
+        .rows = rows,
+        .reduction = reduction,
+        .columns = columns,
+        .batchCount = batchCount,
+        .leftMatrixCount = leftMatrixCount,
+        .rightMatrixCount = rightMatrixCount,
+        .destinationMatrixCount = destinationMatrixCount,
+        .leftCount = batchCount * leftMatrixCount,
+        .rightCount = batchCount * rightMatrixCount,
+        .destinationCount = batchCount * destinationMatrixCount,
+    };
+    return YES;
+}
+
 static BOOL zpu_tensor_matmul_f32(ZPUTensor *left, ZPUTensor *right, ZPUTensor *destination) {
     if (left == nil || right == nil || destination == nil || left->_owner == nil ||
         left->_owner != right->_owner || left->_owner != destination->_owner ||
         left->_dataType != MTLTensorDataTypeFloat32 || right->_dataType != MTLTensorDataTypeFloat32 ||
         destination->_dataType != MTLTensorDataTypeFloat32 || left->_elementSize != sizeof(float) ||
         right->_elementSize != sizeof(float) || destination->_elementSize != sizeof(float) ||
-        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil ||
-        left->_dimensions.rank != 2 || right->_dimensions.rank != 2 || destination->_dimensions.rank != 2) return NO;
-    NSUInteger leftDimensions[2];
-    NSUInteger rightDimensions[2];
-    NSUInteger destinationDimensions[2];
-    if (!zpu_tensor_read_extents(left->_dimensions, 2, leftDimensions, NO) ||
-        !zpu_tensor_read_extents(right->_dimensions, 2, rightDimensions, NO) ||
-        !zpu_tensor_read_extents(destination->_dimensions, 2, destinationDimensions, NO) ||
-        leftDimensions[1] != rightDimensions[0] || destinationDimensions[0] != leftDimensions[0] ||
-        destinationDimensions[1] != rightDimensions[1]) return NO;
-    const NSUInteger rows = leftDimensions[0];
-    const NSUInteger reduction = leftDimensions[1];
-    const NSUInteger columns = rightDimensions[1];
-    if (rows > SIZE_MAX / reduction || rows * reduction > SIZE_MAX / sizeof(float) ||
-        reduction > SIZE_MAX / columns || reduction * columns > SIZE_MAX / sizeof(float) ||
-        rows > SIZE_MAX / columns || rows * columns > SIZE_MAX / sizeof(float)) return NO;
-    const NSUInteger leftCount = rows * reduction;
-    const NSUInteger rightCount = reduction * columns;
-    const NSUInteger destinationCount = rows * columns;
-    NSUInteger zeroValues[2] = {0, 0};
-    MTLTensorExtents *zero = zpu_tensor_make_extents(2, zeroValues);
-    NSMutableData *leftPacked = [NSMutableData dataWithLength:leftCount * sizeof(float)];
-    NSMutableData *rightPacked = [NSMutableData dataWithLength:rightCount * sizeof(float)];
-    NSMutableData *resultPacked = [NSMutableData dataWithLength:destinationCount * sizeof(float)];
+        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil) return NO;
+    ZPUTensorMatmulShape shape;
+    if (!zpu_tensor_matmul_shape(left, right, destination, &shape) ||
+        shape.leftCount > SIZE_MAX / sizeof(float) || shape.rightCount > SIZE_MAX / sizeof(float) ||
+        shape.destinationCount > SIZE_MAX / sizeof(float)) return NO;
+    NSUInteger zeroValues[MTL_TENSOR_MAX_RANK] = {0};
+    MTLTensorExtents *zero = zpu_tensor_make_extents(shape.rank, zeroValues);
+    NSMutableData *leftPacked = [NSMutableData dataWithLength:shape.leftCount * sizeof(float)];
+    NSMutableData *rightPacked = [NSMutableData dataWithLength:shape.rightCount * sizeof(float)];
+    NSMutableData *resultPacked = [NSMutableData dataWithLength:shape.destinationCount * sizeof(float)];
     if (zero == nil || leftPacked == nil || rightPacked == nil || resultPacked == nil ||
         !zpu_tensor_transfer_bytes(left, zero, left->_dimensions, nil, leftPacked.mutableBytes, NO) ||
         !zpu_tensor_transfer_bytes(right, zero, right->_dimensions, nil, rightPacked.mutableBytes, NO)) return NO;
     const float *leftValues = (const float *)leftPacked.bytes;
     const float *rightValues = (const float *)rightPacked.bytes;
     float *resultValues = (float *)resultPacked.mutableBytes;
-    for (NSUInteger row = 0; row < rows; ++row) {
-        for (NSUInteger column = 0; column < columns; ++column) {
-            float sum = 0.0f;
-            for (NSUInteger index = 0; index < reduction; ++index) {
-                sum = fmaf(leftValues[row * reduction + index],
-                           rightValues[index * columns + column], sum);
+    for (NSUInteger batch = 0; batch < shape.batchCount; ++batch) {
+        const NSUInteger leftBase = batch * shape.leftMatrixCount;
+        const NSUInteger rightBase = batch * shape.rightMatrixCount;
+        const NSUInteger destinationBase = batch * shape.destinationMatrixCount;
+        for (NSUInteger row = 0; row < shape.rows; ++row) {
+            for (NSUInteger column = 0; column < shape.columns; ++column) {
+                float sum = 0.0f;
+                for (NSUInteger index = 0; index < shape.reduction; ++index) {
+                    sum = fmaf(leftValues[leftBase + row * shape.reduction + index],
+                               rightValues[rightBase + index * shape.columns + column], sum);
+                }
+                resultValues[destinationBase + row * shape.columns + column] = sum;
             }
-            resultValues[row * columns + column] = sum;
         }
     }
     return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
@@ -6326,47 +6386,38 @@ static BOOL zpu_tensor_matmul_f16(ZPUTensor *left, ZPUTensor *right, ZPUTensor *
         left->_dataType != MTLTensorDataTypeFloat16 || right->_dataType != MTLTensorDataTypeFloat16 ||
         destination->_dataType != MTLTensorDataTypeFloat16 || left->_elementSize != sizeof(uint16_t) ||
         right->_elementSize != sizeof(uint16_t) || destination->_elementSize != sizeof(uint16_t) ||
-        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil ||
-        left->_dimensions.rank != 2 || right->_dimensions.rank != 2 || destination->_dimensions.rank != 2) return NO;
-    NSUInteger leftDimensions[2];
-    NSUInteger rightDimensions[2];
-    NSUInteger destinationDimensions[2];
-    if (!zpu_tensor_read_extents(left->_dimensions, 2, leftDimensions, NO) ||
-        !zpu_tensor_read_extents(right->_dimensions, 2, rightDimensions, NO) ||
-        !zpu_tensor_read_extents(destination->_dimensions, 2, destinationDimensions, NO) ||
-        leftDimensions[1] != rightDimensions[0] || destinationDimensions[0] != leftDimensions[0] ||
-        destinationDimensions[1] != rightDimensions[1]) return NO;
-    const NSUInteger rows = leftDimensions[0];
-    const NSUInteger reduction = leftDimensions[1];
-    const NSUInteger columns = rightDimensions[1];
-    if (rows > SIZE_MAX / reduction || rows * reduction > SIZE_MAX / sizeof(uint16_t) ||
-        reduction > SIZE_MAX / columns || reduction * columns > SIZE_MAX / sizeof(uint16_t) ||
-        rows > SIZE_MAX / columns || rows * columns > SIZE_MAX / sizeof(uint16_t)) return NO;
-    const NSUInteger leftCount = rows * reduction;
-    const NSUInteger rightCount = reduction * columns;
-    const NSUInteger destinationCount = rows * columns;
-    NSUInteger zeroValues[2] = {0, 0};
-    MTLTensorExtents *zero = zpu_tensor_make_extents(2, zeroValues);
-    NSMutableData *leftPacked = [NSMutableData dataWithLength:leftCount * sizeof(uint16_t)];
-    NSMutableData *rightPacked = [NSMutableData dataWithLength:rightCount * sizeof(uint16_t)];
-    NSMutableData *resultPacked = [NSMutableData dataWithLength:destinationCount * sizeof(uint16_t)];
+        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil) return NO;
+    ZPUTensorMatmulShape shape;
+    if (!zpu_tensor_matmul_shape(left, right, destination, &shape) ||
+        shape.leftCount > SIZE_MAX / sizeof(uint16_t) || shape.rightCount > SIZE_MAX / sizeof(uint16_t) ||
+        shape.destinationCount > SIZE_MAX / sizeof(uint16_t)) return NO;
+    NSUInteger zeroValues[MTL_TENSOR_MAX_RANK] = {0};
+    MTLTensorExtents *zero = zpu_tensor_make_extents(shape.rank, zeroValues);
+    NSMutableData *leftPacked = [NSMutableData dataWithLength:shape.leftCount * sizeof(uint16_t)];
+    NSMutableData *rightPacked = [NSMutableData dataWithLength:shape.rightCount * sizeof(uint16_t)];
+    NSMutableData *resultPacked = [NSMutableData dataWithLength:shape.destinationCount * sizeof(uint16_t)];
     if (zero == nil || leftPacked == nil || rightPacked == nil || resultPacked == nil ||
         !zpu_tensor_transfer_bytes(left, zero, left->_dimensions, nil, leftPacked.mutableBytes, NO) ||
         !zpu_tensor_transfer_bytes(right, zero, right->_dimensions, nil, rightPacked.mutableBytes, NO)) return NO;
     const uint16_t *leftValues = (const uint16_t *)leftPacked.bytes;
     const uint16_t *rightValues = (const uint16_t *)rightPacked.bytes;
     uint16_t *resultValues = (uint16_t *)resultPacked.mutableBytes;
-    for (NSUInteger row = 0; row < rows; ++row) {
-        for (NSUInteger column = 0; column < columns; ++column) {
-            _Float16 sum = (_Float16)0.0f;
-            for (NSUInteger index = 0; index < reduction; ++index) {
-                _Float16 leftValue;
-                _Float16 rightValue;
-                memcpy(&leftValue, &leftValues[row * reduction + index], sizeof(leftValue));
-                memcpy(&rightValue, &rightValues[index * columns + column], sizeof(rightValue));
-                sum = (_Float16)(sum + (_Float16)(leftValue * rightValue));
+    for (NSUInteger batch = 0; batch < shape.batchCount; ++batch) {
+        const NSUInteger leftBase = batch * shape.leftMatrixCount;
+        const NSUInteger rightBase = batch * shape.rightMatrixCount;
+        const NSUInteger destinationBase = batch * shape.destinationMatrixCount;
+        for (NSUInteger row = 0; row < shape.rows; ++row) {
+            for (NSUInteger column = 0; column < shape.columns; ++column) {
+                _Float16 sum = (_Float16)0.0f;
+                for (NSUInteger index = 0; index < shape.reduction; ++index) {
+                    _Float16 leftValue;
+                    _Float16 rightValue;
+                    memcpy(&leftValue, &leftValues[leftBase + row * shape.reduction + index], sizeof(leftValue));
+                    memcpy(&rightValue, &rightValues[rightBase + index * shape.columns + column], sizeof(rightValue));
+                    sum = (_Float16)(sum + (_Float16)(leftValue * rightValue));
+                }
+                memcpy(&resultValues[destinationBase + row * shape.columns + column], &sum, sizeof(sum));
             }
-            memcpy(&resultValues[row * columns + column], &sum, sizeof(sum));
         }
     }
     return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
@@ -6379,44 +6430,35 @@ static BOOL zpu_tensor_matmul_bf16(ZPUTensor *left, ZPUTensor *right, ZPUTensor 
         left->_dataType != MTLTensorDataTypeBFloat16 || right->_dataType != MTLTensorDataTypeBFloat16 ||
         destination->_dataType != MTLTensorDataTypeBFloat16 || left->_elementSize != sizeof(uint16_t) ||
         right->_elementSize != sizeof(uint16_t) || destination->_elementSize != sizeof(uint16_t) ||
-        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil ||
-        left->_dimensions.rank != 2 || right->_dimensions.rank != 2 || destination->_dimensions.rank != 2) return NO;
-    NSUInteger leftDimensions[2];
-    NSUInteger rightDimensions[2];
-    NSUInteger destinationDimensions[2];
-    if (!zpu_tensor_read_extents(left->_dimensions, 2, leftDimensions, NO) ||
-        !zpu_tensor_read_extents(right->_dimensions, 2, rightDimensions, NO) ||
-        !zpu_tensor_read_extents(destination->_dimensions, 2, destinationDimensions, NO) ||
-        leftDimensions[1] != rightDimensions[0] || destinationDimensions[0] != leftDimensions[0] ||
-        destinationDimensions[1] != rightDimensions[1]) return NO;
-    const NSUInteger rows = leftDimensions[0];
-    const NSUInteger reduction = leftDimensions[1];
-    const NSUInteger columns = rightDimensions[1];
-    if (rows > SIZE_MAX / reduction || rows * reduction > SIZE_MAX / sizeof(uint16_t) ||
-        reduction > SIZE_MAX / columns || reduction * columns > SIZE_MAX / sizeof(uint16_t) ||
-        rows > SIZE_MAX / columns || rows * columns > SIZE_MAX / sizeof(uint16_t)) return NO;
-    const NSUInteger leftCount = rows * reduction;
-    const NSUInteger rightCount = reduction * columns;
-    const NSUInteger destinationCount = rows * columns;
-    NSUInteger zeroValues[2] = {0, 0};
-    MTLTensorExtents *zero = zpu_tensor_make_extents(2, zeroValues);
-    NSMutableData *leftPacked = [NSMutableData dataWithLength:leftCount * sizeof(uint16_t)];
-    NSMutableData *rightPacked = [NSMutableData dataWithLength:rightCount * sizeof(uint16_t)];
-    NSMutableData *resultPacked = [NSMutableData dataWithLength:destinationCount * sizeof(uint16_t)];
+        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil) return NO;
+    ZPUTensorMatmulShape shape;
+    if (!zpu_tensor_matmul_shape(left, right, destination, &shape) ||
+        shape.leftCount > SIZE_MAX / sizeof(uint16_t) || shape.rightCount > SIZE_MAX / sizeof(uint16_t) ||
+        shape.destinationCount > SIZE_MAX / sizeof(uint16_t)) return NO;
+    NSUInteger zeroValues[MTL_TENSOR_MAX_RANK] = {0};
+    MTLTensorExtents *zero = zpu_tensor_make_extents(shape.rank, zeroValues);
+    NSMutableData *leftPacked = [NSMutableData dataWithLength:shape.leftCount * sizeof(uint16_t)];
+    NSMutableData *rightPacked = [NSMutableData dataWithLength:shape.rightCount * sizeof(uint16_t)];
+    NSMutableData *resultPacked = [NSMutableData dataWithLength:shape.destinationCount * sizeof(uint16_t)];
     if (zero == nil || leftPacked == nil || rightPacked == nil || resultPacked == nil ||
         !zpu_tensor_transfer_bytes(left, zero, left->_dimensions, nil, leftPacked.mutableBytes, NO) ||
         !zpu_tensor_transfer_bytes(right, zero, right->_dimensions, nil, rightPacked.mutableBytes, NO)) return NO;
     const uint16_t *leftValues = (const uint16_t *)leftPacked.bytes;
     const uint16_t *rightValues = (const uint16_t *)rightPacked.bytes;
     uint16_t *resultValues = (uint16_t *)resultPacked.mutableBytes;
-    for (NSUInteger row = 0; row < rows; ++row) {
-        for (NSUInteger column = 0; column < columns; ++column) {
-            float sum = 0.0f;
-            for (NSUInteger index = 0; index < reduction; ++index) {
-                sum += zpu_bfloat16_to_float(leftValues[row * reduction + index]) *
-                    zpu_bfloat16_to_float(rightValues[index * columns + column]);
+    for (NSUInteger batch = 0; batch < shape.batchCount; ++batch) {
+        const NSUInteger leftBase = batch * shape.leftMatrixCount;
+        const NSUInteger rightBase = batch * shape.rightMatrixCount;
+        const NSUInteger destinationBase = batch * shape.destinationMatrixCount;
+        for (NSUInteger row = 0; row < shape.rows; ++row) {
+            for (NSUInteger column = 0; column < shape.columns; ++column) {
+                float sum = 0.0f;
+                for (NSUInteger index = 0; index < shape.reduction; ++index) {
+                    sum += zpu_bfloat16_to_float(leftValues[leftBase + row * shape.reduction + index]) *
+                        zpu_bfloat16_to_float(rightValues[rightBase + index * shape.columns + column]);
+                }
+                resultValues[destinationBase + row * shape.columns + column] = zpu_float_to_bfloat16(sum);
             }
-            resultValues[row * columns + column] = zpu_float_to_bfloat16(sum);
         }
     }
     return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
@@ -6437,34 +6479,16 @@ static BOOL zpu_tensor_matmul_integer(ZPUTensor *left, ZPUTensor *right,
         destination->_dataType != dataType || left->_elementSize != elementSize ||
         right->_elementSize != elementSize || destination->_elementSize != elementSize ||
         (elementSize != 1 && elementSize != 2 && elementSize != 4) ||
-        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil ||
-        left->_dimensions.rank != 2 || right->_dimensions.rank != 2 ||
-        destination->_dimensions.rank != 2) return NO;
-    NSUInteger leftDimensions[2];
-    NSUInteger rightDimensions[2];
-    NSUInteger destinationDimensions[2];
-    if (!zpu_tensor_read_extents(left->_dimensions, 2, leftDimensions, NO) ||
-        !zpu_tensor_read_extents(right->_dimensions, 2, rightDimensions, NO) ||
-        !zpu_tensor_read_extents(destination->_dimensions, 2, destinationDimensions, NO) ||
-        leftDimensions[1] != rightDimensions[0] ||
-        destinationDimensions[0] != leftDimensions[0] ||
-        destinationDimensions[1] != rightDimensions[1]) return NO;
-    const NSUInteger rows = leftDimensions[0];
-    const NSUInteger reduction = leftDimensions[1];
-    const NSUInteger columns = rightDimensions[1];
-    if ((reduction != 0 && rows > SIZE_MAX / reduction) ||
-        (columns != 0 && reduction > SIZE_MAX / columns) ||
-        (columns != 0 && rows > SIZE_MAX / columns)) return NO;
-    const NSUInteger leftCount = rows * reduction;
-    const NSUInteger rightCount = reduction * columns;
-    const NSUInteger destinationCount = rows * columns;
-    if (leftCount > SIZE_MAX / elementSize || rightCount > SIZE_MAX / elementSize ||
-        destinationCount > SIZE_MAX / elementSize) return NO;
-    const NSUInteger leftByteCount = leftCount * elementSize;
-    const NSUInteger rightByteCount = rightCount * elementSize;
-    const NSUInteger destinationByteCount = destinationCount * elementSize;
-    NSUInteger zeroValues[2] = {0, 0};
-    MTLTensorExtents *zero = zpu_tensor_make_extents(2, zeroValues);
+        left->_dimensions == nil || right->_dimensions == nil || destination->_dimensions == nil) return NO;
+    ZPUTensorMatmulShape shape;
+    if (!zpu_tensor_matmul_shape(left, right, destination, &shape) ||
+        shape.leftCount > SIZE_MAX / elementSize || shape.rightCount > SIZE_MAX / elementSize ||
+        shape.destinationCount > SIZE_MAX / elementSize) return NO;
+    const NSUInteger leftByteCount = shape.leftCount * elementSize;
+    const NSUInteger rightByteCount = shape.rightCount * elementSize;
+    const NSUInteger destinationByteCount = shape.destinationCount * elementSize;
+    NSUInteger zeroValues[MTL_TENSOR_MAX_RANK] = {0};
+    MTLTensorExtents *zero = zpu_tensor_make_extents(shape.rank, zeroValues);
     NSMutableData *leftPacked = [NSMutableData dataWithLength:leftByteCount];
     NSMutableData *rightPacked = [NSMutableData dataWithLength:rightByteCount];
     NSMutableData *resultPacked = [NSMutableData dataWithLength:destinationByteCount];
@@ -6477,29 +6501,34 @@ static BOOL zpu_tensor_matmul_integer(ZPUTensor *left, ZPUTensor *right,
     const NSUInteger bitCount = elementSize * 8;
     const uint64_t valueMask = (UINT64_C(1) << bitCount) - 1;
     const uint64_t signBit = UINT64_C(1) << (bitCount - 1);
-    for (NSUInteger row = 0; row < rows; ++row) {
-        for (NSUInteger column = 0; column < columns; ++column) {
-            uint64_t sum = 0;
-            for (NSUInteger index = 0; index < reduction; ++index) {
-                uint64_t leftValue = 0;
-                uint64_t rightValue = 0;
-                memcpy(&leftValue, leftBytes + (row * reduction + index) * elementSize, elementSize);
-                memcpy(&rightValue, rightBytes + (index * columns + column) * elementSize, elementSize);
-                leftValue &= valueMask;
-                rightValue &= valueMask;
-                uint64_t product;
-                if (signedValues) {
-                    const int64_t leftSigned = (leftValue & signBit) != 0 ?
-                        (int64_t)(leftValue | ~valueMask) : (int64_t)leftValue;
-                    const int64_t rightSigned = (rightValue & signBit) != 0 ?
-                        (int64_t)(rightValue | ~valueMask) : (int64_t)rightValue;
-                    product = (uint64_t)(leftSigned * rightSigned);
-                } else {
-                    product = leftValue * rightValue;
+    for (NSUInteger batch = 0; batch < shape.batchCount; ++batch) {
+        const NSUInteger leftBase = batch * shape.leftMatrixCount;
+        const NSUInteger rightBase = batch * shape.rightMatrixCount;
+        const NSUInteger destinationBase = batch * shape.destinationMatrixCount;
+        for (NSUInteger row = 0; row < shape.rows; ++row) {
+            for (NSUInteger column = 0; column < shape.columns; ++column) {
+                uint64_t sum = 0;
+                for (NSUInteger index = 0; index < shape.reduction; ++index) {
+                    uint64_t leftValue = 0;
+                    uint64_t rightValue = 0;
+                    memcpy(&leftValue, leftBytes + (leftBase + row * shape.reduction + index) * elementSize, elementSize);
+                    memcpy(&rightValue, rightBytes + (rightBase + index * shape.columns + column) * elementSize, elementSize);
+                    leftValue &= valueMask;
+                    rightValue &= valueMask;
+                    uint64_t product;
+                    if (signedValues) {
+                        const int64_t leftSigned = (leftValue & signBit) != 0 ?
+                            (int64_t)(leftValue | ~valueMask) : (int64_t)leftValue;
+                        const int64_t rightSigned = (rightValue & signBit) != 0 ?
+                            (int64_t)(rightValue | ~valueMask) : (int64_t)rightValue;
+                        product = (uint64_t)(leftSigned * rightSigned);
+                    } else {
+                        product = leftValue * rightValue;
+                    }
+                    sum = (sum + product) & valueMask;
                 }
-                sum = (sum + product) & valueMask;
+                memcpy(resultBytes + (destinationBase + row * shape.columns + column) * elementSize, &sum, elementSize);
             }
-            memcpy(resultBytes + (row * columns + column) * elementSize, &sum, elementSize);
         }
     }
     return zpu_tensor_transfer_bytes(destination, zero, destination->_dimensions, nil,
@@ -18397,17 +18426,8 @@ static BOOL zpu_mtl4_ml_dimensions_equal(MTLTensorExtents *left, MTLTensorExtent
 
 static BOOL zpu_mtl4_ml_matmul_dimensions_valid(ZPUTensor *left, ZPUTensor *right,
                                                 ZPUTensor *destination) {
-    if (left == nil || right == nil || destination == nil || left->_dimensions == nil ||
-        right->_dimensions == nil || destination->_dimensions == nil || left->_dimensions.rank != 2 ||
-        right->_dimensions.rank != 2 || destination->_dimensions.rank != 2) return NO;
-    NSUInteger leftValues[2];
-    NSUInteger rightValues[2];
-    NSUInteger destinationValues[2];
-    return zpu_tensor_read_extents(left->_dimensions, 2, leftValues, NO) &&
-        zpu_tensor_read_extents(right->_dimensions, 2, rightValues, NO) &&
-        zpu_tensor_read_extents(destination->_dimensions, 2, destinationValues, NO) &&
-        leftValues[1] == rightValues[0] && destinationValues[0] == leftValues[0] &&
-        destinationValues[1] == rightValues[1];
+    ZPUTensorMatmulShape shape;
+    return zpu_tensor_matmul_shape(left, right, destination, &shape);
 }
 
 static BOOL zpu_mtl4_ml_transpose_dimensions_valid(ZPUTensor *source, ZPUTensor *destination) {

@@ -707,6 +707,53 @@ fn binaryElement(operation_kind: Operation, element_type: ElementType, left: u64
     }
 }
 
+const MatmulShape = struct {
+    rank: usize,
+    rows: usize,
+    reduction: usize,
+    columns: usize,
+    batch_count: usize,
+    left_matrix_count: usize,
+    right_matrix_count: usize,
+    destination_matrix_count: usize,
+};
+
+/// Matmul uses axis 0 for rows and axis 1 for the reduction dimension. Any
+/// remaining axes are equal-sized batch axes, with axis 2 as the fastest
+/// batch axis. This matches ZPU's axis-0-fast dense view convention while
+/// preserving the existing rank-2 operation ABI.
+fn matmulShape(left: *const TensorView, right: *const TensorView, destination: *const TensorView) ?MatmulShape {
+    if (left.rank != right.rank or left.rank != destination.rank or left.rank < 2 or left.rank > max_rank) return null;
+    const rank: usize = left.rank;
+    if (left.dimensions[1] != right.dimensions[0] or
+        destination.dimensions[0] != left.dimensions[0] or
+        destination.dimensions[1] != right.dimensions[1]) return null;
+    for (2..rank) |axis| {
+        if (left.dimensions[axis] != right.dimensions[axis] or
+            left.dimensions[axis] != destination.dimensions[axis]) return null;
+    }
+    const rows = left.dimensions[0];
+    const reduction = left.dimensions[1];
+    const columns = right.dimensions[1];
+    const left_matrix_count = checkedMul(rows, reduction) orelse return null;
+    const right_matrix_count = checkedMul(reduction, columns) orelse return null;
+    const destination_matrix_count = checkedMul(rows, columns) orelse return null;
+    var batch_count: usize = 1;
+    for (2..rank) |axis| {
+        batch_count = checkedMul(batch_count, left.dimensions[axis]) orelse return null;
+    }
+    return .{
+        .rank = rank,
+        .rows = rows,
+        .reduction = reduction,
+        .columns = columns,
+        .batch_count = batch_count,
+        .left_matrix_count = left_matrix_count,
+        .right_matrix_count = right_matrix_count,
+        .destination_matrix_count = destination_matrix_count,
+    };
+}
+
 fn referenceOperation(operation_kind: Operation, element_type: ElementType, arguments: *const OperationArguments, input_info: [max_inputs]?ViewInfo, dense_inputs: [max_inputs]TensorView, dense_destination: TensorView, destination_info: ViewInfo) Status {
     const source_info = input_info[0] orelse return .invalid_argument;
     var output = dense_destination;
@@ -749,61 +796,58 @@ fn referenceOperation(operation_kind: Operation, element_type: ElementType, argu
         },
         .matmul => {
             const right_info = input_info[1] orelse return .invalid_argument;
-            if (source_info.rank != 2 or right_info.rank != 2 or destination_info.rank != 2 or
-                arguments.inputs[0].dimensions[1] != arguments.inputs[1].dimensions[0] or
-                arguments.destination.dimensions[0] != arguments.inputs[0].dimensions[0] or
-                arguments.destination.dimensions[1] != arguments.inputs[1].dimensions[1])
-            {
-                return .invalid_argument;
-            }
-            const rows = arguments.inputs[0].dimensions[0];
-            const reduction = arguments.inputs[0].dimensions[1];
-            const columns = arguments.inputs[1].dimensions[1];
-            for (0..rows) |row| {
-                for (0..columns) |column| {
-                    var result: u64 = 0;
-                    switch (element_type) {
-                        .float32 => {
-                            var sum: f32 = 0;
-                            for (0..reduction) |index| {
-                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
-                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
-                                sum = @mulAdd(f32, f32FromBits(left_value), f32FromBits(right_value), sum);
-                            }
-                            result = f32ToBits(sum);
-                        },
-                        .float16 => {
-                            var sum: f16 = 0;
-                            for (0..reduction) |index| {
-                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
-                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
-                                sum = @mulAdd(f16, f16FromBits(left_value), f16FromBits(right_value), sum);
-                            }
-                            result = f16ToBits(sum);
-                        },
-                        .bfloat16 => {
-                            var sum: f32 = 0;
-                            for (0..reduction) |index| {
-                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
-                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
-                                sum += bfloat16FromBits(left_value) * bfloat16FromBits(right_value);
-                            }
-                            result = bfloat16ToBits(sum);
-                        },
-                        .int4, .uint4, .int8, .uint8, .int16, .uint16, .int32, .uint32 => {
-                            const bits = elementBitsForType(element_type);
-                            const mask = (@as(u64, 1) << @as(u6, @intCast(bits))) - 1;
-                            var sum: u64 = 0;
-                            for (0..reduction) |index| {
-                                const left_value = readElementBits(&dense_inputs[0], source_info, row * reduction + index) orelse return .invalid_argument;
-                                const right_value = readElementBits(&dense_inputs[1], right_info, index * columns + column) orelse return .invalid_argument;
-                                sum = (sum +% ((left_value & mask) *% (right_value & mask))) & mask;
-                            }
-                            result = sum;
-                        },
+            const shape = matmulShape(&arguments.inputs[0], &arguments.inputs[1], &arguments.destination) orelse return .invalid_argument;
+            if (source_info.rank != shape.rank or right_info.rank != shape.rank or destination_info.rank != shape.rank) return .invalid_argument;
+            for (0..shape.batch_count) |batch| {
+                const left_base = batch * shape.left_matrix_count;
+                const right_base = batch * shape.right_matrix_count;
+                const destination_base = batch * shape.destination_matrix_count;
+                for (0..shape.rows) |row| {
+                    for (0..shape.columns) |column| {
+                        var result: u64 = 0;
+                        switch (element_type) {
+                            .float32 => {
+                                var sum: f32 = 0;
+                                for (0..shape.reduction) |index| {
+                                    const left_value = readElementBits(&dense_inputs[0], source_info, left_base + row * shape.reduction + index) orelse return .invalid_argument;
+                                    const right_value = readElementBits(&dense_inputs[1], right_info, right_base + index * shape.columns + column) orelse return .invalid_argument;
+                                    sum = @mulAdd(f32, f32FromBits(left_value), f32FromBits(right_value), sum);
+                                }
+                                result = f32ToBits(sum);
+                            },
+                            .float16 => {
+                                var sum: f16 = 0;
+                                for (0..shape.reduction) |index| {
+                                    const left_value = readElementBits(&dense_inputs[0], source_info, left_base + row * shape.reduction + index) orelse return .invalid_argument;
+                                    const right_value = readElementBits(&dense_inputs[1], right_info, right_base + index * shape.columns + column) orelse return .invalid_argument;
+                                    sum = @mulAdd(f16, f16FromBits(left_value), f16FromBits(right_value), sum);
+                                }
+                                result = f16ToBits(sum);
+                            },
+                            .bfloat16 => {
+                                var sum: f32 = 0;
+                                for (0..shape.reduction) |index| {
+                                    const left_value = readElementBits(&dense_inputs[0], source_info, left_base + row * shape.reduction + index) orelse return .invalid_argument;
+                                    const right_value = readElementBits(&dense_inputs[1], right_info, right_base + index * shape.columns + column) orelse return .invalid_argument;
+                                    sum += bfloat16FromBits(left_value) * bfloat16FromBits(right_value);
+                                }
+                                result = bfloat16ToBits(sum);
+                            },
+                            .int4, .uint4, .int8, .uint8, .int16, .uint16, .int32, .uint32 => {
+                                const bits = elementBitsForType(element_type);
+                                const mask = (@as(u64, 1) << @as(u6, @intCast(bits))) - 1;
+                                var sum: u64 = 0;
+                                for (0..shape.reduction) |index| {
+                                    const left_value = readElementBits(&dense_inputs[0], source_info, left_base + row * shape.reduction + index) orelse return .invalid_argument;
+                                    const right_value = readElementBits(&dense_inputs[1], right_info, right_base + index * shape.columns + column) orelse return .invalid_argument;
+                                    sum = (sum +% ((left_value & mask) *% (right_value & mask))) & mask;
+                                }
+                                result = sum;
+                            },
+                        }
+                        const output_element = destination_base + row * shape.columns + column;
+                        if (!writeElementBits(&output, destination_info, output_element, result)) return .invalid_argument;
                     }
-                    const output_element = row * columns + column;
-                    if (!writeElementBits(&output, destination_info, output_element, result)) return .invalid_argument;
                 }
             }
             if (!copyDenseToDestination(&output, destination_info, &arguments.destination, destination_info)) {
@@ -2094,6 +2138,30 @@ test "fixed CPU operations fall back to exact strided reference math" {
     };
     try std.testing.expectEqual(Status.ok, operation(&matrix_arguments));
     try std.testing.expectEqualSlices(f32, &[_]f32{ 58, 64, 139, 154 }, &matrix_output);
+
+    const batched_left_dimensions = [_]usize{ 2, 2, 2 } ++ [_]usize{0} ** (max_rank - 3);
+    const batched_right_dimensions = [_]usize{ 2, 3, 2 } ++ [_]usize{0} ** (max_rank - 3);
+    const batched_output_dimensions = [_]usize{ 2, 3, 2 } ++ [_]usize{0} ** (max_rank - 3);
+    const batched_left_strides = [_]usize{ 1, 2, 4 } ++ [_]usize{0} ** (max_rank - 3);
+    const batched_right_strides = [_]usize{ 1, 2, 6 } ++ [_]usize{0} ** (max_rank - 3);
+    const batched_output_strides = [_]usize{ 1, 2, 6 } ++ [_]usize{0} ** (max_rank - 3);
+    var batched_left = [_]f32{ 1, 2, 3, 4, 2, 1, 0, 3 };
+    var batched_right = [_]f32{ 5, 6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 6 };
+    var batched_output = [_]f32{ -99, -99, -99, -99, -99, -99, -99, -99, -99, -99, -99, -99 };
+    const batched_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.matmul),
+        .element_type = @intFromEnum(ElementType.float32),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{
+            testView(f32, &batched_left, 3, batched_left_dimensions, batched_left_strides),
+            testView(f32, &batched_right, 3, batched_right_dimensions, batched_right_strides),
+        },
+        .destination = testView(f32, &batched_output, 3, batched_output_dimensions, batched_output_strides),
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&batched_arguments));
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 21, 24, 27, 47, 54, 61, 6, 9, 12, 12, 15, 18 }, &batched_output);
 
     const vector_dimensions = [_]usize{2} ++ [_]usize{0} ** (max_rank - 1);
     const vector_strides = [_]usize{1} ++ [_]usize{0} ** (max_rank - 1);

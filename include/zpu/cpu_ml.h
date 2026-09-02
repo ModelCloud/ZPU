@@ -101,6 +101,11 @@ enum {
     ZPU_CPU_ML_OPERATION_MATMUL = 7,
 };
 
+/* Fixed matmul uses dimensions[0] as rows and dimensions[1] as the
+ * reduction axis. Equal dimensions[2..rank-1] are independent batches;
+ * rank-2 remains the ordinary matrix case. All views still use logical
+ * element strides and providers receive dense staged views. */
+
 /* Element identifiers are explicit because element_bits alone cannot
  * distinguish signed, unsigned, floating-point, and bfloat16 tensors. */
 enum {
