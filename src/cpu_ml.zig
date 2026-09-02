@@ -740,7 +740,6 @@ fn referenceOperation(operation_kind: Operation, element_type: ElementType, argu
             return .ok;
         },
         .matmul => {
-            if (element_type == .int4 or element_type == .uint4) return .unsupported;
             const right_info = input_info[1] orelse return .invalid_argument;
             if (source_info.rank != 2 or right_info.rank != 2 or destination_info.rank != 2 or
                 arguments.inputs[0].dimensions[1] != arguments.inputs[1].dimensions[0] or
@@ -783,7 +782,7 @@ fn referenceOperation(operation_kind: Operation, element_type: ElementType, argu
                             }
                             result = bfloat16ToBits(sum);
                         },
-                        .int8, .uint8, .int16, .uint16, .int32, .uint32 => {
+                        .int4, .uint4, .int8, .uint8, .int16, .uint16, .int32, .uint32 => {
                             const bits = elementBitsForType(element_type);
                             const mask = (@as(u64, 1) << @as(u6, @intCast(bits))) - 1;
                             var sum: u64 = 0;
@@ -794,7 +793,6 @@ fn referenceOperation(operation_kind: Operation, element_type: ElementType, argu
                             }
                             result = sum;
                         },
-                        .int4, .uint4 => unreachable,
                     }
                     const output_element = row * columns + column;
                     if (!writeElementBits(&output, destination_info, output_element, result)) return .invalid_argument;
@@ -2021,6 +2019,62 @@ test "fixed CPU operations fall back to exact strided reference math" {
     };
     try std.testing.expectEqual(Status.ok, operation(&integer_arguments));
     try std.testing.expectEqualSlices(u8, &[_]u8{ 6, 7, 22, 29 }, &integer_output);
+
+    const packed_dimensions = [_]usize{ 2, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    const packed_strides = [_]usize{ 1, 2 } ++ [_]usize{0} ** (max_rank - 2);
+    var uint4_left = [_]u8{ 0x21, 0x43 };
+    var uint4_right = [_]u8{ 0x65, 0x87 };
+    var uint4_output = [_]u8{ 0xa5, 0xa5 };
+    const uint4_left_view = TensorView{
+        .data = @ptrCast(uint4_left[0..].ptr), .byte_length = uint4_left.len,
+        .offset_bytes = 0, .rank = 2, .element_bits = 4,
+        .dimensions = packed_dimensions, .strides = packed_strides,
+    };
+    const uint4_right_view = TensorView{
+        .data = @ptrCast(uint4_right[0..].ptr), .byte_length = uint4_right.len,
+        .offset_bytes = 0, .rank = 2, .element_bits = 4,
+        .dimensions = packed_dimensions, .strides = packed_strides,
+    };
+    const uint4_output_view = TensorView{
+        .data = @ptrCast(uint4_output[0..].ptr), .byte_length = uint4_output.len,
+        .offset_bytes = 0, .rank = 2, .element_bits = 4,
+        .dimensions = packed_dimensions, .strides = packed_strides,
+    };
+    const uint4_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.matmul),
+        .element_type = @intFromEnum(ElementType.uint4),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{ uint4_left_view, uint4_right_view },
+        .destination = uint4_output_view,
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&uint4_arguments));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x63, 0x2b }, &uint4_output);
+
+    var int4_left = [_]u8{ 0x2f, 0xe3 };
+    var int4_right = [_]u8{ 0xd1, 0x84 };
+    var int4_output = [_]u8{ 0xa5, 0xa5 };
+    const int4_arguments = OperationArguments{
+        .operation = @intFromEnum(Operation.matmul),
+        .element_type = @intFromEnum(ElementType.int4),
+        .input_count = 2,
+        .reserved = 0,
+        .inputs = .{
+            .{ .data = @ptrCast(int4_left[0..].ptr), .byte_length = int4_left.len,
+               .offset_bytes = 0, .rank = 2, .element_bits = 4,
+               .dimensions = packed_dimensions, .strides = packed_strides },
+            .{ .data = @ptrCast(int4_right[0..].ptr), .byte_length = int4_right.len,
+               .offset_bytes = 0, .rank = 2, .element_bits = 4,
+               .dimensions = packed_dimensions, .strides = packed_strides },
+        },
+        .destination = .{ .data = @ptrCast(int4_output[0..].ptr), .byte_length = int4_output.len,
+                          .offset_bytes = 0, .rank = 2, .element_bits = 4,
+                          .dimensions = packed_dimensions, .strides = packed_strides },
+        .permutation = [_]u32{0} ** max_rank,
+    };
+    try std.testing.expectEqual(Status.ok, operation(&int4_arguments));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x37, 0x7b }, &int4_output);
 }
 
 test "named CPU provider receives a portable graph name and dense transpose views" {

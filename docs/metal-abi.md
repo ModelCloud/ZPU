@@ -444,7 +444,8 @@ triangle path:
   and BFloat16 matrix multiplication through the same ZPU-owned storage path;
   `zpu_cpu_ml_matmul_u8`, `zpu_cpu_ml_matmul_i8`, `zpu_cpu_ml_matmul_u16`,
   `zpu_cpu_ml_matmul_i16`, `zpu_cpu_ml_matmul_u32`, and
-  `zpu_cpu_ml_matmul_i32` provide fixed-width rank-2 integer matrix
+  `zpu_cpu_ml_matmul_i32`, `zpu_cpu_ml_matmul_i4`, and
+  `zpu_cpu_ml_matmul_u4` provide fixed-width rank-2 integer matrix
   multiplication with modulo result-bit semantics through that same path; the
   registered `zpu_cpu_ml_transpose` profile performs a deferred reverse-axis
   transpose through the portable CPU tensor layer, preserving explicit Metal
@@ -515,7 +516,8 @@ triangle path:
   `zpu_cpu_ml_matmul_f16`, `zpu_cpu_ml_matmul_bf16`,
   `zpu_cpu_ml_matmul_u8`, `zpu_cpu_ml_matmul_i8`,
   `zpu_cpu_ml_matmul_u16`, `zpu_cpu_ml_matmul_i16`,
-  `zpu_cpu_ml_matmul_u32`, and `zpu_cpu_ml_matmul_i32` Metal 4
+  `zpu_cpu_ml_matmul_u32`, `zpu_cpu_ml_matmul_i32`,
+  `zpu_cpu_ml_matmul_i4`, and `zpu_cpu_ml_matmul_u4` Metal 4
   machine-learning profiles preserve CPU fence update/wait ordering and
   interleave tensor copies and arithmetic with other commands at their encoded
   position in the deferred ZPU command buffer; arbitrary ML graphs remain
