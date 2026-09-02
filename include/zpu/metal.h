@@ -519,7 +519,34 @@ enum {
     ZPU_METAL_COMPUTE_LOG_F32 = 99,
     ZPU_METAL_COMPUTE_SQRT_F32 = 100,
     ZPU_METAL_COMPUTE_TANH_F32 = 101,
+    /* A validated, allocation-free Float32 expression program produced by
+     * ZPU's portable MSL expression lowerer. It uses input/output buffers
+     * 0/1 and remains entirely on the CPU command path. */
+    ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION = 102,
 };
+
+#define ZPU_METAL_F32_EXPRESSION_VERSION 1u
+#define ZPU_METAL_F32_EXPRESSION_MAX_INSTRUCTIONS 48u
+
+typedef struct zpu_metal_f32_expression_instruction {
+    uint8_t op;
+    uint8_t a;
+    uint8_t b;
+    uint8_t c;
+    float immediate;
+} zpu_metal_f32_expression_instruction;
+
+/* Portable serialized SSA program copied by value into deferred commands.
+ * The instruction encoding is adapter-private; callers should construct it
+ * with zpu_metal_compile_f32_expression rather than hand-writing opcodes. */
+typedef struct zpu_metal_f32_expression_program {
+    uint32_t version;
+    uint32_t instruction_count;
+    uint32_t element_limit;
+    uint8_t output_value;
+    uint8_t reserved[3];
+    zpu_metal_f32_expression_instruction instructions[ZPU_METAL_F32_EXPRESSION_MAX_INSTRUCTIONS];
+} zpu_metal_f32_expression_program;
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_VERSION 2u
@@ -881,7 +908,14 @@ int zpu_metal_resource_state_encoder_end_encoding(zpu_metal_resource_state_encod
 void zpu_metal_resource_state_encoder_destroy(zpu_metal_resource_state_encoder *encoder);
 
 zpu_metal_compute_encoder *zpu_metal_command_buffer_compute_encoder(zpu_metal_command_buffer *command_buffer);
+/* Compiles a compact, whitespace-free Float32 expression where `x` denotes
+ * input[id]. Supported operators and math calls execute only in ZPU's CPU
+ * runtime; this function does not invoke Apple's Metal compiler. */
+int zpu_metal_compile_f32_expression(const char *expression, size_t expression_length,
+    uint32_t element_limit, zpu_metal_f32_expression_program *program);
 int zpu_metal_compute_encoder_set_kernel(zpu_metal_compute_encoder *encoder, zpu_metal_compute_kernel kernel);
+int zpu_metal_compute_encoder_set_f32_expression_program(zpu_metal_compute_encoder *encoder,
+    const zpu_metal_f32_expression_program *program);
 int zpu_metal_compute_encoder_set_buffer(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *buffer, size_t offset, uint32_t index);
 int zpu_metal_compute_encoder_set_acceleration_structure(zpu_metal_compute_encoder *encoder, zpu_metal_buffer *acceleration_structure, uint32_t index);
 /* Selects a bounded CPU intersection-function profile for the fixed ray

@@ -12,6 +12,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const raster3d = @import("raster3d.zig");
+const msl_expression = @import("msl_expression.zig");
 
 const allocator = std.heap.c_allocator;
 
@@ -872,6 +873,7 @@ const ComputeBufferAddCommand = struct {
 
 const ComputeBufferUnaryCommand = struct {
     kernel: u8,
+    program: msl_expression.Program = .{},
     input: *Buffer,
     input_offset: usize,
     output: *Buffer,
@@ -5244,7 +5246,7 @@ fn isIntegerKernel(kernel: u8) bool {
 }
 
 fn isUnaryKernel(kernel: u8) bool {
-    return kernel >= 96 and kernel <= 101;
+    return kernel >= 96 and kernel <= 102;
 }
 
 fn integerKernelElementBytes(kernel: u8) usize {
@@ -5283,6 +5285,7 @@ pub const ComputeEncoder = struct {
     acceleration_structure: ?*Buffer = null,
     acceleration_structure_index: u32 = 0,
     intersection_function_profile: u8 = 0,
+    f32_expression_program: msl_expression.Program = .{},
 
     pub fn deinit(self: *ComputeEncoder) void {
         self.magic = 0;
@@ -5306,8 +5309,14 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 101) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 102) return error.UnsupportedOperation;
         self.kernel = kernel;
+        if (kernel != 102) self.f32_expression_program = .{};
+    }
+
+    pub fn setF32ExpressionProgram(self: *ComputeEncoder, program: *const msl_expression.Program) Error!void {
+        if (!self.open() or self.kernel != 102 or !msl_expression.validate(program)) return error.InvalidArgument;
+        self.f32_expression_program = program.*;
     }
 
     fn isBufferAddKernel(self: *const ComputeEncoder) bool {
@@ -5369,12 +5378,14 @@ pub const ComputeEncoder = struct {
         if (!self.isBufferUnaryKernel() or threads_per_grid.height != 1 or threads_per_grid.depth != 1 or
             threads_per_threadgroup.width == 0 or threads_per_threadgroup.height != 1 or
             threads_per_threadgroup.depth != 1) return error.InvalidArgument;
+        if (self.kernel == 102 and !msl_expression.validate(&self.f32_expression_program)) return error.InvalidCommand;
         const input = self.buffers[0] orelse return error.InvalidCommand;
         const output = self.buffers[1] orelse return error.InvalidCommand;
         if (!validBuffer(input) or !validBuffer(output) or input.device != self.command_buffer.queue.device or
             output.device != input.device) return error.InvalidResource;
         _ = try self.command_buffer.append(.{ .compute_buffer_unary = .{
             .kernel = self.kernel,
+            .program = self.f32_expression_program,
             .input = input,
             .input_offset = self.buffer_offsets[0],
             .output = output,
@@ -6345,18 +6356,23 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
 }
 
 fn executeBufferUnary(command: ComputeBufferUnaryCommand) Error!void {
-    if (command.kernel < 96 or command.kernel > 101 or
+    if (command.kernel < 96 or command.kernel > 102 or
         !validBuffer(command.input) or !validBuffer(command.output) or
         command.input.device != command.output.device or
         command.threads_per_grid.height != 1 or command.threads_per_grid.depth != 1 or
         command.threads_per_threadgroup.width == 0 or
         command.threads_per_threadgroup.height != 1 or
         command.threads_per_threadgroup.depth != 1) return error.InvalidArgument;
-    const byte_count = std.math.mul(usize, command.threads_per_grid.width, @sizeOf(f32)) catch
+    if (command.kernel == 102 and !msl_expression.validate(&command.program)) return error.InvalidArgument;
+    const element_count = if (command.kernel == 102)
+        @min(command.threads_per_grid.width, command.program.element_limit)
+    else
+        command.threads_per_grid.width;
+    const byte_count = std.math.mul(usize, element_count, @sizeOf(f32)) catch
         return error.InvalidArgument;
     if (!rangeValid(command.input.bytes.len, command.input_offset, byte_count) or
         !rangeValid(command.output.bytes.len, command.output_offset, byte_count)) return error.InvalidArgument;
-    for (0..command.threads_per_grid.width) |index| {
+    for (0..element_count) |index| {
         const offset = index * @sizeOf(f32);
         const input = readF32Little(command.input.bytes, command.input_offset + offset);
         const result: f32 = switch (command.kernel) {
@@ -6366,6 +6382,7 @@ fn executeBufferUnary(command: ComputeBufferUnaryCommand) Error!void {
             99 => @log(input),
             100 => std.math.sqrt(input),
             101 => std.math.tanh(input),
+            102 => msl_expression.evaluate(&command.program, input) catch return error.InvalidArgument,
             else => unreachable,
         };
         writeU32Little(command.output.bytes, command.output_offset + offset, @bitCast(result));
@@ -9846,6 +9863,44 @@ test "CPU unary math compute is deferred and slot-accurate" {
         }
         try std.testing.expectEqual(@as(f32, 123.0), readF32Little(output.bytes, 0));
     }
+}
+
+test "CPU composed Float32 expression is deferred and honors the source guard" {
+    const device = try createDevice();
+    defer destroyDevice(device);
+    const queue = try createQueue(device);
+    defer destroyQueue(queue);
+    const input_values = [_]f32{ -1.5, -0.25, 0.0, 0.75, 2.0, 3.0 };
+    const sentinel: f32 = 321.0;
+    const output_values = [_]f32{sentinel} ** input_values.len;
+    const input = try createBuffer(device, @sizeOf(@TypeOf(input_values)), @ptrCast(&input_values));
+    defer destroyBuffer(input);
+    const output = try createBuffer(device, @sizeOf(@TypeOf(output_values)), @ptrCast(&output_values));
+    defer destroyBuffer(output);
+    var program: msl_expression.Program = .{};
+    try msl_expression.compile("sin(x)*0.5+cos(x)", 4, &program);
+
+    var command_buffer = try createCommandBuffer(queue);
+    defer destroyCommandBuffer(command_buffer);
+    var encoder = try beginCompute(command_buffer);
+    try encoder.setKernel(102);
+    try encoder.setF32ExpressionProgram(&program);
+    try encoder.setBuffer(input, 0, 0);
+    try encoder.setBuffer(output, 0, 1);
+    try encoder.dispatchThreads(.{ .width = 6, .height = 1, .depth = 1 }, .{ .width = 2, .height = 1, .depth = 1 });
+    try encoder.endEncoding();
+    destroyComputeEncoder(encoder);
+    for (0..input_values.len) |index| {
+        try std.testing.expectEqual(sentinel, readF32Little(output.bytes, index * @sizeOf(f32)));
+    }
+    try command_buffer.commit();
+    try std.testing.expectEqual(CommandStatus.completed, command_buffer.status);
+    for (input_values[0..4], 0..) |value, index| {
+        const expected = @sin(value) * 0.5 + @cos(value);
+        try std.testing.expectApproxEqAbs(expected, readF32Little(output.bytes, index * @sizeOf(f32)), 0.000001);
+    }
+    try std.testing.expectEqual(sentinel, readF32Little(output.bytes, 4 * @sizeOf(f32)));
+    try std.testing.expectEqual(sentinel, readF32Little(output.bytes, 5 * @sizeOf(f32)));
 }
 
 test "CPU buffer multiply compute is deferred and slot-accurate" {
@@ -14292,6 +14347,29 @@ pub export fn zpu_metal_command_buffer_compute_encoder(command_buffer: ?*Command
 
 pub export fn zpu_metal_compute_encoder_set_kernel(encoder: ?*ComputeEncoder, kernel: u8) callconv(.c) c_int {
     (encoder orelse return -1).setKernel(kernel) catch |err| return errorCode(err);
+    return 0;
+}
+
+pub export fn zpu_metal_compile_f32_expression(
+    expression: ?[*]const u8,
+    expression_length: usize,
+    element_limit: u32,
+    program: ?*msl_expression.Program,
+) callconv(.c) c_int {
+    const output = program orelse return -1;
+    const bytes = (expression orelse {
+        output.* = .{};
+        return -1;
+    })[0..expression_length];
+    msl_expression.compile(bytes, element_limit, output) catch return -1;
+    return 0;
+}
+
+pub export fn zpu_metal_compute_encoder_set_f32_expression_program(
+    encoder: ?*ComputeEncoder,
+    program: ?*const msl_expression.Program,
+) callconv(.c) c_int {
+    (encoder orelse return -1).setF32ExpressionProgram(program orelse return -1) catch |err| return errorCode(err);
     return 0;
 }
 

@@ -13,4 +13,5 @@ test {
     _ = @import("cpu_ml.zig");
     _ = @import("metal/c_api.zig");
     _ = @import("metal/runtime.zig");
+    _ = @import("metal/msl_expression.zig");
 }

@@ -129,6 +129,7 @@ static NSString *const zpu_cpu_exp_f32_function_name = @"zpu_cpu_exp_f32";
 static NSString *const zpu_cpu_log_f32_function_name = @"zpu_cpu_log_f32";
 static NSString *const zpu_cpu_sqrt_f32_function_name = @"zpu_cpu_sqrt_f32";
 static NSString *const zpu_cpu_tanh_f32_function_name = @"zpu_cpu_tanh_f32";
+static NSString *const zpu_cpu_msl_f32_expression_function_name = @"zpu_cpu_msl_f32_expression";
 static NSString *const zpu_cpu_add_f16_function_name = @"zpu_cpu_add_f16";
 static NSString *const zpu_cpu_mul_f16_function_name = @"zpu_cpu_mul_f16";
 static NSString *const zpu_cpu_sub_f16_function_name = @"zpu_cpu_sub_f16";
@@ -220,7 +221,7 @@ static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel
 }
 
 static BOOL zpu_compute_buffer_unary_kernel(zpu_metal_compute_kernel kernel) {
-    return kernel >= ZPU_METAL_COMPUTE_SIN_F32 && kernel <= ZPU_METAL_COMPUTE_TANH_F32;
+    return kernel >= ZPU_METAL_COMPUTE_SIN_F32 && kernel <= ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION;
 }
 
 static BOOL zpu_compute_buffer_vector_kernel(zpu_metal_compute_kernel kernel) {
@@ -1690,6 +1691,7 @@ static uint64_t zpu_next_cpu_drawable_id;
      * metadata. Keep this as an untyped object so the adapter still builds
      * against deployment SDKs predating MTLFunctionReflection. */
     id _functionReflection;
+    zpu_metal_f32_expression_program _f32ExpressionProgram;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name;
 - (instancetype)initWithOwner:(ZPUDevice *)owner name:(NSString *)name
@@ -1755,6 +1757,7 @@ static uint64_t zpu_next_cpu_drawable_id;
     NSDictionary *_functionImplementations;
     NSDictionary *_functionArgumentBufferLayouts;
     NSDictionary *_sourceFunctionReflections;
+    NSDictionary *_sourceComputePrograms;
     NSSet *_visibleFunctionNames;
     NSString *_label;
     MTLLibraryType _type;
@@ -1915,6 +1918,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
     BOOL _supportsIndirectCommandBuffers;
     MTLComputePipelineReflection *_reflection;
     MTLComputePipelineReflection *_legacyReflection;
+    zpu_metal_f32_expression_program _f32ExpressionProgram;
 }
 - (instancetype)initWithOwner:(ZPUDevice *)owner function:(id<MTLFunction>)function error:(NSError **)error;
 - (instancetype)initWithPipeline:(ZPUComputePipelineState *)pipeline
@@ -10065,6 +10069,7 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         else if ([name isEqualToString:zpu_cpu_log_f32_function_name]) kernel = ZPU_METAL_COMPUTE_LOG_F32;
         else if ([name isEqualToString:zpu_cpu_sqrt_f32_function_name]) kernel = ZPU_METAL_COMPUTE_SQRT_F32;
         else if ([name isEqualToString:zpu_cpu_tanh_f32_function_name]) kernel = ZPU_METAL_COMPUTE_TANH_F32;
+        else if ([name isEqualToString:zpu_cpu_msl_f32_expression_function_name]) kernel = ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION;
         else if ([name isEqualToString:zpu_cpu_add_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F32X4;
         else if ([name isEqualToString:zpu_cpu_mul_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32X4;
         else if ([name isEqualToString:zpu_cpu_sub_f32x4_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32X4;
@@ -12808,6 +12813,7 @@ static BOOL zpu_apply_legacy_compute_descriptor(
         _stageInputAttributes = @[];
         _argumentBufferLayout = nil;
         _functionReflection = nil;
+        memset(&_f32ExpressionProgram, 0, sizeof(_f32ExpressionProgram));
         /* Descriptor specializedName changes the public symbol only.  The
          * registered implementation still owns its vertex/stage metadata;
          * looking at _name here would silently drop it for aliases. */
@@ -13020,7 +13026,8 @@ static NSString *zpu_source_compact(NSString *source) {
  * profile.  These are the only source-defined kernels that can be mapped to
  * an existing ZPU CPU implementation without invoking Apple's compiler or
  * guessing at arbitrary MSL semantics. */
-static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functions(NSString *source) {
+static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functions(
+    NSString *source, NSMutableDictionary<NSString *, NSData *> *expressionPrograms) {
     if (source.length == 0) return @{};
     NSError *regexError = nil;
     NSRegularExpression *kernelExpression = [NSRegularExpression
@@ -13314,6 +13321,36 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
                         unaryIndexName, unaryIndexName, unaryProfiles[profileIndex].intrinsic, unaryIndexName];
                     if ([compactBody isEqualToString:expectedBody]) {
                         implementations[functionName] = unaryProfiles[profileIndex].implementation;
+                        return;
+                    }
+                }
+
+                /* The reusable expression profile accepts compositions of
+                 * Float32 operators and pure-math calls. Replace only the
+                 * validated input[id] leaf with the parser token `x`; the
+                 * portable Zig compiler rejects all remaining MSL syntax. */
+                NSString *escapedIndex = [NSRegularExpression escapedPatternForString:unaryIndexName];
+                NSString *bodyPattern = [NSString stringWithFormat:
+                    @"^if\\(%@>=([0-9]+)\\)return;output\\[%@\\]=(.+);$",
+                    escapedIndex, escapedIndex];
+                NSRegularExpression *bodyExpression = [NSRegularExpression
+                    regularExpressionWithPattern:bodyPattern options:0 error:nil];
+                NSTextCheckingResult *bodyMatch = [bodyExpression firstMatchInString:compactBody options:0
+                    range:NSMakeRange(0, compactBody.length)];
+                if (bodyMatch != nil) {
+                    NSString *limitText = [compactBody substringWithRange:[bodyMatch rangeAtIndex:1]];
+                    unsigned long long limitValue = strtoull(limitText.UTF8String, NULL, 10);
+                    NSString *expression = [compactBody substringWithRange:[bodyMatch rangeAtIndex:2]];
+                    NSString *inputReference = [NSString stringWithFormat:@"input[%@]", unaryIndexName];
+                    NSString *portableExpression = [expression stringByReplacingOccurrencesOfString:inputReference
+                                                                                          withString:@"x"];
+                    NSData *expressionData = [portableExpression dataUsingEncoding:NSUTF8StringEncoding];
+                    zpu_metal_f32_expression_program program = {0};
+                    if (limitValue > 0 && limitValue <= UINT32_MAX && expressionData.length != 0 &&
+                        zpu_metal_compile_f32_expression(expressionData.bytes, expressionData.length,
+                            (uint32_t)limitValue, &program) == ZPU_METAL_OK) {
+                        implementations[functionName] = zpu_cpu_msl_f32_expression_function_name;
+                        expressionPrograms[functionName] = [NSData dataWithBytes:&program length:sizeof(program)];
                         return;
                     }
                 }
@@ -15175,6 +15212,7 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
         _installName = [installName copy];
         _visibleFunctionNames = [NSSet set];
         NSMutableDictionary<NSString *, NSString *> *implementations = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSData *> *sourceComputePrograms = [NSMutableDictionary dictionary];
         NSMutableArray *names = [NSMutableArray array];
         NSDictionary<NSString *, NSDictionary *> *sourceArgumentBufferLayouts =
             zpu_source_lowerable_argument_buffer_layouts(source);
@@ -15331,7 +15369,7 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                 implementations[name] = name;
             }
         }
-        [zpu_source_lowerable_compute_functions(source) enumerateKeysAndObjectsUsingBlock:
+        [zpu_source_lowerable_compute_functions(source, sourceComputePrograms) enumerateKeysAndObjectsUsingBlock:
             ^(NSString *name, NSString *implementation, BOOL *stop) {
                 (void)stop;
                 if (![names containsObject:name]) {
@@ -15472,6 +15510,7 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
         _functionImplementations = [implementations copy];
         _functionArgumentBufferLayouts = [sourceArgumentBufferLayouts copy];
         _sourceFunctionReflections = [sourceFunctionReflections copy] ?: @{};
+        _sourceComputePrograms = [sourceComputePrograms copy];
     }
     return self;
 }
@@ -15507,6 +15546,11 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                                                            functionType:functionType
                                                                 options:MTLFunctionOptionNone];
     function->_argumentBufferLayout = _functionArgumentBufferLayouts[functionName];
+    NSData *expressionProgram = _sourceComputePrograms[functionName];
+    if (expressionProgram.length == sizeof(function->_f32ExpressionProgram)) {
+        [expressionProgram getBytes:&function->_f32ExpressionProgram
+                             length:sizeof(function->_f32ExpressionProgram)];
+    }
     if (sourceLowered) {
         if (@available(macOS 26.0, iOS 26.0, *)) {
             function->_functionReflection = _sourceFunctionReflections[functionName];
@@ -20512,6 +20556,7 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_LOG_F32: return zpu_cpu_log_f32_function_name;
         case ZPU_METAL_COMPUTE_SQRT_F32: return zpu_cpu_sqrt_f32_function_name;
         case ZPU_METAL_COMPUTE_TANH_F32: return zpu_cpu_tanh_f32_function_name;
+        case ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION: return zpu_cpu_msl_f32_expression_function_name;
         case ZPU_METAL_COMPUTE_ADD_F16: return zpu_cpu_add_f16_function_name;
         case ZPU_METAL_COMPUTE_MUL_F16: return zpu_cpu_mul_f16_function_name;
         case ZPU_METAL_COMPUTE_SUB_F16: return zpu_cpu_sub_f16_function_name;
@@ -20638,6 +20683,7 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
         _maxTotalThreadsPerThreadgroup = 1024;
         _requiredThreadsPerThreadgroup = MTLSizeMake(0, 0, 0);
         _supportsIndirectCommandBuffers = YES;
+        memset(&_f32ExpressionProgram, 0, sizeof(_f32ExpressionProgram));
         ZPUCPUFunction *cpuFunction = (ZPUCPUFunction *)function;
         if (![cpuFunction isKindOfClass:[ZPUCPUFunction class]] || cpuFunction->_owner != owner ||
             cpuFunction.functionType != MTLFunctionTypeKernel) {
@@ -20723,6 +20769,10 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_SQRT_F32;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_tanh_f32_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_TANH_F32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_msl_f32_expression_function_name] &&
+                   cpuFunction->_f32ExpressionProgram.version == ZPU_METAL_F32_EXPRESSION_VERSION) {
+            _kernel = ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION;
+            _f32ExpressionProgram = cpuFunction->_f32ExpressionProgram;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_add_f16_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_ADD_F16;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_f16_function_name]) {
@@ -20889,6 +20939,7 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
         _supportsIndirectCommandBuffers = pipeline->_supportsIndirectCommandBuffers;
         _reflection = pipeline->_reflection;
         _legacyReflection = pipeline->_legacyReflection;
+        _f32ExpressionProgram = pipeline->_f32ExpressionProgram;
     }
     return self;
 }
@@ -21248,6 +21299,12 @@ static BOOL zpu_function_table_buffer_belongs_to_device(ZPUDevice *owner,
     if (![pipeline isKindOfClass:[ZPUComputePipelineState class]] ||
         pipeline->_owner != [_owner device] ||
         zpu_metal_compute_encoder_set_kernel(_zpuEncoder, pipeline->_kernel) != ZPU_METAL_OK) {
+        [_owner markError];
+        return;
+    }
+    if (pipeline->_kernel == ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION &&
+        zpu_metal_compute_encoder_set_f32_expression_program(
+            _zpuEncoder, &pipeline->_f32ExpressionProgram) != ZPU_METAL_OK) {
         [_owner markError];
         return;
     }

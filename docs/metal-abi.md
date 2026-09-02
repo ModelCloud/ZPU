@@ -336,7 +336,18 @@ triangle path:
   CPU/ZPU command stream. Source lowering admits only the exact intrinsic
   assignment and fixed dispatch bound; native Metal is an oracle for these
   pure-math profiles, with the test suite applying the documented `1e-6`
-  scale-aware comparison tolerance. Arbitrary MSL math remains rejected.
+  scale-aware comparison tolerance.
+  A reusable `ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION` profile additionally
+  lowers composed scalar Float32 expressions over `input[id]` into a fixed,
+  validated SSA program. It supports parentheses, constants, unary `+/-`,
+  `+`, `-`, `*`, `/`, common unary transcendental/rounding calls, and the
+  bounded `pow`, `min`, `max`, `fma`, `clamp`, and `mix` calls. The program is
+  copied by value into the deferred command and interpreted by ZPU on the CPU;
+  the Apple compiler and command encoder are never retained or invoked.
+  Source guards such as `if (id >= N) return` remain effective even when the
+  caller dispatches more than N threads. Unsupported statements, types,
+  resource layouts, calls, and oversized programs remain fail-closed, so this
+  is a composable compiler slice rather than a claim of arbitrary MSL support.
   The bounded `zpu_cpu_copy_rgba8_texture_to_texture` profile reads a
   ZPU-owned RGBA8 texture at binding 0 and writes a same-sized ZPU-owned
   RGBA8 texture at binding 1. Its CPU loop clips the dispatch to the output
@@ -470,8 +481,8 @@ triangle path:
   `bfloat2/3/4` buffer arithmetic; vector 3 preserves Metal's padded
   four-lane, two-byte storage stride and all narrow vector execution remains
   CPU/ZPU-owned.
-  Arbitrary ML graphs and arbitrary-MSL compiler
-  requests remain fail-closed; the registered
+  Arbitrary ML graphs and arbitrary-MSL compiler requests outside the
+  validated Float32 expression slice remain fail-closed; the registered
   `zpu_cpu_tile_gradient_rgba8` tile profile is
   also compiled as CPU metadata and dispatches ordered ZPU tile work with
   exact attachment-global upper-left `(0,0)` coordinates, recorded scissor
@@ -756,8 +767,9 @@ triangle path:
   kernels whose only parameters are built-in grid inputs) additionally
   expose native-matching buffer/texture/sampler/function-table/acceleration
   resource reflection and execute as
-  deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty arbitrary
-  MSL remains fail-closed. The registered
+  deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty source
+  outside the registered profiles and validated Float32 expression slice
+  remains fail-closed. The registered
   `zpu_cpu_intersection_triangle` and
   `zpu_cpu_intersection_triangle_accept` profiles also preserve source-library
   intersection-function descriptors as CPU-owned metadata with

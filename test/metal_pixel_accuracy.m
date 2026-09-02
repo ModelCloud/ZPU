@@ -989,6 +989,12 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_tanh_f32(device const float *input [[buffer(0)]], "
          "device float *output [[buffer(1)]], uint id [[thread_position_in_grid]]) { "
          "if (id >= 12) return; output[id] = tanh(input[id]); }\n"
+         "kernel void zpu_source_composed_f32(device const float *input [[buffer(0)]], "
+         "device float *output [[buffer(1)]], uint id [[thread_position_in_grid]]) { "
+         "if (id >= 12) return; output[id] = sin(input[id]) * 0.5f + cos(input[id]); }\n"
+         "kernel void zpu_source_unsupported_f32(device const float *input [[buffer(0)]], "
+         "device float *output [[buffer(1)]], uint id [[thread_position_in_grid]]) { "
+         "if (id >= 12) return; output[id] = sign(input[id]); }\n"
          "kernel void zpu_source_add_i32(device const int *left [[buffer(0)]], "
          "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
@@ -1353,7 +1359,8 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 113) {
+        adapter_library.functionNames.count != 114 ||
+        [adapter_library newFunctionWithName:@"zpu_source_unsupported_f32"] != nil) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1950,6 +1957,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         {@"zpu_source_log_f32", "log"},
         {@"zpu_source_sqrt_f32", "sqrt"},
         {@"zpu_source_tanh_f32", "tanh"},
+        {@"zpu_source_composed_f32", "composed sin/cos"},
     };
     const float unary_values[12] = {
         -3.0f, -1.5f, -0.75f, -0.25f, 0.0f, 0.125f,
@@ -2033,6 +2041,26 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
         if (!accurate) {
             fprintf(stderr, "metal-pixel: source-defined CPU %s lowering mismatch\n",
                     unary_cases[case_index].label);
+            fprintf(stderr, "metal-pixel: native status=%ld adapter status=%ld reflection=%d\n",
+                    (long)native_command_buffer.status, (long)adapter_command_buffer.status,
+                    reflection_ok ? 1 : 0);
+            if (@available(macOS 26.0, iOS 26.0, *)) {
+                MTLFunctionReflection *failed_function_reflection =
+                    [adapter_library reflectionForFunctionWithName:unary_cases[case_index].name];
+                MTLComputePipelineReflection *failed_pipeline_reflection = adapter_pipeline.reflection;
+                fprintf(stderr, "metal-pixel: function bindings=%lu pipeline bindings=%lu\n",
+                        (unsigned long)failed_function_reflection.bindings.count,
+                        (unsigned long)failed_pipeline_reflection.bindings.count);
+            }
+            if (native_output != nil && adapter_output != nil) {
+                const float *native_values = (const float *)native_output.contents;
+                const float *adapter_values = (const float *)adapter_output.contents;
+                for (NSUInteger value_index = 0; value_index < 12; ++value_index) {
+                    fprintf(stderr, "metal-pixel: [%lu] native=%.9g adapter=%.9g delta=%.9g\n",
+                            (unsigned long)value_index, native_values[value_index], adapter_values[value_index],
+                            fabsf(native_values[value_index] - adapter_values[value_index]));
+                }
+            }
             fail_with_error("source-defined unary pure-math lowering failed",
                             adapter_pipeline_error ?: native_pipeline_error);
             return 180 + (int)case_index;
