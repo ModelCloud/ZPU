@@ -5177,6 +5177,19 @@ fn isNarrowKernel(kernel: u8) bool {
     return isNarrowHalfKernel(kernel) or isNarrowBfloatKernel(kernel);
 }
 
+fn isIntegerKernel(kernel: u8) bool {
+    return kernel >= 78 and kernel <= 95;
+}
+
+fn integerKernelElementBytes(kernel: u8) usize {
+    return switch (kernel) {
+        78...83 => @sizeOf(u32),
+        84...89 => @sizeOf(u16),
+        90...95 => @sizeOf(u8),
+        else => 0,
+    };
+}
+
 fn narrowVectorWidth(kernel: u8) ?usize {
     return switch (kernel) {
         54...57, 66...69 => 2,
@@ -5227,7 +5240,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 77) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 95) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5237,7 +5250,7 @@ pub const ComputeEncoder = struct {
             self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or
             self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or
             self.kernel == 42 or self.kernel == 43 or self.kernel == 44 or
-            isNarrowKernel(self.kernel);
+            isNarrowKernel(self.kernel) or isIntegerKernel(self.kernel);
     }
 
     fn appendBufferAdd(
@@ -6106,13 +6119,15 @@ fn executeTraceAabbs(command: ComputeCommand) Error!void {
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
     const narrow = isNarrowKernel(command.kernel);
+    const integer = isIntegerKernel(command.kernel);
     const narrow_vector_width = narrowVectorWidth(command.kernel);
     if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and command.kernel != 41 and
         command.kernel != 32 and command.kernel != 33 and command.kernel != 34 and
         command.kernel != 35 and command.kernel != 36 and command.kernel != 37 and
         command.kernel != 38 and command.kernel != 39 and command.kernel != 40 and
         command.kernel != 42 and command.kernel != 43 and command.kernel != 44 and
-        !narrow) or
+        !narrow and !integer) or
+        (integer and (command.elements_per_thread != 1 or command.element_stride != 1)) or
         (command.elements_per_thread != 1 and command.elements_per_thread != 2 and
             command.elements_per_thread != 3 and command.elements_per_thread != 4) or
         (command.element_stride != 1 and command.element_stride != 2 and
@@ -6129,7 +6144,7 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
         command.threads_per_threadgroup.height != 1 or command.threads_per_threadgroup.depth != 1)
         return error.InvalidArgument;
     const storage_count = std.math.mul(usize, command.threads_per_grid.width, command.element_stride) catch return error.InvalidArgument;
-    const element_bytes: usize = if (narrow) @sizeOf(u16) else @sizeOf(f32);
+    const element_bytes: usize = if (integer) integerKernelElementBytes(command.kernel) else if (narrow) @sizeOf(u16) else @sizeOf(f32);
     const byte_count = std.math.mul(usize, storage_count, element_bytes) catch return error.InvalidArgument;
     if (!rangeValid(command.left.bytes.len, command.left_offset, byte_count) or
         !rangeValid(command.right.bytes.len, command.right_offset, byte_count) or
@@ -6140,7 +6155,33 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
             const left_offset = command.left_offset + scalar_index * element_bytes;
             const right_offset = command.right_offset + scalar_index * element_bytes;
             const output_offset = command.output_offset + scalar_index * element_bytes;
-            if (narrow) {
+            if (integer) {
+                const left = switch (element_bytes) {
+                    1 => @as(u32, command.left.bytes[left_offset]),
+                    2 => @as(u32, readU16Little(command.left.bytes, left_offset)),
+                    4 => readU32Little(command.left.bytes, left_offset),
+                    else => unreachable,
+                };
+                const right = switch (element_bytes) {
+                    1 => @as(u32, command.right.bytes[right_offset]),
+                    2 => @as(u32, readU16Little(command.right.bytes, right_offset)),
+                    4 => readU32Little(command.right.bytes, right_offset),
+                    else => unreachable,
+                };
+                const result = switch (command.kernel) {
+                    78, 81, 84, 87, 90, 93 => left +% right,
+                    79, 82, 85, 88, 91, 94 => left -% right,
+                    80, 83, 86, 89, 92, 95 => left *% right,
+                    else => unreachable,
+                };
+                switch (element_bytes) {
+                    1 => command.output.bytes[output_offset] = @truncate(result),
+                    2 => writeU16Little(command.output.bytes, output_offset, @truncate(result)),
+                    4 => writeU32Little(command.output.bytes, output_offset, result),
+                    else => unreachable,
+                }
+                continue;
+            } else if (narrow) {
                 if (isNarrowHalfKernel(command.kernel)) {
                     const left: f16 = @bitCast(readU16Little(command.left.bytes, left_offset));
                     const right: f16 = @bitCast(readU16Little(command.right.bytes, right_offset));

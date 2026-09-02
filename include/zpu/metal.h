@@ -488,6 +488,27 @@ enum {
     ZPU_METAL_COMPUTE_MUL_BF16X4 = 75,
     ZPU_METAL_COMPUTE_SUB_BF16X4 = 76,
     ZPU_METAL_COMPUTE_DIV_BF16X4 = 77,
+    /* Bounded source-defined scalar integer arithmetic. These profiles use
+     * the native Metal scalar storage width and wrapping bitwise results,
+     * while execution remains entirely in the CPU/ZPU runtime. */
+    ZPU_METAL_COMPUTE_ADD_I32 = 78,
+    ZPU_METAL_COMPUTE_SUB_I32 = 79,
+    ZPU_METAL_COMPUTE_MUL_I32 = 80,
+    ZPU_METAL_COMPUTE_ADD_U32 = 81,
+    ZPU_METAL_COMPUTE_SUB_U32 = 82,
+    ZPU_METAL_COMPUTE_MUL_U32 = 83,
+    ZPU_METAL_COMPUTE_ADD_I16 = 84,
+    ZPU_METAL_COMPUTE_SUB_I16 = 85,
+    ZPU_METAL_COMPUTE_MUL_I16 = 86,
+    ZPU_METAL_COMPUTE_ADD_U16 = 87,
+    ZPU_METAL_COMPUTE_SUB_U16 = 88,
+    ZPU_METAL_COMPUTE_MUL_U16 = 89,
+    ZPU_METAL_COMPUTE_ADD_I8 = 90,
+    ZPU_METAL_COMPUTE_SUB_I8 = 91,
+    ZPU_METAL_COMPUTE_MUL_I8 = 92,
+    ZPU_METAL_COMPUTE_ADD_U8 = 93,
+    ZPU_METAL_COMPUTE_SUB_U8 = 94,
+    ZPU_METAL_COMPUTE_MUL_U8 = 95,
 };
 
 #define ZPU_METAL_CPU_ACCELERATION_STRUCTURE_MAGIC 0x5a505541u

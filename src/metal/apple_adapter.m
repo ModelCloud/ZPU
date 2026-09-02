@@ -165,11 +165,33 @@ static NSString *const zpu_cpu_add_bf16x4_function_name = @"zpu_cpu_add_bf16x4";
 static NSString *const zpu_cpu_mul_bf16x4_function_name = @"zpu_cpu_mul_bf16x4";
 static NSString *const zpu_cpu_sub_bf16x4_function_name = @"zpu_cpu_sub_bf16x4";
 static NSString *const zpu_cpu_div_bf16x4_function_name = @"zpu_cpu_div_bf16x4";
+static NSString *const zpu_cpu_add_i32_function_name = @"zpu_cpu_add_i32";
+static NSString *const zpu_cpu_sub_i32_function_name = @"zpu_cpu_sub_i32";
+static NSString *const zpu_cpu_mul_i32_function_name = @"zpu_cpu_mul_i32";
+static NSString *const zpu_cpu_add_u32_function_name = @"zpu_cpu_add_u32";
+static NSString *const zpu_cpu_sub_u32_function_name = @"zpu_cpu_sub_u32";
+static NSString *const zpu_cpu_mul_u32_function_name = @"zpu_cpu_mul_u32";
+static NSString *const zpu_cpu_add_i16_function_name = @"zpu_cpu_add_i16";
+static NSString *const zpu_cpu_sub_i16_function_name = @"zpu_cpu_sub_i16";
+static NSString *const zpu_cpu_mul_i16_function_name = @"zpu_cpu_mul_i16";
+static NSString *const zpu_cpu_add_u16_function_name = @"zpu_cpu_add_u16";
+static NSString *const zpu_cpu_sub_u16_function_name = @"zpu_cpu_sub_u16";
+static NSString *const zpu_cpu_mul_u16_function_name = @"zpu_cpu_mul_u16";
+static NSString *const zpu_cpu_add_i8_function_name = @"zpu_cpu_add_i8";
+static NSString *const zpu_cpu_sub_i8_function_name = @"zpu_cpu_sub_i8";
+static NSString *const zpu_cpu_mul_i8_function_name = @"zpu_cpu_mul_i8";
+static NSString *const zpu_cpu_add_u8_function_name = @"zpu_cpu_add_u8";
+static NSString *const zpu_cpu_sub_u8_function_name = @"zpu_cpu_sub_u8";
+static NSString *const zpu_cpu_mul_u8_function_name = @"zpu_cpu_mul_u8";
 static NSString *const zpu_cpu_copy_rgba8_texture_to_texture_function_name = @"zpu_cpu_copy_rgba8_texture_to_texture";
 static NSString *const zpu_cpu_intersection_triangle_function_name = @"zpu_cpu_intersection_triangle";
 static NSString *const zpu_cpu_intersection_triangle_accept_function_name = @"zpu_cpu_intersection_triangle_accept";
 static NSString *const zpu_cpu_trace_aabbs_function_name = @"zpu_cpu_trace_aabbs_rgba8";
 static NSString *const zpu_cpu_intersection_aabb_accept_function_name = @"zpu_cpu_intersection_aabb_accept";
+
+static BOOL zpu_compute_buffer_integer_kernel(zpu_metal_compute_kernel kernel) {
+    return kernel >= ZPU_METAL_COMPUTE_ADD_I32 && kernel <= ZPU_METAL_COMPUTE_MUL_U8;
+}
 
 static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel) {
     return kernel == ZPU_METAL_COMPUTE_ADD_F32 || kernel == ZPU_METAL_COMPUTE_MUL_F32 ||
@@ -185,7 +207,8 @@ static BOOL zpu_compute_buffer_arithmetic_kernel(zpu_metal_compute_kernel kernel
         kernel == ZPU_METAL_COMPUTE_SUB_F16 || kernel == ZPU_METAL_COMPUTE_DIV_F16 ||
         kernel == ZPU_METAL_COMPUTE_ADD_BF16 || kernel == ZPU_METAL_COMPUTE_MUL_BF16 ||
         kernel == ZPU_METAL_COMPUTE_SUB_BF16 || kernel == ZPU_METAL_COMPUTE_DIV_BF16 ||
-        (kernel >= ZPU_METAL_COMPUTE_ADD_F16X2 && kernel <= ZPU_METAL_COMPUTE_DIV_BF16X4);
+        (kernel >= ZPU_METAL_COMPUTE_ADD_F16X2 && kernel <= ZPU_METAL_COMPUTE_DIV_BF16X4) ||
+        zpu_compute_buffer_integer_kernel(kernel);
 }
 
 static BOOL zpu_compute_buffer_vector_kernel(zpu_metal_compute_kernel kernel) {
@@ -9274,19 +9297,34 @@ static MTLComputePipelineReflection *zpu_compute_pipeline_reflection(zpu_metal_c
             kernel == ZPU_METAL_COMPUTE_MUL_BF16 ||
             kernel == ZPU_METAL_COMPUTE_SUB_BF16 ||
             kernel == ZPU_METAL_COMPUTE_DIV_BF16;
+        const BOOL integerI32 = kernel >= ZPU_METAL_COMPUTE_ADD_I32 && kernel <= ZPU_METAL_COMPUTE_MUL_I32;
+        const BOOL integerU32 = kernel >= ZPU_METAL_COMPUTE_ADD_U32 && kernel <= ZPU_METAL_COMPUTE_MUL_U32;
+        const BOOL integerI16 = kernel >= ZPU_METAL_COMPUTE_ADD_I16 && kernel <= ZPU_METAL_COMPUTE_MUL_I16;
+        const BOOL integerU16 = kernel >= ZPU_METAL_COMPUTE_ADD_U16 && kernel <= ZPU_METAL_COMPUTE_MUL_U16;
+        const BOOL integerI8 = kernel >= ZPU_METAL_COMPUTE_ADD_I8 && kernel <= ZPU_METAL_COMPUTE_MUL_I8;
+        const BOOL integerU8 = kernel >= ZPU_METAL_COMPUTE_ADD_U8 && kernel <= ZPU_METAL_COMPUTE_MUL_U8;
         const BOOL narrow = half || bfloat || zpu_compute_buffer_narrow_vector_kernel(kernel);
         const BOOL narrowHalfVector = zpu_compute_buffer_narrow_half_vector_kernel(kernel);
         /* Metal's float3 has a logical width of three lanes but a 16-byte
          * buffer stride/alignment. The CPU profile preserves that padding
          * lane so buffer offsets and reflected ABI match native Metal. */
-        const NSUInteger dataSize = vector4 || vector3 ? sizeof(float) * 4 :
-            (vector2 ? sizeof(float) * 2 :
-                (narrowVector4 ? sizeof(uint16_t) * 4 :
-                    (narrowVector3 ? sizeof(uint16_t) * 4 :
-                        (narrowVector2 ? sizeof(uint16_t) * 2 :
-                            (narrow ? sizeof(uint16_t) : sizeof(float))))));
+        NSUInteger dataSize = sizeof(float);
+        if (integerI32 || integerU32) dataSize = sizeof(uint32_t);
+        else if (integerI16 || integerU16) dataSize = sizeof(uint16_t);
+        else if (integerI8 || integerU8) dataSize = sizeof(uint8_t);
+        else if (vector4 || vector3) dataSize = sizeof(float) * 4;
+        else if (vector2) dataSize = sizeof(float) * 2;
+        else if (narrowVector4 || narrowVector3) dataSize = sizeof(uint16_t) * 4;
+        else if (narrowVector2) dataSize = sizeof(uint16_t) * 2;
+        else if (narrow) dataSize = sizeof(uint16_t);
         MTLDataType dataType = MTLDataTypeFloat;
-        if (vector4) dataType = MTLDataTypeFloat4;
+        if (integerI32) dataType = MTLDataTypeInt;
+        else if (integerU32) dataType = MTLDataTypeUInt;
+        else if (integerI16) dataType = MTLDataTypeShort;
+        else if (integerU16) dataType = MTLDataTypeUShort;
+        else if (integerI8) dataType = MTLDataTypeChar;
+        else if (integerU8) dataType = MTLDataTypeUChar;
+        else if (vector4) dataType = MTLDataTypeFloat4;
         else if (vector3) dataType = MTLDataTypeFloat3;
         else if (vector2) dataType = MTLDataTypeFloat2;
         else if (narrowVector4) dataType = narrowHalfVector ? MTLDataTypeHalf4 : MTLDataTypeBFloat4;
@@ -9971,6 +10009,24 @@ static MTLFunctionReflection *zpu_function_reflection(NSString *name) {
         else if ([name isEqualToString:zpu_cpu_mul_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F32X3;
         else if ([name isEqualToString:zpu_cpu_sub_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F32X3;
         else if ([name isEqualToString:zpu_cpu_div_f32x3_function_name]) kernel = ZPU_METAL_COMPUTE_DIV_F32X3;
+        else if ([name isEqualToString:zpu_cpu_add_i32_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_I32;
+        else if ([name isEqualToString:zpu_cpu_sub_i32_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_I32;
+        else if ([name isEqualToString:zpu_cpu_mul_i32_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_I32;
+        else if ([name isEqualToString:zpu_cpu_add_u32_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_U32;
+        else if ([name isEqualToString:zpu_cpu_sub_u32_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_U32;
+        else if ([name isEqualToString:zpu_cpu_mul_u32_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_U32;
+        else if ([name isEqualToString:zpu_cpu_add_i16_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_I16;
+        else if ([name isEqualToString:zpu_cpu_sub_i16_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_I16;
+        else if ([name isEqualToString:zpu_cpu_mul_i16_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_I16;
+        else if ([name isEqualToString:zpu_cpu_add_u16_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_U16;
+        else if ([name isEqualToString:zpu_cpu_sub_u16_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_U16;
+        else if ([name isEqualToString:zpu_cpu_mul_u16_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_U16;
+        else if ([name isEqualToString:zpu_cpu_add_i8_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_I8;
+        else if ([name isEqualToString:zpu_cpu_sub_i8_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_I8;
+        else if ([name isEqualToString:zpu_cpu_mul_i8_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_I8;
+        else if ([name isEqualToString:zpu_cpu_add_u8_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_U8;
+        else if ([name isEqualToString:zpu_cpu_sub_u8_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_U8;
+        else if ([name isEqualToString:zpu_cpu_mul_u8_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_U8;
         else if ([name isEqualToString:zpu_cpu_add_f16_function_name]) kernel = ZPU_METAL_COMPUTE_ADD_F16;
         else if ([name isEqualToString:zpu_cpu_mul_f16_function_name]) kernel = ZPU_METAL_COMPUTE_MUL_F16;
         else if ([name isEqualToString:zpu_cpu_sub_f16_function_name]) kernel = ZPU_METAL_COMPUTE_SUB_F16;
@@ -10163,6 +10219,24 @@ static BOOL zpu_cpu_function_name_supported(NSString *name) {
         zpu_cpu_mul_f32x3_function_name,
         zpu_cpu_sub_f32x3_function_name,
         zpu_cpu_div_f32x3_function_name,
+        zpu_cpu_add_i32_function_name,
+        zpu_cpu_sub_i32_function_name,
+        zpu_cpu_mul_i32_function_name,
+        zpu_cpu_add_u32_function_name,
+        zpu_cpu_sub_u32_function_name,
+        zpu_cpu_mul_u32_function_name,
+        zpu_cpu_add_i16_function_name,
+        zpu_cpu_sub_i16_function_name,
+        zpu_cpu_mul_i16_function_name,
+        zpu_cpu_add_u16_function_name,
+        zpu_cpu_sub_u16_function_name,
+        zpu_cpu_mul_u16_function_name,
+        zpu_cpu_add_i8_function_name,
+        zpu_cpu_sub_i8_function_name,
+        zpu_cpu_mul_i8_function_name,
+        zpu_cpu_add_u8_function_name,
+        zpu_cpu_sub_u8_function_name,
+        zpu_cpu_mul_u8_function_name,
         zpu_cpu_trace_triangles_function_name,
         zpu_cpu_trace_aabbs_function_name,
         zpu_cpu_intersection_triangle_function_name,
@@ -13143,6 +13217,24 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         NSString *expectedBFloatScalarSignature = [NSString stringWithFormat:
             @"deviceconstbfloat*left[[buffer(0)]],deviceconstbfloat*right[[buffer(1)]],"
              "devicebfloat*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedI32Signature = [NSString stringWithFormat:
+            @"deviceconstint*left[[buffer(0)]],deviceconstint*right[[buffer(1)]],"
+             "deviceint*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedU32Signature = [NSString stringWithFormat:
+            @"deviceconstuint*left[[buffer(0)]],deviceconstuint*right[[buffer(1)]],"
+             "deviceuint*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedI16Signature = [NSString stringWithFormat:
+            @"deviceconstshort*left[[buffer(0)]],deviceconstshort*right[[buffer(1)]],"
+             "deviceshort*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedU16Signature = [NSString stringWithFormat:
+            @"deviceconstushort*left[[buffer(0)]],deviceconstushort*right[[buffer(1)]],"
+             "deviceushort*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedI8Signature = [NSString stringWithFormat:
+            @"deviceconstchar*left[[buffer(0)]],deviceconstchar*right[[buffer(1)]],"
+             "devicechar*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedU8Signature = [NSString stringWithFormat:
+            @"deviceconstuchar*left[[buffer(0)]],deviceconstuchar*right[[buffer(1)]],"
+             "deviceuchar*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
         NSString *expectedHalfVector2Signature = [NSString stringWithFormat:
             @"deviceconsthalf2*left[[buffer(0)]],deviceconsthalf2*right[[buffer(1)]],"
              "devicehalf2*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
@@ -13179,6 +13271,24 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         NSString *expectedBFloatScalarConstAfterTypeSignature = [NSString stringWithFormat:
             @"devicebfloatconst*left[[buffer(0)]],devicebfloatconst*right[[buffer(1)]],"
              "devicebfloat*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedI32ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"deviceintconst*left[[buffer(0)]],deviceintconst*right[[buffer(1)]],"
+             "deviceint*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedU32ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"deviceuintconst*left[[buffer(0)]],deviceuintconst*right[[buffer(1)]],"
+             "deviceuint*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedI16ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"deviceshortconst*left[[buffer(0)]],deviceshortconst*right[[buffer(1)]],"
+             "deviceshort*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedU16ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"deviceushortconst*left[[buffer(0)]],deviceushortconst*right[[buffer(1)]],"
+             "deviceushort*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedI8ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"devicecharconst*left[[buffer(0)]],devicecharconst*right[[buffer(1)]],"
+             "devicechar*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
+        NSString *expectedU8ConstAfterTypeSignature = [NSString stringWithFormat:
+            @"deviceucharconst*left[[buffer(0)]],deviceucharconst*right[[buffer(1)]],"
+             "deviceuchar*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
         NSString *expectedHalfVector2ConstAfterTypeSignature = [NSString stringWithFormat:
             @"devicehalf2const*left[[buffer(0)]],devicehalf2const*right[[buffer(1)]],"
              "devicehalf2*output[[buffer(2)]],uint%@[[thread_position_in_grid]]", indexName];
@@ -13214,6 +13324,19 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             [compactSignature isEqualToString:expectedVector3ConstAfterTypeSignature];
         const BOOL scalar = [compactSignature isEqualToString:expectedScalarSignature] ||
             [compactSignature isEqualToString:expectedScalarConstAfterTypeSignature];
+        const BOOL integerI32 = [compactSignature isEqualToString:expectedI32Signature] ||
+            [compactSignature isEqualToString:expectedI32ConstAfterTypeSignature];
+        const BOOL integerU32 = [compactSignature isEqualToString:expectedU32Signature] ||
+            [compactSignature isEqualToString:expectedU32ConstAfterTypeSignature];
+        const BOOL integerI16 = [compactSignature isEqualToString:expectedI16Signature] ||
+            [compactSignature isEqualToString:expectedI16ConstAfterTypeSignature];
+        const BOOL integerU16 = [compactSignature isEqualToString:expectedU16Signature] ||
+            [compactSignature isEqualToString:expectedU16ConstAfterTypeSignature];
+        const BOOL integerI8 = [compactSignature isEqualToString:expectedI8Signature] ||
+            [compactSignature isEqualToString:expectedI8ConstAfterTypeSignature];
+        const BOOL integerU8 = [compactSignature isEqualToString:expectedU8Signature] ||
+            [compactSignature isEqualToString:expectedU8ConstAfterTypeSignature];
+        const BOOL integer = integerI32 || integerU32 || integerI16 || integerU16 || integerI8 || integerU8;
         const BOOL halfScalar = [compactSignature isEqualToString:expectedHalfScalarSignature] ||
             [compactSignature isEqualToString:expectedHalfScalarConstAfterTypeSignature];
         const BOOL bfloatScalar = [compactSignature isEqualToString:expectedBFloatScalarSignature] ||
@@ -13232,7 +13355,7 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
             [compactSignature isEqualToString:expectedBFloatVector4ConstAfterTypeSignature];
         const BOOL narrowVector = halfVector2 || halfVector3 || halfVector4 ||
             bfloatVector2 || bfloatVector3 || bfloatVector4;
-        if (!vector && !vector2 && !vector3 && !scalar && !halfScalar && !bfloatScalar && !narrowVector) return;
+        if (!vector && !vector2 && !vector3 && !scalar && !halfScalar && !bfloatScalar && !narrowVector && !integer) return;
 
         NSString *assignment = [NSString stringWithFormat:
             @"output[%@]=left[%@]PLUSright[%@];", indexName, indexName, indexName];
@@ -13251,6 +13374,7 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
         BOOL isMultiply = [compactBody hasSuffix:mulAssignment];
         BOOL isDivide = [compactBody hasSuffix:divAssignment];
         if (!isAdd && !isSubtract && !isMultiply && !isDivide) return;
+        if (integer && isDivide) return;
 
         NSUInteger assignmentLength = isAdd ? addAssignment.length :
             (isSubtract ? subAssignment.length : (isMultiply ? mulAssignment.length : divAssignment.length));
@@ -13263,7 +13387,25 @@ static NSDictionary<NSString *, NSString *> *zpu_source_lowerable_compute_functi
                     [NSString stringWithFormat:@"if(%@>=12)return;", indexName] :
                     [NSString stringWithFormat:@"if(%@>=10)return;", indexName]));
         if (prefix.length != 0 && ![prefix isEqualToString:expectedPrefix]) return;
-        if (halfScalar) {
+        if (integerI32) {
+            implementations[functionName] = isAdd ? zpu_cpu_add_i32_function_name :
+                (isSubtract ? zpu_cpu_sub_i32_function_name : zpu_cpu_mul_i32_function_name);
+        } else if (integerU32) {
+            implementations[functionName] = isAdd ? zpu_cpu_add_u32_function_name :
+                (isSubtract ? zpu_cpu_sub_u32_function_name : zpu_cpu_mul_u32_function_name);
+        } else if (integerI16) {
+            implementations[functionName] = isAdd ? zpu_cpu_add_i16_function_name :
+                (isSubtract ? zpu_cpu_sub_i16_function_name : zpu_cpu_mul_i16_function_name);
+        } else if (integerU16) {
+            implementations[functionName] = isAdd ? zpu_cpu_add_u16_function_name :
+                (isSubtract ? zpu_cpu_sub_u16_function_name : zpu_cpu_mul_u16_function_name);
+        } else if (integerI8) {
+            implementations[functionName] = isAdd ? zpu_cpu_add_i8_function_name :
+                (isSubtract ? zpu_cpu_sub_i8_function_name : zpu_cpu_mul_i8_function_name);
+        } else if (integerU8) {
+            implementations[functionName] = isAdd ? zpu_cpu_add_u8_function_name :
+                (isSubtract ? zpu_cpu_sub_u8_function_name : zpu_cpu_mul_u8_function_name);
+        } else if (halfScalar) {
             implementations[functionName] = isAdd ? zpu_cpu_add_f16_function_name :
                 (isSubtract ? zpu_cpu_sub_f16_function_name :
                     (isMultiply ? zpu_cpu_mul_f16_function_name : zpu_cpu_div_f16_function_name));
@@ -15171,6 +15313,15 @@ static NSDictionary<NSString *, MTLFunctionReflection *> *zpu_source_metadata_fu
                 zpu_cpu_sub_bf16x3_function_name, zpu_cpu_div_bf16x3_function_name,
                 zpu_cpu_add_bf16x4_function_name, zpu_cpu_mul_bf16x4_function_name,
                 zpu_cpu_sub_bf16x4_function_name, zpu_cpu_div_bf16x4_function_name,
+                zpu_cpu_add_i32_function_name, zpu_cpu_sub_i32_function_name,
+                zpu_cpu_mul_i32_function_name, zpu_cpu_add_u32_function_name,
+                zpu_cpu_sub_u32_function_name, zpu_cpu_mul_u32_function_name,
+                zpu_cpu_add_i16_function_name, zpu_cpu_sub_i16_function_name,
+                zpu_cpu_mul_i16_function_name, zpu_cpu_add_u16_function_name,
+                zpu_cpu_sub_u16_function_name, zpu_cpu_mul_u16_function_name,
+                zpu_cpu_add_i8_function_name, zpu_cpu_sub_i8_function_name,
+                zpu_cpu_mul_i8_function_name, zpu_cpu_add_u8_function_name,
+                zpu_cpu_sub_u8_function_name, zpu_cpu_mul_u8_function_name,
             ]) {
                 if (![names containsObject:name]) {
                     [names addObject:name];
@@ -20190,6 +20341,24 @@ static NSString *zpu_compute_kernel_name(zpu_metal_compute_kernel kernel) {
         case ZPU_METAL_COMPUTE_MUL_F32X3: return zpu_cpu_mul_f32x3_function_name;
         case ZPU_METAL_COMPUTE_SUB_F32X3: return zpu_cpu_sub_f32x3_function_name;
         case ZPU_METAL_COMPUTE_DIV_F32X3: return zpu_cpu_div_f32x3_function_name;
+        case ZPU_METAL_COMPUTE_ADD_I32: return zpu_cpu_add_i32_function_name;
+        case ZPU_METAL_COMPUTE_SUB_I32: return zpu_cpu_sub_i32_function_name;
+        case ZPU_METAL_COMPUTE_MUL_I32: return zpu_cpu_mul_i32_function_name;
+        case ZPU_METAL_COMPUTE_ADD_U32: return zpu_cpu_add_u32_function_name;
+        case ZPU_METAL_COMPUTE_SUB_U32: return zpu_cpu_sub_u32_function_name;
+        case ZPU_METAL_COMPUTE_MUL_U32: return zpu_cpu_mul_u32_function_name;
+        case ZPU_METAL_COMPUTE_ADD_I16: return zpu_cpu_add_i16_function_name;
+        case ZPU_METAL_COMPUTE_SUB_I16: return zpu_cpu_sub_i16_function_name;
+        case ZPU_METAL_COMPUTE_MUL_I16: return zpu_cpu_mul_i16_function_name;
+        case ZPU_METAL_COMPUTE_ADD_U16: return zpu_cpu_add_u16_function_name;
+        case ZPU_METAL_COMPUTE_SUB_U16: return zpu_cpu_sub_u16_function_name;
+        case ZPU_METAL_COMPUTE_MUL_U16: return zpu_cpu_mul_u16_function_name;
+        case ZPU_METAL_COMPUTE_ADD_I8: return zpu_cpu_add_i8_function_name;
+        case ZPU_METAL_COMPUTE_SUB_I8: return zpu_cpu_sub_i8_function_name;
+        case ZPU_METAL_COMPUTE_MUL_I8: return zpu_cpu_mul_i8_function_name;
+        case ZPU_METAL_COMPUTE_ADD_U8: return zpu_cpu_add_u8_function_name;
+        case ZPU_METAL_COMPUTE_SUB_U8: return zpu_cpu_sub_u8_function_name;
+        case ZPU_METAL_COMPUTE_MUL_U8: return zpu_cpu_mul_u8_function_name;
         case ZPU_METAL_COMPUTE_SOURCE_NOOP: return zpu_cpu_source_metadata_function_name;
         default: return nil;
     }
@@ -20415,6 +20584,42 @@ static BOOL zpu_compute_apply_intersection_profile(ZPUComputeEncoder *encoder) {
             _kernel = ZPU_METAL_COMPUTE_SUB_F32X3;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_div_f32x3_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_DIV_F32X3;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_add_i32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_ADD_I32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_i32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SUB_I32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_i32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_I32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_add_u32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_ADD_U32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_u32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SUB_U32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_u32_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_U32;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_add_i16_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_ADD_I16;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_i16_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SUB_I16;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_i16_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_I16;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_add_u16_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_ADD_U16;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_u16_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SUB_U16;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_u16_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_U16;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_add_i8_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_ADD_I8;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_i8_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SUB_I8;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_i8_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_I8;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_add_u8_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_ADD_U8;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_sub_u8_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_SUB_U8;
+        } else if (is_kernel && [name isEqualToString:zpu_cpu_mul_u8_function_name]) {
+            _kernel = ZPU_METAL_COMPUTE_MUL_U8;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_source_argument_buffer_function_name]) {
             _kernel = ZPU_METAL_COMPUTE_SOURCE_NOOP;
         } else if (is_kernel && [name isEqualToString:zpu_cpu_source_metadata_function_name]) {

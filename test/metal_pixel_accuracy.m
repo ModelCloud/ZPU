@@ -848,7 +848,7 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
         parallel_encoder = [[queue commandBuffer] parallelRenderCommandEncoderWithDescriptor:pass];
     }
     if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
-        library == nil || library.functionNames.count != 153 || function == nil ||
+        library == nil || library.functionNames.count != 171 || function == nil ||
         ml_div_f16_function == nil || ml_div_bf16_function == nil ||
         !default_narrow_shader_functions ||
         default_intersection_function == nil ||
@@ -943,6 +943,60 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_div_f32(device const float *left [[buffer(0)]], "
          "device const float *right [[buffer(1)]], device float *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_i32(device const int *left [[buffer(0)]], "
+         "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_sub_i32(device const int *left [[buffer(0)]], "
+         "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_mul_i32(device const int *left [[buffer(0)]], "
+         "device const int *right [[buffer(1)]], device int *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_add_u32(device const uint *left [[buffer(0)]], "
+         "device const uint *right [[buffer(1)]], device uint *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_sub_u32(device const uint *left [[buffer(0)]], "
+         "device const uint *right [[buffer(1)]], device uint *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_mul_u32(device const uint *left [[buffer(0)]], "
+         "device const uint *right [[buffer(1)]], device uint *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_add_i16(device const short *left [[buffer(0)]], "
+         "device const short *right [[buffer(1)]], device short *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_sub_i16(device const short *left [[buffer(0)]], "
+         "device const short *right [[buffer(1)]], device short *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_mul_i16(device const short *left [[buffer(0)]], "
+         "device const short *right [[buffer(1)]], device short *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_add_u16(device const ushort *left [[buffer(0)]], "
+         "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_sub_u16(device const ushort *left [[buffer(0)]], "
+         "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_mul_u16(device const ushort *left [[buffer(0)]], "
+         "device const ushort *right [[buffer(1)]], device ushort *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_add_i8(device const char *left [[buffer(0)]], "
+         "device const char *right [[buffer(1)]], device char *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_sub_i8(device const char *left [[buffer(0)]], "
+         "device const char *right [[buffer(1)]], device char *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_mul_i8(device const char *left [[buffer(0)]], "
+         "device const char *right [[buffer(1)]], device char *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_add_u8(device const uchar *left [[buffer(0)]], "
+         "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_sub_u8(device const uchar *left [[buffer(0)]], "
+         "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_mul_u8(device const uchar *left [[buffer(0)]], "
+         "device const uchar *right [[buffer(1)]], device uchar *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 10) return; output[id] = left[id] * right[id]; }\n"
          "kernel void zpu_source_add_f16(device const half *left [[buffer(0)]], "
          "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 4) return; output[id] = left[id] + right[id]; }\n"
@@ -1253,7 +1307,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 89) {
+        adapter_library.functionNames.count != 107) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1834,6 +1888,143 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             fail_with_error("source-defined CPU lowering execution failed",
                             adapter_pipeline_error ?: native_pipeline_error);
             return 167 + (int)case_index;
+        }
+    }
+
+    /* Scalar integer shader arithmetic is lowered to wrapping CPU/ZPU
+     * profiles. Compare raw storage bytes against native Metal so signed and
+     * unsigned widths are verified without applying a floating-point error
+     * tolerance. */
+    const int32_t i32_left[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const int32_t i32_right[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const uint32_t u32_left[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const uint32_t u32_right[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const int16_t i16_left[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const int16_t i16_right[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const uint16_t u16_left[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const uint16_t u16_right[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const int8_t i8_left[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const int8_t i8_right[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const uint8_t u8_left[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    const uint8_t u8_right[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+    const struct {
+        NSString *name;
+        MTLDataType dataType;
+        NSUInteger elementSize;
+        const void *left;
+        const void *right;
+        BOOL multiply;
+        BOOL subtract;
+    } integer_cases[] = {
+        {@"zpu_source_add_i32", MTLDataTypeInt, sizeof(int32_t), i32_left, i32_right, NO, NO},
+        {@"zpu_source_sub_i32", MTLDataTypeInt, sizeof(int32_t), i32_left, i32_right, NO, YES},
+        {@"zpu_source_mul_i32", MTLDataTypeInt, sizeof(int32_t), i32_left, i32_right, YES, NO},
+        {@"zpu_source_add_u32", MTLDataTypeUInt, sizeof(uint32_t), u32_left, u32_right, NO, NO},
+        {@"zpu_source_sub_u32", MTLDataTypeUInt, sizeof(uint32_t), u32_left, u32_right, NO, YES},
+        {@"zpu_source_mul_u32", MTLDataTypeUInt, sizeof(uint32_t), u32_left, u32_right, YES, NO},
+        {@"zpu_source_add_i16", MTLDataTypeShort, sizeof(int16_t), i16_left, i16_right, NO, NO},
+        {@"zpu_source_sub_i16", MTLDataTypeShort, sizeof(int16_t), i16_left, i16_right, NO, YES},
+        {@"zpu_source_mul_i16", MTLDataTypeShort, sizeof(int16_t), i16_left, i16_right, YES, NO},
+        {@"zpu_source_add_u16", MTLDataTypeUShort, sizeof(uint16_t), u16_left, u16_right, NO, NO},
+        {@"zpu_source_sub_u16", MTLDataTypeUShort, sizeof(uint16_t), u16_left, u16_right, NO, YES},
+        {@"zpu_source_mul_u16", MTLDataTypeUShort, sizeof(uint16_t), u16_left, u16_right, YES, NO},
+        {@"zpu_source_add_i8", MTLDataTypeChar, sizeof(int8_t), i8_left, i8_right, NO, NO},
+        {@"zpu_source_sub_i8", MTLDataTypeChar, sizeof(int8_t), i8_left, i8_right, NO, YES},
+        {@"zpu_source_mul_i8", MTLDataTypeChar, sizeof(int8_t), i8_left, i8_right, YES, NO},
+        {@"zpu_source_add_u8", MTLDataTypeUChar, sizeof(uint8_t), u8_left, u8_right, NO, NO},
+        {@"zpu_source_sub_u8", MTLDataTypeUChar, sizeof(uint8_t), u8_left, u8_right, NO, YES},
+        {@"zpu_source_mul_u8", MTLDataTypeUChar, sizeof(uint8_t), u8_left, u8_right, YES, NO},
+    };
+    for (NSUInteger case_index = 0; case_index < sizeof(integer_cases) / sizeof(integer_cases[0]); ++case_index) {
+        const NSUInteger count = integer_cases[case_index].multiply ? 10 : 12;
+        const NSUInteger byte_count = count * integer_cases[case_index].elementSize;
+        id<MTLFunction> native_function = [native_library newFunctionWithName:integer_cases[case_index].name];
+        id<MTLFunction> adapter_function = [adapter_library newFunctionWithName:integer_cases[case_index].name];
+        NSError *native_pipeline_error = nil;
+        NSError *adapter_pipeline_error = nil;
+        id<MTLComputePipelineState> native_pipeline =
+            [native_device newComputePipelineStateWithFunction:native_function error:&native_pipeline_error];
+        id<MTLComputePipelineState> adapter_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_pipeline_error];
+        id<MTLBuffer> native_left = [native_device newBufferWithBytes:integer_cases[case_index].left
+                                                                 length:sizeof(i32_left)
+                                                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_right = [native_device newBufferWithBytes:integer_cases[case_index].right
+                                                                  length:sizeof(i32_left)
+                                                                 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_output = [native_device newBufferWithLength:sizeof(i32_left)
+                                                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_left = [adapter_device newBufferWithBytes:integer_cases[case_index].left
+                                                                  length:sizeof(i32_left)
+                                                                 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_right = [adapter_device newBufferWithBytes:integer_cases[case_index].right
+                                                                   length:sizeof(i32_left)
+                                                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_output = [adapter_device newBufferWithLength:sizeof(i32_left)
+                                                                      options:MTLResourceStorageModeShared];
+        if (native_output != nil) memset(native_output.contents, 0xa5, native_output.length);
+        if (adapter_output != nil) memset(adapter_output.contents, 0xa5, adapter_output.length);
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+        id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+        if (native_function != nil && adapter_function != nil && native_pipeline != nil && adapter_pipeline != nil &&
+            native_left != nil && native_right != nil && native_output != nil && adapter_left != nil &&
+            adapter_right != nil && adapter_output != nil && native_encoder != nil && adapter_encoder != nil) {
+            [native_encoder setComputePipelineState:native_pipeline];
+            [native_encoder setBuffer:native_left offset:0 atIndex:0];
+            [native_encoder setBuffer:native_right offset:0 atIndex:1];
+            [native_encoder setBuffer:native_output offset:0 atIndex:2];
+            [native_encoder dispatchThreads:MTLSizeMake(count, 1, 1)
+                         threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [native_encoder endEncoding];
+            [native_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+            [adapter_encoder setComputePipelineState:adapter_pipeline];
+            [adapter_encoder setBuffer:adapter_left offset:0 atIndex:0];
+            [adapter_encoder setBuffer:adapter_right offset:0 atIndex:1];
+            [adapter_encoder setBuffer:adapter_output offset:0 atIndex:2];
+            [adapter_encoder dispatchThreads:MTLSizeMake(count, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [adapter_encoder endEncoding];
+            [adapter_command_buffer commit];
+            [adapter_command_buffer waitUntilCompleted];
+        }
+        BOOL reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *reflection =
+                [adapter_library reflectionForFunctionWithName:integer_cases[case_index].name];
+            MTLComputePipelineReflection *pipeline_reflection = adapter_pipeline.reflection;
+            reflection_ok = reflection != nil && reflection.bindings.count == 3 &&
+                pipeline_reflection != nil && pipeline_reflection.bindings.count == reflection.bindings.count;
+            if (reflection_ok) {
+                for (NSUInteger binding_index = 0; binding_index < reflection.bindings.count; ++binding_index) {
+                    id<MTLBinding> function_binding = reflection.bindings[binding_index];
+                    id<MTLBinding> pipeline_binding = pipeline_reflection.bindings[binding_index];
+                    reflection_ok = reflection_ok &&
+                        [function_binding.name isEqualToString:pipeline_binding.name] &&
+                        function_binding.type == pipeline_binding.type &&
+                        function_binding.access == pipeline_binding.access &&
+                        function_binding.index == pipeline_binding.index;
+                    if (reflection_ok && [function_binding conformsToProtocol:@protocol(MTLBufferBinding)]) {
+                        reflection_ok = ((id<MTLBufferBinding>)function_binding).bufferDataType ==
+                            integer_cases[case_index].dataType &&
+                            ((id<MTLBufferBinding>)function_binding).bufferDataSize ==
+                                integer_cases[case_index].elementSize;
+                    }
+                }
+            }
+        }
+        const BOOL exact = native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&
+            memcmp(native_output.contents, adapter_output.contents, byte_count) == 0;
+        if (!exact) {
+            fprintf(stderr, "metal-pixel: source-defined CPU integer %s lowering mismatch\n",
+                    integer_cases[case_index].multiply ? "multiply" :
+                    (integer_cases[case_index].subtract ? "subtract" : "add"));
+            fail_with_error("source-defined CPU integer lowering execution failed",
+                            adapter_pipeline_error ?: native_pipeline_error);
+            return 190 + (int)case_index;
         }
     }
 
