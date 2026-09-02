@@ -5165,6 +5165,27 @@ pub const ResourceStateEncoder = struct {
     }
 };
 
+fn isNarrowHalfKernel(kernel: u8) bool {
+    return kernel >= 46 and kernel <= 49 or kernel >= 54 and kernel <= 65;
+}
+
+fn isNarrowBfloatKernel(kernel: u8) bool {
+    return kernel >= 50 and kernel <= 53 or kernel >= 66 and kernel <= 77;
+}
+
+fn isNarrowKernel(kernel: u8) bool {
+    return isNarrowHalfKernel(kernel) or isNarrowBfloatKernel(kernel);
+}
+
+fn narrowVectorWidth(kernel: u8) ?usize {
+    return switch (kernel) {
+        54...57, 66...69 => 2,
+        58...61, 70...73 => 3,
+        62...65, 74...77 => 4,
+        else => null,
+    };
+}
+
 pub const ComputeEncoder = struct {
     // Metal exposes 31 buffer bindings per compute stage on the Apple targets
     // covered by this adapter. Registered CPU kernels only consume the slots
@@ -5206,7 +5227,7 @@ pub const ComputeEncoder = struct {
 
     pub fn setKernel(self: *ComputeEncoder, kernel: u8) Error!void {
         if (!self.open()) return error.InvalidCommand;
-        if (kernel < 1 or kernel > 53) return error.UnsupportedOperation;
+        if (kernel < 1 or kernel > 77) return error.UnsupportedOperation;
         self.kernel = kernel;
     }
 
@@ -5216,9 +5237,7 @@ pub const ComputeEncoder = struct {
             self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or
             self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or
             self.kernel == 42 or self.kernel == 43 or self.kernel == 44 or
-            self.kernel == 46 or self.kernel == 47 or self.kernel == 48 or
-            self.kernel == 49 or self.kernel == 50 or self.kernel == 51 or
-            self.kernel == 52 or self.kernel == 53;
+            isNarrowKernel(self.kernel);
     }
 
     fn appendBufferAdd(
@@ -5240,8 +5259,8 @@ pub const ComputeEncoder = struct {
             output.device != left.device) return error.InvalidResource;
         _ = try self.command_buffer.append(.{ .compute_buffer_add = .{
             .kernel = self.kernel,
-            .elements_per_thread = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 3 else 1)),
-            .element_stride = if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 4 else 1)),
+            .elements_per_thread = if (narrowVectorWidth(self.kernel)) |width| width else if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 3 else 1)),
+            .element_stride = if (narrowVectorWidth(self.kernel)) |width| if (width == 3) 4 else width else if (self.kernel == 32 or self.kernel == 33 or self.kernel == 34 or self.kernel == 42) 4 else (if (self.kernel == 35 or self.kernel == 36 or self.kernel == 37 or self.kernel == 43) 2 else (if (self.kernel == 38 or self.kernel == 39 or self.kernel == 40 or self.kernel == 44) 4 else 1)),
             .left = left,
             .left_offset = self.buffer_offsets[0],
             .right = right,
@@ -6086,7 +6105,8 @@ fn executeTraceAabbs(command: ComputeCommand) Error!void {
 }
 
 fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
-    const narrow = command.kernel >= 46 and command.kernel <= 53;
+    const narrow = isNarrowKernel(command.kernel);
+    const narrow_vector_width = narrowVectorWidth(command.kernel);
     if ((command.kernel != 8 and command.kernel != 9 and command.kernel != 30 and command.kernel != 41 and
         command.kernel != 32 and command.kernel != 33 and command.kernel != 34 and
         command.kernel != 35 and command.kernel != 36 and command.kernel != 37 and
@@ -6097,7 +6117,11 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
             command.elements_per_thread != 3 and command.elements_per_thread != 4) or
         (command.element_stride != 1 and command.element_stride != 2 and
             command.element_stride != 4) or
-        (narrow and (command.elements_per_thread != 1 or command.element_stride != 1)) or
+        (narrow and narrow_vector_width == null and
+            (command.elements_per_thread != 1 or command.element_stride != 1)) or
+        (narrow_vector_width != null and
+            (command.elements_per_thread != narrow_vector_width.? or
+             command.element_stride != (if (narrow_vector_width.? == 3) 4 else narrow_vector_width.?))) or
         !validBuffer(command.left) or !validBuffer(command.right) or
         !validBuffer(command.output) or command.left.device != command.right.device or
         command.output.device != command.left.device or command.threads_per_grid.height != 1 or
@@ -6117,14 +6141,14 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
             const right_offset = command.right_offset + scalar_index * element_bytes;
             const output_offset = command.output_offset + scalar_index * element_bytes;
             if (narrow) {
-                if (command.kernel <= 49) {
+                if (isNarrowHalfKernel(command.kernel)) {
                     const left: f16 = @bitCast(readU16Little(command.left.bytes, left_offset));
                     const right: f16 = @bitCast(readU16Little(command.right.bytes, right_offset));
                     const result: f16 = switch (command.kernel) {
-                        46 => left + right,
-                        47 => left * right,
-                        48 => left - right,
-                        49 => left / right,
+                        46, 54, 58, 62 => left + right,
+                        47, 55, 59, 63 => left * right,
+                        48, 56, 60, 64 => left - right,
+                        49, 57, 61, 65 => left / right,
                         else => unreachable,
                     };
                     writeU16Little(command.output.bytes, output_offset, @bitCast(result));
@@ -6132,10 +6156,10 @@ fn executeBufferAdd(command: ComputeBufferAddCommand) Error!void {
                     const left = bfloat16FromBits(readU16Little(command.left.bytes, left_offset));
                     const right = bfloat16FromBits(readU16Little(command.right.bytes, right_offset));
                     const result = switch (command.kernel) {
-                        50 => left + right,
-                        51 => left * right,
-                        52 => left - right,
-                        53 => left / right,
+                        50, 66, 70, 74 => left + right,
+                        51, 67, 71, 75 => left * right,
+                        52, 68, 72, 76 => left - right,
+                        53, 69, 73, 77 => left / right,
                         else => unreachable,
                     };
                     writeU16Little(command.output.bytes, output_offset, bfloat16ToBits(result));

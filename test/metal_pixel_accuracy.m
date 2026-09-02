@@ -782,6 +782,12 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
     for (NSString *name in @[
         @"zpu_cpu_add_f16", @"zpu_cpu_mul_f16", @"zpu_cpu_sub_f16", @"zpu_cpu_div_f16",
         @"zpu_cpu_add_bf16", @"zpu_cpu_mul_bf16", @"zpu_cpu_sub_bf16", @"zpu_cpu_div_bf16",
+        @"zpu_cpu_add_f16x2", @"zpu_cpu_mul_f16x2", @"zpu_cpu_sub_f16x2", @"zpu_cpu_div_f16x2",
+        @"zpu_cpu_add_f16x3", @"zpu_cpu_mul_f16x3", @"zpu_cpu_sub_f16x3", @"zpu_cpu_div_f16x3",
+        @"zpu_cpu_add_f16x4", @"zpu_cpu_mul_f16x4", @"zpu_cpu_sub_f16x4", @"zpu_cpu_div_f16x4",
+        @"zpu_cpu_add_bf16x2", @"zpu_cpu_mul_bf16x2", @"zpu_cpu_sub_bf16x2", @"zpu_cpu_div_bf16x2",
+        @"zpu_cpu_add_bf16x3", @"zpu_cpu_mul_bf16x3", @"zpu_cpu_sub_bf16x3", @"zpu_cpu_div_bf16x3",
+        @"zpu_cpu_add_bf16x4", @"zpu_cpu_mul_bf16x4", @"zpu_cpu_sub_bf16x4", @"zpu_cpu_div_bf16x4",
     ]) {
         default_narrow_shader_functions = default_narrow_shader_functions &&
             [library newFunctionWithName:name].functionType == MTLFunctionTypeKernel;
@@ -825,7 +831,8 @@ static int test_adapter_core_object_protocols(id<MTLDevice> adapter_device,
         parallel_encoder = [[queue commandBuffer] parallelRenderCommandEncoderWithDescriptor:pass];
     }
     if (adapter_buffer == nil || adapter_texture == nil || queue == nil || command_buffer == nil ||
-        library == nil || function == nil || ml_div_f16_function == nil || ml_div_bf16_function == nil ||
+        library == nil || library.functionNames.count != 153 || function == nil ||
+        ml_div_f16_function == nil || ml_div_bf16_function == nil ||
         !default_narrow_shader_functions ||
         default_intersection_function == nil ||
         default_accept_intersection_function == nil ||
@@ -931,6 +938,42 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
          "kernel void zpu_source_div_f16(device const half *left [[buffer(0)]], "
          "device const half *right [[buffer(1)]], device half *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 4) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_f16x2(device const half2 *left [[buffer(0)]], "
+         "device const half2 *right [[buffer(1)]], device half2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_f16x2(device const half2 *left [[buffer(0)]], "
+         "device const half2 *right [[buffer(1)]], device half2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_f16x2(device const half2 *left [[buffer(0)]], "
+         "device const half2 *right [[buffer(1)]], device half2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_div_f16x2(device const half2 *left [[buffer(0)]], "
+         "device const half2 *right [[buffer(1)]], device half2 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_f16x3(device const half3 *left [[buffer(0)]], "
+         "device const half3 *right [[buffer(1)]], device half3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_f16x3(device const half3 *left [[buffer(0)]], "
+         "device const half3 *right [[buffer(1)]], device half3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_f16x3(device const half3 *left [[buffer(0)]], "
+         "device const half3 *right [[buffer(1)]], device half3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_div_f16x3(device const half3 *left [[buffer(0)]], "
+         "device const half3 *right [[buffer(1)]], device half3 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] / right[id]; }\n"
+         "kernel void zpu_source_add_f16x4(device const half4 *left [[buffer(0)]], "
+         "device const half4 *right [[buffer(1)]], device half4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] + right[id]; }\n"
+         "kernel void zpu_source_mul_f16x4(device const half4 *left [[buffer(0)]], "
+         "device const half4 *right [[buffer(1)]], device half4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] * right[id]; }\n"
+         "kernel void zpu_source_sub_f16x4(device const half4 *left [[buffer(0)]], "
+         "device const half4 *right [[buffer(1)]], device half4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] - right[id]; }\n"
+         "kernel void zpu_source_div_f16x4(device const half4 *left [[buffer(0)]], "
+         "device const half4 *right [[buffer(1)]], device half4 *output [[buffer(2)]], "
+         "uint id [[thread_position_in_grid]]) { if (id >= 5) return; output[id] = left[id] / right[id]; }\n"
          "kernel void zpu_source_add_f32_const_after_type(device float const *left [[buffer(0)]], "
          "device float const *right [[buffer(1)]], device float *output [[buffer(2)]], "
          "uint id [[thread_position_in_grid]]) { if (id >= 12) return; output[id] = left[id] + right[id]; }\n"
@@ -1193,7 +1236,7 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
     id<MTLLibrary> native_library = [native_device newLibraryWithSource:source options:nil error:&native_error];
     id<MTLLibrary> adapter_library = [adapter_device newLibraryWithSource:source options:nil error:&adapter_error];
     if (native_library == nil || native_error != nil || adapter_library == nil || adapter_error != nil ||
-        adapter_library.functionNames.count != 77) {
+        adapter_library.functionNames.count != 89) {
         fail_with_error("source-defined CPU lowering library creation failed", adapter_error ?: native_error);
         return 166;
     }
@@ -1860,6 +1903,128 @@ static int test_source_lowering_against_native(id<MTLDevice> native_device,
             fail_with_error("source-defined CPU Float16 lowering execution failed",
                             adapter_pipeline_error ?: native_pipeline_error);
             return 177 + (int)case_index;
+        }
+    }
+
+    const struct {
+        NSString *name;
+        NSUInteger width;
+        NSUInteger storage_width;
+    } half_vector_cases[] = {
+        {@"zpu_source_add_f16x2", 2, 2}, {@"zpu_source_mul_f16x2", 2, 2},
+        {@"zpu_source_sub_f16x2", 2, 2}, {@"zpu_source_div_f16x2", 2, 2},
+        {@"zpu_source_add_f16x3", 3, 4}, {@"zpu_source_mul_f16x3", 3, 4},
+        {@"zpu_source_sub_f16x3", 3, 4}, {@"zpu_source_div_f16x3", 3, 4},
+        {@"zpu_source_add_f16x4", 4, 4}, {@"zpu_source_mul_f16x4", 4, 4},
+        {@"zpu_source_sub_f16x4", 4, 4}, {@"zpu_source_div_f16x4", 4, 4},
+    };
+    const uint16_t half_vector_left[20] = {
+        0x3e00, 0xc000, 0x4200, 0x4500, 0x3c00, 0x4100, 0x4300, 0x4400,
+        0x3800, 0x4000, 0x3e00, 0x4200, 0x4500, 0x3a00, 0x4000, 0x4300,
+        0x3e00, 0xc000, 0x4200, 0x4500,
+    };
+    const uint16_t half_vector_right[20] = {
+        0x3800, 0x4000, 0x3c00, 0x4100, 0x4000, 0x3c00, 0x3e00, 0x4200,
+        0x3c00, 0x4100, 0x3800, 0x4000, 0x3c00, 0x4000, 0x3e00, 0x4100,
+        0x4000, 0x3c00, 0x3e00, 0x4100,
+    };
+    for (NSUInteger case_index = 0;
+         case_index < sizeof(half_vector_cases) / sizeof(half_vector_cases[0]); ++case_index) {
+        const NSUInteger byte_length = 5 * half_vector_cases[case_index].storage_width * sizeof(uint16_t);
+        id<MTLFunction> native_function =
+            [native_library newFunctionWithName:half_vector_cases[case_index].name];
+        id<MTLFunction> adapter_function =
+            [adapter_library newFunctionWithName:half_vector_cases[case_index].name];
+        NSError *native_pipeline_error = nil;
+        NSError *adapter_pipeline_error = nil;
+        id<MTLComputePipelineState> native_pipeline =
+            [native_device newComputePipelineStateWithFunction:native_function error:&native_pipeline_error];
+        id<MTLComputePipelineState> adapter_pipeline =
+            [adapter_device newComputePipelineStateWithFunction:adapter_function error:&adapter_pipeline_error];
+        id<MTLBuffer> native_left =
+            [native_device newBufferWithBytes:half_vector_left length:byte_length
+                                      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_right =
+            [native_device newBufferWithBytes:half_vector_right length:byte_length
+                                       options:MTLResourceStorageModeShared];
+        id<MTLBuffer> native_output =
+            [native_device newBufferWithLength:byte_length options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_left =
+            [adapter_device newBufferWithBytes:half_vector_left length:byte_length
+                                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_right =
+            [adapter_device newBufferWithBytes:half_vector_right length:byte_length
+                                         options:MTLResourceStorageModeShared];
+        id<MTLBuffer> adapter_output =
+            [adapter_device newBufferWithLength:byte_length options:MTLResourceStorageModeShared];
+        if (native_output != nil) memset(native_output.contents, 0xa5, byte_length);
+        if (adapter_output != nil) memset(adapter_output.contents, 0xa5, byte_length);
+        id<MTLCommandBuffer> native_command_buffer = [native_queue commandBuffer];
+        id<MTLCommandBuffer> adapter_command_buffer = [adapter_queue commandBuffer];
+        id<MTLComputeCommandEncoder> native_encoder = [native_command_buffer computeCommandEncoder];
+        id<MTLComputeCommandEncoder> adapter_encoder = [adapter_command_buffer computeCommandEncoder];
+        if (native_pipeline != nil && adapter_pipeline != nil && native_left != nil && native_right != nil &&
+            native_output != nil && adapter_left != nil && adapter_right != nil && adapter_output != nil &&
+            native_encoder != nil && adapter_encoder != nil) {
+            [native_encoder setComputePipelineState:native_pipeline];
+            [native_encoder setBuffer:native_left offset:0 atIndex:0];
+            [native_encoder setBuffer:native_right offset:0 atIndex:1];
+            [native_encoder setBuffer:native_output offset:0 atIndex:2];
+            [native_encoder dispatchThreads:MTLSizeMake(5, 1, 1)
+                         threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [native_encoder endEncoding];
+            [native_command_buffer commit];
+            [native_command_buffer waitUntilCompleted];
+            [adapter_encoder setComputePipelineState:adapter_pipeline];
+            [adapter_encoder setBuffer:adapter_left offset:0 atIndex:0];
+            [adapter_encoder setBuffer:adapter_right offset:0 atIndex:1];
+            [adapter_encoder setBuffer:adapter_output offset:0 atIndex:2];
+            [adapter_encoder dispatchThreads:MTLSizeMake(5, 1, 1)
+                          threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+            [adapter_encoder endEncoding];
+            [adapter_command_buffer commit];
+            [adapter_command_buffer waitUntilCompleted];
+        }
+        BOOL reflection_ok = YES;
+        if (@available(macOS 26.0, iOS 26.0, *)) {
+            MTLFunctionReflection *reflection =
+                [adapter_library reflectionForFunctionWithName:half_vector_cases[case_index].name];
+            const MTLDataType expected_data_type = half_vector_cases[case_index].width == 2 ? MTLDataTypeHalf2 :
+                (half_vector_cases[case_index].width == 3 ? MTLDataTypeHalf3 : MTLDataTypeHalf4);
+            reflection_ok = reflection != nil && reflection.bindings.count == 3;
+            if (reflection_ok) {
+                for (id<MTLBinding> binding in reflection.bindings) {
+                    reflection_ok = reflection_ok && binding.type == MTLBindingTypeBuffer &&
+                        [binding conformsToProtocol:@protocol(MTLBufferBinding)] &&
+                        ((id<MTLBufferBinding>)binding).bufferDataType == expected_data_type &&
+                        ((id<MTLBufferBinding>)binding).bufferDataSize ==
+                            half_vector_cases[case_index].storage_width * sizeof(uint16_t);
+                }
+            }
+        }
+        BOOL logical_lanes_equal = native_output != nil && adapter_output != nil;
+        BOOL adapter_padding_unchanged = adapter_output != nil;
+        for (NSUInteger vector_index = 0; vector_index < 5 && logical_lanes_equal; ++vector_index) {
+            const uint8_t *native_bytes = (const uint8_t *)native_output.contents +
+                vector_index * half_vector_cases[case_index].storage_width * sizeof(uint16_t);
+            const uint8_t *adapter_bytes = (const uint8_t *)adapter_output.contents +
+                vector_index * half_vector_cases[case_index].storage_width * sizeof(uint16_t);
+            logical_lanes_equal = memcmp(native_bytes, adapter_bytes,
+                half_vector_cases[case_index].width * sizeof(uint16_t)) == 0;
+            if (half_vector_cases[case_index].width == 3) {
+                adapter_padding_unchanged = adapter_padding_unchanged &&
+                    *(const uint16_t *)(adapter_bytes + 3 * sizeof(uint16_t)) == 0xa5a5;
+            }
+        }
+        const BOOL exact = native_function != nil && adapter_function != nil && native_pipeline != nil &&
+            adapter_pipeline != nil && native_pipeline_error == nil && adapter_pipeline_error == nil &&
+            native_command_buffer.status == MTLCommandBufferStatusCompleted &&
+            adapter_command_buffer.status == MTLCommandBufferStatusCompleted && reflection_ok &&
+            logical_lanes_equal && adapter_padding_unchanged;
+        if (!exact) {
+            fail_with_error("source-defined CPU narrow vector lowering execution failed",
+                            adapter_pipeline_error ?: native_pipeline_error);
+            return 185 + (int)case_index;
         }
     }
 
