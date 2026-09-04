@@ -8,15 +8,32 @@ cap="${ZPU_MAX_THREADS:-8}"
 case "$cap" in ''|*[!0-9]*) echo "ZPU_MAX_THREADS must be a positive integer" >&2; exit 64;; esac
 (( cap > 0 && cap <= 8 )) || { echo "ZPU_MAX_THREADS must be in 1..8" >&2; exit 64; }
 
-allowed="${ZPU_TEST_ALLOWED_CPUS:-$(taskset -pc $$ | sed 's/.*: //')}"
+platform=$(uname -s)
+if [[ "$platform" == "Darwin" ]]; then
+  if [[ -n "${ZPU_TEST_ALLOWED_CPUS:-}" ]]; then
+    allowed="$ZPU_TEST_ALLOWED_CPUS"
+  else
+    physical=$(sysctl -n hw.physicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || true)
+    [[ "$physical" =~ ^[0-9]+$ && "$physical" -gt 0 ]] || { echo "cannot determine physical CPU count on Darwin" >&2; exit 66; }
+    (( physical > 8 )) && physical=8
+    allowed="0-$((physical - 1))"
+  fi
+else
+  allowed="${ZPU_TEST_ALLOWED_CPUS:-$(taskset -pc $$ | sed 's/.*: //')}"
+fi
 topology="${ZPU_TEST_LSCPU_FILE:-}"
 if [[ -n "$topology" ]]; then
-  topology_cmd=(cat "$topology")
+  topology_data="$(cat "$topology")"
+elif [[ "$platform" == "Darwin" ]]; then
+  physical=$(sysctl -n hw.physicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || true)
+  (( physical > 8 )) && physical=8
+  topology_data=""
+  for ((cpu = 0; cpu < physical; cpu++)); do
+    topology_data+="$cpu,$cpu,0,Y"$'\n'
+  done
 else
-  topology_cmd=(lscpu -p=CPU,CORE,SOCKET,ONLINE)
+  topology_data="$(lscpu -p=CPU,CORE,SOCKET,ONLINE)"
 fi
-
-topology_data="$(${topology_cmd[@]})" || { echo "topology source failed" >&2; exit 66; }
 if ! awk -F, '
   /^#/ || /^[[:space:]]*$/ { next }
   NF != 4 { exit 1 }
@@ -39,11 +56,15 @@ export ZPU_MAX_THREADS="$count"
 export ZPU_SELECTED_CPUS="$selected"
 export ZPU_LIMITED="physical-core-v1"
 # Trusted host values intentionally overwrite caller-provided fingerprint data.
-export ZPU_CPU_MODEL="$(lscpu | awk -F: '/^Model name:/{sub(/^[ \t]+/,"",$2); print $2; exit}')"
+if [[ "$platform" == "Darwin" ]]; then
+  export ZPU_CPU_MODEL="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null || echo Darwin)"
+else
+  export ZPU_CPU_MODEL="$(lscpu | awk -F: '/^Model name:/{sub(/^[ \t]+/,"",$2); print $2; exit}')"
+fi
 # lscpu's CORE column is a dense renumbering, not the kernel core_id the
 # benchmark reads back from sysfs, so the trusted fingerprint comes from sysfs
 # whenever a real host is being measured. Fixture runs keep using the file.
-if [[ -n "$topology" ]]; then
+if [[ -n "$topology" || "$platform" == "Darwin" ]]; then
   export ZPU_TOPOLOGY="$(awk -F, -v selected="$selected" '
 BEGIN{n=split(selected,a,",");for(i=1;i<=n;i++)wanted[a[i]]=1}
 !/^#/ && NF==4 && $4=="Y" && wanted[$1+0] {item=$3 ":" $2 "@" $1; out=out (out?";":"") item}
@@ -72,4 +93,11 @@ if [[ "${1:-}" == "zig" && "${2:-}" == "build" ]]; then
   done
   if [[ "$inserted" == 0 ]]; then args+=("-j${count}"); fi
 fi
-exec taskset -c "$selected" "${args[@]}"
+if [[ "$platform" == "Darwin" ]]; then
+  # macOS has no taskset equivalent. The canonical worker cap remains
+  # enforced through ZPU_MAX_THREADS and Zig's -j flag; the selected IDs are
+  # a deterministic physical-core accounting/fingerprint only.
+  exec "${args[@]}"
+else
+  exec taskset -c "$selected" "${args[@]}"
+fi

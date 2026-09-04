@@ -1,0 +1,1130 @@
+# CPU Metal layer (WIP)
+
+The CPU ML seam is also shipped independently of this Apple-shaped layer.
+`cpu-ml-install` installs `libzpu_cpu_ml.a` and `zpu/cpu_ml.h`; it has no
+Metal, Foundation, PJRT, or OS-specific API dependency (it uses the target C
+runtime for ordinary allocation and memory helpers). A ZML integration
+must use ZML's CPU package explicitly and register its CPU callback through
+that ABI. The host OS is not a backend selector: running ZPU on macOS does
+not permit or select ZML's Metal/PJRT-GPU package. `metal-install` composes
+the same CPU library into the optional Objective-C adapter, while Apple
+Metal remains an oracle-only test dependency.
+
+This branch adds a native, Metal-shaped command layer in `src/metal`. Its
+portable core is a CPU implementation with a separate optional Apple
+Objective-C adapter. The public types are intentionally a new ZPU ABI where
+Metal has no safe 1:1 Vulkan mapping; no Vulkan translation is performed by
+the command recorder. The adapter objects declare the corresponding Metal
+protocols and expose the selector surface for normal Objective-C capability
+checks, but all supported work stays in ZPU-owned CPU resources and ZPU's
+portable runtime.
+
+The current increment covers an ordered render-pass path plus a native CPU
+triangle path:
+
+- `MTLRenderPassDescriptor`-shaped load/store and clear state
+- command-buffer recording and end/commit lifecycle
+- `clear` and clipped rectangle fill into RGBA8/BGRA8 surfaces, serialized on
+  the submitting core
+- clip-space point, line, line-strip, triangle, and triangle-strip draws with
+  homogeneous X/Y/W clipping, viewport, scissor, cull, winding, fill-mode,
+  color interpolation, depth bias/slope scale, and clip-vs-clamp depth behavior
+- two screen-band workers for a 3D draw: the submitting core plus one worker
+- owned A8/R8/R8Unorm_sRGB/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Unorm_sRGB/RG8Snorm/
+  RG16Unorm/RG16Snorm/RG16Float/R32Uint/R32Sint/
+  R8Uint/R8Sint/R16Uint/R16Sint/RG8Uint/RG8Sint/RG16Uint/RG16Sint/
+  RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
+  B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 packed formats/
+  R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/
+  RGBA32Uint/RGBA32Sint/
+  RG32Float/RGBA32Float buffers and
+  Depth16Unorm/Depth32Float/Stencil8/Depth24Unorm_Stencil8/
+  Depth32Float_Stencil8/X32_Stencil8/X24_Stencil8 raw CPU resources and
+  1D/2D/3D textures with
+  checked region read/write
+- CPU-owned A8, R8Unorm/R8Unorm_sRGB/R8Snorm, R16Unorm/R16Snorm, R16Float,
+  RG8Unorm/RG8Unorm_sRGB/RG8Snorm, RG16Unorm/RG16Snorm, RG16Float,
+  R8/R16/RG8/RG16/R32/RG32/RGBA8/RGBA16 Uint/Sint,
+  R32Float, RGBA16Unorm/RGBA16Snorm, RGBA16Float, RG32Float, RGBA32Float,
+  and packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2 textures preserve
+  native texel widths for raw transfers, views, buffer-backed storage, and heap
+  allocation accounting. Depth16Unorm and the combined depth/stencil formats
+  use CPU-owned raw storage; Depth16Unorm, Depth24Unorm_Stencil8, and
+  Depth32Float_Stencil8 are accepted by the CPU depth/stencil attachment path
+  with explicit pack/unpack semantics, while X32_Stencil8 and X24_Stencil8
+  remain stencil-only. Native combined-format availability and raw readback
+  are device-specific, so CPU tests are the packing oracle; the legacy and
+  Metal 4 adapter blit options also support combined depth/stencil resources.
+  D24/X24 component transfers use Apple's four-byte buffer texel layout
+  (depth in bytes 0..2, stencil in byte 3) and preserve the unselected
+  component; D24 support is CPU-adapter-only on devices whose native Metal
+  capability query reports it unavailable. Render paths accept
+  A8Unorm, R8Unorm/R8Unorm_sRGB, R8Snorm,
+  R16Unorm/R16Snorm, RG8Unorm/RG8Unorm_sRGB/RG8Snorm,
+  RG16Unorm/RG16Snorm, R16Float, RG16Float, RGBA8Unorm/RGBA8Unorm_sRGB,
+  RGBA8Snorm, BGRA8Unorm/BGRA8Unorm_sRGB, RGBA16Unorm/RGBA16Snorm,
+  RGBA16Float, RG11B10Float, RGB9E5Float, R32Float, RG32Float, and RGBA32Float
+  as CPU color targets; the registered `zpu_cpu_rgba8_uint_fragment` and
+  `zpu_cpu_rgba8_sint_fragment` profiles additionally target RGBA8Uint and
+  RGBA8Sint, while the matching registered profiles cover R8/R16/RG8/RG16/
+  R32/RG32 Uint/Sint, RGB10A2Uint, RGBA16Uint/RGBA16Sint, and RGBA32Uint/RGBA32Sint. These integer render
+  profiles use raw integer clears and exact native fragment conversion; integer
+  mipmap generation remains rejected because no integer filtering profile is
+  registered;
+  sRGB RGB channels
+  use Apple's 12-bit linear fixed-point transfer profile for CPU sampling,
+  attachment stores, clears, and mip generation; 2D mip levels are filtered
+  from the base level while 3D mip levels are filtered recursively, matching
+  the Apple GPU profile exercised by the native oracle; signed-normalized
+  attachment stores and 2D/3D mip generation use integer-domain normalized
+  filtering with native-oracle quantization; all other Uint/Sint formats remain
+  transfer-only; packed normalized B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/BGR10A2
+  and packed RG11B10Float/RGB9E5Float formats use CPU decode/encode profiles
+  for sampling, render targets, and 2D/3D mip generation, including the
+  native packed-float mipmap truncation rule;
+  fixed CPU compute profiles remain explicitly format-specific; the registered
+  `zpu_cpu_fill_gradient_r8/r16/rg8/rg16/r32/rg32/rgba8/rgba16/rgba32_*` profiles
+  preserve their matching uint/sint lanes through the CPU/ZPU path, and
+  `zpu_cpu_fill_gradient_rgb10a2_uint` preserves the packed 10/10/10/2 fields;
+  scalar, dual-channel, four-channel, and packed profiles all use the same
+  upper-left CPU dispatch grid;
+- formats without a corresponding CPU shader profile remain rejected
+- CPU-owned `MTLDevice` identity and capability metadata, including a stable,
+  copyable `MTLArchitecture` named `ZPU CPU`; this metadata never wraps or
+  retains Apple's native Metal device
+- ordinary device-created 1D, 1D-array, 2D, 2D-array, cube, and cube-array
+  textures with independently allocated CPU/ZPU slice×mip levels (six faces
+  per cube), exact level/slice read/write,
+  level/slice-range views, and level/slice-aware blit copies; CPU mipmap
+  generation uses Metal's destination-center linear filter and matches the
+  native R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/R32Float/
+  RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float and signed-normalized
+  oracles; ordinary integer formats have native raw-byte/width oracles; buffer-backed and
+  heap-backed textures use independently allocated CPU/ZPU slice×mip levels
+  with full allocation-size accounting; linear buffer-backed textures remain
+  explicitly limited to one 2D level because their caller-supplied stride
+  cannot describe a portable mip layout; 3D textures use one ZPU-owned 2D
+  plane per z slice, including mip-level depth reduction, explicit
+  `bytesPerImage` transfers (including rejection of image strides smaller than
+  a plane's row span), 3D views, heap placement, and legacy/Metal 4
+  texture and buffer copies plus center-sampled mipmap generation
+- CPU-owned direct layered color render passes for up to eight 2D-array slices.
+  The expanded direct instance index selects the corresponding ZPU-owned
+  slice, preserving Apple's top-left X/Y pixel grid while keeping execution
+  entirely on the CPU. Deferred primitive and indexed draws also resolve
+  `baseInstance` (for direct and indirect draws) and select successive slices. Layered
+  legacy vertex amplification is CPU-expanded into up to two ordered view
+  draws; each view preserves the recorded viewport/scissor origin and applies
+  its `renderTargetArrayIndexOffset` to the ZPU-owned array slice. The bounded
+  ABI records up to sixteen viewport/scissor entries; each
+  `viewportArrayIndexOffset` selects the corresponding recorded CPU state, and
+  offsets beyond those entries fail closed rather than changing the pixel grid
+  implicitly. The native oracle covers direct, indexed, and indirect amplified
+  draws byte-for-byte.
+  Depth/stencil array planes are also staged as independent CPU arrays and
+  participate in per-layer clears, load/store, depth tests, and stencil
+  operations. The registered tile profile broadcasts its deterministic
+  upper-left-grid output to every layer, accepts a contiguous RGBA8/BGRA8
+  attachment signature, and routes its logical output through an opted-in
+  logical-to-physical map; the registered mesh-gradient profile maps mesh-grid
+  Z one-to-one to layered slices while preserving attachment-global top-left
+  X/Y; the same registered mesh profile also supports 2x and 4x sample
+  planes and resolves them through the CPU path; the registered tile profile
+  supports the same sample-plane and resolve path; arbitrary mesh shader execution remains explicitly rejected, while
+  uniform integer triangle patches select layers
+  by `baseInstance` and use the same CPU sample-plane and resolve path for
+  supported 2x/4x multisample attachments.
+- CPU-owned 2D multisample and 2D multisample-array textures with
+  Apple-verified 2x and 4x default sample locations, represented as
+  independent ZPU sample planes per layer. Ordered
+  render encoders can store those planes or resolve them into a matching
+  single-sample color texture using `MultisampleResolve` or
+  `StoreAndMultisampleResolve`; the resolver averages logical sample colors
+  before the destination format encode. This bounded profile supports 2D
+  multisample depth/stencil attachments by maintaining independent ZPU depth
+  and stencil planes for every layer and sample. Parallel render encoders support ordered
+  2x/4x CPU child passes with the same top-left sample positions and resolve
+  semantics. Legacy, parallel, and Metal 4 render encoders also support 2x/4x
+  MRT with independent CPU sample planes and per-attachment resolves. Sparse
+  placement and direct CPU transfers remain rejected.
+  2D multisample and 2D multisample-array views are CPU-owned aliases of
+  every sample plane, including same-size compatible color-format
+  reinterpretations.
+  Custom sample positions are accepted for
+  1x/2x/4x passes after finite `[0, 1]` validation, quantized to Apple's
+  1/16-pixel sample grid, and interpreted in Metal's top-left, pixel-local
+  coordinates; custom-sample store options are validated as CPU metadata,
+  while deferred `Unknown` actions are finalized by the
+  encoder and depth-only `CustomSampleDepthStore` maps to a full per-sample
+  ZPU depth store; other sample counts remain unsupported.
+- buffer and texture resource options preserve the requested storage mode, CPU
+  cache mode, hazard mode, texture usage, optimization flag, compression mode,
+  and swizzle metadata; indirect command buffers preserve their resource
+  options, and texture views inherit those properties from their ZPU-owned
+  backing resource; CPU resources remain non-volatile, so
+  `setPurgeableState:` returns the prior `MTLPurgeableStateNonVolatile` state
+  without discarding ZPU storage
+- `newBufferWithBytesNoCopy` aliases caller-owned CPU memory through the ZPU
+  buffer while deferring the supplied deallocator until the adapter resource
+  is released
+- heap-backed buffers and textures with bounded allocation accounting; heap
+  storage/cache mismatches are rejected, heap offsets are retained for
+  resources, aligned first-fit and explicit non-overlapping placement are
+  supported, and `makeAliasable` releases a live range for true CPU backing
+  reuse while the old resource remains a byte-visible alias. Default heap
+  hazard tracking is resolved as untracked, matching Metal's heap rules
+- owned Depth16Unorm/Depth32Float and combined depth/stencil textures bound as
+  render-pass depth attachments, with configurable Metal compare functions,
+  write masks, explicit CPU pack/unpack, and depth clears
+- owned Stencil8/X32_Stencil8/X24_Stencil8 and combined textures bound as
+  render-pass stencil attachments, with
+  front/back compare functions, fail/depth-fail/pass operations, read/write
+  masks, references, and clear/load/store behavior
+- depth-only render passes are accepted by the legacy, parallel, and Metal 4
+  adapters, including layered 2D and multisample-array passes; a private
+  discarded CPU color surface preserves the portable raster ABI while public
+  depth/stencil bytes remain exact
+- up to eight R8/R16Unorm/R16Float/RG8/RG16Unorm/RG16Float/RGBA8/BGRA8/
+  B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10Float/RGB9E5Float/BGR10A2Unorm/
+  R32Float/RGBA16Unorm/RGBA16Float/RG32Float/RGBA32Float color attachments can be
+  described and cleared by a CPU render pass; the explicit
+  R8/R16/RG8/RG16/R32/RG32/RGBA8 Uint/Sint, RGB10A2Uint, RGBA16 Uint/Sint,
+  and RGBA32Uint/RGBA32Sint
+  attachments are available through their matching registered CPU fragment
+  profiles;
+  `zpu_test_mrt_fragment` profile mirrors one logical fragment color to every
+  extra target, while ordinary single-output profiles leave extra targets at
+  their load/clear value
+- the bounded `zpu_test_sample_fragment` profile samples a ZPU-owned color
+  texture with interpolated normalized or texel-space coordinates; nearest/
+  linear minification and magnification filters selected from CPU-computed
+  texture footprints, nearest/linear mip selection, LOD bias and clamps,
+  sampler address modes, linear filtering, the three Metal border-color modes,
+  and weighted/minimum/maximum reduction are carried through the CPU raster path;
+  native Metal is used only as the byte-accuracy oracle where the native GPU
+  exposes the requested feature
+- the bounded `zpu_cpu_uniform_color_fragment` profile consumes a 16-byte
+  `float4` from `setFragmentBytes:length:atIndex:0` and applies it through
+  the CPU raster path; it also consumes a ZPU-owned 16-byte `float4` buffer
+  binding at fragment index 0 with commit-time reads, so writes made before
+  commit are visible; other fragment byte layouts remain unsupported
+- the registered `zpu_cpu_position_gradient_fragment` profile evaluates the
+  fragment position entirely in the CPU raster path as attachment-global
+  Metal coordinates: pixel `(x,y)` produces `((x + 1) / 8, (y + 1) / 8,
+  1/4, 1)`. Viewport origin and scissor affect coverage but never rebase the
+  top-left pixel grid; the profile has no resource bindings and is checked
+  byte-for-byte against the native position oracle
+- the registered `zpu_cpu_vertex` profile selects the fixed `zpu_metal_vertex`
+  CPU vertex ABI. Its function object is a Metal-shaped profile only; vertex
+  fetch, viewport mapping, rasterization, and interpolation remain entirely
+  ZPU-owned and CPU-executed
+- the registered `zpu_cpu_fragment` profile selects the fixed interpolated
+  color output ABI. Its function object is likewise metadata for the CPU
+  raster path; it does not compile or dispatch MSL
+- bounded CPU anisotropic sampler footprints for normalized coordinates and
+  linear min/mag filters, with the configured tap count capped for predictable
+  CPU work; native Metal remains only the byte-accuracy oracle
+- fixed-function render pipeline, depth-stencil, and sampler state objects;
+  pipeline attachment format validation, blending factors/operations, color
+  write masks, depth bounds, nil depth-stencil disabling, and Metal top-left
+  triangle edge inclusion
+- deprecated sparse-texture access-counter selectors validate sparse tile
+  regions and write ordered zero counters through the CPU/ZPU blit stream; the
+  CPU adapter has no GPU cache-miss stream, so zero is the explicit
+  deterministic value
+- Metal pixel-grid coordinates: texture row/column zero is the upper-left
+  texel, `MTLViewport` and `MTLScissorRect` origins are applied in that same
+  top-left space, and clip-space `+Y` maps toward decreasing row indices
+  (`originY`); this is covered by an asymmetric non-zero-origin native-oracle
+  test. This is the Metal texture coordinate space on both macOS and iOS; any
+  AppKit/UIKit view-coordinate conversion belongs to the caller and is not
+  silently applied by the CPU adapter
+- render-pass attachment mip levels and single array/cube face slices select
+  the corresponding ZPU texture and use that target's width/height for
+  rasterization; direct layered color passes select up to eight 2D-array
+  slices by direct instance index, while primitive/indexed indirect draws
+  honor `baseInstance` and resolve it at commit time where indirect arguments
+  are used. Vertex amplification count is limited to two, expands into
+  ordered CPU/ZPU draws, and applies each render-target-array offset without
+  rebasing the top-left viewport/scissor grid; up to two recorded viewport and
+  scissor entries are selected by each viewport-array offset, with unrecorded
+  entries failing closed. Layered depth/stencil array planes
+  select and update matching per-layer CPU state; the registered tile profile
+  broadcasts to each layer, and both the tile and registered mesh profiles
+  support contiguous RGBA8/BGRA8 attachments with an opted-in
+  logical-to-physical map. Uniform integer triangle patches select layers by
+  `baseInstance`; the registered mesh-gradient profile maps mesh-grid Z to
+  layered slices while preserving attachment-global top-left X/Y, while
+  arbitrary mesh shader execution remains explicitly rejected; layered
+  multisample color passes use independent per-layer sample planes and resolves
+- buffer-backed 2D and texture-buffer views that alias ZPU storage with checked
+  offsets/row strides and preserve the backing resource lifetime
+- compatible pixel-format views for all supported color and integer formats
+  with the same bytes-per-texel create
+  view-owned ZPU handles over the same bytes, so CPU sampling, rendering, and
+  transfers observe the view interpretation while the parent remains the
+  storage owner; depth/stencil views remain same-format only, and 2D
+  multisample views alias every sample plane; one selected slice can also be
+  exposed as a CPU-owned scalar 1D/2D view of its corresponding array
+  resource, or as a one-element 1D/2D-array view of a scalar resource
+- CPU-owned `MTLTextureViewPool` slots that create/copy ZPU texture views or
+  buffer-backed views and return synthetic resource IDs usable by MTL4
+  argument tables
+- ordered render, parallel-render, and blit encoders, command-buffer status,
+  buffer copies/fills, texture transfers, indexed and indirect draws, render
+  indirect command buffers (including CPU blit-copy of encoded commands),
+  command-buffer `retainedReferences`/`errorOptions` metadata and explicit
+  unretained-reference lifetime mode,
+  process-local synthetic `gpuResourceID` values for CPU indirect command
+  buffers and argument-buffer serialization of those identities,
+  including CPU replay of fragment-buffer bindings and Metal 4 fixed-function
+  indirect render state when the corresponding SDK/runtime selectors are used,
+  descriptor inheritance and binding-count enforcement, indexed ICB ownership,
+  index-type/alignment/range validation, and legal reset no-ops,
+  texture views, level-aware mipmap generation/copies, ordered MTLFence
+  update/wait commands, and CPU-owned visibility result buffers with aligned
+  boolean/counting modes plus reset/accumulate behavior
+- generic CPU blit synchronization accepts both ZPU buffers and textures;
+  texture synchronization and CPU/GPU-access optimization retain the requested
+  ZPU resource or valid mip/slice subresource without invoking native Metal
+- compute-pass descriptors preserve the Metal serial/concurrent dispatch type
+  on the CPU compute encoder; compute- and blit-pass descriptor sampling
+  attachments schedule ZPU timestamp samples at encoder start/end while
+  retaining the CPU-owned counter buffers; resource-state pass descriptors
+  and acceleration-structure pass descriptors use the same CPU-owned start/end
+  timestamp semantics
+- render-pass descriptors schedule CPU timestamp samples for the configured
+  vertex and fragment start/end boundaries while preserving the top-left
+  ZPU raster grid
+- identity rasterization-rate maps advertise capability consistently through
+  `supportsRasterizationRateMapWithLayerCount:` and preserve native physical
+  size/coordinate mappings; variable-rate maps remain rejected because the
+  CPU renderer owns a fixed 1:1 pixel grid; legacy, parallel, and Metal 4
+  render-pass creation also rejects native or cross-device maps instead of
+  silently treating their screen-space coordinates as identity
+- a deferred CPU compute encoder for the explicit
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8`,
+  `ZPU_METAL_COMPUTE_COPY_RGBA8_BUFFER_TO_TEXTURE`, and
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_ARRAY` and
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA8_3D`,
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_R32_FLOAT`, and
+  `ZPU_METAL_COMPUTE_FILL_GRADIENT_RGBA16_FLOAT`, and the bounded
+  `ZPU_METAL_COMPUTE_TRACE_TRIANGLES_RGBA8` kernel; they operate directly
+  on ZPU-owned buffers/textures and never invoke Apple's Metal runtime. Array
+  dispatches expand the logical z grid into ordered per-slice ZPU commands;
+  compute encoder state also validates and retains Metal's 31 buffer binding
+  slots; each registered CPU profile consumes only the slots in its profile,
+  while unused valid slots remain harmless CPU-side state.
+  The bounded `zpu_cpu_add_f32` profile consumes ZPU-owned Float32 buffers at
+  bindings 0/1/2 and performs deferred elementwise addition on the CPU for
+  direct and indirect one-dimensional dispatches; Metal 4 argument tables can
+  provide the same three buffer bindings without changing CPU ownership, and
+  `setBytes:length:atIndex:` snapshots are accepted in any of those profile
+  slots with the same ZPU-owned lifetime semantics.
+  The bounded `zpu_cpu_sub_f32` profile uses the identical bindings and
+  deferred CPU/ZPU execution path for elementwise Float32 subtraction; its
+  source lowering admits only the exact subtraction body and fixed bound, so
+  arbitrary MSL remains rejected.
+  The bounded `zpu_cpu_div_f32` profile and its float2/float3/float4 variants
+  use the same three ZPU-owned buffer bindings and deferred elementwise
+  division. Their source lowering admits only the exact division body and
+  fixed dispatch bound; divide-by-zero and other arbitrary numerical shader
+  behavior remain outside this registered profile.
+  The bounded `zpu_cpu_sin_f32`, `zpu_cpu_cos_f32`, `zpu_cpu_exp_f32`,
+  `zpu_cpu_log_f32`, `zpu_cpu_sqrt_f32`, and `zpu_cpu_tanh_f32` profiles use
+  two ZPU-owned Float32 buffers at bindings 0/1 and execute unary math in the
+  CPU/ZPU command stream. Source lowering admits only the exact intrinsic
+  assignment and fixed dispatch bound; native Metal is an oracle for these
+  pure-math profiles, with the test suite applying the documented `1e-6`
+  scale-aware comparison tolerance.
+  A reusable `ZPU_METAL_COMPUTE_MSL_F32_EXPRESSION` profile additionally
+  lowers composed scalar Float32 expressions over `input[id]` (or the
+  two-buffer `left[id]`/`right[id]` form) into a fixed, validated SSA program.
+  It supports parentheses, constants, unary `+/-`,
+  `+`, `-`, `*`, `/`, common unary transcendental/rounding calls, and the
+  bounded `pow`, `min`, `max`, `fma`, `clamp`, and `mix` calls. The program is
+  copied by value into the deferred command and interpreted by ZPU on the CPU;
+  the Apple compiler and command encoder are never retained or invoked.
+  Source guards such as `if (id >= N) return` remain effective even when the
+  caller dispatches more than N threads. Unsupported statements, types,
+  resource layouts, calls, and oversized programs remain fail-closed, so this
+  is a composable compiler slice rather than a claim of arbitrary MSL support.
+  The bounded `zpu_cpu_copy_rgba8_texture_to_texture` profile reads a
+  ZPU-owned RGBA8 texture at binding 0 and writes a same-sized ZPU-owned
+  RGBA8 texture at binding 1. Its CPU loop clips the dispatch to the output
+  dimensions and copies raw four-byte texels in Metal's upper-left
+  `gid.x/gid.y` order; source lowering admits only the exact read/write body.
+  Direct compute texture slots 2 through 127 and sampler slots 0 through 15
+  are retained as ZPU-owned metadata for registered profiles that do not
+  execute those resources; the executable texture slots remain profile-owned
+  and are never rebased by an unrelated binding. Metal 4 compute argument
+  tables preserve and clear the same full texture/sampler slot ranges.
+  The matching `zpu_cpu_mul_f32` profile performs deferred elementwise Float32
+  multiplication through the same three ZPU-owned buffer slots and direct,
+  indirect, and Metal 4 argument-table dispatch paths.
+  3D dispatches expand z into plane commands while preserving the z coordinate
+  in the CPU kernel; indirect array/3D dispatches resolve the deferred z
+  extent at commit and skip slices outside that extent. The triangle trace
+  profile consumes a CPU-serialized legacy
+  `MTLPrimitiveAccelerationStructureDescriptor` or Metal 4
+  `MTL4PrimitiveAccelerationStructureDescriptor` containing Float3 triangle
+  geometry, including Metal 4 GPU-address ranges, casts one orthographic
+  primary ray per output texel, and writes exact RGBA8 hit/miss values on
+  Metal's top-left grid; indexed UInt16/UInt32 geometry and explicit vertex
+  strides are supported; legacy and Metal 4 primitive transformation matrix
+  buffers support finite column-major and row-major CPU transforms. Supported
+  refits re-read those current matrix and geometry bytes. Legacy
+  default/UserID and Metal 4 indirect instance descriptors flatten already-built
+  CPU triangle children with finite affine transforms; legacy indirect
+  descriptors flatten resource-ID children while honoring their CPU-owned
+  instance-count buffer, while motion instances,
+  curves, custom intersection functions, and arbitrary ray tracing remain
+  fail-closed. The registered Metal 4 AABB trace profile separately serializes
+  finite `MTL4AccelerationStructureBoundingBoxGeometryDescriptor` ranges into
+  ZPU-owned min/max records and traverses them with the same half-pixel,
+  upper-left primary-ray grid. Built Metal 4 direct and GPU-addressed indirect
+  instance descriptors flatten those AABB records through finite affine
+  transforms, deferred active counts, and primitive visibility masks. Exact
+  RGBA8 output is checked against native Metal shader oracles, while native
+  acceleration structures are never used for adapter execution
+- CPU-owned Metal 4 command allocators, command buffers, command queues, and
+  argument tables; Metal 4 compute dispatches bridge process-local argument
+  table resource IDs to ZPU-owned resources and execute through the same
+  deferred CPU kernels. Allocators serialize active recording ownership to
+  one command buffer and release it at `endCommandBuffer`, matching Apple's
+  pre-submit allocator reuse contract. `MTL4CommandQueueDescriptor.feedbackQueue` routes
+  commit feedback handlers onto the caller-supplied serial dispatch queue;
+  with no queue, the bounded CPU adapter preserves its synchronous feedback
+  behavior. Render and compute argument tables are re-read at each draw,
+  dispatch, or indirect-command execution boundary, matching Metal's
+  encode-time snapshot rule even when a table is mutated between commands
+- CPU-owned Metal 4 compiler metadata for the registered ZPU kernel set:
+  MTL4LibraryFunctionDescriptor objects resolve through ZPU libraries,
+  compiler-created compute pipeline descriptors instantiate the existing ZPU
+  CPU kernels, binary functions expose deterministic name/type metadata, and
+  compute pipeline binary linking accepts only same-device registered visible
+  CPU functions while preserving the base ZPU kernel and exported handles;
+  Metal 4 compiler and archive dynamic-linking descriptors accept the same
+  registered visible binary functions and ZPU-owned dynamic libraries;
+  fixed render pipelines also support CPU specialization of an unspecialized
+  first-color blend state;
+  asynchronous compiler tasks complete synchronously after CPU construction;
+  dynamic libraries preserve registered symbol names and install names through
+  a deterministic CPU serialization format; the registered
+  `zpu_cpu_ml_identity` tensor pipeline executes through deferred CPU/ZPU
+  copies, and the registered `zpu_cpu_ml_add_u8` profile performs deferred
+  elementwise UInt8 tensor addition through ZPU-owned storage; the registered
+  `zpu_cpu_ml_add_f32` profile performs deferred elementwise Float32 tensor
+  addition through the same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_sub_f32` profile performs deferred elementwise Float32 tensor
+  subtraction through that same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_div_f32` profile performs deferred elementwise Float32 division
+  through the same ZPU-owned storage path for nonzero divisors; the registered
+  `zpu_cpu_ml_div_f16` and `zpu_cpu_ml_div_bf16` profiles perform deferred
+  Float16 and BFloat16 division through the same ZPU-owned storage path, with
+  BFloat16 widening and round-to-nearest-even packing; the registered
+  `zpu_cpu_ml_sub_u8`, `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`,
+  `zpu_cpu_ml_sub_i16`, `zpu_cpu_ml_sub_u32`, `zpu_cpu_ml_sub_i32`,
+  `zpu_cpu_ml_sub_i4`, and `zpu_cpu_ml_sub_u4` profiles perform deferred
+  fixed-width integer or packed-nibble subtraction through that same
+  ZPU-owned storage path; the registered `zpu_cpu_ml_sub_f16` profile performs
+  deferred Float16 subtraction, and `zpu_cpu_ml_sub_bf16` performs deferred
+  BFloat16 subtraction with explicit CPU widening and round-to-nearest-even
+  packing; the registered
+  `zpu_cpu_ml_add_i32` profile performs deferred elementwise Int32 tensor
+  addition with Metal-compatible 32-bit wraparound through that same ZPU-owned
+  storage path; the registered `zpu_cpu_ml_add_u32` profile performs deferred
+  elementwise UInt32 tensor addition with Metal-compatible 32-bit wraparound
+  through the same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_add_u16` profile performs deferred elementwise UInt16 tensor
+  addition with Metal-compatible 16-bit wraparound through that same ZPU-owned
+  storage path; the registered `zpu_cpu_ml_add_i16` profile performs deferred
+  elementwise Int16 tensor addition with Metal-compatible 16-bit wraparound
+  through that same ZPU-owned storage path; the registered
+  `zpu_cpu_ml_add_i8` profile performs deferred elementwise Int8 tensor
+  addition with Metal-compatible 8-bit wraparound through that same ZPU-owned
+  storage path; the registered `zpu_cpu_ml_add_f16` profile performs deferred
+  elementwise Float16 tensor addition through the same ZPU-owned storage path,
+  while the registered `zpu_cpu_ml_add_bf16` profile performs deferred
+  elementwise BFloat16 tensor addition through explicit CPU widening and
+  round-to-nearest-even packing on the same ZPU-owned storage path; the
+  registered `zpu_cpu_ml_add_i4` and `zpu_cpu_ml_add_u4` profiles perform
+  deferred packed low/high-nibble addition with modulo-16 results; the
+  registered `zpu_cpu_ml_mul_u8`, `zpu_cpu_ml_mul_i8`, `zpu_cpu_ml_mul_u16`,
+  `zpu_cpu_ml_mul_i16`, `zpu_cpu_ml_mul_u32`, and `zpu_cpu_ml_mul_i32`
+  profiles perform deferred elementwise integer multiplication with
+  Metal-compatible fixed-width result bit patterns; the registered
+  `zpu_cpu_ml_mul_i4` and `zpu_cpu_ml_mul_u4` profiles perform deferred
+  packed low/high-nibble multiplication with modulo-16 results; the
+  registered `zpu_cpu_ml_mul_f32` and `zpu_cpu_ml_mul_f16` profiles perform
+  deferred elementwise Float32 and Float16 multiplication, and the registered
+  `zpu_cpu_ml_matmul_f32`, `zpu_cpu_ml_matmul_f16`, and
+  `zpu_cpu_ml_matmul_bf16` profiles perform deferred Float32, Float16, and
+  BFloat16 matrix multiplication through the same ZPU-owned storage path.
+  Axes 0 and 1 are rows/reduction, while equal axes 2 through rank-1 are
+  independent batch dimensions; rank-2 remains the original matrix behavior;
+  `zpu_cpu_ml_matmul_u8`, `zpu_cpu_ml_matmul_i8`, `zpu_cpu_ml_matmul_u16`,
+  `zpu_cpu_ml_matmul_i16`, `zpu_cpu_ml_matmul_u32`, and
+  `zpu_cpu_ml_matmul_i32`, `zpu_cpu_ml_matmul_i4`, and
+  `zpu_cpu_ml_matmul_u4` provide fixed-width integer matrix multiplication
+  with modulo result-bit semantics through that same path and the same batch
+  dimension rules; the
+  registered `zpu_cpu_ml_transpose` profile performs a deferred reverse-axis
+  transpose through the portable CPU tensor layer, preserving explicit Metal
+  element strides, packed element widths, overlap semantics, and untouched
+  padding bytes. Source-defined scalar `half` and `bfloat` buffer kernels with
+  the canonical three-buffer arithmetic shape are also lowered to the same
+  CPU/ZPU arithmetic profiles; Float16 arithmetic is performed in Float16 and
+  BFloat16 arithmetic widens to Float32 before round-to-nearest-even packing.
+  Every supported fixed Metal 4 ML dispatch enters the host-neutral
+  `zpu_cpu_ml_operation` boundary; the Apple adapter retains only descriptor
+  validation and ZPU tensor ownership, so it has no second arithmetic
+  implementation. Before that fixed operation fallback, the adapter probes
+  the canonical profile name through the optional ZML/cpu named v3 ABI (then
+  v2/v1), so a translated graph can own the call while all resources remain
+  staged CPU/ZPU views.
+  These source profiles preserve the exact `thread_position_in_grid` bounds
+  used by their native Metal oracle and do not invoke Apple's compiler at
+  execution time. The same bounded source lowering covers `half2/3/4` and
+  `bfloat2/3/4` buffer arithmetic; vector 3 preserves Metal's padded
+  four-lane, two-byte storage stride and all narrow vector execution remains
+  CPU/ZPU-owned.
+  Arbitrary ML graphs and arbitrary-MSL compiler requests outside the
+  validated Float32 expression slice remain fail-closed; the registered
+  `zpu_cpu_tile_gradient_rgba8` tile profile is
+  also compiled as CPU metadata and dispatches ordered ZPU tile work with
+  exact attachment-global upper-left `(0,0)` coordinates, recorded scissor
+  clipping, fixed profile depth 0.5, and RGBA8/BGRA8 storage ordering; the
+  registered `zpu_cpu_mesh_gradient_rgba8` plus
+  `zpu_cpu_mesh_gradient_fragment` profile similarly dispatches one ordered
+  CPU/ZPU pixel per mesh-grid thread in attachment-global top-left coordinates,
+  maps mesh-grid Z to the selected layered render-target slice,
+  clips it with the recorded scissor rectangle, applies fixed profile depth
+  0.5 through ZPU depth/stencil/color-write state, preserves the first logical
+  color attachment's blend factors, operations, and write mask, and supports
+  contiguous RGBA8/BGRA8 logical attachments through the opted-in color map;
+  its 2x/4x layered sample writes are independently checked against native
+  Metal resolves while preserving the Apple top-left sample grid.
+  Tile and mesh
+  visibility results use those same ZPU fragment outcomes: boolean results report
+  whether any pixel passed, while counting results accumulate passed pixels;
+  the registered
+  `zpu_cpu_tessellated_triangle_vertex` plus
+  `zpu_cpu_tessellated_triangle_fragment` profile accepts uniform integer
+  triangle factors from 1 through 16 plus Metal's pow2 and fractional-even/odd partition modes. Filled patches use the mathematically
+  equivalent ordinary top-left-origin ZPU triangle path for pixel-stable
+  coverage; line-filled patches rasterize the generated CPU triangle grid,
+  including per-sample coverage and attachment-global 8-bit subpixel
+  interpolation for 2x/4x multisample targets
+- native Metal ML comparisons are oracle-only and use a scale-aware floating
+  tolerance: `1e-6` for pure elementwise math and `2e-3` for matrix
+  multiplication, accumulation, and inference outputs. Integer and identity
+  profiles remain byte-exact, and these tolerances do not change CPU/ZPU
+  execution semantics
+- CPU-owned Metal 4 pipeline-data serializers record those registered compute
+  names and emit deterministic ZPU metadata scripts or the existing ZPU
+  binary-archive format; these outputs are not Apple metal-tt scripts or
+  native GPU binaries
+- the registered `zpu_cpu_ml_identity`, `zpu_cpu_ml_transpose`,
+  `zpu_cpu_ml_add_u8`,
+  `zpu_cpu_ml_add_f32`, `zpu_cpu_ml_sub_f32`, `zpu_cpu_ml_div_f32`,
+  `zpu_cpu_ml_div_f16`, `zpu_cpu_ml_div_bf16`,
+  `zpu_cpu_ml_sub_u8`,
+  `zpu_cpu_ml_sub_i8`, `zpu_cpu_ml_sub_u16`, `zpu_cpu_ml_sub_i16`,
+  `zpu_cpu_ml_sub_u32`, `zpu_cpu_ml_sub_i32`, `zpu_cpu_ml_sub_i4`,
+  `zpu_cpu_ml_sub_u4`, `zpu_cpu_ml_sub_f16`, `zpu_cpu_ml_sub_bf16`,
+  `zpu_cpu_ml_add_i32`,
+  `zpu_cpu_ml_add_u32`,
+  `zpu_cpu_ml_add_u16`, `zpu_cpu_ml_add_i16`, `zpu_cpu_ml_add_i8`,
+  `zpu_cpu_ml_add_f16`, `zpu_cpu_ml_add_bf16`, `zpu_cpu_ml_add_i4`,
+  `zpu_cpu_ml_add_u4`, `zpu_cpu_ml_mul_u8`, `zpu_cpu_ml_mul_i8`,
+  `zpu_cpu_ml_mul_u16`, `zpu_cpu_ml_mul_i16`, `zpu_cpu_ml_mul_u32`,
+  `zpu_cpu_ml_mul_i32`, `zpu_cpu_ml_mul_i4`, `zpu_cpu_ml_mul_u4`,
+  `zpu_cpu_ml_mul_f32`, `zpu_cpu_ml_mul_f16`,
+  `zpu_cpu_ml_mul_bf16`, `zpu_cpu_ml_matmul_f32`,
+  `zpu_cpu_ml_matmul_f16`, `zpu_cpu_ml_matmul_bf16`,
+  `zpu_cpu_ml_matmul_u8`, `zpu_cpu_ml_matmul_i8`,
+  `zpu_cpu_ml_matmul_u16`, `zpu_cpu_ml_matmul_i16`,
+  `zpu_cpu_ml_matmul_u32`, `zpu_cpu_ml_matmul_i32`,
+  `zpu_cpu_ml_matmul_i4`, and `zpu_cpu_ml_matmul_u4` Metal 4
+  machine-learning profiles preserve CPU fence update/wait ordering and
+  interleave tensor copies and arithmetic with other commands at their encoded
+  position in the deferred ZPU command buffer; arbitrary ML graphs remain
+  fail-closed
+- owner-checked CPU function handles expose registered compute and visible
+  callable names/types plus synthetic CPU resource IDs; visible function-table
+  invocation remains unsupported because the fixed CPU kernels do not execute
+  arbitrary function-pointer shader code
+- supported Apple-adapter render state and draw selectors propagate ZPU
+  validation failures to `MTLCommandBufferStatusError`; invalid state is not
+  silently reported as successful CPU work
+- legacy and Metal 4 color attachment maps validate an eight-entry unique
+  logical-to-physical permutation, preserve the physical attachment order,
+  and route registered CPU fragment outputs without translating through native
+  Metal. The registered CPU tile profile also routes its single logical output
+  through the opted-in map, including across 2D-array slices. Non-identity
+  maps require the render-pass opt-in; ordinary Metal 4 render pipelines
+  additionally require inherited mapping state, and deferred render ICBs must
+  set `supportColorAttachmentMapping` before a non-identity map can be replayed.
+  Missing or unrepresentable physical targets fail closed
+- legacy and Metal 4 render pipeline callable linking accepts only same-device
+  registered visible CPU functions for vertex and fragment stages; derived
+  pipeline states retain the fixed ZPU raster profile and expose stage-scoped
+  handles plus synthetic CPU resource IDs. The bounded registered tile and mesh
+  profiles are executable through both legacy and Metal 4 encoders; tile/mesh
+  binary linking and arbitrary tile/object/mesh functions remain fail-closed
+- CPU-owned Metal 4 commit options and feedback; the explicit
+  `ZPUMetalCreateCPUCommitOptions()` extension creates options whose feedback
+  handlers receive host-time start/end values after the ZPU command buffers
+  complete
+- CPU-owned Metal 4 render encoders for ordinary render passes and the bounded
+  registered tile and mesh profiles; they bridge MTL4 attachment descriptors,
+  GPU-address argument tables, fixed-function raster state, indexed/indirect
+  draws, fences, viewport/scissor state, tile dispatch, and mesh-grid dispatch
+  to the existing ZPU
+  encoders. The MTL4 path preserves the same upper-left pixel grid and
+  clip-space +Y direction as the legacy adapter, including clipped edge tiles,
+  and rejects GPU addresses and argument-table resources that are not owned by
+  the ZPU device recording the command
+- MTL4 argument-table application binds zero resource IDs as explicit nulls for
+  CPU compute and render-stage state, so replacing a table cannot leak a prior
+  texture, sampler, or buffer binding into the next dispatch or draw; bounded
+  CPU render profiles retain extra vertex/fragment resource slots as
+  stage-scoped metadata while executing only their registered slot-zero ABI;
+  bounded CPU compute profiles preserve texture-0 and texture-1 bindings independently
+- matching registered legacy tile, object, and mesh stage resource setters
+  validate and retain ZPU-owned buffers, textures, samplers, offsets, threadgroup
+  metadata, and inline byte snapshots; these bindings are metadata for the
+  fixed CPU profiles and do not route execution to native Metal. Ordinary
+  pipelines and arbitrary stage profiles remain fail-closed
+- indirect threadgroup dispatch arguments are read from ZPU buffers at commit
+  time, preserving Metal's deferred argument-buffer semantics
+- direct and indexed render draws read ZPU vertex and index buffer bindings at
+  commit time; inline `setVertexBytes` data remains an encode-time snapshot,
+  and filled-geometry oracles avoid conflating point raster coordinates with
+  resource visibility. The CPU raster ABI fetches vertex data from slot zero;
+  additional direct vertex buffer/inline-byte slots (1 through 30) are
+  accepted as ZPU-owned metadata with Metal last-write-wins semantics and do
+  not alter slot-zero execution; supported dynamic vertex strides are retained
+  with those extra vertex bindings. Unsupported slot indices and foreign
+  resources fail closed. Direct fragment buffer/inline-byte slots (1 through
+  30) follow the same rule; fragment slot zero remains the only executable
+  uniform-buffer slot in the registered CPU profiles. Direct vertex and
+  fragment texture slots (1 through 127) and sampler slots (1 through 15) are
+  likewise retained as metadata for profiles without those executable
+  bindings; the registered sample profile continues to require sampler slot
+  zero and rejects additional sampler slots.
+- direct and indexed indirect render draws read their ZPU argument buffers at
+  commit time, including `vertexStart`, `instanceCount`, `indexStart`, and
+  signed `baseVertex`; indexed `indexStart` is converted from elements to
+  bytes using the bound index type
+- Metal 4 indirect thread dispatch arguments (grid and threadgroup dimensions)
+  are also read from the ZPU buffer at commit time, rather than when the
+  encoder records the call
+- legacy and Metal 4 mesh-threadgroup indirect grid arguments are read from
+  the ZPU buffer at commit time; the CPU mesh profile multiplies the deferred
+  threadgroup grid by the mesh threadgroup dimensions before clipping to the
+  recorded attachment-global scissor and upper-left render target
+- legacy triangle-patch draws accept half-precision, per-patch-and-per-instance
+  tessellation factors and execute the registered uniform integer triangle
+  profile for factors 1 through 16 and pow2/fractional partitioning, including patch-index, control-point-index,
+  and indirect argument buffers. All of those buffers are ZPU-owned and read at
+  commit time; direct and indirect `baseInstance` values select layered
+  color/depth/stencil targets using the same upper-left pixel grid as ordinary
+  draws. The CPU path also applies `setTessellationFactorScale:` when the
+  scaled four factors remain one equal positive factor within the pipeline
+  maximum. Non-uniform factors, fractional line-grid rasterization, factors above
+  the pipeline maximum, quad patches, and arbitrary tessellation shader profiles
+  fail closed
+- compute `setBytes` bindings are copied into command-buffer-owned ZPU buffers
+  and follow the same deferred lifetime rules
+- CPU command buffers expose host-clock `GPUStartTime`/`GPUEndTime` around
+  synchronous ZPU execution; `kernelStartTime`/`kernelEndTime` are exposed for
+  command buffers that create a CPU compute encoder, and remain zero for
+  render/blit-only buffers
+- compute sampler/resource declarations, stage-in metadata, and memory
+  barriers are accepted on the CPU encoder; barriers are ordered no-ops because
+  the current ZPU command buffer executes serially, and registered kernels do
+  not sample or consume stage-in/threadgroup metadata
+- argument encoders retain ZPU resources, provide Metal-layout-compatible CPU
+  constant storage, and serialize supported buffer/texture/sampler/depth-
+  stencil bindings into declaration-order slots: resources use 8-byte
+  synthetic GPU addresses (with buffer offsets folded into the address), while
+  scalar/vector/matrix constants use their native Metal size/alignment and
+  array stride. Rebinding captures direct constant writes. The explicit
+  `zpu_cpu_argument_buffer` profile also reflects and encodes one fixed nested
+  pointer/texture/sampler/constant layout, while
+  `zpu_cpu_argument_buffer_array` additionally reflects and encodes fixed
+  two-element pointer/texture/sampler/constant arrays with native byte and
+  argument-index strides. The `zpu_cpu_argument_buffer_nested` profile also
+  supports one bounded child encoder: the parent stores the child buffer's
+  synthetic GPU address and the child independently encodes its pointer and
+  texture slots. The `zpu_cpu_argument_buffer_recursive` profile extends that
+  contract through two child levels, with each child retaining an independent
+  declaration-order layout. Strict source-defined metadata-only kernels can
+  now describe a complete argument-buffer tree at any buffer index, including
+  recursively nested structs, fixed-size arrays, pointers, textures, samplers,
+  scalar/vector/matrix constants, and their Metal reflection types. The parser
+  preserves source order, validates strictly increasing `[[id]]` locations,
+  every type and offset, and rejects unknown or cyclic declarations. Pointer
+  arrays such as `array<device const half *, 2>` preserve the native encoder
+  span and are reflected as the native anonymous `__elems` array struct,
+  including pointee type, access, and stride metadata. Arrays of validated
+  argument-buffer structs such as `array<SourceStructArrayElement, 2>` use
+  the same anonymous `__elems` shape, recursively preserve each element's
+  child layout and argument-index stride, and map child constant writes to
+  the CPU-owned buffer. Inline struct-valued members preserve their direct
+  nested `MTLDataTypeStruct` reflection and child constant offsets as well;
+  nested native arrays recursively preserve each `__elems` level, including
+  per-level element strides and argument-index spans. Singleton arrays retain
+  their array reflection instead of collapsing to scalar or struct members.
+  Pointers to validated ordinary source structs also preserve pointee struct
+  members, Metal size/alignment, and read-only/read-write access metadata;
+  fixed-size arrays of those pointers retain the native `__elems` shape,
+  pointer stride, and following argument indices.
+  Metal 4 source argument-buffer metadata also recognizes the validated
+  `tensor<device float, dextents<int32_t, N>>` reference form with dynamic
+  rank-`N` extents, and the `depth_stencil_state` resource handle; tensor
+  references and depth/stencil handles remain ZPU-owned and are never passed
+  to a native Metal encoder.
+  It never compiles or executes arbitrary MSL
+- CPU-owned Metal 4 timestamp counter heaps; timestamp writes and resolves are
+  recorded as ordered CPU/ZPU command operations and therefore observe the
+  same deferred commit ordering as neighboring encoders. Resolves write
+  directly into ZPU-owned buffers, including private-storage resources, and
+  optional wait/update fences surround the recorded resolve. CPU-range
+  invalidation remains immediate, so recording an operation and invalidating
+  before commit exercises the command-time semantics. `queryTimestampFrequency`
+  reports nanoseconds for this CPU clock domain; no hardware GPU timestamp is
+  exposed
+- CPU-owned legacy timestamp counter sets/sample buffers; draw, dispatch, and
+  blit sample points and resolves are ordered CPU/ZPU commands, so samples
+  observe the same commit-time sequencing as neighboring work and resolve to
+  `MTLCounterResultTimestamp` records in ZPU buffers, including private
+  destinations. Unsupported hardware-only counters remain unavailable rather
+  than being reported as fabricated statistics
+- CPU integer geometry for `sparseTileSizeWithTextureType:...`,
+  `convertSparsePixelRegions:...`, and `convertSparseTileRegions:...`; supported
+  color/depth formats and 1D/2D/3D texture types match the native tile oracle,
+  while outward and inward alignment are overflow checked; placement sparse
+  buffers and Tier 1 placement sparse textures provide CPU-owned page mapping,
+  copied-page aliasing, legacy and Metal 4 map/unmap/copy operations,
+  resource-state move operations, unmap-to-zero behavior, and exact mapped
+  tile transfers. Sparse resources never allocate native Metal storage;
+  unbacked texture reads return zero and unbacked writes are discarded. For
+  1D/2D and array textures, lower mipmaps are CPU-packed into the native
+  sparse-tail byte size; mapping the first tail level maps every tail level,
+  and tail copy/move/unmap operations preserve the same CPU page-range model.
+  3D tails also match the native first-tail and allocation-size contract for
+  read-only and writable RGBA8 shapes across 16/64/256 KiB sparse pages,
+  including depth-packed reservations; the opaque native physical byte layout
+  is not exposed by Metal, so raw depth-packed backing-store equivalence
+  remains an explicit oracle boundary
+- CPU library metadata can discover the registered CPU kernel names and fixed
+  CPU render profiles from source text, UTF-8 file/URL/data inputs, and the
+  default bundle query. Source text also supports a strict CPU-lowered profile
+  for source-named F32 buffer add/multiply/subtract/divide kernels with the standard three
+  buffer slots and `thread_position_in_grid`, plus source-named `float2`,
+  `float3`, and `float4` variants and registered scalar/vector
+  add/multiply/subtract/divide profiles whose vector dispatch consumes one element per
+  `gid.x` while preserving exact lane order. `float3` retains Metal's 16-byte
+  element stride and padding lane in CPU-owned buffers, plus the source-named RGBA8
+  texture gradient profile with a `texture2d<float, access::write>` slot and
+  the top-left `uint2` grid, plus a source-named RGBA8 texture-to-texture copy
+  profile with read binding 0 and write binding 1. The copy profile preserves
+  raw texel bytes and admits only its exact bounded body. The same source
+  lowering set also admits the canonical RGBA8 gradient bodies for
+  `texture2d_array<float>` and `texture3d<float>`; array slices and volume
+  depth preserve the same top-left X/Y grid and are executed by the existing
+  CPU/ZPU array and 3D profiles. The lowering set includes a strict
+  source-named passthrough vertex plus
+  color-returning fragment pair. The pair accepts any source struct identifier
+  whose validated layout is `float4 position [[position]]; float4 color;`, so
+  renaming the source record does not change the fixed CPU ABI. A canonical
+  typed integer gradient may likewise use a renamed function identifier when
+  it retains the canonical format suffix (for example `_rg16_sint`); because
+  `texture2d<int>` does not encode storage width, both that suffix and the
+  exact validated signature/body are required before lowering. A canonical
+  source-named fragment that
+  returns a `constant float4` buffer-0 color is lowered to the CPU
+  uniform-color raster profile, preserving `setFragmentBytes:length:atIndex:`
+  and its exact attachment bytes. A complete canonical nested argument-buffer
+  declaration is also lowered to the CPU recursive argument encoder, with
+  native-matching parent/child layout metadata and resource slots. Strict
+  metadata-only argument-buffer declarations additionally preserve arbitrary
+  supported member names, ids, buffer indices, native `array<T,N>` members,
+  recursive child
+  aliases, including finite `using` and `typedef` chains that resolve to the
+  validated scalar/vector, address-qualified pointer, resource, array, or
+  named-struct vocabulary while preserving pointer access qualifiers,
+  reflection, and scalar/vector types including 64-bit `long`/`ulong` and
+  `bfloat`, plus validated function-table, Metal 4 command-resource, and
+  primitive/instance acceleration structure argument-buffer metadata. Depth
+  resource spellings (`depth2d`, `depth2d_array`, `depth2d_ms`,
+  `depth2d_ms_array`, `depthcube`, and `depthcube_array`) preserve native
+  read-only texture reflection, including depth classification. Those
+  finite aliases are also resolved for direct empty-kernel buffer, texture,
+  and sampler reflection.
+  executable functions execute through ZPU's
+  existing CPU kernels/raster profiles and never through Apple's compiler;
+  metadata-only argument-buffer functions expose layout/encoder state without
+  claiming executable arbitrary shader semantics. Layered CPU vertex/fragment
+  profiles also expose their native-matching buffer reflection: the layered
+  vertex reports its input vertex buffer, while the layered fragment reports no
+  resource bindings. Direct source kernels with an empty body (including
+  kernels whose only parameters are built-in grid inputs) additionally
+  expose native-matching buffer/texture/sampler/function-table/acceleration
+  resource reflection and execute as
+  deferred CPU/ZPU no-ops for direct and indirect dispatch; non-empty source
+  outside the registered profiles and validated Float32 expression slice
+  remains fail-closed. The registered
+  `zpu_cpu_intersection_triangle` and
+  `zpu_cpu_intersection_triangle_accept` profiles also preserve source-library
+  intersection-function descriptors as CPU-owned metadata with
+  `MTLFunctionTypeIntersection`; those two bounded profiles execute in ZPU's
+  CPU ray traversal, while arbitrary custom-intersection and ray-tracing
+  execution remains fail-closed.
+  Legacy compute-pipeline creation also carries the same canonical CPU/source
+  binding reflection onto the pipeline object on SDKs that expose the Metal 4
+  reflection property; reflection therefore does not depend on selecting the
+  Metal 4 compiler factory.
+  Unsupported arbitrary MSL and stitched libraries still fail closed; the
+  CPU adapter accepts only graphs made from the registered visible identity
+  profiles, with input-zero or previous-node data flow
+- CPU-created Metal 4 render pipelines retain a ZPU-owned specialization
+  descriptor, so supported unspecialized blend state can be resolved through
+  `newRenderPipelineDescriptorForSpecialization` and the CPU compiler path
+- `newDefaultLibrary` returns the same CPU metadata library for the registered
+  ZPU kernels, including the array, 3D, bounded tile, and intersection
+  descriptor profiles; it does not load or compile an Apple `.metallib`
+- CPU binary archives persist and reload deterministic metadata for registered
+  ZPU compute/render functions; the Metal 4 archive view can reopen registered
+  compute metadata; neither archive API serializes Apple GPU binaries
+- CPU Metal I/O handles decode Apple `MTLIOCompressionContext` pack files for
+  zlib, LZFSE, LZ4, LZMA, and LZBitmap through the system CPU compression API;
+  load-bytes, buffer, and texture operations consume the decoded ZPU-owned
+  bytes, with native Metal used only as the test oracle. CPU I/O queues also
+  honor `maxCommandBufferCount` at buffer vending, serial implicit barriers,
+  and `maxCommandsInFlight` for storage-load commands; event signaling and
+  waiting remain ordered CPU synchronization metadata, matching the native
+  queue behavior exercised by the oracle
+- CPU resource-state encoders preserve Metal encoder boundaries and fence
+  ordering. Resource/cache transitions are ordered no-ops over ZPU's unified
+  CPU memory; legacy sparse texture map, batch, indirect, and move operations
+  are deferred into the same ZPU command stream as following blit/compute work,
+  while updating the same CPU-owned physical-page store as the Metal 4 queue
+  operations
+- CPU residency sets track ZPU allocations, committed byte totals, and
+  request/end-residency state without introducing a GPU residency domain
+- process-local shared-event handles round-trip the same ZPU event and
+  preserve monotonic signaling; CPU waits honor zero, finite, and indefinite
+  timeouts and wake when a later CPU or command-buffer signal reaches the
+  requested value. Decoded or foreign handles fail closed because the CPU
+  adapter does not invent a cross-process GPU primitive
+- process-local shared-texture handles round-trip shareable ZPU textures and
+  preserve their CPU bytes and metadata; IOSurface-backed and foreign handles
+  use a retained CPU no-copy view when explicitly created through the
+  IOSurface texture initializer; foreign handles remain unsupported rather
+  than importing native storage
+- CPU visible/intersection function tables retain ZPU-owned function handles,
+  buffer bindings, opaque-intersection signatures, and visible-table links;
+  they expose deterministic CPU resource metadata and IDs; valid table and
+  acceleration-structure bindings on legacy compute encoders retain the same
+  CPU resources and preserve command ordering. The fixed triangle trace
+  profile consumes the table bound at buffer 1 and executes the registered
+  reject-all `zpu_cpu_intersection_triangle` or accept-all
+  `zpu_cpu_intersection_triangle_accept` profile in the CPU command stream;
+  arbitrary function-pointer dispatch, other custom intersection functions,
+  and arbitrary ray tracing remain unsupported
+- CPU acceleration-structure resources expose deterministic ZPU-backed storage,
+  heap placement, resource IDs, and descriptor-derived size queries. Their CPU
+  command encoder supports build, refit, copy, compact-size, and compaction
+  metadata/storage operations; refit rebuilds supported CPU triangle and
+  instance payloads from current ZPU-owned geometry; the fixed Float3 triangle
+  trace profile traverses CPU-serialized legacy and Metal 4 primitive,
+  bounded, and indirect instance geometry, including active instance-count
+  buffer ranges, packed affine transforms, and per-instance visibility masks;
+  zero-mask instances are filtered using the fixed all-bits primary-ray mask;
+  the Metal 4 bounding-box profile traverses CPU-owned AABB records with
+  finite ordered bounds and exact top-left pixel mapping, and Metal 4 indirect
+  instance descriptors flatten built AABB children with finite affine
+  transforms and visibility masks; arbitrary ray intersection execution
+  remains fail-closed
+- CPU render pipeline states resolve vertex/fragment function handles by
+  owner, stage, and name, including Metal 4 binary-function metadata; foreign
+  functions and unsupported stages fail closed. The Metal 4 device-level
+  function-handle selector also returns handles for ZPU-owned CPU functions.
+- compiler/archive-created fixed CPU pipelines expose deterministic modern
+  binding reflection (and compatibility argument reflection) for their known
+  buffer, texture, and sampler interfaces; ordinary device-created pipelines
+  retain Metal's default `nil` `pipelineState.reflection` behavior while the
+  legacy `options:reflection:` creation selectors return the same fixed CPU
+  binding metadata
+- Metal 4 CPU machine-learning pipeline reflection exposes tensor bindings as
+  `MTLTensorBinding` objects, including the profile's tensor data type, Metal's
+  required `int` index type, and optional descriptor-provided dimensions;
+  unspecified dimensions (including `NSNull` entries supplied through the
+  range setter) resolve from the bound ZPU tensors at dispatch;
+  descriptor dimensions of `-1` are preserved as per-axis runtime wildcards,
+  while concrete bound ZPU tensors remain mandatory. Elementwise profiles still
+  require matching concrete extents. The polymorphic identity profile reports
+  `MTLTensorDataTypeNone` rather than claiming a single storage format
+- registered CPU library functions expose matching binding reflection with a
+  `nil` user annotation; unregistered functions and arbitrary specialized
+  descriptors remain unsupported. The fixed
+  `zpu_cpu_tensor_argument_buffer` and
+  `zpu_cpu_tensor_argument_buffer_array` profiles also expose
+  native-matching `MTLTensorReferenceType` metadata for rank-2 Float32
+  tensors with dynamic extents, including tensor array element reflection;
+  those profiles are metadata-only because Metal has no portable CPU tensor
+  argument-encoder setter
+- CPU indirect compute commands for those registered kernels; the command
+  buffer inherits the ZPU encoder's texture bindings and records pipeline,
+  buffer, and dispatch state for deferred execution, with device ownership,
+  command-type, buffer-offset, dimension, and CPU threadgroup-limit checks.
+  The fixed texture/copy kernels use their documented single buffer slot, while
+  the registered `zpu_cpu_add_f32`, `zpu_cpu_mul_f32`, and `zpu_cpu_sub_f32`
+  profiles preserve all three kernel-buffer bindings at indices 0/1/2 through
+  ICB record, copy, reset, and replay; unsupported profile-specific slots still
+  fail closed rather than being silently rebound.
+  Indirect imageblock dimensions, stage-in regions, and kernel threadgroup
+  memory bindings are retained through copy/reset and checked against the
+  descriptor's bind limit; they are metadata-only for the registered ZPU
+  kernels, whose CPU execution has no hidden threadgroup storage. Reset slots
+  remain legal no-ops
+- CPU indirect mesh command recording, copy, reset, and replay for the
+  registered mesh-gradient profile; its thread dimensions, object/mesh buffer
+  bindings, and object threadgroup-memory metadata remain in the CPU-owned ICB
+  and are applied at replay, while arbitrary mesh shader execution fails closed
+  at replay
+- CPU indirect patch and indexed-patch command recording, copy, reset, and
+  replay for the registered uniform integer/pow2/fractional triangle profile; patch buffers,
+  tessellation-factor buffers, offsets, strides, and draw ranges are retained
+  in the CPU-owned ICB, while fractional line-grid/non-uniform factors and
+  arbitrary tessellation shader execution fail closed at replay
+- CPU indirect render commands preserve the same one-slot executable constraint
+  as the CPU raster ABI for vertex and fragment buffers; descriptor capacity
+  beyond slot zero is accepted, retained as CPU-owned last-write-wins state,
+  including supported dynamic vertex strides, and replayed through the direct encoder's metadata path without rebasing it
+  onto slot zero. Copy/reset and non-inherited-buffer replay preserve the
+  additional slots, while arbitrary shader resource execution remains outside
+  the registered CPU profile.
+- Metal 4 buffer/texture/tensor copies, buffer-fill, indirect-command reset/copy,
+  and CPU/GPU access optimization commands append or apply CPU-owned ZPU work;
+  CPU-owned tensors also provide contiguous and strided byte-addressable slice
+  transfers, including packed low/high-nibble round trips for Int4 and UInt4
+  tensors; buffer-backed tensor views enforce Apple's 64-byte ML row and
+  128-byte sub-byte outer-stride/offset rules, including exact higher-rank ML
+  stride continuation; direct tensors reject buffer-only stride descriptors;
+  invalid tensor creation returns Apple's `MTLTensorDomain` with
+  `MTLTensorErrorInvalidDescriptor` (allocation failure uses
+  `MTLTensorErrorInternalError`);
+  legacy and Metal 4 tensor copy commands defer packed sub-byte transfers
+  through the CPU/ZPU command stream. Acceleration-structure build/refit/copy/compaction commands use
+  the same CPU-owned storage path, and the bounded Float3 triangle trace
+  profile executes from that storage. An explicit `ZPUMetalCreateCPUDrawable`
+  factory wraps a ZPU texture in a CPU-owned `MTLDrawable`; ordinary command
+  buffers defer presentation until synchronous CPU completion, deliver
+  presented handlers, and expose host-time/monotonic-ID metadata. Metal 4
+  drawable signal/wait validates the same ownership graph and remains a CPU
+  no-op. Tensor shader binding and ML graph execution outside the registered
+  CPU-provider ABI, arbitrary
+  ray-intersection execution, opaque native 3D sparse-tail backing layout, and arbitrary
+  tile/mesh render-pass features remain explicit fail-closed
+  boundaries. The registered tile and mesh profiles are the bounded
+  exceptions. Suspending/resuming render
+  passes are represented as sequential ordinary CPU passes because the CPU
+  implementation has no tile-memory stitching requirement. The
+  adapter never routes them to native Metal
+
+- Any future ZML integration is CPU-only and optional. The adapter may use
+  only ZML's portable CPU package for dense tensor execution; it must never
+  select ZML's Metal platform or link its Metal/PJRT-GPU package. Metal tensor
+  descriptors remain authoritative: the adapter performs any required
+  pack/unpack for explicit dimensions, element strides, slice offsets, and
+  Int4/UInt4 nibble storage before or after a ZML CPU call. The installed
+  `zpu/cpu_ml.h` header exposes versioned `zpu_cpu_ml_set_backend`,
+  `zpu_cpu_ml_set_operation_backend`, and
+  `zpu_cpu_ml_set_named_operation_backend` hooks; the additive
+  `zpu_cpu_ml_set_named_operation_backend_v2`/
+  `zpu_cpu_ml_named_operation_v2` pair carries larger graph input lists. All provider forms receive
+  only offset-zero dense CPU views; the operation provider receives an
+  explicit operation and element-type identifier, while a named provider
+  receives a bounded function name plus its input count and element type. The
+  v1 named ABI retains its binary-compatible inline two-input shape. The
+  additive v2 named ABI uses borrowed pointers to up to 16 dense input views,
+  so a provider-owned graph entry point is not forced into a binary-op shape.
+  The additive v3 named ABI adds up to 16 output views and independent input
+  and output element-type arrays, so multi-output and mixed-precision graph
+  entry points remain provider-owned; the Metal-shaped adapter only validates
+  bindings, stages dense CPU views, and scatters successful outputs back to
+  ZPU-owned tensors. It is limited to the Metal 4 argument-table maximum of
+  31 total bindings.
+  This named seam also has an optional versioned catalog hook; catalog entries are
+  copied into `MTLLibrary.functionNames` only after the provider query accepts
+  their UTF-8 name and tensor signature. This keeps dynamic ZML/cpu graph
+  functions discoverable through the ordinary Metal-shaped library API while
+  preserving the same CPU-only dispatch path.
+  This is the intended seam for ZML/cpu graph functions: the provider can use its
+  own portable CPU runtime and ISA kernels (AdvSIMD/NEON on arm64, AVX tiers on
+  x86_64) without this package learning Metal, MSL, or MLIR. Returning
+  `ZPU_CPU_ML_STATUS_UNSUPPORTED` selects the exact ZPU reference
+  implementation for fixed operations; named providers fail closed when they
+  decline because there is no generic graph fallback. Provider registration is
+  process-wide and the caller owns the provider context lifetime; unregister
+  only after its in-flight callbacks have completed.
+  Backend selection is independent of the host operating system, so running
+  ZPU on macOS does not imply a Metal execution target. If a target lacks a
+  portable ZML CPU runtime artifact, the operation either uses the exact
+  ZPU CPU reference path or remains fail-closed; it must not silently switch
+  to native Metal.
+- classic Metal resource, pipeline, blit, event, indirect-command, and
+  command-buffer selectors that have no portable CPU meaning are represented
+  explicitly: metadata-only operations are deterministic no-ops, while
+  arbitrary shader compilation, unregistered or arbitrary binary linking, opaque
+  native sparse-texture tail layouts, CAMetalLayer drawable acquisition, arbitrary ray tracing,
+  tensor shader and arbitrary ML execution, and unsupported
+  Metal 4 advanced families return nil or a stable error. They never fall through to Apple's
+  native Metal runtime
+
+The C header exposes both `zpu_metal_render`, an opt-in single-pass entry
+point, and a resource/command-buffer API for C, C++, and Objective-C clients.
+The latter owns A8/R8/R8Unorm_sRGB/R8Snorm/R16Unorm/R16Snorm/R16Float/RG8/RG8Unorm_sRGB/RG8Snorm/
+RG16Unorm/RG16Snorm/RG16Float/R32Uint/R32Sint/
+R8Uint/R8Sint/R16Uint/R16Sint/RG8Uint/RG8Sint/RG16Uint/RG16Sint/
+RG32Uint/RG32Sint/RGBA8/BGRA8/RGBA8Unorm_sRGB/BGRA8Unorm_sRGB/RGBA8Snorm/RGBA8Uint/RGBA8Sint/
+packed B5G6R5/A1BGR5/ABGR4/BGR5A1/RGB10A2/RG11B10/RGB9E5/BGR10A2/
+  R32Float/RGBA16Unorm/RGBA16Snorm/RGBA16Float/RGBA16Uint/RGBA16Sint/RGBA32Uint/RGBA32Sint/RG32Float/RGBA32Float/
+  Depth16Unorm/Depth32Float/Stencil8/Depth24Unorm_Stencil8/Depth32Float_Stencil8/
+  X32_Stencil8/X24_Stencil8 buffers and textures, records
+render/blit work, and executes it at command-buffer commit. Its render state
+uses a fixed `zpu_metal_vertex` ABI; it does not parse MSL or execute arbitrary
+shader functions. The optional Apple adapter supplies the supported
+Metal-shaped Objective-C objects, while malformed resources are rejected with stable
+negative error codes. The Apple adapter also delivers scheduled/completed
+command-buffer handlers and explicit shared-event notifications for the
+implemented synchronous runtime.
+
+The portable ABI also exposes CPU-owned placement-sparse buffers. A sparse
+buffer reports no public contents pointer; page-aligned map/unmap operations
+are recorded on the resource-state encoder, and mapping copies preserve page
+aliases. Ordinary ZPU blit/fill commands are the deterministic access path,
+with unmapped reads returning zero. The bounded ABI covers sparse buffers and
+single-level 2D sparse textures for the Apple page-size/tile geometries exposed
+by the portable constructors. The single-region, legacy batch, and indirect
+texture mapping entry points use sparse-tile coordinates and preserve the
+caller's deferred order; move operations transfer pages only into unmapped
+destination tiles, matching Metal's resource-state rule. Only mip level 0 and
+slice 0 are representable in this portable profile. Arbitrary sparse texture
+mip/tail/3D layouts are still outside this ABI; the Apple adapter's
+Objective-C resource-state implementation additionally covers its documented
+CPU page model for those layouts.
+
+On macOS, `zig build metal-pixel` compiles a tiny runtime MSL shader, renders a
+known triangle pair using Apple's Metal framework, renders the same vertices
+through ZPU, and compares every output byte. The test covers clear, triangle
+coverage, color interpolation, BGRA channel order, object lifetimes, depth
+ordering, pipeline/depth/sampler state, blending, texture views, indirect
+draws, render and compute indirect command buffers, the CPU compute path
+  against a native Metal oracle, the Metal 4 CPU argument-table compute and
+  Metal 4 AABB trace output against a native shader oracle,
+  ordinary render paths, compiler-created Metal 4 compute/render and archive
+  metadata paths, deferred indirect-thread dispatch, and deferred
+  indirect array z filtering, explicit 3D texture plane/stride copies, and
+  legacy/Metal 4 3D mipmap generation, cube/cube-array face and view transfers,
+  one-slice 1D/1D-array and 2D/2D-array view type conversions, packed
+  normalized 2D/3D mipmap raw-byte exactness, 2D float mipmap raw-byte exactness, and
+  legacy/Metal 4 visibility result byte exactness, and CPU depth-bounds output
+  against an equivalent native Metal fragment-discard oracle,
+  and the explicit adapter. The suite enumerates every selector in the current
+  SDK protocol hierarchies for the core adapter objects before running these
+  semantic checks; this is an API-surface gate, not a claim that every Metal
+  feature is implemented.
+
+Use `zig build metal-install` to install the standalone static library without
+requiring the repository's Linux Vulkan/XCB install artifacts.
+
+The focused checks are:
+
+```sh
+tools/limited-cpus.sh bash tools/cpu_ml_portability_gate.sh
+tools/limited-cpus.sh zig build cpu-ml-test
+tools/limited-cpus.sh zig build cpu-ml-c-api
+tools/limited-cpus.sh zig build metal-test
+tools/limited-cpus.sh zig build metal-c-api
+tools/limited-cpus.sh zig build metal-pixel
+tools/limited-cpus.sh zig build metal-install -Dtarget=aarch64-ios -Dxcb=false
+```
+
+The CPU ML package is intentionally a separate artifact. Its ABI is ordinary
+host CPU memory and does not select a backend from the host OS: arm64 providers
+may use AdvSIMD/NEON (including Apple silicon), while x86_64 providers may use
+AVX tiers when the provider's own target and runtime checks permit it. The
+standalone package never links Metal, Foundation, PJRT, or an Apple SDK; it
+only uses the target C runtime for ordinary CPU support. The Apple adapter only
+stages ZPU-owned tensors into that ABI. The portability gate
+cross-compiles this package for x86_64 Linux, arm64 Linux, and arm64 macOS to
+arm64 iOS to keep that separation reviewable.
+
+The last command is a compile-only iOS arm64 check; an iOS device or simulator
+is still required for runtime execution.
+
+On Apple targets, `include/zpu/metal_apple.h` exposes the explicit
+`ZPUMetalCreateSystemDefaultDevice()` factory. It returns a ZPU-backed
+`id<MTLDevice>`-shaped object for the implemented core methods; it does not
+interpose Apple's global `MTLCreateSystemDefaultDevice` symbol.
+`ZPUMetalCreateCPUFunction()` creates a ZPU-owned function descriptor without
+compiling MSL; registered kernel names select CPU kernels, while fixed render
+function names provide metadata for the CPU raster path. Native `MTLFunction`
+objects are needed only by the separate oracle side of the pixel test. The adapter's
+`newLibraryWithSource:` is a CPU metadata registry for named ZPU kernels; it
+does not compile or execute arbitrary MSL.
+
+The API inventory is checked in at `api/metal-abi.json`. It intentionally marks
+the implementation as WIP: Apple's complete current Metal/Metal 4 framework
+surface is substantially larger than this CPU renderer and is not claimed as
+covered here. `tools/metal_abi_status.py --require-complete` is the fail-closed
+gate to run with the target SDK; non-Apple builds can only validate the native
+ABI and mapping manifest. The Apple documentation is the normative API
+reference: <https://developer.apple.com/documentation/metal>.
+
+## Mapping policy
+
+1. ABI-compatible values such as color, viewport, scissor, attachment
+   load/store actions, formats, and basic topology are listed in
+   `src/metal/mapping.zig` as direct Vulkan remaps. No translation pass is
+   involved.
+2. Metal object lifetime, encoder lifecycle, and pass ownership are native
+   ABI entries because Vulkan does not provide a 1:1 mapping for those
+   semantics. This label does not authorize native Apple execution: the ZPU
+   adapter and portable runtime execute on the CPU, while Apple Metal is used
+   only by the pixel-accuracy oracle test.
+3. CPU scheduling is bounded by workload: 2D uses one core, 3D uses at most
+   two rendering lanes. This is an execution policy, not an API promise that
+   an Apple device has a particular topology.
+
+## Coverage status
+
+The current checked-in implementation is intentionally not 100% of the Apple
+Metal ABI. The remaining framework surface includes additional compute and
+Metal 4 encoders, resource and pipeline descriptors beyond the fixed-function state
+implemented here, arbitrary Metal 4 tile/mesh render and remaining copy/optimization families. The registered RGBA8 tile and mesh profiles are CPU/ZPU-owned
+through legacy and Metal 4 pipeline creation, binary archives, and the Metal 4
+pipeline-data serializer; the registered uniform integer/pow2/fractional triangle-patch profile
+is CPU/ZPU-owned through the legacy render encoder, layered render targets, and
+ICB path. Arbitrary tile/mesh/tessellation functions remain unsupported. ICB arbitrary mesh/tessellation-shader execution, other
+synchronization families, arbitrary ray-tracing execution beyond the bounded triangle and
+legacy/Metal 4 instance profiles, opaque native 3D sparse-texture tail
+backing layout, arbitrary machine-learning/tensor execution, and arbitrary shader compilation. Function-table storage is
+implemented, but it does not imply ray-tracing or arbitrary function-pointer
+execution. A strict completeness claim belongs only after the Apple SDK
+inventory and macOS/iOS behavior tests pass.
+
+The SDK inventory on the current Xcode 26.6 host contains 96 headers, 253
+Metal-named types, 446 Objective-C selectors, and 11 C functions. Those counts
+are useful review gates; they are not implementation coverage. The Apple pixel
+suite additionally enumerates the current `MTLDevice` hierarchy plus the core
+and Metal 4 object protocol hierarchies, and requires the CPU adapter to expose
+every selector before running semantic tests. ZPU cannot
+replace Apple's system `MTLCreateSystemDefaultDevice` from an ordinary app, so
+the supported integration is explicit selection of this portable ABI.

@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse !core_only;
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
     const optimize = b.standardOptimizeOption(.{});
+    const cross_compiling = target.result.cpu.arch != b.graph.host.result.cpu.arch or
+        target.result.os.tag != b.graph.host.result.os.tag;
     if (b.option([]const u8, "search-prefix", "Extra library search prefix for cross builds (e.g. /usr/lib/aarch64-linux-gnu)")) |prefix| {
         b.addSearchPrefix(prefix);
     }
@@ -358,14 +360,177 @@ pub fn build(b: *std.Build) void {
     const target_8k_120_step = b.step("target-8k-120", "Require vkcube 7680x4320 presented-frame p99 at 120 FPS or better");
     target_8k_120_step.dependOn(&run_target_8k_120.step);
 
+    // The CPU ML seam is a separate, host-OS-neutral artifact.  Keep it
+    // independent from the Objective-C adapter so a ZML CPU provider can
+    // consume it on any target without Metal/Foundation or an Apple SDK.
+    const cpu_ml_layer = b.addLibrary(.{
+        .name = "zpu_cpu_ml",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cpu_ml_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cpu_ml_layer.root_module.link_libc = true;
+
+    const install_cpu_ml_layer = b.addInstallArtifact(cpu_ml_layer, .{});
+    const install_cpu_ml_header = b.addInstallFile(
+        b.path("include/zpu/cpu_ml.h"),
+        "include/zpu/cpu_ml.h",
+    );
+    const cpu_ml_install_step = b.step("cpu-ml-install", "Install the host-OS-neutral ZPU CPU ML ABI and static library");
+    cpu_ml_install_step.dependOn(&install_cpu_ml_layer.step);
+    cpu_ml_install_step.dependOn(&install_cpu_ml_header.step);
+
+    const cpu_ml_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cpu_ml_test_root.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    cpu_ml_unit_tests.root_module.link_libc = true;
+    const run_cpu_ml_unit_tests = b.addRunArtifact(cpu_ml_unit_tests);
+    run_cpu_ml_unit_tests.step.dependOn(&require_limited.step);
+    const cpu_ml_unit_test_step = b.step("cpu-ml-test", "Run the host-OS-neutral CPU ML unit tests");
+    cpu_ml_unit_test_step.dependOn(&run_cpu_ml_unit_tests.step);
+    const cpu_ml_c_api_step = b.step("cpu-ml-c-api", "Run the standalone host-OS-neutral CPU ML C ABI test");
+
+    const metal_layer = b.addLibrary(.{
+        .name = "zpu_metal",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/metal_api_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    metal_layer.root_module.link_libc = true;
+    metal_layer.root_module.addIncludePath(b.path("include"));
+    metal_layer.root_module.addImport("zpu_config", build_config_module);
+    metal_layer.root_module.linkLibrary(cpu_ml_layer);
+    if (v3_kernels_main) |k| metal_layer.root_module.linkLibrary(k);
+    const apple_target = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    if (apple_target) {
+        metal_layer.root_module.addCSourceFile(.{ .file = b.path("src/metal/apple_adapter.m"), .flags = &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" } });
+        if (std.zig.system.darwin.getSdk(b.graph.arena, b.graph.io, &target.result)) |sdk_path| {
+            metal_layer.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr/include" }) });
+            metal_layer.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr/lib" }) });
+            metal_layer.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "System/Library/Frameworks" }) });
+        }
+        metal_layer.root_module.linkFramework("Foundation", .{});
+        metal_layer.root_module.linkFramework("Metal", .{});
+        metal_layer.root_module.linkSystemLibrary("compression", .{});
+        metal_layer.root_module.linkFramework("IOSurface", .{});
+    }
+    const install_metal_layer = b.addInstallArtifact(metal_layer, .{});
+    const install_metal_header = b.addInstallFile(
+        b.path("include/zpu/metal.h"),
+        "include/zpu/metal.h",
+    );
+    const install_metal_apple_header = b.addInstallFile(
+        b.path("include/zpu/metal_apple.h"),
+        "include/zpu/metal_apple.h",
+    );
+    const metal_install_step = b.step("metal-install", "Install the opt-in ZPU Metal-shaped static library");
+    metal_install_step.dependOn(cpu_ml_install_step);
+    metal_install_step.dependOn(&install_metal_layer.step);
+    metal_install_step.dependOn(&install_metal_header.step);
+    metal_install_step.dependOn(&install_metal_apple_header.step);
+
+    const metal_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/metal_test_root.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    metal_unit_tests.root_module.link_libc = true;
+    metal_unit_tests.root_module.addImport("zpu_config", build_config_module);
+    if (v3_kernels_host) |k| metal_unit_tests.root_module.linkLibrary(k);
+    const run_metal_unit_tests = b.addRunArtifact(metal_unit_tests);
+    run_metal_unit_tests.step.dependOn(&require_limited.step);
+    const metal_unit_test_step = b.step("metal-test", "Run the isolated Metal-layer Zig unit tests");
+    metal_unit_test_step.dependOn(&run_metal_unit_tests.step);
+
     const tests = b.addTest(.{ .root_module = zpu });
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&require_limited.step);
     const test_step = b.step("test", "Run deterministic unit tests");
+    test_step.dependOn(cpu_ml_unit_test_step);
+
+    if (!cross_compiling) {
+        const cpu_ml_c_api_tests = b.addExecutable(.{
+            .name = "zpu-cpu-ml-c-api-test",
+            .root_module = b.createModule(.{ .target = b.graph.host, .optimize = .Debug }),
+        });
+        cpu_ml_c_api_tests.root_module.addCSourceFile(.{ .file = b.path("test/cpu_ml_c_api.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        cpu_ml_c_api_tests.root_module.addIncludePath(b.path("include"));
+        cpu_ml_c_api_tests.root_module.link_libc = true;
+        cpu_ml_c_api_tests.root_module.linkLibrary(cpu_ml_layer);
+        const run_cpu_ml_c_api_tests = b.addRunArtifact(cpu_ml_c_api_tests);
+        run_cpu_ml_c_api_tests.step.dependOn(&require_limited.step);
+        cpu_ml_c_api_step.dependOn(&run_cpu_ml_c_api_tests.step);
+        test_step.dependOn(cpu_ml_c_api_step);
+    } else {
+        cpu_ml_c_api_step.dependOn(&cpu_ml_layer.step);
+    }
+    const metal_c_api_step = b.step("metal-c-api", "Run the portable C ABI and malformed-input tests");
+
+    if (!cross_compiling) {
+        const metal_c_api_tests = b.addExecutable(.{
+            .name = "zpu-metal-c-api-test",
+            .root_module = b.createModule(.{ .target = b.graph.host, .optimize = .Debug }),
+        });
+        metal_c_api_tests.root_module.addCSourceFile(.{ .file = b.path("test/metal_c_api.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        metal_c_api_tests.root_module.addIncludePath(b.path("include"));
+        metal_c_api_tests.root_module.link_libc = true;
+        metal_c_api_tests.root_module.linkLibrary(metal_layer);
+        const run_metal_c_api_tests = b.addRunArtifact(metal_c_api_tests);
+        run_metal_c_api_tests.step.dependOn(&require_limited.step);
+        metal_c_api_step.dependOn(&run_metal_c_api_tests.step);
+        test_step.dependOn(metal_c_api_step);
+    } else {
+        // Foreign targets cannot execute the host C ABI test, but the
+        // cross-target build must still compile the public layer.
+        metal_c_api_step.dependOn(&metal_layer.step);
+    }
+
+    if (!cross_compiling and b.graph.host.result.os.tag == .macos) {
+        const metal_pixel_tests = b.addExecutable(.{
+            .name = "zpu-metal-pixel-accuracy-test",
+            .root_module = b.createModule(.{ .target = b.graph.host, .optimize = .Debug }),
+        });
+        metal_pixel_tests.root_module.addCSourceFile(.{ .file = b.path("test/metal_pixel_accuracy.m"), .flags = &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" } });
+        metal_pixel_tests.root_module.addIncludePath(b.path("include"));
+        metal_pixel_tests.root_module.link_libc = true;
+        metal_pixel_tests.root_module.linkFramework("Foundation", .{});
+        metal_pixel_tests.root_module.linkFramework("Metal", .{});
+        metal_pixel_tests.root_module.linkSystemLibrary("compression", .{});
+        metal_pixel_tests.root_module.linkFramework("IOSurface", .{});
+        metal_pixel_tests.root_module.linkLibrary(metal_layer);
+        const run_metal_pixel_tests = b.addRunArtifact(metal_pixel_tests);
+        run_metal_pixel_tests.step.dependOn(&require_limited.step);
+        const metal_pixel_step = b.step("metal-pixel", "Compare the ZPU render path with the host Metal rasterizer");
+        metal_pixel_step.dependOn(&run_metal_pixel_tests.step);
+        if (!cross_compiling) test_step.dependOn(metal_pixel_step);
+    }
+
+    const metal_abi_status = if (b.graph.host.result.os.tag == .macos)
+        b.addSystemCommand(&.{ "python3", "tools/metal_abi_status.py", "--all-platforms" })
+    else
+        b.addSystemCommand(&.{ "python3", "tools/metal_abi_status.py" });
+    metal_abi_status.step.dependOn(&require_limited.step);
+    const metal_abi_tests = b.addSystemCommand(&.{"test/metal_abi.sh"});
+    metal_abi_tests.step.dependOn(&require_limited.step);
+    const metal_abi_step = b.step("metal-abi", "Validate the native Metal ABI and report SDK coverage");
+    metal_abi_step.dependOn(&metal_abi_status.step);
+    metal_abi_step.dependOn(&metal_abi_tests.step);
+    test_step.dependOn(metal_abi_step);
+    test_step.dependOn(metal_unit_test_step);
     // Cross-compiling: prove the test graph builds for the target without
     // attempting to execute foreign binaries locally.
-    const cross_compiling = target.result.cpu.arch != b.graph.host.result.cpu.arch or
-        target.result.os.tag != b.graph.host.result.os.tag;
     if (cross_compiling) {
         tests.step.dependOn(&require_limited.step);
         test_step.dependOn(&tests.step);

@@ -1,0 +1,205 @@
+// Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
+// SPDX-License-Identifier: Apache-2.0
+
+//! Explicit Metal-to-Vulkan mapping policy.
+//!
+//! A direct mapping here means that the ABI shape and operation semantics are
+//! already identical enough to hand the value to a Vulkan-facing layer. It is
+//! not a command translation pass. Objects whose lifetime or synchronization
+//! rules differ stay in the native Metal ABI.
+
+pub const Kind = enum { direct_vulkan, native_metal };
+
+pub const Api = enum {
+    a8_unorm,
+    color,
+    viewport,
+    scissor_rect,
+    r8_unorm,
+    r8_unorm_srgb,
+    r8_snorm,
+    r8_uint,
+    r8_sint,
+    r16_unorm,
+    r16_snorm,
+    r16_uint,
+    r16_sint,
+    r16_float,
+    rg8_unorm,
+    rg8_unorm_srgb,
+    rg8_snorm,
+    rg8_uint,
+    rg8_sint,
+    rg16_unorm,
+    rg16_snorm,
+    rg16_uint,
+    rg16_sint,
+    rg16_float,
+    r32_uint,
+    r32_sint,
+    rgba8_unorm,
+    rgba8_unorm_srgb,
+    rgba8_snorm,
+    rgba8_uint,
+    rgba8_sint,
+    bgra8_unorm,
+    bgra8_unorm_srgb,
+    b5g6r5_unorm,
+    a1bgr5_unorm,
+    abgr4_unorm,
+    bgr5a1_unorm,
+    rgb10a2_unorm,
+    rgb10a2_uint,
+    rg11b10_float,
+    rgb9e5_float,
+    bgr10a2_unorm,
+    r32_float,
+    rgba16_unorm,
+    rgba16_snorm,
+    rgba16_uint,
+    rgba16_sint,
+    rgba16_float,
+    rg32_uint,
+    rg32_sint,
+    rg32_float,
+    rgba32_uint,
+    rgba32_sint,
+    rgba32_float,
+    depth16_unorm,
+    depth24_unorm_stencil8,
+    depth32_float_stencil8,
+    x32_stencil8,
+    x24_stencil8,
+    load_dont_care,
+    load_load,
+    load_clear,
+    store_dont_care,
+    store_store,
+    primitive_point,
+    primitive_line,
+    primitive_line_strip,
+    primitive_triangle,
+    primitive_triangle_strip,
+    device,
+    command_queue,
+    command_buffer,
+    render_command_encoder,
+    compute_command_encoder,
+    blit_command_encoder,
+    parallel_render_command_encoder,
+    render_pass_descriptor,
+    depth_attachment,
+};
+
+pub const Entry = struct {
+    kind: Kind,
+    /// Vulkan enum value when `kind` is `.direct_vulkan`; null for native
+    /// Metal entries that must not be routed through Vulkan.
+    vulkan_value: ?u32 = null,
+};
+
+pub fn entry(api: Api) Entry {
+    return switch (api) {
+        .color, .viewport, .scissor_rect => .{ .kind = .direct_vulkan },
+        .a8_unorm, .a1bgr5_unorm, .abgr4_unorm, .rgb10a2_unorm, .rgb10a2_uint, .rg11b10_float, .rgb9e5_float, .bgr10a2_unorm => .{ .kind = .native_metal },
+        .b5g6r5_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 5 }, // VK_FORMAT_B5G6R5_UNORM_PACK16
+        .bgr5a1_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 7 }, // VK_FORMAT_B5G5R5A1_UNORM_PACK16
+        .r8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 9 }, // VK_FORMAT_R8_UNORM
+        .r8_unorm_srgb => .{ .kind = .direct_vulkan, .vulkan_value = 15 }, // VK_FORMAT_R8_SRGB
+        .r8_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 10 }, // VK_FORMAT_R8_SNORM
+        .r8_uint => .{ .kind = .direct_vulkan, .vulkan_value = 13 }, // VK_FORMAT_R8_UINT
+        .r8_sint => .{ .kind = .direct_vulkan, .vulkan_value = 14 }, // VK_FORMAT_R8_SINT
+        .r16_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 70 }, // VK_FORMAT_R16_UNORM
+        .r16_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 71 }, // VK_FORMAT_R16_SNORM
+        .r16_uint => .{ .kind = .direct_vulkan, .vulkan_value = 74 }, // VK_FORMAT_R16_UINT
+        .r16_sint => .{ .kind = .direct_vulkan, .vulkan_value = 75 }, // VK_FORMAT_R16_SINT
+        .r16_float => .{ .kind = .direct_vulkan, .vulkan_value = 76 }, // VK_FORMAT_R16_SFLOAT
+        .rg8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 16 }, // VK_FORMAT_R8G8_UNORM
+        .rg8_unorm_srgb => .{ .kind = .direct_vulkan, .vulkan_value = 22 }, // VK_FORMAT_R8G8_SRGB
+        .rg8_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 17 }, // VK_FORMAT_R8G8_SNORM
+        .rg8_uint => .{ .kind = .direct_vulkan, .vulkan_value = 20 }, // VK_FORMAT_R8G8_UINT
+        .rg8_sint => .{ .kind = .direct_vulkan, .vulkan_value = 21 }, // VK_FORMAT_R8G8_SINT
+        .rg16_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 77 }, // VK_FORMAT_R16G16_UNORM
+        .rg16_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 78 }, // VK_FORMAT_R16G16_SNORM
+        .rg16_uint => .{ .kind = .direct_vulkan, .vulkan_value = 81 }, // VK_FORMAT_R16G16_UINT
+        .rg16_sint => .{ .kind = .direct_vulkan, .vulkan_value = 82 }, // VK_FORMAT_R16G16_SINT
+        .rg16_float => .{ .kind = .direct_vulkan, .vulkan_value = 83 }, // VK_FORMAT_R16G16_SFLOAT
+        .r32_uint => .{ .kind = .direct_vulkan, .vulkan_value = 98 }, // VK_FORMAT_R32_UINT
+        .r32_sint => .{ .kind = .direct_vulkan, .vulkan_value = 99 }, // VK_FORMAT_R32_SINT
+        .rgba8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 37 }, // VK_FORMAT_R8G8B8A8_UNORM
+        .rgba8_unorm_srgb => .{ .kind = .direct_vulkan, .vulkan_value = 43 }, // VK_FORMAT_R8G8B8A8_SRGB
+        .rgba8_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 38 }, // VK_FORMAT_R8G8B8A8_SNORM
+        .rgba8_uint => .{ .kind = .direct_vulkan, .vulkan_value = 41 }, // VK_FORMAT_R8G8B8A8_UINT
+        .rgba8_sint => .{ .kind = .direct_vulkan, .vulkan_value = 42 }, // VK_FORMAT_R8G8B8A8_SINT
+        .bgra8_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 44 }, // VK_FORMAT_B8G8R8A8_UNORM
+        .bgra8_unorm_srgb => .{ .kind = .direct_vulkan, .vulkan_value = 50 }, // VK_FORMAT_B8G8R8A8_SRGB
+        .r32_float => .{ .kind = .direct_vulkan, .vulkan_value = 100 }, // VK_FORMAT_R32_SFLOAT
+        .rgba16_unorm => .{ .kind = .direct_vulkan, .vulkan_value = 91 }, // VK_FORMAT_R16G16B16A16_UNORM
+        .rgba16_snorm => .{ .kind = .direct_vulkan, .vulkan_value = 92 }, // VK_FORMAT_R16G16B16A16_SNORM
+        .rgba16_uint => .{ .kind = .direct_vulkan, .vulkan_value = 95 }, // VK_FORMAT_R16G16B16A16_UINT
+        .rgba16_sint => .{ .kind = .direct_vulkan, .vulkan_value = 96 }, // VK_FORMAT_R16G16B16A16_SINT
+        .rgba16_float => .{ .kind = .direct_vulkan, .vulkan_value = 97 }, // VK_FORMAT_R16G16B16A16_SFLOAT
+        .rg32_uint => .{ .kind = .direct_vulkan, .vulkan_value = 101 }, // VK_FORMAT_R32G32_UINT
+        .rg32_sint => .{ .kind = .direct_vulkan, .vulkan_value = 102 }, // VK_FORMAT_R32G32_SINT
+        .rg32_float => .{ .kind = .direct_vulkan, .vulkan_value = 103 }, // VK_FORMAT_R32G32_SFLOAT
+        .rgba32_uint => .{ .kind = .direct_vulkan, .vulkan_value = 107 }, // VK_FORMAT_R32G32B32A32_UINT
+        .rgba32_sint => .{ .kind = .direct_vulkan, .vulkan_value = 108 }, // VK_FORMAT_R32G32B32A32_SINT
+        .rgba32_float => .{ .kind = .direct_vulkan, .vulkan_value = 109 }, // VK_FORMAT_R32G32B32A32_SFLOAT
+        .load_dont_care => .{ .kind = .direct_vulkan, .vulkan_value = 1 }, // VK_ATTACHMENT_LOAD_OP_DONT_CARE
+        .load_load => .{ .kind = .direct_vulkan, .vulkan_value = 0 }, // VK_ATTACHMENT_LOAD_OP_LOAD
+        .load_clear => .{ .kind = .direct_vulkan, .vulkan_value = 2 }, // VK_ATTACHMENT_LOAD_OP_CLEAR
+        .store_dont_care => .{ .kind = .direct_vulkan, .vulkan_value = 1 }, // VK_ATTACHMENT_STORE_OP_DONT_CARE
+        .store_store => .{ .kind = .direct_vulkan, .vulkan_value = 0 }, // VK_ATTACHMENT_STORE_OP_STORE
+        .primitive_point => .{ .kind = .direct_vulkan, .vulkan_value = 0 }, // VK_PRIMITIVE_TOPOLOGY_POINT_LIST
+        .primitive_line => .{ .kind = .direct_vulkan, .vulkan_value = 1 }, // VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+        .primitive_line_strip => .{ .kind = .direct_vulkan, .vulkan_value = 2 }, // VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
+        .primitive_triangle => .{ .kind = .direct_vulkan, .vulkan_value = 3 }, // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+        .primitive_triangle_strip => .{ .kind = .direct_vulkan, .vulkan_value = 5 }, // VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+        .device, .command_queue, .command_buffer, .render_command_encoder, .compute_command_encoder, .blit_command_encoder, .parallel_render_command_encoder, .render_pass_descriptor, .depth_attachment, .depth16_unorm, .depth24_unorm_stencil8, .depth32_float_stencil8, .x32_stencil8, .x24_stencil8 => .{ .kind = .native_metal },
+    };
+}
+
+test "mapping policy keeps direct values separate from native lifetimes" {
+    try @import("std").testing.expectEqual(@as(?u32, 9), entry(.r8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.a8_unorm).kind);
+    try @import("std").testing.expectEqual(@as(?u32, 5), entry(.b5g6r5_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.rgb10a2_unorm).kind);
+    try @import("std").testing.expectEqual(@as(?u32, 15), entry(.r8_unorm_srgb).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 10), entry(.r8_snorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 13), entry(.r8_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 70), entry(.r16_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 71), entry(.r16_snorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 74), entry(.r16_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 76), entry(.r16_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 16), entry(.rg8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 22), entry(.rg8_unorm_srgb).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 17), entry(.rg8_snorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 77), entry(.rg16_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 20), entry(.rg8_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 83), entry(.rg16_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 98), entry(.r32_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 99), entry(.r32_sint).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.bgra8_unorm).kind);
+    try @import("std").testing.expectEqual(@as(?u32, 44), entry(.bgra8_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 50), entry(.bgra8_unorm_srgb).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 100), entry(.r32_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 97), entry(.rgba16_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 91), entry(.rgba16_unorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 92), entry(.rgba16_snorm).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 41), entry(.rgba8_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 43), entry(.rgba8_unorm_srgb).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 109), entry(.rgba32_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 107), entry(.rgba32_uint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 108), entry(.rgba32_sint).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 103), entry(.rg32_float).vulkan_value);
+    try @import("std").testing.expectEqual(@as(?u32, 101), entry(.rg32_uint).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.depth16_unorm).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.depth24_unorm_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.depth32_float_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.x32_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.x24_stencil8).kind);
+    try @import("std").testing.expectEqual(Kind.direct_vulkan, entry(.primitive_triangle_strip).kind);
+    try @import("std").testing.expectEqual(@as(?u32, 5), entry(.primitive_triangle_strip).vulkan_value);
+    try @import("std").testing.expectEqual(Kind.native_metal, entry(.command_buffer).kind);
+    try @import("std").testing.expectEqual(@as(?u32, null), entry(.command_buffer).vulkan_value);
+}

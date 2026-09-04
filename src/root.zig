@@ -25,6 +25,7 @@ pub const platform = @import("platform/presenter.zig");
 pub const benchmark = @import("benchmark.zig");
 pub const render_pipeline = @import("render_pipeline.zig");
 pub const render_ir_exec = @import("vulkan/render_ir_exec.zig");
+pub const metal = @import("metal.zig");
 
 /// Experimental render-redesign APIs are kept behind an explicit namespace
 /// until their execution and Vulkan hazard contracts stabilize.
@@ -45,6 +46,12 @@ test {
     _ = @import("vulkan/driver.zig");
     _ = @import("render_pipeline.zig");
     _ = @import("vulkan/render_ir_exec.zig");
+    _ = @import("metal/abi.zig");
+    _ = @import("metal/mapping.zig");
+    _ = @import("metal/cpu.zig");
+    _ = @import("cpu_ml.zig");
+    _ = @import("metal/c_api.zig");
+    _ = @import("metal/runtime.zig");
     _ = @import("render/pass_dag.zig");
     _ = @import("render/mosaic_pipeline.zig");
     _ = @import("render/mosaic_backend.zig");

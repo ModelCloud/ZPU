@@ -74,14 +74,19 @@ pub fn monotonicNs() u64 {
 }
 
 pub fn sleepUntil(deadline_ns: u64) void {
-    const ts = std.c.timespec{
-        .sec = @intCast(deadline_ns / ns_per_second),
-        .nsec = @intCast(deadline_ns % ns_per_second),
-    };
+    // Zig 0.16 removed std.Thread.sleep, and clock_nanosleep is not exposed
+    // as a callable libc function by its Darwin std.c surface. Use the
+    // portable POSIX relative sleep and recompute the remaining interval so
+    // interrupted calls preserve the same absolute-deadline semantics.
     while (true) {
-        const rc = std.c.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &ts, null);
-        if (rc == 0) return;
-        if (rc != @intFromEnum(std.c.E.INTR)) return;
+        const now_ns = monotonicNs();
+        if (now_ns >= deadline_ns) return;
+        const remaining_ns = deadline_ns - now_ns;
+        const request = std.c.timespec{
+            .sec = @intCast(remaining_ns / ns_per_second),
+            .nsec = @intCast(remaining_ns % ns_per_second),
+        };
+        _ = std.c.nanosleep(&request, null);
     }
 }
 
