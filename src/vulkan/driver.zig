@@ -15159,20 +15159,33 @@ fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool
     return if (command_buffer.push_descriptor_active) command_buffer.push_descriptor_stage_flags & 0x1f != 0 else command_buffer.bound_descriptor_stage_flags & 0x1f != 0;
 }
 const GraphicsDescriptorRequirements = struct { set0: bool, set1: bool, layout: bool };
+fn profileGraphicsDescriptorRequirements(profile: *const ProfileGraphics) GraphicsDescriptorRequirements {
+    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0;
+    const set1 = profile.fragment_sampled_image != null;
+    return .{ .set0 = set0, .set1 = set1, .layout = set0 or set1 };
+}
 fn graphicsDescriptorRequirements(pipeline: *const GraphicsPipelineObj) GraphicsDescriptorRequirements {
     return switch (pipeline.execution_abi) {
-        .profile_v1_scalar_graphics => |profile| blk: {
-            const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0;
-            const set1 = profile.fragment_sampled_image != null;
-            break :blk .{
-                .set0 = set0,
-                .set1 = set1,
-                .layout = set0 or set1 or profile.vertex_push_constant != null or profile.fragment_push_constant != null,
-            };
-        },
+        .profile_v1_scalar_graphics => |*profile| profileGraphicsDescriptorRequirements(profile),
         .cpu_cube_v1 => .{ .set0 = true, .set1 = false, .layout = true },
         else => .{ .set0 = false, .set1 = false, .layout = false },
     };
+}
+test "graphics descriptor requirements exclude push-constant-only pipelines" {
+    var profile: ProfileGraphics = undefined;
+    profile.vertex_uniform_count = 0;
+    profile.fragment_uniform_count = 0;
+    profile.vertex_push_constant = .{ .interface = 0, .byte_size = 16 };
+    profile.fragment_push_constant = .{ .interface = 0, .byte_size = 16 };
+    profile.fragment_sampled_image = null;
+    try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = false, .set1 = false, .layout = false }, profileGraphicsDescriptorRequirements(&profile));
+
+    profile.vertex_uniform_count = 1;
+    try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = true, .set1 = false, .layout = true }, profileGraphicsDescriptorRequirements(&profile));
+
+    profile.vertex_uniform_count = 0;
+    profile.fragment_sampled_image = 0;
+    try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = false, .set1 = true, .layout = true }, profileGraphicsDescriptorRequirements(&profile));
 }
 fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipeline: *const GraphicsPipelineObj) bool {
     const requirements = graphicsDescriptorRequirements(pipeline);
