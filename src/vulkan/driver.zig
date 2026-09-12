@@ -11238,14 +11238,21 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
     fragment.interfaces[1].descriptor_set = 1;
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces[1].descriptor_set = 0;
+    // Each stage decodes the shared uniform binding with its own member
+    // layout, so differing offsets, member types, and member counts remain
+    // compatible as long as both stages declare a block at the same
+    // set/binding coordinate.
     fragment.interfaces[1].members[0].offset = 16;
-    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
-    fragment.interfaces[1].members[0].offset = 0;
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces[1].members[0].ty.columns = 3;
-    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
-    fragment.interfaces[1].members[0].ty.columns = 4;
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces[1].member_count = 0;
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].block = false;
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    fragment.interfaces[1].block = true;
+    fragment.interfaces[1].members[0].offset = 0;
+    fragment.interfaces[1].members[0].ty.columns = 4;
     fragment.interfaces[1].member_count = 1;
     try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces = fragment_interfaces[0..1];
@@ -12026,8 +12033,12 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
     };
     for (vertex.interfaces) |left| if (left.storage == .uniform) {
         var matched = false;
+        // Vertex and fragment stages declare independent views of the shared
+        // uniform binding; each program decodes the buffer with its own
+        // member layout, so compatibility is the descriptor coordinate plus
+        // block-ness, not struct equality.
         for (fragment.interfaces) |right| if (right.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) {
-            if (!std.meta.eql(left, right)) return false;
+            if (left.block != right.block) return false;
             matched = true;
         };
         if (!matched) return false;
