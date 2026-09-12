@@ -11785,6 +11785,7 @@ fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const Shade
                 "ZPU SPIR-V frontend rejected stage={s} entry={s} specs={d} error={s} words={d} digest={x}\n",
                 .{ @tagName(stage), name, specs.len, @errorName(err), shader.module.words.len, shader.module.identity.digest },
             );
+            if (failureDiagnosticsEnabled()) if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             return error.Invalid;
         },
     };
