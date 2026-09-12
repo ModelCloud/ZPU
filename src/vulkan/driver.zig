@@ -11782,8 +11782,8 @@ fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const Shade
         error.OutOfMemory => error.OutOfMemory,
         else => {
             if (failureDiagnosticsEnabled()) std.debug.print(
-                "ZPU SPIR-V frontend rejected stage={s} error={s} words={d} digest={x}\n",
-                .{ @tagName(stage), @errorName(err), shader.module.words.len, shader.module.identity.digest },
+                "ZPU SPIR-V frontend rejected stage={s} entry={s} specs={d} error={s} words={d} digest={x}\n",
+                .{ @tagName(stage), name, specs.len, @errorName(err), shader.module.words.len, shader.module.identity.digest },
             );
             return error.Invalid;
         },
