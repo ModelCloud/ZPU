@@ -1633,6 +1633,10 @@ const max_command_buffer_commands: usize = cpu_cube.max_batch_commands;
 const max_resource_pins = max_child_objects * 2;
 const max_memory_objects = 4096;
 const max_sampler_objects = 4000;
+// Chromium's Skia backend keeps a descriptor set live per draw-state
+// combination across its render-target cache, so this registry is sized for a
+// compositor rather than for the bounded child registries.
+const max_descriptor_set_objects = 4096;
 const heap_size: u64 = 256 * 1024 * 1024;
 const max_2d_extent: u32 = 8192;
 const max_image_array_layers: u32 = 256;
@@ -1708,8 +1712,8 @@ var pipeline_cache_objects: [max_child_objects]PipelineCacheObj = undefined;
 var pipeline_cache_state = [_]SlotState{.never} ** max_child_objects;
 var descriptor_pool_objects: [max_child_objects]DescriptorPoolObj = undefined;
 var descriptor_pool_state = [_]SlotState{.never} ** max_child_objects;
-var descriptor_set_objects: [max_child_objects]DescriptorSetObj = undefined;
-var descriptor_set_state = [_]SlotState{.never} ** max_child_objects;
+var descriptor_set_objects: [max_descriptor_set_objects]DescriptorSetObj = undefined;
+var descriptor_set_state = [_]SlotState{.never} ** max_descriptor_set_objects;
 var shader_module_objects: [max_shader_modules]ShaderModuleObj = undefined;
 var shader_module_state = [_]SlotState{.never} ** max_shader_modules;
 var descriptor_set_layout_objects: [max_child_objects]DescriptorSetLayoutObj = undefined;
@@ -13114,11 +13118,12 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     const pool = validDescriptorPoolLocked(ci.descriptor_pool) orelse return .error_initialization_failed;
     if (!pool.owner.eql(d)) return .error_initialization_failed;
     if (ci.descriptor_set_count > pool.max_sets - pool.allocated_sets) return .error_out_of_pool_memory;
-    var slots: [max_child_objects]u8 = undefined;
+    var slots: [max_child_objects]u32 = undefined;
     var free_count: usize = 0;
     for (descriptor_set_state, 0..) |state, index| if (state != .live) {
         slots[free_count] = @intCast(index);
         free_count += 1;
+        if (free_count == ci.descriptor_set_count) break;
     };
     if (free_count < ci.descriptor_set_count) return .error_out_of_host_memory;
     var layouts: [max_child_objects]Canonical = undefined;
