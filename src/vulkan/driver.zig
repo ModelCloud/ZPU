@@ -11724,25 +11724,10 @@ fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.St
 }
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
+    if (cpuCubeV1ShaderCompatible(shader, stage, name, specs.len)) return null;
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => {
-            // The legacy cpu_cube_v1 rasterizer is the only execution path that
-            // can render without compiling the SPIR-V. Allow the known vkcube
-            // distro variants (same entry point name and word-count signature,
-            // no specialization constants) to fall back to it.
-            if (specs.len == 0 and std.mem.eql(u8, name, "main")) {
-                const known_words = switch (stage) {
-                    .vertex => &[_]usize{390},
-                    .fragment => &[_]usize{ 320, 661 },
-                    else => &[_]usize{},
-                };
-                for (known_words) |expected| {
-                    if (shader.module.words.len == expected) return null;
-                }
-            }
-            return error.Invalid;
-        },
+        else => error.Invalid,
     };
 }
 
@@ -12097,7 +12082,6 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
         return .error_invalid_shader;
     }
     const source: [*]const u32 = @ptrFromInt(@intFromPtr(raw));
-
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
