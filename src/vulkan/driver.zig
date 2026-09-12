@@ -9341,6 +9341,36 @@ fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
     return @intCast(adjusted);
 }
 
+fn profileTriangleVertex(topology: i32, triangle: u32, corner: usize) ?u32 {
+    return switch (topology) {
+        3 => std.math.add(
+            u32,
+            std.math.mul(u32, triangle, 3) catch return null,
+            @intCast(corner),
+        ) catch return null,
+        4 => std.math.add(
+            u32,
+            triangle,
+            if (triangle & 1 == 0)
+                @intCast(corner)
+            else
+                @as([3]u32, .{ 1, 0, 2 })[corner],
+        ) catch return null,
+        else => null,
+    };
+}
+
+test "scalar graphics profile expands triangle lists and strips" {
+    try std.testing.expectEqual(@as(?u32, 0), profileTriangleVertex(3, 0, 0));
+    try std.testing.expectEqual(@as(?u32, 4), profileTriangleVertex(3, 1, 1));
+    try std.testing.expectEqual(@as(?u32, 0), profileTriangleVertex(4, 0, 0));
+    try std.testing.expectEqual(@as(?u32, 2), profileTriangleVertex(4, 0, 2));
+    try std.testing.expectEqual(@as(?u32, 2), profileTriangleVertex(4, 1, 0));
+    try std.testing.expectEqual(@as(?u32, 1), profileTriangleVertex(4, 1, 1));
+    try std.testing.expectEqual(@as(?u32, 3), profileTriangleVertex(4, 1, 2));
+    try std.testing.expectEqual(@as(?u32, null), profileTriangleVertex(2, 0, 0));
+}
+
 /// Apply the Vulkan depth-bias equation for the bounded scalar raster profile.
 /// The CPU profile exposes a D32_SFLOAT depth attachment, whose minimum
 /// representable positive depth increment is conservatively modeled as 2^-24.
@@ -9419,7 +9449,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const target = color orelse depth orelse return;
     const color_bytes = if (color) |color_image| imageLayerBytes(color_image, op.color_base_layer + layer) else null;
     const depth_bytes = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + layer) else null;
-    if (op.vertex_count < 3 or op.vertex_count % 3 != 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
+    const triangle_count: u32 = switch (op.primitive_topology) {
+        3 => if (op.vertex_count % 3 == 0) op.vertex_count / 3 else return,
+        4 => if (op.vertex_count >= 3) op.vertex_count - 2 else return,
+        else => return,
+    };
+    if (triangle_count == 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
     var bounds = emptyRect();
     var pixels_written: usize = 0;
     var vertex_bindings: [21]render_ir_exec.Binding = undefined;
@@ -9469,14 +9504,17 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
     var vertices: [3]ProfileScreenVertex = undefined;
-    var triangle_start: u32 = 0;
-    while (triangle_start < op.vertex_count) : (triangle_start += 3) {
+    for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
             var binding_count: usize = 0;
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse return;
                 const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-                const emitted = triangle_start + @as(u32, @intCast(corner));
+                const emitted = profileTriangleVertex(
+                    op.primitive_topology,
+                    @intCast(triangle_index),
+                    corner,
+                ) orelse return;
                 const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return) else std.math.add(u64, op.base_vertex, emitted) catch return;
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, vertex_index, stride) catch return) catch return;
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
@@ -11648,7 +11686,12 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         }
     }
     const pipeline_primitive_restart_enable = try bool32(ia.primitive_restart_enable);
-    if ((!dynamic_primitive_topology and ia.topology != 3) or (!dynamic_primitive_restart_enable and pipeline_primitive_restart_enable != 0)) return pipelineInvalid(@src().line);
+    if ((!dynamic_primitive_topology and
+        ia.topology != 3 and
+        (ia.topology != 4 or profile_contract == null)) or
+        (!dynamic_primitive_restart_enable and
+            pipeline_primitive_restart_enable != 0))
+        return pipelineInvalid(@src().line);
     const vp = ci.viewport orelse return pipelineInvalid(@src().line);
     if (vp.s_type != 22 or vp.p_next != null or vp.flags != 0 or vp.viewport_count != 1 or vp.scissor_count != 1 or (!dynamic_viewport and vp.viewports == null) or (!dynamic_scissor and vp.scissors == null)) return pipelineInvalid(@src().line);
     try w.u32le(1);
@@ -11707,9 +11750,6 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         stencil_test != 0 or
         (!std.meta.eql(ds.front, zero_stencil) and !std.meta.eql(ds.front, always_stencil)) or
         (!std.meta.eql(ds.back, zero_stencil) and !std.meta.eql(ds.back, always_stencil)) or
-        (!dynamic_depth_test_enable and pipeline_depth_test_enable != 1) or
-        (!dynamic_depth_write_enable and pipeline_depth_write_enable != 1) or
-        (!dynamic_depth_compare_op and ds.depth_compare_op != 3) or
         (!dynamic_depth_bounds and pipeline_depth_bounds_test_enable == 1 and (ds.min_depth_bounds != 0.0 or ds.max_depth_bounds != 1.0));
     if (invalid_depth_stencil) return pipelineInvalid(@src().line);
     try w.u32le(1);
@@ -14022,6 +14062,9 @@ fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
         else => false,
     };
 }
+fn graphicsTopologySupported(profile: bool, topology: i32) bool {
+    return topology == 3 or (profile and topology == 4);
+}
 fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, pipeline: *const GraphicsPipelineObj) bool {
     if (!pipeline.dynamic_rendering) return true;
     const color_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_color_format else if (command_buffer.dynamic_color_image) |color| color.format else 0;
@@ -14047,7 +14090,13 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     const stencil_test_enable = if (pipeline.dynamic_stencil_test_enable) command_buffer.impl.dynamic.stencil_test_enable else pipeline.stencil_test_enable;
     const depth_bias_enable = if (pipeline.dynamic_depth_bias_enable) command_buffer.impl.dynamic.depth_bias_enable else pipeline.depth_bias_enable;
     const depth_bias = if (pipeline.dynamic_depth_bias) command_buffer.impl.depth_bias else pipeline.depth_bias;
-    if (primitive_topology != 3 or primitive_restart_enable != 0 or stencil_test_enable != 0) return null;
+    if (!graphicsTopologySupported(
+        pipeline.execution_abi == .profile_v1_scalar_graphics,
+        primitive_topology,
+    ) or
+        primitive_restart_enable != 0 or
+        stencil_test_enable != 0)
+        return null;
     return .{
         .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
         .scissor = if (pipeline.dynamic_scissor) command_buffer.impl.scissor else pipeline.scissor,
@@ -14119,6 +14168,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dynamic_stencil_compare_mask = false;
     pipeline.dynamic_stencil_write_mask = false;
     pipeline.dynamic_stencil_reference = false;
+    pipeline.execution_abi = .cpu_cube_v1;
     var impl: CommandBufferImpl = undefined;
     impl.viewport = dynamic_viewport;
     impl.scissor = dynamic_scissor;
@@ -14200,6 +14250,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expectEqual(@as(i32, 3), resolved.primitive_topology);
     try std.testing.expectEqual(@as(u32, 0), resolved.primitive_restart_enable);
     impl.dynamic.primitive_topology = 4;
+    try std.testing.expect(graphicsTopologySupported(true, 4));
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.dynamic.primitive_topology = 3;
     impl.dynamic.primitive_restart_enable = 1;
@@ -14389,8 +14440,13 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     pipeline.blend_constants = .{ 0, 0, 0, 0 };
     pipeline.dynamic_blend_constants = false;
     pipeline.dynamic_vertex_input_binding_stride = false;
-    var vertex_bytes: [48]u8 align(64) = [_]u8{0} ** 48;
-    const positions = [_][4]f32{ .{ -0.8, -0.8, 0.5, 1 }, .{ 0.8, -0.8, 0.5, 1 }, .{ 0, 0.8, 0.5, 1 } };
+    var vertex_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
+    const positions = [_][4]f32{
+        .{ -0.8, -0.8, 0.5, 1 },
+        .{ 0.8, -0.8, 0.5, 1 },
+        .{ -0.8, 0.8, 0.5, 1 },
+        .{ 0.8, 0.8, 0.5, 1 },
+    };
     for (positions, 0..) |position, vertex| for (position, 0..) |value, component| std.mem.writeInt(u32, vertex_bytes[vertex * 16 + component * 4 ..][0..4], @bitCast(value), .little);
     var vertex_memory = MemoryObj{ .owner = undefined, .bytes = vertex_bytes[0..], .mapped = true };
     var vertex_buffer = BufferObj{ .owner = undefined, .size = vertex_bytes.len, .usage = 0x80, .memory = &vertex_memory };
@@ -14402,10 +14458,22 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     var color = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = 44, .usage = 0x2, .layout = 1, .memory = &color_memory };
     var depth = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = 126, .usage = 0x2, .layout = 1, .memory = &depth_memory };
     var descriptors = DescriptorSetObj{};
-    const command = Command{ .cube_draw = .{ .framebuffer = null, .color_image = &color, .depth_image = &depth, .pipeline = &pipeline, .descriptors = &descriptors, .vertex_count = 3, .base_vertex = 0, .instance_count = 1, .indexed = null, .viewport = .{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 }, .cull_mode = 0, .front_face = 1, .vertex_bindings = .{ .buffers = .{&vertex_buffer} ** 16, .offsets = .{0} ** 16, .sizes = .{48} ** 16, .strides = .{16} ** 16, .set = 1 } } };
+    const command = Command{ .cube_draw = .{ .framebuffer = null, .color_image = &color, .depth_image = &depth, .pipeline = &pipeline, .descriptors = &descriptors, .vertex_count = 3, .base_vertex = 0, .instance_count = 1, .indexed = null, .viewport = .{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 }, .scissor = .{ .x = 0, .y = 0, .width = 4, .height = 4 }, .cull_mode = 0, .front_face = 1, .vertex_bindings = .{ .buffers = .{&vertex_buffer} ** 16, .offsets = .{0} ** 16, .sizes = .{64} ** 16, .strides = .{16} ** 16, .set = 1 } } };
     var context = QueryExecutionContext{ .pool = null, .index = 0 };
     executeValidatedCommand(command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    var strip_command = command;
+    strip_command.cube_draw.vertex_count = 4;
+    strip_command.cube_draw.primitive_topology = 4;
+    executeValidatedCommand(strip_command, &context);
+    var strip_pixels: usize = 0;
+    for (0..16) |pixel| {
+        if (std.mem.readInt(u32, color_bytes[pixel * 4 ..][0..4], .little) != 0)
+            strip_pixels += 1;
+    }
+    try std.testing.expect(strip_pixels > 4);
     const fragment_derivative_operands = [_]u32{0};
     const fragment_derivative_output_operands = [_]u32{ 1, 1 };
     const fragment_derivative_instructions = [_]render_ir.Instruction{
@@ -17870,10 +17938,18 @@ test "vkcube presentation path records submits and presents two swapchain images
     invalid_pipeline.multisample = &bad_multisample;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     var bad_depth = depth_stencil;
-    bad_depth.depth_compare_op = 1;
+    bad_depth.depth_test_enable = 0;
+    bad_depth.depth_write_enable = 0;
+    bad_depth.depth_compare_op = 7;
     invalid_pipeline = pipeline_info;
     invalid_pipeline.depth_stencil = &bad_depth;
-    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    var disabled_depth_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &disabled_depth_pipeline));
+    const disabled_depth = validGraphicsPipelineLocked(disabled_depth_pipeline[0]).?;
+    try std.testing.expectEqual(@as(u32, 0), disabled_depth.depth_test_enable);
+    try std.testing.expectEqual(@as(u32, 0), disabled_depth.depth_write_enable);
+    try std.testing.expectEqual(@as(i32, 7), disabled_depth.depth_compare_op);
+    destroyPipeline(device, disabled_depth_pipeline[0], null);
     bad_depth = depth_stencil;
     bad_depth.depth_bounds_test_enable = 1;
     bad_depth.min_depth_bounds = 0.25;
