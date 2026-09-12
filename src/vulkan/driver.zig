@@ -15158,6 +15158,40 @@ fn activeDescriptorSet(command_buffer: *CommandBufferObj) ?*DescriptorSetObj {
 fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool {
     return if (command_buffer.push_descriptor_active) command_buffer.push_descriptor_stage_flags & 0x1f != 0 else command_buffer.bound_descriptor_stage_flags & 0x1f != 0;
 }
+const GraphicsDescriptorRequirements = struct { set0: bool, set1: bool, layout: bool };
+fn graphicsDescriptorRequirements(pipeline: *const GraphicsPipelineObj) GraphicsDescriptorRequirements {
+    return switch (pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |profile| blk: {
+            const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0;
+            const set1 = profile.fragment_sampled_image != null;
+            break :blk .{
+                .set0 = set0,
+                .set1 = set1,
+                .layout = set0 or set1 or profile.vertex_push_constant != null or profile.fragment_push_constant != null,
+            };
+        },
+        .cpu_cube_v1 => .{ .set0 = true, .set1 = false, .layout = true },
+        else => .{ .set0 = false, .set1 = false, .layout = false },
+    };
+}
+fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipeline: *const GraphicsPipelineObj) bool {
+    const requirements = graphicsDescriptorRequirements(pipeline);
+    if (requirements.layout) {
+        const layout_pointer = command_buffer.impl.bound_layout orelse return false;
+        const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse return false;
+        if (layout != layout_pointer or !layout.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical)) return false;
+    }
+    if (requirements.set0) {
+        const descriptors = activeDescriptorSet(@constCast(command_buffer)) orelse return false;
+        const stages = if (command_buffer.impl.push_descriptor_active) command_buffer.impl.push_descriptor_stage_flags else command_buffer.impl.bound_descriptor_stage_flags;
+        if (stages & 0x1f == 0 or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.set0.eql(&descriptors.layout)) return false;
+    }
+    if (requirements.set1) {
+        const descriptors = command_buffer.impl.bound_sampled_descriptors orelse return false;
+        if (command_buffer.impl.bound_descriptor_bind_point != 0 or command_buffer.impl.bound_descriptor_stage_flags & 0x1f == 0 or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.set1.eql(&descriptors.layout)) return false;
+    }
+    return true;
+}
 fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const DescriptorSetObj) ?*DescriptorSetObj {
     if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
     const snapshot = &command_buffer.impl.descriptor_snapshots[command_buffer.impl.count];
@@ -15177,8 +15211,38 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
         snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
         snapshot.uniform_dynamic = false;
     }
-    // Snapshots live in the command buffer rather than the global descriptor
-    // registry; resource liveness is still checked by prevalidation below.
+    snapshot.synthetic = true;
+    return snapshot;
+}
+fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?*DescriptorSetObj {
+    if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
+    const requirements = graphicsDescriptorRequirements(pipeline);
+    const snapshot = &command_buffer.impl.descriptor_snapshots[command_buffer.impl.count];
+    if (requirements.set0) {
+        const descriptors = activeDescriptorSet(command_buffer) orelse return null;
+        snapshot.* = descriptors.*;
+        if (!descriptors.synthetic) snapshot.source_set = @constCast(descriptors);
+        if (descriptors.uniform_dynamic) {
+            if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
+            snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
+            snapshot.uniform_dynamic = false;
+        }
+    } else {
+        snapshot.* = .{
+            .owner = pipeline.owner,
+            .layout = .{ .bytes = pipeline.set0.bytes, .digest = pipeline.set0.digest },
+            .synthetic = true,
+        };
+    }
+    snapshot.active_users = .init(0);
+    snapshot.retire_pending = false;
+    snapshot.sampled_source_set = null;
+    if (requirements.set1) {
+        const sampled = command_buffer.impl.bound_sampled_descriptors orelse return null;
+        snapshot.texture = sampled.texture;
+        snapshot.sampler = sampled.sampler;
+        snapshot.sampled_source_set = sampled;
+    }
     snapshot.synthetic = true;
     return snapshot;
 }
@@ -15209,19 +15273,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    const layout_pointer = command_buffer.impl.bound_layout orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const descriptors = activeDescriptorSet(command_buffer) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline))) {
+    if (pipeline != pipeline_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !graphicsDescriptorStateValid(command_buffer, pipeline) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline))) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -15234,7 +15286,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         return;
     }
     if (vertex_count == 0 or instance_count == 0) return;
-    const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
+    const descriptor_snapshot = snapshotGraphicsDescriptorState(command_buffer, pipeline) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
@@ -15267,18 +15319,6 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    const layout_pointer = command_buffer.impl.bound_layout orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const descriptors = activeDescriptorSet(command_buffer) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
     const index_pointer = command_buffer.impl.index_buffer orelse {
         command_buffer.impl.invalid = true;
         return;
@@ -15300,7 +15340,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
+    if (pipeline != pipeline_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !graphicsDescriptorStateValid(command_buffer, pipeline) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -15313,7 +15353,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         return;
     }
     if (index_count == 0 or instance_count == 0) return;
-    const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
+    const descriptor_snapshot = snapshotGraphicsDescriptorState(command_buffer, pipeline) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
@@ -15342,18 +15382,6 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         return;
     };
     const pipeline = validGraphicsPipelineLocked(command_buffer.impl.bound_pipeline_handle) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const layout_pointer = command_buffer.impl.bound_layout orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const layout = validPipelineLayoutLocked(command_buffer.impl.bound_layout_handle) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    const descriptors = activeDescriptorSet(command_buffer) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
@@ -15387,7 +15415,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
     // Zero-count commands are the only form that may omit the structure
     // stride; positive batches always carry a complete aligned command.
     const stride_valid = draw_count == 0 or (stride >= indirect_size and stride % 4 == 0);
-    if (!graphicsDescriptorBindingValid(command_buffer.impl) or pipeline != pipeline_pointer or layout != layout_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !layout.owner.eql(command_buffer.impl.owner) or !descriptors.owner.eql(command_buffer.impl.owner) or !pipeline.layout.eql(&layout.canonical) or !pipeline.set0.eql(&descriptors.layout) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
+    if (pipeline != pipeline_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !graphicsDescriptorStateValid(command_buffer, pipeline) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or indirect_buffer.owner != command_buffer.impl.owner or indirect_buffer.usage & 0x100 == 0 or indirect_buffer.memory == null or !liveMemoryObject(indirect_buffer.memory.?) or offset % 4 != 0 or !stride_valid or (draw_count != 0 and offset > indirect_buffer.size) or !range_valid or invalid_index_state) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -15399,7 +15427,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         command_buffer.impl.invalid = true;
         return;
     }
-    const descriptor_snapshot = snapshotDescriptorSet(command_buffer, descriptors) orelse {
+    const descriptor_snapshot = snapshotGraphicsDescriptorState(command_buffer, pipeline) orelse {
         command_buffer.impl.invalid = true;
         return;
     };
