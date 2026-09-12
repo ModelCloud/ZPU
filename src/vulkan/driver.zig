@@ -10439,7 +10439,7 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.set_layout_count != 1) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.set_layout_count == 0) return .error_initialization_failed;
     const push_ranges = pipelinePushRanges(ci) catch |err| return creationFailure(err);
     var canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
     const source_set = validDescriptorSetLayoutLocked(ci.set_layouts.?[0]).?;
@@ -16941,6 +16941,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&descriptor_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(device, &pipeline_layout_info, null, &pipeline_layout));
+    const two_set_layouts = [_]usize{ descriptor_layout, descriptor_layout };
+    var two_set_pipeline_layout_info = pipeline_layout_info;
+    two_set_pipeline_layout_info.set_layout_count = two_set_layouts.len;
+    two_set_pipeline_layout_info.set_layouts = &two_set_layouts;
+    var two_set_pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(device, &two_set_pipeline_layout_info, null, &two_set_pipeline_layout));
+    destroyPipelineLayout(device, two_set_pipeline_layout, null);
     test_allocations_before_failure = 13;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createPipelineLayout(device, &pipeline_layout_info, null, &unpublished));
     test_allocations_before_failure = null;
