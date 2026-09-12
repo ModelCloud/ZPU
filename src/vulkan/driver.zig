@@ -1170,7 +1170,7 @@ const MemoryObj = struct {
     retire_pending: bool = false,
     storage_released: bool = false,
 };
-const BufferObj = struct { owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
+const BufferObj = struct { handle: usize = 0, owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
 const BufferViewObj = struct { owner: Device, buffer: *BufferObj, format: i32, offset: u64, range: u64 };
 const ImageObj = struct {
     owner: Device,
@@ -4328,7 +4328,10 @@ fn validMemoryLocked(handle: usize) ?*MemoryObj {
     return result;
 }
 fn validBufferLocked(handle: usize) ?*BufferObj {
-    const result = findLiveHandle(BufferObj, handle, &buffer_objects, &buffer_state);
+    if (handle == 0) return null;
+    const result = for (&buffer_objects, buffer_state) |*object, state| {
+        if (object.handle == handle) break if (state == .live) object else null;
+    } else null;
     if (handle != 0 and result == null) hit(.stale_buffer);
     return result;
 }
@@ -5096,10 +5099,11 @@ fn createBuffer(device: ?Device, info: ?*const BufferCreateInfo, alloc: ?*const 
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&buffer_objects, &buffer_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .size = ci.size, .usage = usage };
+    for (&buffer_objects, &buffer_state) |*object, *state| if (state.* != .live) {
+        const handle = allocateGenericHandle();
+        object.* = .{ .handle = handle, .owner = d, .size = ci.size, .usage = usage };
         state.* = .live;
-        out.* = @intFromPtr(object);
+        out.* = handle;
         return .success;
     };
     hit(.child_registry_exhaustion);
@@ -27155,7 +27159,7 @@ test "administrative command-pool reset performance is bounded and allocation fr
     destroyInstance(ctx.instance, null);
 }
 
-test "bounded child registries fail safely without reusing tombstones" {
+test "bounded child registries fail safely while buffer handles recycle slots" {
     const ctx = try createTestDeviceContext();
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
     var pool: usize = 0;
@@ -27185,20 +27189,22 @@ test "bounded child registries fail safely without reusing tombstones" {
     }
     try std.testing.expect(exhausted);
     const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
-    exhausted = false;
-    var created_buffers: usize = 0;
-    for (0..max_buffer_objects + 1) |_| {
-        var handle: usize = 0;
-        const result = createBuffer(ctx.device, &buffer_info, null, &handle);
-        if (result == .error_out_of_host_memory) {
-            exhausted = true;
-            break;
-        }
-        try std.testing.expectEqual(Result.success, result);
-        created_buffers += 1;
+    var stale_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &stale_buffer));
+    destroyBuffer(ctx.device, stale_buffer, null);
+    for (0..max_child_objects + 1) |_| {
+        var recycled: usize = 0;
+        try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, &recycled));
+        try std.testing.expect(recycled != stale_buffer);
+        try std.testing.expect(validBufferLocked(stale_buffer) == null);
+        destroyBuffer(ctx.device, recycled, null);
     }
-    try std.testing.expect(created_buffers > max_child_objects);
+    var buffers: [max_buffer_objects]usize = undefined;
+    for (&buffers) |*handle| try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &buffer_info, null, handle));
+    var overflow_buffer: usize = 0;
+    exhausted = createBuffer(ctx.device, &buffer_info, null, &overflow_buffer) == .error_out_of_host_memory;
     try std.testing.expect(exhausted);
+    for (buffers) |handle| destroyBuffer(ctx.device, handle, null);
     const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     exhausted = false;
     for (0..max_child_objects + 1) |_| {
