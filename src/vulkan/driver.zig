@@ -11689,7 +11689,20 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         );
         return pipelineInvalid(@src().line);
     }
-    if (profile_pair and (!frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0) or !frontendSampledImagesCompatible(&vertex_program.?, &fragment_program.?, layout))) return pipelineInvalid(@src().line);
+    if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU pipeline interfaces rejected vertex_words={d} fragment_words={d} vertex_digest={x} fragment_digest={x}\n",
+            .{ vertex_words, fragment_words, vertex_digest, fragment_digest },
+        );
+        return pipelineInvalid(@src().line);
+    }
+    if (profile_pair and !frontendSampledImagesCompatible(&vertex_program.?, &fragment_program.?, layout)) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU pipeline sampled images rejected vertex_words={d} fragment_words={d} vertex_digest={x} fragment_digest={x}\n",
+            .{ vertex_words, fragment_words, vertex_digest, fragment_digest },
+        );
+        return pipelineInvalid(@src().line);
+    }
     const vi = ci.vertex_input orelse return pipelineInvalid(@src().line);
     if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return pipelineInvalid(@src().line);
     var binding_indices: [16]u8 = undefined;
