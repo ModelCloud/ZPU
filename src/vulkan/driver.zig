@@ -7891,6 +7891,18 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled() and !c.impl.invalid) {
+        std.debug.print(
+            "ZPU pipeline barrier command srcStages=0x{x} dstStages=0x{x} dependencyFlags=0x{x} memory={d} buffers={d} images={d}\n",
+            .{ src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, buffer_barrier_count, image_barrier_count },
+        );
+        if (image_barrier_count <= max_api_items) if (image_barriers) |barriers| for (barriers[0..image_barrier_count], 0..) |barrier, index| {
+            std.debug.print(
+                "ZPU image barrier {d} sType={d} pNext={} srcAccess=0x{x} dstAccess=0x{x} oldLayout={d} newLayout={d} srcQueue={d} dstQueue={d} image=0x{x} aspect=0x{x} mip={d}+{d} layer={d}+{d}\n",
+                .{ index, barrier.s_type, barrier.p_next != null, barrier.src_access_mask, barrier.dst_access_mask, barrier.old_layout, barrier.new_layout, barrier.src_queue_family_index, barrier.dst_queue_family_index, barrier.image, barrier.subresource_range.aspect_mask, barrier.subresource_range.base_mip_level, barrier.subresource_range.level_count, barrier.subresource_range.base_array_layer, barrier.subresource_range.layer_count },
+            );
+        };
+    }
     const stages_valid = validPipelineStageMask(src_stage_mask) and validPipelineStageMask(dst_stage_mask);
     if (c.impl.state != 1 or c.impl.invalid or dependency_flags & ~@as(u32, 1) != 0 or !stages_valid or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
         hit(.invalid_barrier);
