@@ -1929,7 +1929,11 @@ var requirement_hits: u64 = 0;
 var overlap_hold = std.atomic.Value(bool).init(false);
 var overlap_entered = std.atomic.Value(bool).init(false);
 fn hit(comptime requirement: Requirement) void {
-    if (@import("builtin").is_test) requirement_hits |= @as(u64, 1) << @intFromEnum(requirement);
+    if (@import("builtin").is_test) {
+        requirement_hits |= @as(u64, 1) << @intFromEnum(requirement);
+    } else if (failureDiagnosticsEnabled()) {
+        std.debug.print("ZPU requirement rejected: {s}\n", .{@tagName(requirement)});
+    }
 }
 
 fn lock() void {
