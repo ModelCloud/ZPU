@@ -15340,7 +15340,36 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    if (pipeline != pipeline_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !graphicsDescriptorStateValid(command_buffer, pipeline) or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline)) or start > index_buffer.size or byte_count > index_buffer.size - start or byte_count > command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset)) {
+    const descriptor_state_valid = graphicsDescriptorStateValid(command_buffer, pipeline);
+    const render_compatible = if (dynamic_rendering) dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline) else pipeline.render_compatibility.eql(&render_pass.?.compatibility);
+    const index_range_valid = start <= index_buffer.size and byte_count <= index_buffer.size - start and byte_count <= command_buffer.impl.index_size -| (start -| command_buffer.impl.index_offset);
+    if (pipeline != pipeline_pointer or index_buffer != index_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !descriptor_state_valid or index_buffer.owner != command_buffer.impl.owner or index_buffer.memory == null or !liveMemoryObject(index_buffer.memory.?) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or !render_compatible or !index_range_valid) {
+        if (failureDiagnosticsEnabled()) {
+            const requirements = graphicsDescriptorRequirements(pipeline);
+            std.debug.print(
+                "ZPU draw indexed rejected abi={s} pipeline={} index={} owner={} descriptors={} requirements={}/{}/{} indexOwner={} indexMemory={} execution={} subpass={} render={} range={} start={d} bytes={d} buffer={d} bound={d}\n",
+                .{
+                    @tagName(pipeline.execution_abi),
+                    pipeline == pipeline_pointer,
+                    index_buffer == index_pointer,
+                    pipeline.owner.eql(command_buffer.impl.owner),
+                    descriptor_state_valid,
+                    requirements.set0,
+                    requirements.set1,
+                    requirements.layout,
+                    index_buffer.owner == command_buffer.impl.owner,
+                    index_buffer.memory != null and liveMemoryObject(index_buffer.memory.?),
+                    graphicsDrawExecutionAllowed(pipeline.execution_abi),
+                    pipeline.subpass == command_buffer.impl.active_subpass,
+                    render_compatible,
+                    index_range_valid,
+                    start,
+                    byte_count,
+                    index_buffer.size,
+                    command_buffer.impl.index_size,
+                },
+            );
+        }
         command_buffer.impl.invalid = true;
         return;
     }
