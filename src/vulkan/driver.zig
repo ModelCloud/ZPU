@@ -3744,17 +3744,38 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
 fn getFormatProperties(physical: ?Physical, format: i32, output: ?*FormatProperties) callconv(.c) void {
     lock();
     defer mutex.unlock();
-    _ = getFormatPropertiesLocked(physical orelse return, format, output);
+    const supported = getFormatPropertiesLocked(physical orelse return, format, output);
+    if (failureDiagnosticsEnabled()) {
+        const properties = if (output) |out| out.* else std.mem.zeroes(FormatProperties);
+        std.debug.print(
+            "ZPU format properties format={d} supported={} linear=0x{x} optimal=0x{x} buffer=0x{x}\n",
+            .{
+                format,
+                supported,
+                properties.linear_tiling_features,
+                properties.optimal_tiling_features,
+                properties.buffer_features,
+            },
+        );
+    }
 }
 fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, tiling: i32, usage: u32, flags: u32, output: ?*ImageFormatProperties) callconv(.c) Result {
     lock();
     defer mutex.unlock();
-    if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
+    const result: Result = result: {
+        if (!validPhysicalLocked(physical orelse break :result .error_initialization_failed)) break :result .error_initialization_failed;
+        const allowed_usage = imageFormatUsage(format, tiling);
+        if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or !imageCreateFlagsValid(flags) or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) break :result .error_format_not_supported;
+        const out = output orelse break :result .error_initialization_failed;
+        out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
+        break :result .success;
+    };
     const allowed_usage = imageFormatUsage(format, tiling);
-    if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or !imageCreateFlagsValid(flags) or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) return .error_format_not_supported;
-    const out = output orelse return .error_initialization_failed;
-    out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
-    return .success;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU image format properties format={d} type={d} tiling={d} usage=0x{x} allowed=0x{x} flags=0x{x} result={s}\n",
+        .{ format, image_type, tiling, usage, allowed_usage, flags, @tagName(result) },
+    );
+    return result;
 }
 fn getSparseImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, samples: u32, usage: u32, tiling: i32, count: ?*u32, output: ?[*]SparseImageFormatProperties) callconv(.c) void {
     _ = output;
