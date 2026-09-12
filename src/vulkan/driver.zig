@@ -1771,6 +1771,13 @@ fn failureDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+fn objectPoolExhausted(comptime object_name: []const u8) Result {
+    if (failureDiagnosticsEnabled()) {
+        std.debug.print("ZPU {s} object pool exhausted\n", .{object_name});
+    }
+    return .error_out_of_host_memory;
+}
+
 fn recordTrace(record_value: TraceRecord) void {
     const limit = traceLimit();
     if (limit == 0 or trace_written or trace_count >= limit) return;
@@ -5095,7 +5102,7 @@ fn createBuffer(device: ?Device, info: ?*const BufferCreateInfo, alloc: ?*const 
         return .success;
     };
     hit(.child_registry_exhaustion);
-    return .error_out_of_host_memory;
+    return objectPoolExhausted("buffer");
 }
 fn destroyBuffer(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -5230,7 +5237,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         return .success;
     };
     hit(.child_registry_exhaustion);
-    return .error_out_of_host_memory;
+    return objectPoolExhausted("image");
 }
 fn destroyImage(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -5852,7 +5859,7 @@ fn createCommandPool(device: ?Device, info: ?*const CommandPoolCreateInfo, alloc
         out.* = @intFromPtr(pool);
         return .success;
     };
-    return .error_out_of_host_memory;
+    return objectPoolExhausted("command pool");
 }
 fn destroyCommandPool(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -12245,7 +12252,7 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
         out.* = @intFromPtr(object);
         return .success;
     };
-    return .error_out_of_host_memory;
+    return objectPoolExhausted("sampler");
 }
 fn destroySampler(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -12544,7 +12551,7 @@ fn createSemaphore(device: ?Device, info: ?*const SemaphoreCreateInfo, alloc: ?*
         out.* = @intFromPtr(object);
         return .success;
     };
-    return .error_out_of_host_memory;
+    return objectPoolExhausted("semaphore");
 }
 fn destroySemaphore(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -12642,7 +12649,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         out.* = @intFromPtr(object);
         return .success;
     };
-    return .error_out_of_host_memory;
+    return objectPoolExhausted("image view");
 }
 fn destroyImageView(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
