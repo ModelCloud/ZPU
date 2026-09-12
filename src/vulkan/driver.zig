@@ -13274,6 +13274,10 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU begin render pass invalid={} commands={d} contents={d}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, contents },
+    );
     if (command_buffer.impl.dynamic_rendering) {
         command_buffer.impl.invalid = true;
         return;
@@ -13555,6 +13559,10 @@ fn cmdBindPipeline(cb: ?CommandBuffer, bind_point: i32, pipeline: usize) callcon
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU bind pipeline invalid={} commands={d} bindPoint={d} pipeline=0x{x}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, bind_point, pipeline },
+    );
     if (command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
         command_buffer.impl.invalid = true;
         return;
@@ -13589,6 +13597,10 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU bind descriptor sets invalid={} commands={d} bindPoint={d} firstSet={d} count={d} dynamic={d}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, bind_point, first_set, count, dynamic_count },
+    );
     if ((bind_point != 0 and bind_point != 1) or count == 0 or count > 2 or first_set > 1 or count > 2 - first_set or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
         command_buffer.impl.invalid = true;
         return;
@@ -15174,6 +15186,10 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU draw invalid={} commands={d} renderPass={} dynamic={} pipeline={} layout={} descriptors={} vertices={d} instances={d} firstVertex={d} firstInstance={d}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.dynamic_rendering, command_buffer.impl.bound_pipeline != null, command_buffer.impl.bound_layout != null, activeDescriptorSet(command_buffer) != null, vertex_count, instance_count, first_vertex, first_instance },
+    );
     const dynamic_rendering = command_buffer.impl.dynamic_rendering;
     const render_pass = command_buffer.impl.active_render_pass;
     if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering)) {
@@ -15228,6 +15244,10 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU draw indexed invalid={} commands={d} renderPass={} dynamic={} pipeline={} layout={} descriptors={} indices={d} instances={d} firstIndex={d} vertexOffset={d} firstInstance={d}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.dynamic_rendering, command_buffer.impl.bound_pipeline != null, command_buffer.impl.bound_layout != null, activeDescriptorSet(command_buffer) != null, index_count, instance_count, first_index, vertex_offset, first_instance },
+    );
     const dynamic_rendering = command_buffer.impl.dynamic_rendering;
     const render_pass = command_buffer.impl.active_render_pass;
     if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or (render_pass == null and !dynamic_rendering)) {
@@ -15608,6 +15628,10 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU end render pass invalid={} commands={d} active={} framebuffer={} subpass={d}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.active_framebuffer != null, command_buffer.impl.active_subpass },
+    );
     const render_pass = command_buffer.impl.active_render_pass;
     const framebuffer = command_buffer.impl.active_framebuffer;
     // Vulkan query scope is nested inside the render-pass instance.  Do not
