@@ -1170,6 +1170,7 @@ const MemoryObj = struct {
 const BufferObj = struct { handle: usize = 0, owner: Device, size: u64, usage: u32, memory: ?*MemoryObj = null, offset: u64 = 0 };
 const BufferViewObj = struct { owner: Device, buffer: *BufferObj, format: i32, offset: u64, range: u64 };
 const ImageObj = struct {
+    handle: usize = 0,
     owner: Device,
     width: u32,
     height: u32,
@@ -1838,8 +1839,9 @@ fn releasePresentedState(swapchain: *SwapchainObj, image_index: u32) void {
 /// private payload only after the worker is finished.
 fn releasePresentedLocked(swapchain: *SwapchainObj, image_index: u32) void {
     if (image_index < swapchain.image_count) {
-        const image: *ImageObj = @ptrFromInt(swapchain.images[image_index]);
-        if (image.active_users.load(.acquire) != 0) releaseImageUserLocked(image);
+        if (imageObjectForHandle(swapchain.images[image_index])) |image| {
+            if (image.active_users.load(.acquire) != 0) releaseImageUserLocked(image);
+        }
     }
     releasePresentedState(swapchain, image_index);
 }
@@ -1849,11 +1851,13 @@ fn releasePresented(context: *anyopaque, image_index: u32) void {
     // Drop the swapchain pending count before taking the registry mutex.  The
     // destroy path waits on this condition while unlocked; acquiring the
     // mutex first would invert that order and deadlock a worker completion.
-    const image: ?*ImageObj = if (image_index < swapchain.image_count) @ptrFromInt(swapchain.images[image_index]) else null;
+    const image_handle: usize = if (image_index < swapchain.image_count) swapchain.images[image_index] else 0;
     releasePresentedState(swapchain, image_index);
-    if (image) |value| {
+    if (image_handle != 0) {
         lock();
-        if (value.active_users.load(.acquire) != 0) releaseImageUserLocked(value);
+        if (imageObjectForHandle(image_handle)) |image| {
+            if (image.active_users.load(.acquire) != 0) releaseImageUserLocked(image);
+        }
         mutex.unlock();
     }
 }
@@ -4341,8 +4345,14 @@ fn validBufferLocked(handle: usize) ?*BufferObj {
 fn validBufferViewLocked(handle: usize) ?*BufferViewObj {
     return findLiveHandle(BufferViewObj, handle, &buffer_view_objects, &buffer_view_state);
 }
+fn imageObjectForHandle(handle: usize) ?*ImageObj {
+    if (handle == 0) return null;
+    return for (&image_objects, image_state) |*object, state| {
+        if (state != .never and object.handle == handle) break object;
+    } else null;
+}
 fn validImageLocked(handle: usize) ?*ImageObj {
-    const result = findLiveHandle(ImageObj, handle, &image_objects, &image_state);
+    const result = if (imageObjectForHandle(handle)) |object| (if (stateForObject(ImageObj, object, &image_objects, &image_state).?.* == .live) object else null) else null;
     if (handle != 0 and result == null) hit(.stale_image);
     return result;
 }
@@ -4773,8 +4783,8 @@ fn pinComputePipelineLocked(pipeline: *ComputePipelineObj, owner: Device, pinned
 fn maybeRetireSwapchainTransportLocked(handle: usize) void {
     if (handle == 0) return;
     for (&swapchain_objects) |*swapchain| if (@intFromPtr(swapchain) == handle and swapchain.transport_retire_pending) {
-        for (swapchain.images[0..swapchain.image_count]) |image_handle| {
-            const image: *ImageObj = @ptrFromInt(image_handle);
+        for (&image_objects, image_state) |*image, state| {
+            if (state == .never or image.shared_owner != handle) continue;
             if (image.active_users.load(.acquire) != 0) return;
         }
         xcb_present.deinit(&swapchain.transport);
@@ -5240,11 +5250,12 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&image_objects, &image_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .width = ci.extent.width, .height = ci.extent.height, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
+    for (&image_objects, &image_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
+        const handle = allocateGenericHandle();
+        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
         if (imageByteSize(object) == null) return .error_initialization_failed;
         state.* = .live;
-        out.* = @intFromPtr(object);
+        out.* = handle;
         return .success;
     };
     hit(.child_registry_exhaustion);
@@ -11623,6 +11634,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     var fragment_program: ?render_ir.Program = null;
     errdefer if (fragment_program) |*program| program.deinit(allocator);
     var cpu_cube_stage_mask: u32 = 0;
+    var vertex_digest: [32]u8 = undefined;
+    var fragment_digest: [32]u8 = undefined;
+    var vertex_words: usize = 0;
+    var fragment_words: usize = 0;
     for (stage_indices) |index| {
         const stage = stages[index];
         if (stage.s_type != 18 or !pipelineRobustnessCreateInfoValid(stage.p_next) or stage.flags != 0 or (stage.stage != 1 and stage.stage != 0x10) or stage_mask & stage.stage != 0 or stage.name == null) return pipelineInvalid(@src().line);
@@ -11651,6 +11666,13 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             }
         }
         const frontend_stage: render_ir.Stage = if (stage.stage == 1) .vertex else .fragment;
+        if (frontend_stage == .vertex) {
+            vertex_digest = shader.module.identity.digest;
+            vertex_words = shader.module.words.len;
+        } else {
+            fragment_digest = shader.module.identity.digest;
+            fragment_words = shader.module.words.len;
+        }
         const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
         if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
@@ -11660,7 +11682,13 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (stage_mask != 0x11) return pipelineInvalid(@src().line);
     const profile_pair = vertex_program != null and fragment_program != null and cpu_cube_stage_mask == 0;
     const cpu_cube_pair = vertex_program == null and fragment_program == null and cpu_cube_stage_mask == 0x11;
-    if (!profile_pair and !cpu_cube_pair) return pipelineInvalid(@src().line);
+    if (!profile_pair and !cpu_cube_pair) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU pipeline pair rejected cpu_cube_mask=0x{x} vertex_compiled={} fragment_compiled={} vertex_words={d} fragment_words={d} vertex_digest={x} fragment_digest={x}\n",
+            .{ cpu_cube_stage_mask, vertex_program != null, fragment_program != null, vertex_words, fragment_words, vertex_digest, fragment_digest },
+        );
+        return pipelineInvalid(@src().line);
+    }
     if (profile_pair and (!frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0) or !frontendSampledImagesCompatible(&vertex_program.?, &fragment_program.?, layout))) return pipelineInvalid(@src().line);
     const vi = ci.vertex_input orelse return pipelineInvalid(@src().line);
     if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return pipelineInvalid(@src().line);
@@ -15889,7 +15917,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
         errdefer rollbackSwapchainCreation(swapchain, created);
         while (created < image_count) : (created += 1) {
             var found = false;
-            for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and image_slot_state.* == .never) {
+            for (&image_objects, &image_state) |*image, *image_slot_state| if (!found and (image_slot_state.* == .never or (image_slot_state.* == .tombstone and !image.retire_pending))) {
                 const byte_count = @as(usize, ci.image_extent.width) * ci.image_extent.height * 4;
                 const shared_image_bytes = xcb_present.swapchainImageBytes(&swapchain.transport, created);
                 const shared_bytes = shared_image_bytes != null;
@@ -15897,9 +15925,10 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
                     break :blk allocateBytes(byte_count) catch return .error_out_of_host_memory;
                 };
                 @memset(bytes, 0);
-                image.* = .{ .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes, .shared_bytes = shared_bytes, .shared_owner = if (shared_bytes) @intFromPtr(swapchain) else 0 };
+                const image_handle = allocateGenericHandle();
+                image.* = .{ .handle = image_handle, .owner = d, .width = ci.image_extent.width, .height = ci.image_extent.height, .array_layers = ci.image_array_layers, .samples = 1, .format = ci.image_format, .usage = ci.image_usage, .layout = 0, .owned_bytes = bytes, .shared_bytes = shared_bytes, .shared_owner = if (shared_bytes) @intFromPtr(swapchain) else 0 };
                 image_slot_state.* = .live;
-                swapchain.images[created] = @intFromPtr(image);
+                swapchain.images[created] = image_handle;
                 found = true;
             };
             if (!found) return .error_out_of_host_memory;
@@ -16135,8 +16164,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
             mutex.unlock();
             return .error_initialization_failed;
         }
-        const image: *ImageObj = @ptrFromInt(swapchain.images[index]);
-        if (!liveImageObject(image) or image.retire_pending or image.owner != q.owner) {
+        const image = validImageLocked(swapchain.images[index]) orelse {
+            mutex.unlock();
+            return .error_initialization_failed;
+        };
+        if (image.retire_pending or image.owner != q.owner) {
             mutex.unlock();
             return .error_initialization_failed;
         }
@@ -24140,7 +24172,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &dst_info, null, &live_dst));
     try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, live_src, live_src_memory, 0));
     try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, live_dst, live_dst_memory, 0));
-    const live_image: *ImageObj = @ptrFromInt(image);
+    const live_image: *ImageObj = imageObjectForHandle(image).?;
     const live_src_object: *BufferObj = @ptrFromInt(live_src);
     const live_dst_object: *BufferObj = @ptrFromInt(live_dst);
     var mismatched_layouts = [_]i32{0} ** max_child_objects;
@@ -24232,7 +24264,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     try std.testing.expectEqual(Result.success, endCommandBuffer(cbs[0]));
     destroyImage(ctx.device, image, null);
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
-    const dead_image: *ImageObj = @ptrFromInt(image);
+    const dead_image: *ImageObj = imageObjectForHandle(image).?;
     try std.testing.expect(!prevalidateCommand(.{ .clear = .{ .image = dead_image, .layout = 1, .color = .{ 1, 2, 3, 4 } } }, ctx.device, &validation_layouts));
     try std.testing.expect(!prevalidateCommand(.{ .fill = .{ .dst = dead_dst, .offset = 0, .size = 4, .data = 0 } }, ctx.device, &validation_layouts));
     const stale_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
@@ -24362,7 +24394,7 @@ test "zero fills and extreme buffer image arithmetic reject without side effects
     try std.testing.expectEqual(Result.error_initialization_failed, endCommandBuffer(cbs[0]));
     try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(ctx.queue, 1, @ptrCast(&submit), fence));
     try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
-    try std.testing.expectEqual(@as(i32, 0), (@as(*ImageObj, @ptrFromInt(image))).layout);
+    try std.testing.expectEqual(@as(i32, 0), imageObjectForHandle(image).?.layout);
 
     destroyFence(ctx.device, fence, null);
     freeCommandBuffers(ctx.device, pool, 1, &cbs);
@@ -24419,7 +24451,7 @@ test "submission prevalidation is failure atomic" {
     try std.testing.expectEqual(Result.not_ready, getFenceStatus(ctx.device, fence));
     try std.testing.expectEqual(original_state, cbs[0].impl.state);
     try std.testing.expectEqual(original_count, cbs[0].impl.count);
-    try std.testing.expectEqual(@as(i32, 0), (@as(*ImageObj, @ptrFromInt(image))).layout);
+    try std.testing.expectEqual(@as(i32, 0), imageObjectForHandle(image).?.layout);
     try std.testing.expectEqual(Result.success, mapMemory(ctx.device, memories[0], 0, 64, 0, &mapped));
     for ((@as([*]const u8, @ptrCast(mapped.?)))[0..64]) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
     unmapMemory(ctx.device, memories[0]);
@@ -25594,7 +25626,7 @@ test "depth stencil image clear uses exact D32 depth semantics" {
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
     var mismatched_layouts = [_]i32{0} ** max_child_objects;
-    const live_image: *ImageObj = @ptrFromInt(image);
+    const live_image: *ImageObj = imageObjectForHandle(image).?;
     try std.testing.expect(!prevalidateCommand(.{ .clear_depth = .{ .image = live_image, .layout = 1, .depth = value.depth } }, ctx.device, &mismatched_layouts));
     test_allocations_before_failure = 0;
     for (0..4096) |_| {
@@ -27407,6 +27439,16 @@ test "bounded child registries fail safely while buffer handles recycle slots" {
     try std.testing.expect(exhausted);
     for (buffers) |handle| destroyBuffer(ctx.device, handle, null);
     const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var stale_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &stale_image));
+    destroyImage(ctx.device, stale_image, null);
+    for (0..max_child_objects + 1) |_| {
+        var recycled: usize = 0;
+        try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &recycled));
+        try std.testing.expect(recycled != stale_image);
+        try std.testing.expect(validImageLocked(stale_image) == null);
+        destroyImage(ctx.device, recycled, null);
+    }
     exhausted = false;
     for (0..max_child_objects + 1) |_| {
         var handle: usize = 0;
