@@ -54,6 +54,7 @@ init_runtime() {
     runtime=$base/zpu-smolvm
     auth_dir=$runtime/xauth
     source_archive=$runtime/zpu-source.tar
+    source_part_prefix=$runtime/zpu-source.tar.part.
     [[ ! -L $runtime && ! -L $auth_dir ]] || die 'runtime and authorization paths must not be symlinks'
     if [[ -e $runtime ]]; then
         [[ -d $runtime && $(stat -c %u "$runtime") == "$UID" && $(stat -c %a "$runtime") == 700 ]] || die 'existing ZPU runtime must be a current-user directory with mode exactly 700'
@@ -64,7 +65,7 @@ cleanup_runtime() {
     trap - EXIT
     trap '' HUP INT TERM QUIT
     if [[ -n ${runtime:-} && ! -L $runtime && -d $runtime ]]; then
-        rm -f -- "$runtime/source-list" "$runtime/untracked-list" "$runtime/zpu-source.tar"
+        rm -f -- "$runtime/source-list" "$runtime/untracked-list" "$runtime/zpu-source.tar" "$runtime"/zpu-source.tar.part.*
         if [[ -n ${auth_dir:-} && ! -L $auth_dir && -d $auth_dir ]]; then
             rm -f -- "$auth_dir/bootstrap-Xauthority" "$auth_dir/before.nlist" "$auth_dir/after.nlist" \
                 "$auth_dir/selected.nlist" "$auth_dir/host-raw.nlist" "$auth_dir/after-raw.nlist" \
@@ -170,7 +171,7 @@ require_host() {
 }
 require_auth_tools() {
     local program
-    for program in xauth stat awk sed sort comm grep mktemp install python3; do command -v "$program" >/dev/null || die "$program not found"; done
+    for program in xauth stat awk sed sort comm grep mktemp install python3 split; do command -v "$program" >/dev/null || die "$program not found"; done
 }
 require_display() {
     require_auth_tools
@@ -275,6 +276,8 @@ prepare_source() {
         die 'source export unexpectedly contains a build artifact'
     fi
     rm -f "$source_list"
+    rm -f -- "$source_part_prefix"*
+    split -b 768K -d -a 4 -- "$source_archive" "$source_part_prefix"
 }
 create() {
     reject_host_injection
@@ -358,10 +361,21 @@ sync_source() {
     assert_network_disabled
     prepare_source
     run smolvm machine exec --name "$machine" -- sh -ceu 'rm -rf /mnt/zpu-source && mkdir -p /mnt/zpu-source'
-    run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
+    else
+        run smolvm machine exec --name "$machine" -- sh -ceu 'rm -f /var/tmp/zpu-source.tar /var/tmp/zpu-source.tar.part.*'
+        local source_part
+        for source_part in "$source_part_prefix"*; do
+            run smolvm machine cp "$source_part" "$machine:/var/tmp/$(basename "$source_part")"
+        done
+        run smolvm machine exec --name "$machine" -- sh -ceu 'cat /var/tmp/zpu-source.tar.part.* > /var/tmp/zpu-source.tar && rm -f /var/tmp/zpu-source.tar.part.*'
+    fi
     run smolvm machine exec --name "$machine" -- tar -C /mnt/zpu-source -xf /var/tmp/zpu-source.tar
     run smolvm machine exec --name "$machine" -- rm -f /var/tmp/zpu-source.tar
-    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then rm -f -- "$source_archive"; fi
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
+        rm -f -- "$source_archive" "$source_part_prefix"*
+    fi
 }
 build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-build.sh; }
 package_guest() {

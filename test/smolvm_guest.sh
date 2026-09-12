@@ -529,5 +529,9 @@ fi
 grep -F 'source export unexpectedly contains a build artifact' "$tmp/err"
 "$repo/tools/smolvm-zpu.sh" build >/dev/null
 [[ ! -e $tmp/runtime/zpu-smolvm/zpu-source.tar ]] || { echo 'host source archive remained after transfer' >&2; exit 1; }
+if compgen -G "$tmp/runtime/zpu-smolvm/zpu-source.tar.part.*" >/dev/null; then
+    echo 'host source archive part remained after transfer' >&2
+    exit 1
+fi
 grep -F 'rm -f /var/tmp/zpu-source.tar' <<<"$out" >/dev/null || { echo 'dry-run omitted guest source archive cleanup' >&2; exit 1; }
 printf '%s\n' 'SmolVM guest isolation contract passed'
