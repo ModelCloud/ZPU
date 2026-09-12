@@ -1751,6 +1751,11 @@ fn traceLimit() usize {
     return @min(std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0, max_trace_frames);
 }
 
+fn failureDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_FAILURES") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
 fn recordTrace(record_value: TraceRecord) void {
     const limit = traceLimit();
     if (limit == 0 or trace_written or trace_count >= limit) return;
@@ -11301,7 +11306,7 @@ fn validBlendConstants(constants: [4]f32) bool {
 }
 
 fn pipelineInvalid(line: u32) CanonicalError {
-    _ = line;
+    if (failureDiagnosticsEnabled()) std.debug.print("ZPU graphics pipeline rejected at line {d}\n", .{line});
     return error.Invalid;
 }
 fn queueSubmitFailed(line: u32) Result {
@@ -11775,7 +11780,13 @@ fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const Shade
     if (cpuCubeV1ShaderCompatible(shader, stage, name, specs.len)) return null;
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => error.Invalid,
+        else => {
+            if (failureDiagnosticsEnabled()) std.debug.print(
+                "ZPU SPIR-V frontend rejected stage={s} error={s} words={d} digest={x}\n",
+                .{ @tagName(stage), @errorName(err), shader.module.words.len, shader.module.identity.digest },
+            );
+            return error.Invalid;
+        },
     };
 }
 
