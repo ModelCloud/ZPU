@@ -26,3 +26,7 @@ varyings, and function-local storage.
 `chromium_skia_vertex_flat.spvasm` captures Chromium's flat-color vertex path.
 It exercises `Flat` interpolation metadata on a `vec4` output while retaining
 the structured position and push-constant interfaces.
+
+`chromium_skia_fragment_flat.spvasm` captures the matching fragment path. It
+exercises the fragment origin mode, output index zero, `FrontFacing`, and a flat
+`vec4` input.

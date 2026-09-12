@@ -29,9 +29,11 @@ const Node = struct {
 const Decorations = struct {
     spec_id: ?u32 = null,
     location: ?u32 = null,
+    index_zero: bool = false,
     binding: ?u32 = null,
     descriptor_set: ?u32 = null,
     builtin_position: bool = false,
+    builtin_front_facing: bool = false,
     flat: bool = false,
     block: bool = false,
 };
@@ -245,6 +247,7 @@ const decoration_schema = [_]ValueMeta{
     .{ .value = 11, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 14, .supported = true },
     .{ .value = 30, .supported = true, .operands = .{ .min = 1, .max = 1 } },
+    .{ .value = 32, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 33, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 34, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 35, .supported = true, .operands = .{ .min = 1, .max = 1 } },
@@ -623,7 +626,7 @@ fn interfacesUnique(items: []const ir.Interface) bool {
         if (item.storage != prior.storage) continue;
         if (item.storage == .uniform) {
             if (item.descriptor_set == prior.descriptor_set and item.binding == prior.binding) return false;
-        } else if ((item.builtin_position and prior.builtin_position) or (item.location != null and item.location == prior.location)) return false;
+        } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.location != null and item.location == prior.location)) return false;
     }
     return true;
 }
@@ -770,7 +773,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const meta = valueMeta(&execution_mode_schema, w[1]) orelse return error.Unsupported;
                 const payload = w.len - 2;
                 if (payload < meta.operands.min or payload > meta.operands.max) return error.Malformed;
-                if (!meta.supported and !(requested_stage == .compute and w[1] == 17)) return error.Unsupported;
+                if (!meta.supported and !(requested_stage == .compute and w[1] == 17) and !(requested_stage == .fragment and w[1] == 7)) return error.Unsupported;
             },
             71 => {
                 const meta = valueMeta(&decoration_schema, w[1]) orelse return error.Unsupported;
@@ -786,8 +789,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     2 => if (!decorations[target].block) {
                         decorations[target].block = true;
                     } else return error.Malformed,
-                    11 => if (!decorations[target].builtin_position and w[2] == 0) {
+                    11 => if (w[2] == 0 and !decorations[target].builtin_position and !decorations[target].builtin_front_facing) {
                         decorations[target].builtin_position = true;
+                    } else if (w[2] == 17 and !decorations[target].builtin_position and !decorations[target].builtin_front_facing) {
+                        decorations[target].builtin_front_facing = true;
                     } else return error.Unsupported,
                     14 => if (!decorations[target].flat) {
                         decorations[target].flat = true;
@@ -795,6 +800,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     30 => if (decorations[target].location == null) {
                         decorations[target].location = w[2];
                     } else return error.Malformed,
+                    32 => if (w[2] == 0 and !decorations[target].index_zero) {
+                        decorations[target].index_zero = true;
+                    } else return error.Unsupported,
                     33 => if (decorations[target].binding == null) {
                         decorations[target].binding = w[2];
                     } else return error.Malformed,
@@ -1047,10 +1055,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     }
     if (!capability or !memory_model or in_function or function_count == 0) return error.Malformed;
     for (nodes, decorations, 0..) |node, decoration, node_index| {
-        const any_decoration = decoration.spec_id != null or decoration.location != null or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.block;
+        const any_decoration = decoration.spec_id != null or decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_front_facing or decoration.flat or decoration.block;
         if (any_decoration and node.kind == .none) return error.Malformed;
         if (decoration.spec_id != null and !(node.kind == .constant and node.opcode >= 48 and node.opcode <= 50)) return error.Unsupported;
-        if ((decoration.location != null or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position) and node.kind != .variable) return error.Unsupported;
+        if ((decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_front_facing or decoration.flat) and node.kind != .variable) return error.Unsupported;
         if (decoration.block and node.kind != .structure) return error.Unsupported;
         for (member_offsets[node_index * 16 ..][0..16], 0..) |offset, member_index| if (offset != null and (node.kind != .structure or member_index >= node.words.len)) return if (node.kind == .none) error.Malformed else error.Unsupported;
     }
@@ -1424,11 +1432,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             12 => if (requested_stage == .compute) .output else return error.Unsupported,
             else => return error.Unsupported,
         };
+        if (decorations[index].index_zero and !(requested_stage == .fragment and storage == .output and decorations[index].location == 0)) return error.Unsupported;
         var shape: ir.Type = undefined;
-        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .flat = decorations[index].flat };
+        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_front_facing = decorations[index].builtin_front_facing, .flat = decorations[index].flat };
         const pointee = nodes[try id(nodes, pointer.b)];
         if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
-            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
+            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
             for (pointee.words, 0..) |member, member_index| {
                 const builtin = member_builtins[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
@@ -1469,8 +1478,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 interface.members[member_index] = .{ .ty = member_shape, .offset = offset };
             }
             if (storage == .uniform) {
-                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
-            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
+                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
+            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
         } else if (requested_stage == .compute and variable.a == 12) {
             if (pointee.kind == .structure and decorations[try id(nodes, pointer.b)].block and pointee.words.len == 1) {
                 shape = try resultShape(nodes, pointee.words[0]);
@@ -1479,11 +1488,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 interface.members[0] = .{ .ty = shape, .offset = member_offsets[@as(usize, pointer.b) * 16] orelse return error.Unsupported };
                 if (interface.members[0].offset != 0) return error.Unsupported;
             } else shape = try resultShape(nodes, pointer.b);
-            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
+            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
         } else {
             shape = try resultShape(nodes, pointer.b);
-            if ((decorations[index].location == null) == !decorations[index].builtin_position or decorations[index].binding != null or decorations[index].descriptor_set != null) return error.Unsupported;
+            const builtin = decorations[index].builtin_position or decorations[index].builtin_front_facing;
+            if ((decorations[index].location == null) == !builtin or decorations[index].binding != null or decorations[index].descriptor_set != null) return error.Unsupported;
             if (decorations[index].builtin_position and !(storage == .output and requested_stage == .vertex and shape.scalar == .f32 and shape.columns == 4)) return error.Unsupported;
+            if (decorations[index].builtin_front_facing and !(storage == .input and requested_stage == .fragment and shape.scalar == .bool and shape.columns == 1 and shape.rows == 1)) return error.Unsupported;
             if (decorations[index].flat and !((storage == .output and requested_stage == .vertex) or (storage == .input and requested_stage == .fragment))) return error.Unsupported;
         }
         interface.ty = shape;
@@ -2851,18 +2862,18 @@ test "profile compiles selected straight-line vertex to owned canonical IR" {
     try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
     try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00", program.bytes[0..8]);
     try std.testing.expectEqualSlices(u8, &.{
-        0x5a, 0x50, 0x55, 0x49, 0x52, 0x33, 0x44, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-        0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 0x01, 0x00, 0x00, 0x00, 0x01, 0x03, 0x04,
-        0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x00, 0x00,
-        0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x80, 0x3f, 0x01, 0x03, 0x04, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x12, 0x03, 0x04, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
+        90, 80,  85,  73,  82,  51,  68,  0,   1,   0,   0,   0,   4,   0, 0, 0,
+        0,  4,   0,   0,   0,   109, 97,  105, 110, 1,   0,   0,   0,   1, 3, 4,
+        1,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0,
+        0,  0,   3,   0,   0,   0,   0,   3,   1,   1,   0,   0,   0,   0, 4, 0,
+        0,  0,   0,   0,   128, 63,  1,   3,   4,   1,   4,   0,   0,   0, 0, 0,
+        0,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0, 0, 0,
+        0,  0,   18,  3,   4,   1,   2,   0,   0,   0,   0,   0,   0,   0, 1, 0,
+        0,  0,   0,   0,   0,   0,
     }, program.bytes);
     try std.testing.expectEqualSlices(u8, &.{
-        214, 105, 39, 65, 200, 5,   170, 212, 193, 169, 237, 220, 218, 113, 33,  150,
-        96,  24,  35, 46, 137, 171, 110, 125, 73,  84,  12,  15,  143, 116, 127, 68,
+        103, 88,  5,   253, 198, 111, 62, 98, 22,  195, 109, 97,  108, 22,  41,  3,
+        81,  255, 225, 220, 179, 3,   88, 85, 255, 20,  239, 197, 37,  122, 127, 126,
     }, &program.identity.digest);
     var clone = try program.clone(std.testing.allocator);
     defer clone.deinit(std.testing.allocator);
@@ -4816,12 +4827,23 @@ test "Chromium Skia flat-color vertex shader preserves interpolation mode" {
     try std.testing.expectEqual(ir.Storage.push_constant, program.interfaces[4].storage);
 }
 
+test "Chromium Skia flat-color fragment shader accepts front facing" {
+    const bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_158.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), program.interfaces.len);
+    try std.testing.expect(program.interfaces[0].flat);
+    try std.testing.expect(program.interfaces[1].builtin_front_facing);
+    try std.testing.expectEqual(ir.Storage.output, program.interfaces[2].storage);
+}
+
 test "specialization uniform matrix and fragment canonical identities are golden" {
     const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
     const cases = .{
-        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 285), @as(usize, 9), @as(usize, 2), [32]u8{ 91, 182, 18, 163, 40, 236, 162, 38, 201, 93, 239, 87, 6, 77, 238, 83, 227, 69, 100, 78, 203, 32, 223, 99, 22, 209, 4, 252, 64, 43, 183, 7 } },
-        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 152), @as(usize, 4), @as(usize, 2), [32]u8{ 215, 149, 142, 75, 106, 244, 255, 170, 14, 102, 161, 23, 23, 206, 241, 107, 114, 19, 78, 206, 73, 233, 194, 42, 222, 226, 87, 124, 2, 85, 166, 126 } },
-        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 86), @as(usize, 2), @as(usize, 1), [32]u8{ 69, 93, 130, 159, 244, 29, 10, 39, 146, 253, 203, 169, 5, 31, 50, 43, 201, 163, 87, 212, 73, 51, 115, 123, 237, 101, 64, 37, 95, 78, 123, 181 } },
+        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 287), @as(usize, 9), @as(usize, 2), [32]u8{ 238, 12, 85, 217, 244, 47, 33, 83, 146, 194, 194, 157, 241, 28, 186, 144, 101, 46, 175, 160, 2, 232, 103, 53, 143, 69, 187, 213, 67, 32, 119, 58 } },
+        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 154), @as(usize, 4), @as(usize, 2), [32]u8{ 145, 37, 140, 7, 207, 138, 206, 203, 6, 158, 174, 50, 7, 68, 154, 58, 23, 103, 185, 122, 76, 217, 17, 53, 3, 33, 136, 208, 41, 91, 62, 146 } },
+        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 87), @as(usize, 2), @as(usize, 1), [32]u8{ 213, 168, 10, 159, 226, 79, 46, 132, 115, 108, 98, 31, 38, 141, 186, 48, 71, 121, 122, 69, 226, 247, 19, 101, 149, 199, 180, 53, 253, 0, 204, 198 } },
     };
     inline for (cases) |case| {
         var program = try compile(std.testing.allocator, case[0], case[1], "main", case[2]);
