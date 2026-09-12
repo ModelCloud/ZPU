@@ -353,6 +353,15 @@ pub const Op = enum(u8) {
     /// coordinates. The first operand is the resource interface, followed by
     /// the coordinate and implicit-LOD bias values.
     image_sample_implicit_lod,
+    local,
+    local_access,
+    local_load,
+    local_store,
+    label,
+    branch,
+    branch_conditional,
+    phi,
+    return_,
 };
 
 pub const Instruction = struct {
@@ -503,8 +512,10 @@ pub fn identify(bytes: []const u8) Identity {
 
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage => false,
+        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
         .image_sample_implicit_lod => operand_index != 0,
+        .local_access, .local_store, .phi => true,
+        .local_load, .branch_conditional => operand_index == 0,
         .constant_composite => true,
         .access => operand_index != 0,
         .composite => true,
@@ -558,7 +569,7 @@ fn declarationLess(context: DeclarationContext, a: u32, b: u32) bool {
 }
 
 fn declaration(op: Op) bool {
-    return op == .constant or op == .constant_composite;
+    return op == .constant or op == .constant_composite or op == .local;
 }
 
 /// Deterministically renumbers scalar constants by semantic bytes, then

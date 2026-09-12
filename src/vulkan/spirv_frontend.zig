@@ -313,10 +313,9 @@ fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
             break :blk shape;
         },
         .matrix => blk: {
-            if (node.b != 4) return error.Unsupported;
             const column = try resultShape(nodes, node.a);
-            if (column.scalar != .f32 or column.columns != 4 or column.rows != 1) return error.Unsupported;
-            break :blk .{ .scalar = .f32, .columns = 4, .rows = 4 };
+            if ((node.b != 2 and node.b != 4) or column.scalar != .f32 or column.columns != node.b or column.rows != 1) return error.Unsupported;
+            break :blk .{ .scalar = .f32, .columns = @intCast(node.b), .rows = column.columns };
         },
         // The bounded arithmetic profile represents the two scalar members
         // returned by OpIAddCarry/OpISubBorrow/OpUMulExtended/OpSMulExtended
@@ -921,7 +920,6 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 block_terminated = false;
             },
             247 => {
-                if (requested_stage != .compute) return error.Unsupported;
                 if (!in_function or !label_seen or terminated or block_terminated or w.len != 2) return error.Malformed;
                 if (w[1] != 0) return error.Unsupported;
                 _ = try id(nodes, w[0]);
@@ -988,7 +986,6 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 current_function = 0;
             },
             245 => {
-                if (requested_stage != .compute) return error.Unsupported;
                 if (!in_function or !label_seen or terminated or block_terminated or w.len < 6 or (w.len - 2) % 2 != 0) return error.Malformed;
                 const result = try resultShape(nodes, w[0]);
                 var pair_index: usize = 2;
@@ -1003,7 +1000,6 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 try define(nodes, w[1], .{ .kind = .function_value, .type_id = w[0], .opcode = 245, .words = w[2..] });
             },
             249, 250, 251 => {
-                if (requested_stage != .compute) return error.Unsupported;
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 if (instruction.opcode == 249 and w.len != 1) return error.Malformed;
                 if (instruction.opcode == 250 and w.len != 3) return error.Malformed;
@@ -1138,11 +1134,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                         const part = try valueShape(nodes, operand);
                         if (part.scalar != result.scalar or part.columns != 1 or part.rows != 1) return error.Malformed;
                     }
-                } else if (result.rows == 4 and result.columns == 4) {
-                    if (w.len != 6) return error.Malformed;
+                } else if (result.rows == result.columns and (result.rows == 2 or result.rows == 4)) {
+                    if (w.len - 2 != result.columns) return error.Malformed;
                     for (w[2..]) |operand| {
                         const part = try valueShape(nodes, operand);
-                        if (part.scalar != .f32 or part.columns != 4 or part.rows != 1) return error.Malformed;
+                        if (part.scalar != .f32 or part.columns != result.rows or part.rows != 1) return error.Malformed;
                     }
                 } else return error.Unsupported;
             },
@@ -1153,7 +1149,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (pointer.a == 0) {
                     if (nodes[try id(nodes, w[0])].kind != .sampled_image or pointer.b != w[0]) return error.Malformed;
                 } else if (!sameShape(try resultShape(nodes, w[0]), try resultShape(nodes, pointer.b))) return error.Malformed;
-                if (pointer.a != 0 and pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
+                if (pointer.a != 0 and pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 7 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
             },
             87 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1309,7 +1305,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const result = try resultShape(nodes, w[0]);
                 const vector = try valueShape(nodes, w[2]);
                 const matrix = try valueShape(nodes, w[3]);
-                if (result.scalar != .f32 or result.columns != 4 or result.rows != 1 or !sameShape(result, vector) or matrix.scalar != .f32 or matrix.columns != 4 or matrix.rows != 4) return error.Malformed;
+                if (result.scalar != .f32 or result.rows != 1 or result.columns < 2 or !sameShape(result, vector) or matrix.scalar != .f32 or matrix.columns != result.columns or matrix.rows != result.columns) return error.Malformed;
             },
             146 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1533,6 +1529,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     std.mem.sort(ir.Interface, interfaces.items, {}, interfaceLess);
     if (!interfacesUnique(interfaces.items)) return error.Unsupported;
 
+    var general_control_flow = false;
+    if (requested_stage != .compute) {
+        for (module.instructions, instruction_functions) |instruction, instruction_function| {
+            if (instruction_function != entry.function or instruction.opcode != 250) continue;
+            if (try staticCondition(nodes, instruction.words[0]) == null) {
+                general_control_flow = true;
+                break;
+            }
+        }
+    }
+
     // Resolve the bounded control-flow slice before SSA lowering. Statically
     // selected acyclic branches and one side-effect-free dynamic conditional
     // are admitted; this keeps canonical IR straight-line while ensuring that
@@ -1557,7 +1564,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     @memset(visited_labels, false);
     var dynamic_branch: ?DynamicBranch = null;
     var dynamic_switch: ?DynamicSwitch = null;
-    while (true) {
+    if (!general_control_flow) while (true) {
         if (current_block >= module.instructions.len or module.instructions[current_block].opcode != 248) return error.Malformed;
         const label_id = module.instructions[current_block].words[0];
         const label_index = try id(nodes, label_id);
@@ -1664,11 +1671,30 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             if (!found) return error.Malformed;
             predecessor_label = if ((dynamic_branch != null and target == dynamic_branch.?.merge_label) or (dynamic_switch != null and target == dynamic_switch.?.merge_label)) std.math.maxInt(u32) else label_id;
         } else break;
+    };
+    if (general_control_flow) {
+        for (instruction_functions, 0..) |instruction_function, instruction_index|
+            if (instruction_function == entry.function) {
+                reachable[instruction_index] = true;
+            };
     }
 
     const needed = allocator.alloc(bool, module.bound) catch return error.OutOfMemory;
     defer allocator.free(needed);
     @memset(needed, false);
+    if (general_control_flow) {
+        for (module.instructions, instruction_functions) |instruction, instruction_function| {
+            if (instruction_function != entry.function) continue;
+            const result_id: ?u32 = switch (instruction.opcode) {
+                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => instruction.words[1],
+                248 => instruction.words[0],
+                else => null,
+            };
+            if (result_id) |result| needed[try id(nodes, result)] = true;
+            if (instruction.opcode == 62) needed[try id(nodes, instruction.words[1])] = true;
+            if (instruction.opcode == 250) needed[try id(nodes, instruction.words[0])] = true;
+        }
+    }
     if (dynamic_branch) |branch| needed[try id(nodes, branch.condition)] = true;
     if (dynamic_switch) |switch_info| needed[try id(nodes, switch_info.selector)] = true;
     for (module.instructions, instruction_functions, reachable) |instruction, instruction_function, is_reachable| {
@@ -1708,6 +1734,17 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 else => 2,
             };
             if (instruction.opcode == 245) {
+                if (general_control_flow) {
+                    var pair_index: usize = 2;
+                    while (pair_index < w.len) : (pair_index += 2) {
+                        const operand_index = try id(nodes, w[pair_index]);
+                        if (!needed[operand_index]) {
+                            needed[operand_index] = true;
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
                 const selected_predecessor = predecessor[reverse_index];
                 if (selected_predecessor == std.math.maxInt(u32)) {
                     const branch = dynamic_branch;
@@ -1786,9 +1823,92 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (instruction_function == entry.function and !is_reachable) continue;
         const w = instruction.words;
         if (instruction.opcode == 248) active_predecessor = selected_predecessor;
+        if (general_control_flow and instruction_function == entry.function) {
+            if (instruction.opcode == 59) {
+                const variable = nodes[try id(nodes, w[1])];
+                if (variable.a != 7 or w.len != 3) return error.Unsupported;
+                const pointer = nodes[try id(nodes, variable.type_id)];
+                const shape = try resultShape(nodes, pointer.b);
+                const operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, &.{}) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .local, .ty = shape, .operands = operands, .literal = literal });
+                canonical_ids[try id(nodes, w[1])] = @intCast(lowered.items.len - 1);
+                continue;
+            }
+            if (instruction.opcode == 248) {
+                var label_literal: [4]u8 = undefined;
+                std.mem.writeInt(u32, &label_literal, w[0], .little);
+                const operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, &label_literal) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = operands, .literal = literal });
+                continue;
+            }
+            if (instruction.opcode == 249) {
+                var branch_literal: [4]u8 = undefined;
+                std.mem.writeInt(u32, &branch_literal, w[0], .little);
+                const operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, &branch_literal) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .branch, .ty = .{ .scalar = .u32 }, .operands = operands, .literal = literal });
+                continue;
+            }
+            if (instruction.opcode == 250) {
+                const condition = canonical_ids[try id(nodes, w[0])];
+                if (condition == std.math.maxInt(u32)) return error.Malformed;
+                var branch_literal: [8]u8 = undefined;
+                std.mem.writeInt(u32, branch_literal[0..4], w[1], .little);
+                std.mem.writeInt(u32, branch_literal[4..8], w[2], .little);
+                const operands = allocator.dupe(u32, &.{condition}) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, &branch_literal) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .branch_conditional, .ty = .{ .scalar = .u32 }, .operands = operands, .literal = literal });
+                continue;
+            }
+            if (instruction.opcode == 253) {
+                const operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, &.{}) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = operands, .literal = literal });
+                continue;
+            }
+        }
         if (instruction.opcode == 245) {
             const phi_index = try id(nodes, w[1]);
             if (!needed[phi_index]) continue;
+            if (general_control_flow) {
+                var phi_operands: std.ArrayList(u32) = .empty;
+                defer phi_operands.deinit(allocator);
+                var phi_literal: std.ArrayList(u8) = .empty;
+                defer phi_literal.deinit(allocator);
+                var pair_index: usize = 2;
+                while (pair_index < w.len) : (pair_index += 2) {
+                    const value = canonical_ids[try id(nodes, w[pair_index])];
+                    if (value == std.math.maxInt(u32)) return error.Malformed;
+                    try phi_operands.append(allocator, value);
+                    try phi_literal.appendNTimes(allocator, 0, 4);
+                    std.mem.writeInt(u32, phi_literal.items[phi_literal.items.len - 4 ..][0..4], w[pair_index + 1], .little);
+                }
+                const operands = allocator.dupe(u32, phi_operands.items) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, phi_literal.items) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .phi, .ty = try resultShape(nodes, w[0]), .operands = operands, .literal = literal });
+                canonical_ids[phi_index] = @intCast(lowered.items.len - 1);
+                continue;
+            }
             const selected_label = active_predecessor;
             if (selected_label == std.math.maxInt(u32)) {
                 const phi_shape = try resultShape(nodes, w[0]);
@@ -1864,7 +1984,19 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (instruction.opcode == 62) {
             const target_pointer = nodes[try id(nodes, w[0])];
             const target = if (target_pointer.kind == .function_value and target_pointer.opcode == 65) nodes[try id(nodes, target_pointer.words[0])] else target_pointer;
-            if (target.kind == .variable and target.a == 7) continue;
+            if (target.kind == .variable and target.a == 7) {
+                if (!general_control_flow) continue;
+                const pointer = canonical_ids[try id(nodes, w[0])];
+                const value = canonical_ids[try id(nodes, w[1])];
+                if (pointer == std.math.maxInt(u32) or value == std.math.maxInt(u32)) return error.Malformed;
+                const operands = allocator.dupe(u32, &.{ pointer, value }) catch return error.OutOfMemory;
+                const literal = allocator.dupe(u8, &.{}) catch {
+                    allocator.free(operands);
+                    return error.OutOfMemory;
+                };
+                try lowered.append(allocator, .{ .op = .local_store, .ty = try valueShape(nodes, w[1]), .operands = operands, .literal = literal });
+                continue;
+            }
             if (target.kind != .variable or (target.a != 3 and !(requested_stage == .compute and target.a == 12))) return error.Unsupported;
             const value = canonical_ids[try id(nodes, w[1])];
             if (value == std.math.maxInt(u32)) return error.Malformed;
@@ -2085,6 +2217,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             193 => .funord_ge,
             else => unreachable,
         };
+        if (general_control_flow and (instruction.opcode == 61 or instruction.opcode == 65)) {
+            const pointer_id = node.words[0];
+            const pointer_node = nodes[try id(nodes, pointer_id)];
+            const root = if (pointer_node.kind == .function_value and pointer_node.opcode == 65)
+                nodes[try id(nodes, pointer_node.words[0])]
+            else
+                pointer_node;
+            if (root.kind == .variable and root.a == 7)
+                op = if (instruction.opcode == 61) .local_load else .local_access;
+        }
         var operands: std.ArrayList(u32) = .empty;
         defer operands.deinit(allocator);
         var literal: [16]u8 = .{0} ** 16;
@@ -2193,7 +2335,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 try operands.append(allocator, canonical_ids[source_index]);
             }
             if (ext_output_interface) |interface_index| try operands.append(allocator, interface_index);
-            if (instruction.opcode == 61) {
+            if (instruction.opcode == 61 and op != .local_load) {
                 const pointer_id = node.words[0];
                 const pointer_node = nodes[try id(nodes, pointer_id)];
                 op = if (pointer_node.kind == .variable) switch (pointer_node.a) {
@@ -4514,9 +4656,6 @@ test "every explicitly excluded instruction family capability type storage and c
         224, // OpControlBarrier
         227, // atomic family
         246, // OpLoopMerge
-        249, // OpBranch
-        250, // OpBranchConditional
-        251, // OpSwitch
         252, // OpKill
     };
     for (excluded_opcodes) |opcode| {
@@ -4870,6 +5009,31 @@ test "Chromium Skia relaxed-precision vertex shader compiles" {
     try std.testing.expectEqual(@as(?u32, 1), program.interfaces[4].location);
     try std.testing.expect(program.interfaces[5].builtin_position);
     try std.testing.expectEqual(ir.Storage.push_constant, program.interfaces[6].storage);
+}
+
+test "Chromium Skia large vertex shader compiles" {
+    const bytes align(4) = @embedFile("fixtures/chromium_skia_vertex_2005.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    var backing = [_][64]u8{.{0} ** 64} ** max_interfaces;
+    var bindings: [max_interfaces]render_ir_exec.Binding = undefined;
+    var outputs: [max_interfaces]render_ir_exec.Output = undefined;
+    var binding_count: usize = 0;
+    var output_count: usize = 0;
+    for (program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+            output_count += 1;
+        } else {
+            for (0..16) |lane| std.mem.writeInt(u32, backing[interface_index][lane * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+            bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+            binding_count += 1;
+        }
+    }
+    try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
 }
 
 test "Chromium Skia flat-color vertex shader preserves interpolation mode" {

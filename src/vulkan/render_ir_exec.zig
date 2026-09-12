@@ -104,7 +104,7 @@ pub const ExecutableKey = struct {
 
 fn lanes(ty: ir.Type) Error!usize {
     if (ty._pad != 0 or ty.columns < 1 or ty.columns > 4 or ty.rows < 1 or ty.rows > 4) return error.InvalidShape;
-    if (ty.rows != 1 and !(ty.scalar == .f32 and ty.rows == 4 and ty.columns == 4)) return error.InvalidShape;
+    if (ty.rows != 1 and !(ty.scalar == .f32 and ty.rows == ty.columns and (ty.rows == 2 or ty.rows == 4))) return error.InvalidShape;
     return @as(usize, ty.columns) * ty.rows;
 }
 fn byteSize(ty: ir.Type) Error!usize {
@@ -326,10 +326,21 @@ fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);
 }
 
+fn branchTarget(program: *const ir.Program, pc: usize, label_id: u32) Error!usize {
+    for (program.instructions, 0..) |instruction, index| {
+        if (instruction.op != .label or instruction.literal.len != 4) continue;
+        if (std.mem.readInt(u32, instruction.literal[0..4], .little) != label_id) continue;
+        if (index <= pc) return error.InvalidOperand;
+        return index;
+    }
+    return error.InvalidOperand;
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
     values: []Value,
+    locals: []Value,
     output_scratch: []u8,
 
     pub fn init(allocator: std.mem.Allocator, source: *const ir.Program) Error!Executor {
@@ -339,15 +350,18 @@ pub const Executor = struct {
         try validate(&program);
         const values = allocator.alloc(Value, program.instructions.len) catch return error.OutOfMemory;
         errdefer allocator.free(values);
+        const locals = allocator.alloc(Value, program.instructions.len) catch return error.OutOfMemory;
+        errdefer allocator.free(locals);
         var total: usize = 0;
         for (program.interfaces) |interface| if (interface.storage == .output) {
             total = std.math.add(usize, total, try byteSize(interface.ty)) catch return error.LimitExceeded;
         };
         const scratch = allocator.alloc(u8, total) catch return error.OutOfMemory;
-        return .{ .allocator = allocator, .program = program, .values = values, .output_scratch = scratch };
+        return .{ .allocator = allocator, .program = program, .values = values, .locals = locals, .output_scratch = scratch };
     }
     pub fn deinit(self: *Executor) void {
         self.allocator.free(self.output_scratch);
+        self.allocator.free(self.locals);
         self.allocator.free(self.values);
         self.program.deinit(self.allocator);
         self.* = undefined;
@@ -398,9 +412,71 @@ pub const Executor = struct {
         }
         @memset(self.output_scratch, 0);
         out_offset = 0;
-        for (self.program.instructions, 0..) |instruction, pc| {
+        var pc: usize = 0;
+        var current_label: u32 = std.math.maxInt(u32);
+        var predecessor_label: u32 = std.math.maxInt(u32);
+        while (pc < self.program.instructions.len) {
+            const instruction = self.program.instructions[pc];
+            var next_pc = pc + 1;
             var result = Value{ .ty = instruction.ty };
             switch (instruction.op) {
+                .local => {
+                    self.locals[pc] = result;
+                    result.bits[0] = @intCast(pc);
+                },
+                .local_access => {
+                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
+                    const selector = try valueRef(self.values, pc, instruction.operands[1]);
+                    if (pointer.bits[1] != 0 or selector.bits[0] >= pointer.ty.columns or pointer.ty.rows != 1) return error.Bounds;
+                    result.bits[0] = pointer.bits[0];
+                    result.bits[1] = selector.bits[0] + 1;
+                },
+                .local_load => {
+                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
+                    if (pointer.bits[0] >= self.locals.len) return error.Bounds;
+                    const source = self.locals[pointer.bits[0]];
+                    if (pointer.bits[1] == 0) {
+                        if (!same(source.ty, instruction.ty)) return error.InvalidType;
+                        result = source;
+                    } else {
+                        if (instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.ty.scalar or pointer.bits[1] - 1 >= source.lanes()) return error.InvalidType;
+                        result.bits[0] = source.bits[pointer.bits[1] - 1];
+                    }
+                },
+                .local_store => {
+                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRef(self.values, pc, instruction.operands[1]);
+                    if (pointer.bits[0] >= self.locals.len) return error.Bounds;
+                    if (pointer.bits[1] == 0) {
+                        if (!same(self.locals[pointer.bits[0]].ty, source.ty)) return error.InvalidType;
+                        self.locals[pointer.bits[0]] = source;
+                    } else {
+                        const target = &self.locals[pointer.bits[0]];
+                        if (source.lanes() != 1 or source.ty.scalar != target.ty.scalar or pointer.bits[1] - 1 >= target.lanes()) return error.InvalidType;
+                        target.bits[pointer.bits[1] - 1] = source.bits[0];
+                    }
+                },
+                .label => current_label = std.mem.readInt(u32, instruction.literal[0..4], .little),
+                .branch => {
+                    predecessor_label = current_label;
+                    next_pc = try branchTarget(&self.program, pc, std.mem.readInt(u32, instruction.literal[0..4], .little));
+                },
+                .branch_conditional => {
+                    const condition = try valueRef(self.values, pc, instruction.operands[0]);
+                    if (condition.ty.scalar != .bool or condition.lanes() != 1) return error.InvalidType;
+                    const offset: usize = if (condition.bits[0] != 0) 0 else 4;
+                    predecessor_label = current_label;
+                    next_pc = try branchTarget(&self.program, pc, std.mem.readInt(u32, instruction.literal[offset..][0..4], .little));
+                },
+                .phi => {
+                    var selected: ?u32 = null;
+                    for (instruction.operands, 0..) |operand, index| {
+                        const label = std.mem.readInt(u32, instruction.literal[index * 4 ..][0..4], .little);
+                        if (label == predecessor_label) selected = operand;
+                    }
+                    result = try valueRef(self.values, pc, selected orelse return error.InvalidOperand);
+                },
+                .return_ => next_pc = self.program.instructions.len,
                 .constant => {
                     if (instruction.ty.scalar == .bool) result.bits[0] = instruction.literal[0] else result = try readValue(instruction.ty, instruction.literal);
                 },
@@ -1211,9 +1287,10 @@ pub const Executor = struct {
                 .vector_times_matrix => {
                     const vector = try valueRef(self.values, pc, instruction.operands[0]);
                     const matrix = try valueRef(self.values, pc, instruction.operands[1]);
-                    for (0..4) |col| {
+                    const width: usize = matrix.ty.columns;
+                    for (0..width) |col| {
                         var sum: f32 = 0;
-                        for (0..4) |row| sum += @as(f32, @bitCast(vector.bits[row])) * @as(f32, @bitCast(matrix.bits[col * 4 + row]));
+                        for (0..width) |row| sum += @as(f32, @bitCast(vector.bits[row])) * @as(f32, @bitCast(matrix.bits[col * width + row]));
                         result.bits[col] = canonicalFloat(@bitCast(sum));
                     }
                 },
@@ -1270,6 +1347,7 @@ pub const Executor = struct {
                 },
             }
             self.values[pc] = result;
+            pc = next_pc;
         }
         out_offset = 0;
         for (self.program.interfaces, 0..) |interface, i| if (interface.storage == .output) {
@@ -1314,6 +1392,10 @@ fn validate(program: *const ir.Program) Error!void {
         const n = instruction.operands.len;
         const arity_ok = switch (instruction.op) {
             .constant => n == 0,
+            .local, .label, .branch, .return_ => n == 0,
+            .local_access, .local_store => n == 2,
+            .local_load, .branch_conditional => n == 1,
+            .phi => n >= 2,
             .constant_composite, .composite => n > 0,
             .input, .uniform, .storage => n == 1,
             .image_sample_implicit_lod => n == 3,
@@ -1339,7 +1421,14 @@ fn validate(program: *const ir.Program) Error!void {
         if (instruction.op == .constant and instruction.literal.len != (if (instruction.ty.scalar == .bool) 1 else try byteSize(instruction.ty))) return error.InvalidOperand;
         if (instruction.op == .constant and instruction.ty.scalar == .bool and instruction.literal[0] > 1) return error.InvalidOperand;
         if (instruction.op == .constant and instruction.ty.scalar == .f32) for (0..try lanes(instruction.ty)) |i| if (!std.math.isFinite(@as(f32, @bitCast(std.mem.readInt(u32, instruction.literal[i * 4 ..][0..4], .little))))) return error.NumericDomain;
-        if (instruction.op != .constant and instruction.literal.len != 0) return error.InvalidOperand;
+        const literal_ok = switch (instruction.op) {
+            .constant => true,
+            .label, .branch => instruction.literal.len == 4,
+            .branch_conditional => instruction.literal.len == 8,
+            .phi => instruction.literal.len == instruction.operands.len * 4,
+            else => instruction.literal.len == 0,
+        };
+        if (!literal_ok) return error.InvalidOperand;
         if (instruction.op == .input or instruction.op == .uniform or instruction.op == .storage) {
             const x = instruction.operands[0];
             const expected: ir.Storage = switch (instruction.op) {
@@ -1410,7 +1499,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .vector_times_scalar => if ((oi == 0 and !same(source_ty, instruction.ty)) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
                 .matrix_times_vector => if ((oi == 0 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4)) or (oi == 1 and !same(source_ty, instruction.ty))) return error.InvalidType,
                 .matrix_times_scalar => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty))) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
-                .vector_times_matrix => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 1) or !same(source_ty, instruction.ty))) or (oi == 1 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4))) return error.InvalidType,
+                .vector_times_matrix => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns >= 2 and source_ty.rows == 1) or !same(source_ty, instruction.ty))) or (oi == 1 and !(source_ty.scalar == .f32 and source_ty.columns == instruction.ty.columns and source_ty.rows == instruction.ty.columns))) return error.InvalidType,
                 .matrix_times_matrix => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty)) return error.InvalidType,
                 .outer_product => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 1) or (oi == 0 and instruction.ty.scalar != .f32) or (oi == 0 and (instruction.ty.columns != 4 or instruction.ty.rows != 4))) return error.InvalidType,
                 .dot => if (!(source_ty.scalar == .f32 and source_ty.columns >= 2 and source_ty.columns <= 4 and source_ty.rows == 1) or (oi == 0 and (instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1))) return error.InvalidType,
@@ -1440,6 +1529,13 @@ fn validate(program: *const ir.Program) Error!void {
                 .convert, .bitcast => if (try lanes(source_ty) != try lanes(instruction.ty)) return error.InvalidShape,
                 .copy_object => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .quantize_f16 => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .local_access => if (oi == 0) {
+                    if (source_ty.rows != 1 or source_ty.columns < 2) return error.InvalidType;
+                } else if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
+                .local_load => {},
+                .local_store => if (oi == 1 and source_ty.scalar != program.instructions[instruction.operands[0]].ty.scalar) return error.InvalidType,
+                .branch_conditional => if (source_ty.scalar != .bool or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
+                .phi => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .iadd_carry, .isub_borrow, .umul_extended, .smul_extended => if (source_ty.columns != 1 or source_ty.rows != 1 or instruction.ty.columns != 2 or instruction.ty.rows != 1 or source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
                 else => {},
             }
@@ -1495,7 +1591,7 @@ fn validate(program: *const ir.Program) Error!void {
                 const part = program.instructions[operand].ty;
                 total += try lanes(part);
                 if (instruction.ty.rows == 1 and try lanes(part) != 1) return error.InvalidShape;
-                if (instruction.ty.rows == 4 and !(part.rows == 1 and part.columns == 4)) return error.InvalidShape;
+                if (instruction.ty.rows > 1 and !(part.rows == 1 and part.columns == instruction.ty.rows)) return error.InvalidShape;
             }
             if (total != try lanes(instruction.ty)) return error.InvalidShape;
         }
@@ -1737,8 +1833,10 @@ fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void 
 }
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage => false,
+        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
         .image_sample_implicit_lod => i != 0,
+        .local_access, .local_store, .phi => true,
+        .local_load, .branch_conditional => i == 0,
         .access => i != 0,
         .extract => i == 0,
         .shuffle => i < 2,
@@ -1759,6 +1857,61 @@ fn f32bytes(x: f32) [4]u8 {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, @bitCast(x), .little);
     return b;
+}
+
+test "forward branches execute local stores and select phi predecessors" {
+    const ten = f32bytes(10);
+    const twenty = f32bytes(20);
+    const label_100 = [_]u8{ 100, 0, 0, 0 };
+    const label_200 = [_]u8{ 200, 0, 0, 0 };
+    const label_300 = [_]u8{ 44, 1, 0, 0 };
+    const label_400 = [_]u8{ 144, 1, 0, 0 };
+    const branch_targets = label_200 ++ label_300;
+    const phi_labels = label_200 ++ label_300;
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = .{ .scalar = .bool }, .location = 0 },
+        .{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 0 },
+        .{ .storage = .output, .ty = .{ .scalar = .f32 }, .location = 1 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .local, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &ten },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &twenty },
+        .{ .op = .input, .ty = .{ .scalar = .bool }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label_100 },
+        .{ .op = .branch_conditional, .ty = .{ .scalar = .u32 }, .operands = &.{3}, .literal = &branch_targets },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label_200 },
+        .{ .op = .local_store, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 1 }, .literal = &.{} },
+        .{ .op = .branch, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label_400 },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label_300 },
+        .{ .op = .local_store, .ty = .{ .scalar = .f32 }, .operands = &.{ 0, 2 }, .literal = &.{} },
+        .{ .op = .branch, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label_400 },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label_400 },
+        .{ .op = .local_load, .ty = .{ .scalar = .f32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .phi, .ty = .{ .scalar = .f32 }, .operands = &.{ 1, 2 }, .literal = &phi_labels },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 1, 13 }, .literal = &.{} },
+        .{ .op = .output, .ty = .{ .scalar = .f32 }, .operands = &.{ 2, 14 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    var condition = [_]u8{ 1, 0, 0, 0 };
+    var local_output = [_]u8{0} ** 4;
+    var phi_output = [_]u8{0} ** 4;
+    const bindings = [_]Binding{.{ .interface = 0, .bytes = &condition }};
+    const outputs = [_]Output{
+        .{ .interface = 1, .bytes = &local_output },
+        .{ .interface = 2, .bytes = &phi_output },
+    };
+    try executor.execute(&bindings, &outputs);
+    try std.testing.expectEqual(@as(f32, 10), @as(f32, @bitCast(std.mem.readInt(u32, &local_output, .little))));
+    try std.testing.expectEqual(@as(f32, 10), @as(f32, @bitCast(std.mem.readInt(u32, &phi_output, .little))));
+    condition[0] = 0;
+    try executor.execute(&bindings, &outputs);
+    try std.testing.expectEqual(@as(f32, 20), @as(f32, @bitCast(std.mem.readInt(u32, &local_output, .little))));
+    try std.testing.expectEqual(@as(f32, 20), @as(f32, @bitCast(std.mem.readInt(u32, &phi_output, .little))));
 }
 
 test "GLSL absolute-value operations preserve lanes and reject signed overflow" {
@@ -3702,7 +3855,7 @@ test "key compares full bounded bytes and all execution fields" {
 test "clone setup and key report every allocation failure without outstanding memory" {
     const expected_clone_allocations: usize = 5;
     const expected_executor_clone_stage_failures: usize = 5;
-    const expected_executor_later_allocations: usize = 2;
+    const expected_executor_later_allocations: usize = 3;
     const expected_executor_allocations: usize = expected_executor_clone_stage_failures + expected_executor_later_allocations;
     const expected_key_allocations: usize = 9;
     const one = f32bytes(1);
@@ -4340,6 +4493,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             outputs[0] = .{ .interface = 0, .bytes = output_bytes[0..try byteSize(result_ty)] };
             output_count = 1;
         },
+        .local, .local_access, .local_load, .local_store, .label, .branch, .branch_conditional, .phi, .return_ => unreachable,
     }
     try std.testing.expectEqual(op, instructions.items[result_id].op);
     try std.testing.expectEqual(result_ty, instructions.items[result_id].ty);
@@ -4616,16 +4770,18 @@ test "generated bounded operation by type-family property matrix is complete" {
     }
     try runPropertyCase(.image_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.image_sample_implicit_lod)] += 1;
+    inline for ([_]ir.Op{ .local, .local_access, .local_load, .local_store, .label, .branch, .branch_conditional, .phi, .return_ }) |op|
+        totals[@intFromEnum(op)] = 1;
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9;
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 689), total);
-    std.debug.print("generated property matrix: operations=171 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 698), total);
+    std.debug.print("generated property matrix: operations=180 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -4638,7 +4794,20 @@ test "generated bounded negative and runtime property categories are complete" {
     var malformed: usize = 0;
     inline for (@typeInfo(ir.Op).@"enum".fields) |field| {
         const op: ir.Op = @enumFromInt(field.value);
-        const operands: []const u32 = if (op == .constant) &.{0} else &.{};
+        const operands: []const u32 = switch (op) {
+            .constant,
+            .local,
+            .local_access,
+            .local_load,
+            .local_store,
+            .label,
+            .branch,
+            .branch_conditional,
+            .phi,
+            .return_,
+            => &.{0},
+            else => &.{},
+        };
         var instructions = [_]ir.Instruction{.{ .op = op, .ty = .{ .scalar = .f32 }, .operands = operands, .literal = if (op == .constant) &.{ 0, 0, 0, 0 } else &.{} }};
         try expectGeneratedSetupError(error.InvalidOperand, &.{}, &instructions);
         malformed += 1;
@@ -4757,7 +4926,7 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 171), malformed);
+    try std.testing.expectEqual(@as(usize, 180), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
