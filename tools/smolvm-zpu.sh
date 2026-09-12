@@ -265,7 +265,7 @@ prepare_source() {
         die 'untracked files are forbidden when creating the immutable guest source mount; add, ignore, or remove them first'
     fi
     rm -f "$untracked_list"
-    git -C "$repo" archive --format=tar --output="$source_archive" HEAD
+    git -C "$repo" archive --format=tar.gz --output="$source_archive" HEAD
     if ! tar -tf "$source_archive" > "$source_list"; then
         rm -f "$source_list" "$source_archive"
         die 'failed to inspect guest source archive'
