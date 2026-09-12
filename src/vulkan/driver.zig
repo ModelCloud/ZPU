@@ -14243,7 +14243,34 @@ fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, 
     return pipeline.rendering_stencil_format == 0;
 }
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
-    if ((pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) or (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) or (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) or (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) or (pipeline.dynamic_line_stipple and !command_buffer.impl.line_stipple_set) or (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) or (pipeline.dynamic_blend_constants and !command_buffer.impl.blend_constants_set) or (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) or (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) or (pipeline.dynamic_stencil_reference and command_buffer.impl.stencil_reference_set != 3) or (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) or (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) or (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) or (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) or (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) or (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) or (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) or (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) or (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) or (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) or (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) or (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) or (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set)) return null;
+    var missing: u32 = 0;
+    if (pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) missing |= 1 << 0;
+    if (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) missing |= 1 << 1;
+    if (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) missing |= 1 << 2;
+    if (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) missing |= 1 << 3;
+    if (pipeline.dynamic_line_stipple and !command_buffer.impl.line_stipple_set) missing |= 1 << 4;
+    if (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) missing |= 1 << 5;
+    if (pipeline.dynamic_blend_constants and !command_buffer.impl.blend_constants_set) missing |= 1 << 6;
+    if (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) missing |= 1 << 7;
+    if (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) missing |= 1 << 8;
+    if (pipeline.dynamic_stencil_reference and command_buffer.impl.stencil_reference_set != 3) missing |= 1 << 9;
+    if (pipeline.dynamic_cull_mode and command_buffer.impl.dynamic.cull_mode == std.math.maxInt(u32)) missing |= 1 << 10;
+    if (pipeline.dynamic_front_face and command_buffer.impl.dynamic.front_face < 0) missing |= 1 << 11;
+    if (pipeline.dynamic_primitive_topology and !command_buffer.impl.dynamic.primitive_topology_set) missing |= 1 << 12;
+    if (pipeline.dynamic_primitive_restart_enable and !command_buffer.impl.dynamic.primitive_restart_enable_set) missing |= 1 << 13;
+    if (pipeline.dynamic_rasterizer_discard_enable and !command_buffer.impl.dynamic.rasterizer_discard_enable_set) missing |= 1 << 14;
+    if (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) missing |= 1 << 15;
+    if (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) missing |= 1 << 16;
+    if (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) missing |= 1 << 17;
+    if (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) missing |= 1 << 18;
+    if (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) missing |= 1 << 19;
+    if (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) missing |= 1 << 20;
+    if (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) missing |= 1 << 21;
+    if (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set) missing |= 1 << 22;
+    if (missing != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster state rejected missing=0x{x}\n", .{missing});
+        return null;
+    }
     const primitive_topology = if (pipeline.dynamic_primitive_topology) command_buffer.impl.dynamic.primitive_topology else pipeline.primitive_topology;
     const primitive_restart_enable = if (pipeline.dynamic_primitive_restart_enable) command_buffer.impl.dynamic.primitive_restart_enable else pipeline.primitive_restart_enable;
     const rasterizer_discard_enable = if (pipeline.dynamic_rasterizer_discard_enable) command_buffer.impl.dynamic.rasterizer_discard_enable else pipeline.rasterizer_discard_enable;
@@ -14255,13 +14282,14 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     const stencil_test_enable = if (pipeline.dynamic_stencil_test_enable) command_buffer.impl.dynamic.stencil_test_enable else pipeline.stencil_test_enable;
     const depth_bias_enable = if (pipeline.dynamic_depth_bias_enable) command_buffer.impl.dynamic.depth_bias_enable else pipeline.depth_bias_enable;
     const depth_bias = if (pipeline.dynamic_depth_bias) command_buffer.impl.depth_bias else pipeline.depth_bias;
-    if (!graphicsTopologySupported(
+    const topology_supported = graphicsTopologySupported(
         pipeline.execution_abi == .profile_v1_scalar_graphics,
         primitive_topology,
-    ) or
-        primitive_restart_enable != 0 or
-        stencil_test_enable != 0)
+    );
+    if (!topology_supported or primitive_restart_enable != 0 or stencil_test_enable != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster mode rejected topology={d} supported={} restart={d} stencil={d}\n", .{ primitive_topology, topology_supported, primitive_restart_enable, stencil_test_enable });
         return null;
+    }
     return .{
         .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
         .scissor = if (pipeline.dynamic_scissor) command_buffer.impl.scissor else pipeline.scissor,
