@@ -155,14 +155,11 @@ fn featureWords(features: *const Features) []const u32 {
 }
 
 fn coreFeaturesSupported(features: *const Features) bool {
-    // multiDrawIndirect is the sole advertised optional core feature.  Every
-    // other VkPhysicalDeviceFeatures bit remains disabled until its execution
-    // semantics are implemented and tested.
     const multi_draw_index = @offsetOf(Features, "multi_draw_indirect") / @sizeOf(u32);
+    const inherited_queries_index = @offsetOf(Features, "inherited_queries") / @sizeOf(u32);
     for (featureWords(features), 0..) |value, index| {
-        if (index == multi_draw_index) {
-            if (value > 1) return false;
-        } else if (value != 0) return false;
+        if (value > 1) return false;
+        if (value != 0 and index != multi_draw_index and index != inherited_queries_index) return false;
     }
     return true;
 }
@@ -3560,6 +3557,7 @@ fn getFeaturesLocked(h: Physical, out: *Features) bool {
     }
     out.* = std.mem.zeroes(Features);
     out.multi_draw_indirect = 1;
+    out.inherited_queries = 1;
     return true;
 }
 fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
@@ -17196,8 +17194,12 @@ test "enumeration lifecycle and unsupported features" {
     try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
     features.robust_buffer_access = 0;
     features.multi_draw_indirect = 1;
+    features.inherited_queries = 1;
     try std.testing.expectEqual(Result.success, createDevice(ps[0], &di, null, &device));
     destroyDevice(device, null);
+    features.inherited_queries = 2;
+    try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
+    features.inherited_queries = 0;
     features.multi_draw_indirect = 2;
     try std.testing.expectEqual(Result.error_feature_not_present, createDevice(ps[0], &di, null, &device));
     features.multi_draw_indirect = 0;
@@ -17297,7 +17299,8 @@ test "core instance physical and device enumeration is bounded and allocation fr
         @memset(std.mem.asBytes(&features), 1);
         getFeatures(physical[0], &features);
         try std.testing.expectEqual(@as(u32, 1), features.multi_draw_indirect);
-        for (featureWords(&features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
+        try std.testing.expectEqual(@as(u32, 1), features.inherited_queries);
+        for (featureWords(&features), 0..) |value, index| if (index != 9 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
         var sparse_count: u32 = 1;
         getSparseImageFormatProperties(physical[0], 37, 1, 1, 4, 0, &sparse_count, @ptrFromInt(8));
         try std.testing.expectEqual(@as(u32, 0), sparse_count);
@@ -20420,7 +20423,8 @@ test "all physical queries cover success boundaries and invalid handles" {
     @memset(std.mem.asBytes(&features), 1);
     getFeatures(p, &features);
     try std.testing.expectEqual(@as(u32, 1), features.multi_draw_indirect);
-    for (featureWords(&features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
+    try std.testing.expectEqual(@as(u32, 1), features.inherited_queries);
+    for (featureWords(&features), 0..) |value, index| if (index != 9 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
     var queue_count: u32 = 7;
     getQueueProperties(p, &queue_count, null);
     try std.testing.expectEqual(@as(u32, 1), queue_count);
@@ -20926,7 +20930,8 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 200), @offsetOf(PhysicalDeviceVulkan12Features, "subgroup_broadcast_dynamic_id"));
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 1), features.features.multi_draw_indirect);
-    for (featureWords(&features.features), 0..) |value, index| if (index != 9) try std.testing.expectEqual(@as(u32, 0), value);
+    try std.testing.expectEqual(@as(u32, 1), features.features.inherited_queries);
+    for (featureWords(&features.features), 0..) |value, index| if (index != 9 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
     {
         const v11_bytes = std.mem.asBytes(&vulkan11_features)[16..64];
         var i: usize = 0;
