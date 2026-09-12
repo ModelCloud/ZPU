@@ -3440,7 +3440,7 @@ fn getSurfaceCapabilities(physical: ?Physical, handle: usize, output: ?*SurfaceC
     const out = output orelse return .error_initialization_failed;
     const surface = validSurfaceLocked(handle) orelse return .error_initialization_failed;
     if (!validPhysicalLocked(p) or surface.owner != p.owner) return .error_initialization_failed;
-    out.* = .{ .min_image_count = 2, .max_image_count = 4, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = max_2d_extent, .height = max_2d_extent }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x10 };
+    out.* = .{ .min_image_count = 2, .max_image_count = 4, .current_extent = .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) }, .min_image_extent = .{ .width = 1, .height = 1 }, .max_image_extent = .{ .width = max_2d_extent, .height = max_2d_extent }, .max_image_array_layers = 1, .supported_transforms = 1, .current_transform = 1, .supported_composite_alpha = 1, .supported_usage_flags = 0x17 };
     return .success;
 }
 fn getSurfaceFormats(physical: ?Physical, handle: usize, count: ?*u32, output: ?[*]SurfaceFormat) callconv(.c) Result {
@@ -15644,7 +15644,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1)) {
+    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage & 0x10 == 0 or ci.image_usage & ~@as(u32, 0x17) != 0 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1)) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU swapchain rejected sType={d} pNext={} flags=0x{x} minImages={d} format={d} colorSpace={d} extent={d}x{d} layers={d} usage=0x{x} sharingMode={d} queueFamilies={d} queueFamilyIndices={} transform=0x{x} alpha=0x{x} presentMode={d} clipped={d}\n",
             .{ ci.s_type, ci.p_next != null, ci.flags, ci.min_image_count, ci.image_format, ci.image_color_space, ci.image_extent.width, ci.image_extent.height, ci.image_array_layers, ci.image_usage, ci.image_sharing_mode, ci.queue_family_index_count, ci.queue_family_indices != null, ci.pre_transform, ci.composite_alpha, ci.present_mode, ci.clipped },
@@ -17153,7 +17153,7 @@ test "XCB and headless surface lifecycle and physical presentation queries" {
     try std.testing.expectEqual(std.math.maxInt(u32), capabilities.current_extent.width);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, capabilities.min_image_extent);
     try std.testing.expectEqual(Extent2D{ .width = max_2d_extent, .height = max_2d_extent }, capabilities.max_image_extent);
-    try std.testing.expectEqual(@as(u32, 0x10), capabilities.supported_usage_flags);
+    try std.testing.expectEqual(@as(u32, 0x17), capabilities.supported_usage_flags);
 
     var count: u32 = 0;
     try std.testing.expectEqual(Result.success, getSurfaceFormats(physicals[0], surface, &count, null));
@@ -17190,7 +17190,7 @@ test "XCB and headless surface lifecycle and physical presentation queries" {
     try std.testing.expect(validSurfaceLocked(headless_surface).?.headless);
     var headless_supported: u32 = 0;
     try std.testing.expectEqual(Result.success, getSurfaceSupport(physicals[0], 0, headless_surface, &headless_supported));
-    const headless_swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = headless_surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 2, .height = 2 }, .image_array_layers = 1, .image_usage = 0x10, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
+    const headless_swapchain_info = SwapchainCreateInfo{ .s_type = 1_000_001_000, .p_next = null, .flags = 0, .surface = headless_surface, .min_image_count = 2, .image_format = 44, .image_color_space = 0, .image_extent = .{ .width = 2, .height = 2 }, .image_array_layers = 1, .image_usage = 0x17, .image_sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .pre_transform = 1, .composite_alpha = 1, .present_mode = 2, .clipped = 1, .old_swapchain = 0 };
     var headless_swapchain: usize = 0;
     try std.testing.expectEqual(Result.success, createSwapchain(device, &headless_swapchain_info, null, &headless_swapchain));
     try std.testing.expect(validSwapchainLocked(headless_swapchain).?.transport.headless);
