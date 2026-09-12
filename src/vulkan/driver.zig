@@ -5159,7 +5159,7 @@ fn createBufferView(device: ?Device, info: ?*const BufferViewCreateInfo, alloc: 
     if (!validDeviceLocked(d) or buffer.owner != d or buffer.usage & 0xc == 0 or ci.offset % 4 != 0 or ci.offset >= buffer.size) return .error_initialization_failed;
     const range = if (ci.range == std.math.maxInt(u64)) buffer.size - ci.offset else ci.range;
     if (range == 0 or range % 4 != 0 or range > buffer.size - ci.offset) return .error_initialization_failed;
-    for (&buffer_view_objects, &buffer_view_state) |*object, *state| if (state.* == .never) {
+    for (&buffer_view_objects, &buffer_view_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = d, .buffer = buffer, .format = ci.format, .offset = ci.offset, .range = range };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -5665,7 +5665,7 @@ fn createFence(device: ?Device, info: ?*const FenceCreateInfo, alloc: ?*const Al
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&fence_objects, &fence_state) |*fence, *state| if (state.* == .never) {
+    for (&fence_objects, &fence_state) |*fence, *state| if (state.* == .never or (state.* == .tombstone and fence.waiters.load(.acquire) == 0)) {
         fence.* = .{ .owner = d, .signaled = .init(ci.flags == 1), .waiters = .init(0) };
         state.* = .live;
         out.* = @intFromPtr(fence);
@@ -5746,7 +5746,7 @@ fn createEvent(device: ?Device, info: ?*const EventCreateInfo, alloc: ?*const Al
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&event_objects, &event_state) |*event, *state| if (state.* == .never) {
+    for (&event_objects, &event_state) |*event, *state| if (state.* == .never or (state.* == .tombstone and event.waiters.load(.acquire) == 0)) {
         event.* = .{ .owner = d, .signaled = .init(false), .waiters = .init(0), .signal_kind = .init(@intFromEnum(EventSignalKind.none)), .signal_stage_mask = .init(0), .signal_dependency_key = .init(0) };
         state.* = .live;
         out.* = @intFromPtr(event);
@@ -5816,7 +5816,7 @@ fn createQueryPool(device: ?Device, info: ?*const QueryPoolCreateInfo, alloc: ?*
         allocator.free(slots);
         return .error_initialization_failed;
     }
-    for (&query_pool_objects, &query_pool_state) |*pool, *state| if (state.* == .never) {
+    for (&query_pool_objects, &query_pool_state) |*pool, *state| if (state.* == .never or (state.* == .tombstone and !pool.retire_pending and pool.active_users.load(.acquire) == 0)) {
         pool.* = .{ .owner = DeviceIdentity.capture(d), .query_type = ci.query_type, .slots = slots, .active_users = .init(0), .retire_pending = false };
         state.* = .live;
         out.* = @intFromPtr(pool);
@@ -5890,7 +5890,7 @@ fn createCommandPool(device: ?Device, info: ?*const CommandPoolCreateInfo, alloc
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&command_pool_objects, &command_pool_state) |*pool, *state| if (state.* == .never) {
+    for (&command_pool_objects, &command_pool_state) |*pool, *state| if (state.* != .live) {
         pool.* = .{ .owner = d, .flags = ci.flags };
         state.* = .live;
         out.* = @intFromPtr(pool);
@@ -5926,7 +5926,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
     var made: usize = 0;
     while (made < ci.command_buffer_count) : (made += 1) {
         var slot: ?usize = null;
-        for (&command_buffer_state, 0..) |state, index| if (state == .never) {
+        for (&command_buffer_state, 0..) |state, index| if (state == .never or (state == .tombstone and !command_buffer_retire_pending[index] and command_buffer_active_users[index].load(.acquire) == 0)) {
             slot = index;
             break;
         };
@@ -10682,7 +10682,7 @@ fn createDescriptorSetLayout(device: ?Device, info: ?*const DescriptorSetLayoutC
         canonical.deinit();
         return .error_initialization_failed;
     }
-    for (&descriptor_set_layout_objects, &descriptor_set_layout_state) |*object, *state| if (state.* == .never) {
+    for (&descriptor_set_layout_objects, &descriptor_set_layout_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .counts = counts, .flags = ci.flags, .binding_types = descriptorBindingTypes(ci) };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -10780,7 +10780,7 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
         set0.deinit();
         return .error_out_of_host_memory;
     } else Canonical{};
-    for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* == .never) {
+    for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .set_count = ci.set_layout_count, .set0 = set0, .set0_layout = source_set, .set1 = set1, .set1_layout = source_set1, .push_descriptor = source_set.flags & 1 != 0, .push_ranges = push_ranges };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -11033,7 +11033,7 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
         compatibility.deinit();
         return .error_initialization_failed;
     }
-    for (&render_pass_objects, &render_pass_state) |*object, *state| if (state.* == .never) {
+    for (&render_pass_objects, &render_pass_state) |*object, *state| if (state.* != .live) {
         object.* = .{
             .owner = DeviceIdentity.capture(d),
             .canonical = canonical,
@@ -12339,7 +12339,7 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&sampler_objects, &sampler_state) |*object, *state| if (state.* == .never) {
+    for (&sampler_objects, &sampler_state) |*object, *state| if (state.* != .live) {
         object.* = .{
             .owner = d,
             .mag_filter = info.mag_filter,
@@ -12492,7 +12492,7 @@ fn createPipelineCache(device: ?Device, info: ?*const PipelineCacheCreateInfo, a
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&pipeline_cache_objects, &pipeline_cache_state) |*cache, *state| if (state.* == .never) {
+    for (&pipeline_cache_objects, &pipeline_cache_state) |*cache, *state| if (state.* != .live) {
         cache.* = .{ .owner = DeviceIdentity.capture(d), .data = owned_payload };
         state.* = .live;
         out.* = @intFromPtr(cache);
@@ -12606,7 +12606,7 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     var free_index: ?usize = null;
-    for (shader_module_state, 0..) |state, index| if (state == .never) {
+    for (shader_module_state, 0..) |state, index| if (state != .live) {
         free_index = index;
         break;
     };
@@ -12654,7 +12654,7 @@ fn createSemaphore(device: ?Device, info: ?*const SemaphoreCreateInfo, alloc: ?*
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&semaphore_objects, &semaphore_state) |*object, *state| if (state.* == .never) {
+    for (&semaphore_objects, &semaphore_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = d, .signaled = .init(false), .timeline = timeline, .timeline_value = .init(initial_value) };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -12800,7 +12800,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     }
     if (color == null and depth == null and render_pass.framebuffer_attachment_count != 0) return .error_initialization_failed;
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
-    for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* == .never) {
+    for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -12836,7 +12836,7 @@ fn createComputePipelines(device: ?Device, cache: usize, count: u32, infos: ?[*]
     var built: [max_child_objects]ComputePipelineObj = undefined;
     var slots: [max_child_objects]u8 = undefined;
     var free_count: usize = 0;
-    for (compute_pipeline_state, 0..) |state, index| if (state == .never) {
+    for (compute_pipeline_state, 0..) |state, index| if (state != .live) {
         slots[free_count] = @intCast(index);
         free_count += 1;
     };
@@ -12897,7 +12897,7 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*
     var built: [max_child_objects]GraphicsPipelineObj = undefined;
     var slots: [max_child_objects]u8 = undefined;
     var free_count: usize = 0;
-    for (graphics_pipeline_state, 0..) |state, index| if (state == .never) {
+    for (graphics_pipeline_state, 0..) |state, index| if (state != .live) {
         slots[free_count] = @intCast(index);
         free_count += 1;
     };
@@ -12999,7 +12999,7 @@ fn createPrivateDataSlot(device: ?Device, info: ?*const PrivateDataSlotCreateInf
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&private_data_slot_objects, &private_data_slot_state) |*slot, *state| if (state.* == .never) {
+    for (&private_data_slot_objects, &private_data_slot_state) |*slot, *state| if (state.* != .live) {
         slot.* = .{ .owner = d, .entries = [_]PrivateDataEntry{.{}} ** max_api_items };
         state.* = .live;
         out.* = @intFromPtr(slot);
@@ -13063,7 +13063,7 @@ fn createDescriptorPool(device: ?Device, info: ?*const DescriptorPoolCreateInfo,
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
-    for (&descriptor_pool_objects, &descriptor_pool_state) |*pool, *state| if (state.* == .never) {
+    for (&descriptor_pool_objects, &descriptor_pool_state) |*pool, *state| if (state.* != .live) {
         pool.* = .{ .owner = DeviceIdentity.capture(d), .flags = ci.flags, .max_sets = ci.max_sets, .allocated_sets = 0, .capacity = capacity, .used = [_]u32{0} ** descriptor_type_count };
         state.* = .live;
         out.* = @intFromPtr(pool);
@@ -13116,7 +13116,7 @@ fn allocateDescriptorSets(device: ?Device, info: ?*const DescriptorSetAllocateIn
     if (ci.descriptor_set_count > pool.max_sets - pool.allocated_sets) return .error_out_of_pool_memory;
     var slots: [max_child_objects]u8 = undefined;
     var free_count: usize = 0;
-    for (descriptor_set_state, 0..) |state, index| if (state == .never) {
+    for (descriptor_set_state, 0..) |state, index| if (state != .live) {
         slots[free_count] = @intCast(index);
         free_count += 1;
     };
@@ -13259,7 +13259,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
     if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
-    for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* == .never) {
+    for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
         state.* = .live;
@@ -15923,7 +15923,7 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
         break :blk old;
     };
     _ = cpu_locality.pinCurrent(.render);
-    for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never) {
+    for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never or (state.* == .tombstone and !swapchain.transport_retire_pending)) {
         const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
         const image_count = if (pixels >= @as(u64, 3840) * 2160 and ci.min_image_count < 4) ci.min_image_count + 1 else ci.min_image_count;
         const transport = if (surface.headless)
@@ -18333,15 +18333,15 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_reference_render_info.subpasses = @ptrCast(&bad_reference_subpass);
     try std.testing.expectEqual(Result.error_initialization_failed, createRenderPass(device, &bad_reference_render_info, null, &unchanged[0]));
     const saved_dsl_state = descriptor_set_layout_state;
-    @memset(&descriptor_set_layout_state, .tombstone);
+    @memset(&descriptor_set_layout_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createDescriptorSetLayout(device, &descriptor_layout_info, null, &unchanged[0]));
     descriptor_set_layout_state = saved_dsl_state;
     const saved_layout_state = pipeline_layout_state;
-    @memset(&pipeline_layout_state, .tombstone);
+    @memset(&pipeline_layout_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createPipelineLayout(device, &pipeline_layout_info, null, &unchanged[0]));
     pipeline_layout_state = saved_layout_state;
     const saved_render_state = render_pass_state;
-    @memset(&render_pass_state, .tombstone);
+    @memset(&render_pass_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createRenderPass(device, &render_pass_info, null, &unchanged[0]));
     render_pass_state = saved_render_state;
     invalid_pipeline = pipeline_info;
@@ -19791,7 +19791,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     surface_state = saved_surface_state;
     try std.testing.expect(validSwapchainLocked(0xdead_beef) == null);
     const saved_semaphore_state = semaphore_state;
-    @memset(&semaphore_state, .tombstone);
+    @memset(&semaphore_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createSemaphore(device, &semaphore_info, null, &exhausted_handle));
     semaphore_state = saved_semaphore_state;
     const saved_view_state = image_view_state;
@@ -19799,15 +19799,15 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_out_of_host_memory, createImageView(device, &view_info, null, &exhausted_handle));
     image_view_state = saved_view_state;
     const saved_framebuffer_state = framebuffer_state;
-    @memset(&framebuffer_state, .tombstone);
+    @memset(&framebuffer_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createFramebuffer(device, &framebuffer_info, null, &exhausted_handle));
     framebuffer_state = saved_framebuffer_state;
     const saved_swapchain_state = swapchain_state;
-    @memset(&swapchain_state, .tombstone);
+    @memset(&swapchain_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createSwapchain(device, &swapchain_info, null, &exhausted_handle));
     swapchain_state = saved_swapchain_state;
     const saved_descriptor_state = descriptor_set_state;
-    @memset(&descriptor_set_state, .tombstone);
+    @memset(&descriptor_set_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, allocateDescriptorSets(device, &set_info, &sets));
     descriptor_set_state = saved_descriptor_state;
 
@@ -24636,10 +24636,8 @@ test "pipeline cache registry exhaustion preserves the output handle" {
     var count: usize = 0;
     while (count < handles.len) : (count += 1) {
         const result = createPipelineCache(ctx.device, &info, null, &handles[count]);
-        if (result == .error_out_of_host_memory) break;
         try std.testing.expectEqual(Result.success, result);
     }
-    try std.testing.expect(count < handles.len);
     var unpublished: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createPipelineCache(ctx.device, &info, null, &unpublished));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
@@ -25156,10 +25154,8 @@ test "descriptor pool registry exhaustion preserves the output handle" {
     var count: usize = 0;
     while (count < handles.len) : (count += 1) {
         const result = createDescriptorPool(ctx.device, &info, null, &handles[count]);
-        if (result == .error_out_of_host_memory) break;
         try std.testing.expectEqual(Result.success, result);
     }
-    try std.testing.expect(count < handles.len);
     var unpublished: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createDescriptorPool(ctx.device, &info, null, &unpublished));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
@@ -27251,10 +27247,8 @@ test "event registry exhaustion never publishes an unowned handle" {
     var count: usize = 0;
     while (count < handles.len) : (count += 1) {
         const result = createEvent(ctx.device, &info, null, &handles[count]);
-        if (result == .error_out_of_host_memory) break;
         try std.testing.expectEqual(Result.success, result);
     }
-    try std.testing.expect(count < handles.len);
     var unpublished: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_out_of_host_memory, createEvent(ctx.device, &info, null, &unpublished));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished);
@@ -27439,7 +27433,7 @@ test "bounded child registries fail safely while buffer handles recycle slots" {
     var cb_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
     var cb: [max_child_objects]CommandBuffer = undefined;
     var available: u32 = 0;
-    for (command_buffer_state) |state| if (state == .never) {
+    for (command_buffer_state, 0..) |state, index| if (state == .never or (state == .tombstone and !command_buffer_retire_pending[index] and command_buffer_active_users[index].load(.acquire) == 0)) {
         available += 1;
     };
     try std.testing.expect(available >= 2);
@@ -27447,8 +27441,12 @@ test "bounded child registries fail safely while buffer handles recycle slots" {
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &cb_info, &cb));
     cb_info.command_buffer_count = 2;
     try std.testing.expectEqual(Result.error_out_of_host_memory, allocateCommandBuffers(ctx.device, &cb_info, &cb));
+    // The failed batch releases its partial allocations as recyclable
+    // tombstones, so a single-buffer request still fits the pool.
     cb_info.command_buffer_count = 1;
-    try std.testing.expectEqual(Result.error_out_of_host_memory, allocateCommandBuffers(ctx.device, &cb_info, &cb));
+    var spare: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &cb_info, &spare));
+    freeCommandBuffers(ctx.device, pool, 1, &spare);
     var exhausted = false;
     for (0..max_child_objects + 1) |_| {
         var handle: usize = 0;
@@ -27610,8 +27608,9 @@ test "shader modules use owned validated words and dedicated lifetime-safe ABI h
     const replacement_words = [_]u32{ spirv.magic, 0x0001_0000, 7, 4, 0 };
     const replacement_info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = replacement_words.len * 4, .p_code = &replacement_words };
     var replacement: usize = 0;
+    // Freed slots recycle, so the replacement may reuse the same pool slot
+    // and therefore the same raw handle value.
     try std.testing.expectEqual(Result.success, create(first.device, &replacement_info, null, &replacement));
-    try std.testing.expect(replacement != handle);
     destroy(null, replacement, null);
     destroy(first.device, 0, null);
     destroy(first.device, replacement, null);
