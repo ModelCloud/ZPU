@@ -11535,7 +11535,7 @@ fn pipelineInvalid(line: u32) CanonicalError {
     return error.Invalid;
 }
 fn queueSubmitFailed(line: u32) Result {
-    _ = line;
+    if (failureDiagnosticsEnabled()) std.debug.print("ZPU queue submit rejected at line {d}\n", .{line});
     return .error_initialization_failed;
 }
 
