@@ -4,7 +4,7 @@
 const std = @import("std");
 
 pub const profile_version: u32 = 1;
-pub const serialization_version: u32 = 5;
+pub const serialization_version: u32 = 6;
 pub const max_values: usize = 4096;
 pub const max_instructions: usize = 4096;
 
@@ -384,6 +384,7 @@ pub const Interface = struct {
     descriptor_set: ?u32 = null,
     binding: ?u32 = null,
     builtin_position: bool = false,
+    builtin_frag_coord: bool = false,
     builtin_front_facing: bool = false,
     flat: bool = false,
     block: bool = false,
@@ -482,6 +483,7 @@ pub fn serialize(allocator: std.mem.Allocator, stage: Stage, entry_name: []const
         try putU32(&list, allocator, item.descriptor_set orelse std.math.maxInt(u32));
         try putU32(&list, allocator, item.binding orelse std.math.maxInt(u32));
         try list.append(allocator, @intFromBool(item.builtin_position));
+        try list.append(allocator, @intFromBool(item.builtin_frag_coord));
         try list.append(allocator, @intFromBool(item.builtin_front_facing));
         try list.append(allocator, @intFromBool(item.flat));
         try list.append(allocator, @intFromBool(item.block));
@@ -657,7 +659,7 @@ test "serialization is exact little endian and identity checks full bytes" {
     const instructions = [_]Instruction{.{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{ 4, 3, 2, 1 } }};
     const bytes = try serialize(std.testing.allocator, .fragment, "main", &interfaces, &instructions);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x05\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
+    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x06\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
     const first = identify(bytes);
     var changed = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(changed);

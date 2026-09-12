@@ -1736,7 +1736,7 @@ fn validate(program: *const ir.Program) Error!void {
             for (instruction.operands) |operand| {
                 const part = program.instructions[operand].ty;
                 total += try lanes(part);
-                if (instruction.ty.rows == 1 and try lanes(part) != 1) return error.InvalidShape;
+                if (instruction.ty.rows == 1 and (part.rows != 1 or part.scalar != instruction.ty.scalar)) return error.InvalidShape;
                 if (instruction.ty.rows > 1 and !(part.rows == 1 and part.columns == instruction.ty.rows)) return error.InvalidShape;
             }
             if (total != try lanes(instruction.ty)) return error.InvalidShape;

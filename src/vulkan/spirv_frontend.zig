@@ -33,6 +33,7 @@ const Decorations = struct {
     binding: ?u32 = null,
     descriptor_set: ?u32 = null,
     builtin_position: bool = false,
+    builtin_frag_coord: bool = false,
     builtin_front_facing: bool = false,
     flat: bool = false,
     block: bool = false,
@@ -475,7 +476,7 @@ fn glslOutputInterfaceIndex(nodes: []const Node, decorations: []const Decoration
         if (item.storage != .output) continue;
         if (stage == .compute and pointer.a == 12) {
             if (item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set) return @intCast(index);
-        } else if (item.location == decoration.location and item.builtin_position == decoration.builtin_position) {
+        } else if (item.location == decoration.location and item.builtin_position == decoration.builtin_position and item.builtin_frag_coord == decoration.builtin_frag_coord) {
             return @intCast(index);
         }
     }
@@ -639,7 +640,7 @@ fn interfacesUnique(items: []const ir.Interface) bool {
         if (item.storage != prior.storage) continue;
         if (item.storage == .uniform or item.storage == .sampled_image) {
             if (item.descriptor_set == prior.descriptor_set and item.binding == prior.binding) return false;
-        } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.location != null and item.location == prior.location)) return false;
+        } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_frag_coord and prior.builtin_frag_coord) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.location != null and item.location == prior.location)) return false;
     }
     return true;
 }
@@ -808,9 +809,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     2 => if (!decorations[target].block) {
                         decorations[target].block = true;
                     } else return error.Malformed,
-                    11 => if (w[2] == 0 and !decorations[target].builtin_position and !decorations[target].builtin_front_facing) {
+                    11 => if (w[2] == 0 and !decorations[target].builtin_position and !decorations[target].builtin_frag_coord and !decorations[target].builtin_front_facing) {
                         decorations[target].builtin_position = true;
-                    } else if (w[2] == 17 and !decorations[target].builtin_position and !decorations[target].builtin_front_facing) {
+                    } else if (w[2] == 15 and !decorations[target].builtin_position and !decorations[target].builtin_frag_coord and !decorations[target].builtin_front_facing) {
+                        decorations[target].builtin_frag_coord = true;
+                    } else if (w[2] == 17 and !decorations[target].builtin_position and !decorations[target].builtin_frag_coord and !decorations[target].builtin_front_facing) {
                         decorations[target].builtin_front_facing = true;
                     } else return error.Unsupported,
                     14 => if (!decorations[target].flat) {
@@ -1088,10 +1091,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     }
     if (!capability or !memory_model or in_function or function_count == 0) return error.Malformed;
     for (nodes, decorations, 0..) |node, decoration, node_index| {
-        const any_decoration = decoration.spec_id != null or decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_front_facing or decoration.flat or decoration.block;
+        const any_decoration = decoration.spec_id != null or decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_frag_coord or decoration.builtin_front_facing or decoration.flat or decoration.block;
         if (any_decoration and node.kind == .none) return error.Malformed;
         if (decoration.spec_id != null and !(node.kind == .constant and node.opcode >= 48 and node.opcode <= 50)) return error.Unsupported;
-        if ((decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_front_facing or decoration.flat) and node.kind != .variable) return error.Unsupported;
+        if ((decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_frag_coord or decoration.builtin_front_facing or decoration.flat) and node.kind != .variable) return error.Unsupported;
         if (decoration.block and node.kind != .structure) return error.Unsupported;
         for (member_offsets[node_index * 16 ..][0..16], 0..) |offset, member_index| if (offset != null and (node.kind != .structure or member_index >= node.words.len)) return if (node.kind == .none) error.Malformed else error.Unsupported;
     }
@@ -1152,11 +1155,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             44, 80 => {
                 const result = try resultShape(nodes, w[0]);
                 if (result.rows == 1 and result.columns > 1) {
-                    if (w.len - 2 != result.columns) return error.Malformed;
+                    var columns: u32 = 0;
                     for (w[2..]) |operand| {
                         const part = try valueShape(nodes, operand);
-                        if (part.scalar != result.scalar or part.columns != 1 or part.rows != 1) return error.Malformed;
+                        if (part.scalar != result.scalar or part.rows != 1) return error.Malformed;
+                        columns = std.math.add(u32, columns, part.columns) catch return error.LimitExceeded;
                     }
+                    if (columns != result.columns) return error.Malformed;
                 } else if (result.rows > 1) {
                     if (w.len - 2 != result.columns) return error.Malformed;
                     for (w[2..]) |operand| {
@@ -1485,10 +1490,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         };
         if (decorations[index].index_zero and !(requested_stage == .fragment and storage == .output and decorations[index].location == 0)) return error.Unsupported;
         var shape: ir.Type = undefined;
-        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_front_facing = decorations[index].builtin_front_facing, .flat = decorations[index].flat };
+        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_frag_coord = decorations[index].builtin_frag_coord, .builtin_front_facing = decorations[index].builtin_front_facing, .flat = decorations[index].flat };
         const pointee = nodes[try id(nodes, pointer.b)];
         if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
-            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
+            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
             for (pointee.words, 0..) |member, member_index| {
                 const builtin = member_builtins[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
@@ -1511,7 +1516,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             if (!position_seen) return error.Unsupported;
             continue;
         } else if (storage == .sampled_image) {
-            if (pointee.kind != .sampled_image or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
+            if (pointee.kind != .sampled_image or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
             shape = .{ .scalar = .f32, .columns = 4 };
         } else if (storage == .uniform or storage == .push_constant) {
             if (pointee.kind != .structure or !decorations[try id(nodes, pointer.b)].block) return error.Unsupported;
@@ -1537,8 +1542,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 interface.members[member_index] = .{ .ty = member_shape, .offset = offset };
             }
             if (storage == .uniform) {
-                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
-            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
+                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
+            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
         } else if (requested_stage == .compute and variable.a == 12) {
             if (pointee.kind == .structure and decorations[try id(nodes, pointer.b)].block and pointee.words.len == 1) {
                 shape = try resultShape(nodes, pointee.words[0]);
@@ -1547,12 +1552,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 interface.members[0] = .{ .ty = shape, .offset = member_offsets[@as(usize, pointer.b) * 16] orelse return error.Unsupported };
                 if (interface.members[0].offset != 0) return error.Unsupported;
             } else shape = try resultShape(nodes, pointer.b);
-            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
+            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
         } else {
             shape = try resultShape(nodes, pointer.b);
-            const builtin = decorations[index].builtin_position or decorations[index].builtin_front_facing;
+            const builtin = decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing;
             if ((decorations[index].location == null) == !builtin or decorations[index].binding != null or decorations[index].descriptor_set != null) return error.Unsupported;
             if (decorations[index].builtin_position and !(storage == .output and requested_stage == .vertex and shape.scalar == .f32 and shape.columns == 4)) return error.Unsupported;
+            if (decorations[index].builtin_frag_coord and !(storage == .input and requested_stage == .fragment and shape.scalar == .f32 and shape.columns == 4 and shape.rows == 1)) return error.Unsupported;
             if (decorations[index].builtin_front_facing and !(storage == .input and requested_stage == .fragment and shape.scalar == .bool and shape.columns == 1 and shape.rows == 1)) return error.Unsupported;
             if (decorations[index].flat and !((storage == .output and requested_stage == .vertex) or (storage == .input and requested_stage == .fragment))) return error.Unsupported;
         }
@@ -2047,7 +2053,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             for (interfaces.items, 0..) |item, interface_index| {
                 if (requested_stage == .compute and target.a == 12) {
                     if (item.storage == .output and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set) semantic_index = @intCast(interface_index);
-                } else if (item.storage == .output and (if (member_builtin) |builtin| builtin == 0 and item.builtin_position else item.location == decoration.location and item.builtin_position == decoration.builtin_position)) semantic_index = @intCast(interface_index);
+                } else if (item.storage == .output and (if (member_builtin) |builtin| builtin == 0 and item.builtin_position else item.location == decoration.location and item.builtin_position == decoration.builtin_position and item.builtin_frag_coord == decoration.builtin_frag_coord and item.builtin_front_facing == decoration.builtin_front_facing)) semantic_index = @intCast(interface_index);
             }
             const target_index = semantic_index orelse return error.Unsupported;
             const output_shape = interfaces.items[target_index].ty;
@@ -2343,6 +2349,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                         if (pointer_node.kind != .variable) return error.Unsupported;
                         const decoration = decorations[source_index];
                         var semantic_index: ?u32 = null;
+                        var direct_builtin = true;
                         const expected_storage: ir.Storage = switch (pointer_node.a) {
                             2 => .uniform,
                             3 => .output,
@@ -2359,8 +2366,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                                 const structure_id = nodes[try id(nodes, pointer_node.type_id)].b;
                                 const builtin = member_builtins[@as(usize, structure_id) * 16 + member.words[0]] orelse return error.Unsupported;
                                 member_matches = builtin == 0 and item.builtin_position;
+                                direct_builtin = false;
                             }
-                            if (member_matches and item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
+                            if (member_matches and item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set and (!direct_builtin or (item.builtin_position == decoration.builtin_position and item.builtin_frag_coord == decoration.builtin_frag_coord and item.builtin_front_facing == decoration.builtin_front_facing)))
                                 semantic_index = @intCast(interface_index);
                         }
                         try operands.append(allocator, semantic_index orelse return error.Unsupported);
@@ -3097,18 +3105,18 @@ test "profile compiles selected straight-line vertex to owned canonical IR" {
     try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
     try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00", program.bytes[0..8]);
     try std.testing.expectEqualSlices(u8, &.{
-        90, 80,  85,  73,  82,  51,  68,  0,   1,   0,   0,   0,   5,   0, 0, 0,
+        90, 80,  85,  73,  82,  51,  68,  0,   1,   0,   0,   0,   6,   0, 0, 0,
         0,  4,   0,   0,   0,   109, 97,  105, 110, 1,   0,   0,   0,   1, 3, 4,
         1,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0,
-        0,  0,   3,   0,   0,   0,   0,   3,   1,   1,   0,   0,   0,   0, 4, 0,
-        0,  0,   0,   0,   128, 63,  1,   3,   4,   1,   4,   0,   0,   0, 0, 0,
+        0,  0,   0,   3,   0,   0,   0,   0,   3,   1,   1,   0,   0,   0, 0, 4,
+        0,  0,   0,   0,   0,   128, 63,  1,   3,   4,   1,   4,   0,   0, 0, 0,
         0,  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0, 0, 0,
-        0,  0,   18,  3,   4,   1,   2,   0,   0,   0,   0,   0,   0,   0, 1, 0,
-        0,  0,   0,   0,   0,   0,
+        0,  0,   0,   18,  3,   4,   1,   2,   0,   0,   0,   0,   0,   0, 0, 1,
+        0,  0,   0,   0,   0,   0,   0,
     }, program.bytes);
     try std.testing.expectEqualSlices(u8, &.{
-        19, 211, 122, 229, 205, 203, 36, 9,   92,  171, 32, 165, 25,  137, 159, 213,
-        87, 77,  201, 10,  133, 36,  98, 243, 199, 185, 85, 143, 106, 222, 142, 8,
+        203, 242, 69, 54, 222, 0,  3,   151, 46,  85,  239, 251, 223, 126, 162, 154,
+        1,   126, 42, 74, 37,  90, 185, 28,  113, 134, 45,  69,  241, 214, 26,  246,
     }, &program.identity.digest);
     var clone = try program.clone(std.testing.allocator);
     defer clone.deinit(std.testing.allocator);
@@ -5213,14 +5221,83 @@ test "Chromium Skia derivative fragment shaders compile" {
     const gradient_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_674.spv").*;
     var gradient_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &gradient_bytes), .fragment, "main", &.{});
     defer gradient_program.deinit(std.testing.allocator);
+
+    const textured_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_648.spv").*;
+    var textured_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &textured_bytes), .fragment, "main", &.{});
+    defer textured_program.deinit(std.testing.allocator);
+
+    var frag_coord_interface: ?u32 = null;
+    var color_interface: ?u32 = null;
+    var coordinates_interface: ?u32 = null;
+    var front_facing_interface: ?u32 = null;
+    var push_constant_interface: ?u32 = null;
+    var sampled_image_interface: ?u32 = null;
+    var output_interface: ?u32 = null;
+    for (textured_program.interfaces, 0..) |interface, index| switch (interface.storage) {
+        .input => {
+            if (interface.builtin_frag_coord)
+                frag_coord_interface = @intCast(index)
+            else if (interface.builtin_front_facing)
+                front_facing_interface = @intCast(index)
+            else if (interface.location == 0)
+                color_interface = @intCast(index)
+            else if (interface.location == 1)
+                coordinates_interface = @intCast(index);
+        },
+        .push_constant => push_constant_interface = @intCast(index),
+        .sampled_image => sampled_image_interface = @intCast(index),
+        .output => output_interface = @intCast(index),
+        else => {},
+    };
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &textured_program);
+    defer executor.deinit();
+    var frag_coord = [_]f32{ 0.5, 0.5, 0, 1 };
+    var color = [_]f32{ 1, 1, 1, 1 };
+    var coordinates = [_]f32{ 0.25, 0.25 };
+    var front_facing = [_]u8{1};
+    var push_constants = [_]f32{0} ** 22;
+    push_constants[16] = 0.5;
+    push_constants[17] = 0.5;
+    push_constants[18] = 1;
+    push_constants[19] = 1;
+    push_constants[21] = 1;
+    const pixels = [_]u8{
+        64, 128, 192, 255, 255, 0, 0,   255,
+        0,  255, 0,   255, 0,   0, 255, 255,
+    };
+    var output = [_]u8{0} ** 16;
+    try executor.execute(&.{
+        .{ .interface = frag_coord_interface.?, .bytes = std.mem.sliceAsBytes(&frag_coord) },
+        .{ .interface = color_interface.?, .bytes = std.mem.sliceAsBytes(&color) },
+        .{ .interface = coordinates_interface.?, .bytes = std.mem.sliceAsBytes(&coordinates) },
+        .{ .interface = front_facing_interface.?, .bytes = &front_facing },
+        .{ .interface = push_constant_interface.?, .bytes = std.mem.sliceAsBytes(&push_constants) },
+        .{
+            .interface = sampled_image_interface.?,
+            .sampled_image = .{
+                .pixels = &pixels,
+                .width = 2,
+                .height = 2,
+                .row_stride = 8,
+                .format = .rgba8_unorm,
+                .filter = .nearest,
+                .address_u = .clamp_to_edge,
+                .address_v = .clamp_to_edge,
+            },
+        },
+    }, &.{.{ .interface = output_interface.?, .bytes = &output }});
+    const expected = [_]f32{ 64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1 };
+    for (expected, 0..) |channel, index|
+        try std.testing.expectEqual(channel, @as(f32, @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little))));
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {
     const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
     const cases = .{
-        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 287), @as(usize, 9), @as(usize, 2), [32]u8{ 78, 156, 189, 206, 68, 234, 84, 71, 73, 8, 250, 204, 7, 17, 0, 181, 214, 40, 29, 198, 182, 12, 34, 86, 241, 97, 242, 76, 32, 136, 105, 89 } },
-        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 154), @as(usize, 4), @as(usize, 2), [32]u8{ 104, 180, 67, 92, 22, 177, 184, 182, 42, 187, 13, 227, 137, 214, 84, 174, 42, 229, 55, 46, 3, 81, 254, 79, 39, 178, 104, 138, 250, 54, 135, 12 } },
-        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 87), @as(usize, 2), @as(usize, 1), [32]u8{ 139, 117, 1, 218, 132, 40, 10, 17, 62, 245, 183, 111, 160, 135, 239, 45, 128, 22, 211, 36, 83, 186, 229, 162, 96, 173, 163, 165, 41, 248, 152, 135 } },
+        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 289), @as(usize, 9), @as(usize, 2), [32]u8{ 32, 54, 120, 171, 171, 47, 37, 140, 249, 223, 164, 90, 213, 117, 244, 105, 27, 199, 198, 147, 250, 157, 214, 189, 189, 56, 122, 213, 62, 182, 128, 184 } },
+        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 156), @as(usize, 4), @as(usize, 2), [32]u8{ 4, 251, 107, 70, 145, 166, 94, 68, 132, 217, 147, 216, 245, 172, 184, 175, 208, 170, 80, 235, 66, 218, 171, 187, 47, 60, 251, 20, 5, 236, 98, 211 } },
+        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 88), @as(usize, 2), @as(usize, 1), [32]u8{ 3, 96, 59, 154, 106, 162, 89, 4, 120, 130, 239, 208, 160, 86, 145, 157, 132, 181, 51, 33, 96, 218, 195, 223, 199, 40, 210, 139, 230, 176, 86, 139 } },
     };
     inline for (cases) |case| {
         var program = try compile(std.testing.allocator, case[0], case[1], "main", case[2]);

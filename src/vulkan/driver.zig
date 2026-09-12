@@ -1404,6 +1404,7 @@ const ProfileGraphics = struct {
     fragment_uniforms: [4]ProfileUniform = undefined,
     fragment_uniform_count: u8 = 0,
     fragment_push_constant: ?ProfileUniform = null,
+    fragment_frag_coord: ?u32 = null,
     fragment_front_facing: ?u32 = null,
     fragment_sampled_image: ?u32 = null,
     fragment_output: u32,
@@ -1424,6 +1425,7 @@ const ProfileGraphicsContract = struct {
     fragment_uniforms: [4]ProfileUniform = undefined,
     fragment_uniform_count: u8 = 0,
     fragment_push_constant: ?ProfileUniform = null,
+    fragment_frag_coord: ?u32 = null,
     fragment_front_facing: ?u32 = null,
     fragment_sampled_image: ?u32 = null,
     fragment_output: u32,
@@ -9486,7 +9488,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         const front_facing = if (op.front_face == 0) area < 0 else area > 0;
         if ((front_facing and op.cull_mode & 1 != 0) or (!front_facing and op.cull_mode & 2 != 0)) continue;
         const depth_bias = if (op.depth_bias_enable != 0) profileDepthBias(vertices, area, op.depth_bias) orelse return else 0;
-        if (profile.varying_count == 0) {
+        if (profile.varying_count == 0 and profile.fragment_frag_coord == null) {
             var fragment_binding_count: usize = 0;
             for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
                 fragment_bindings[fragment_binding_count] = uniform;
@@ -9516,7 +9518,9 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
             const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
             if (b0 < 0 or b1 < 0 or b2 < 0) continue;
-            if (profile.varying_count != 0) {
+            const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
+            if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
+            if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
                 const q0 = b0 / vertices[0].w;
                 const q1 = b1 / vertices[1].w;
                 const q2 = b2 / vertices[2].w;
@@ -9565,6 +9569,28 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[fragment_binding_count] = uniform;
                     fragment_binding_count += 1;
                 }
+                var frag_coord_bytes: [16]u8 = undefined;
+                var frag_coord_dpdx_bytes: [16]u8 = undefined;
+                var frag_coord_dpdy_bytes: [16]u8 = undefined;
+                if (profile.fragment_frag_coord) |interface| {
+                    const depth_dx = db0_dx * vertices[0].z + db1_dx * vertices[1].z + db2_dx * vertices[2].z;
+                    const depth_dy = db0_dy * vertices[0].z + db1_dy * vertices[1].z + db2_dy * vertices[2].z;
+                    const frag_coord = [_]f32{ px, py, depth_value, denominator };
+                    const frag_coord_dpdx = [_]f32{ 1, 0, depth_dx, denominator_dx };
+                    const frag_coord_dpdy = [_]f32{ 0, 1, depth_dy, denominator_dy };
+                    for (0..4) |lane| {
+                        std.mem.writeInt(u32, frag_coord_bytes[lane * 4 ..][0..4], @bitCast(frag_coord[lane]), .little);
+                        std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
+                        std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
+                    }
+                    fragment_bindings[fragment_binding_count] = .{
+                        .interface = interface,
+                        .bytes = &frag_coord_bytes,
+                        .dpdx_bytes = &frag_coord_dpdx_bytes,
+                        .dpdy_bytes = &frag_coord_dpdy_bytes,
+                    };
+                    fragment_binding_count += 1;
+                }
                 var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
                 if (profile.fragment_front_facing) |interface| {
                     fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
@@ -9576,8 +9602,6 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 }
                 profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch return;
             }
-            const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
-            if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
             if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
             if (depth_bytes) |depth_storage| {
@@ -11732,14 +11756,17 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             error.OutOfMemory => error.OutOfMemory,
             else => error.Invalid,
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_image = contract.fragment_sampled_image, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_image = contract.fragment_sampled_image, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
     for (fragment.interfaces) |input| if (input.storage == .input) {
-        if (input.builtin_front_facing) {
+        if (input.builtin_frag_coord) {
+            if (input.location != null or input.ty.scalar != .f32 or input.ty.columns != 4 or input.ty.rows != 1) return false;
+            continue;
+        } else if (input.builtin_front_facing) {
             if (input.location != null or input.ty.scalar != .bool or input.ty.columns != 1 or input.ty.rows != 1) return false;
             continue;
         }
@@ -11837,7 +11864,11 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
     var fragment_outputs: u32 = 0;
     for (fragment.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
-            if (interface.builtin_front_facing) {
+            if (interface.builtin_frag_coord) {
+                if (result.fragment_frag_coord != null or interface.location != null or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1) return null;
+                result.fragment_frag_coord = @intCast(index);
+                continue;
+            } else if (interface.builtin_front_facing) {
                 if (result.fragment_front_facing != null or interface.location != null or interface.ty.scalar != .bool or interface.ty.columns != 1 or interface.ty.rows != 1) return null;
                 result.fragment_front_facing = @intCast(index);
                 continue;
@@ -14379,6 +14410,59 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
         if (color_bytes[at + 0] == 0 and color_bytes[at + 1] == 127 and color_bytes[at + 2] == 127 and color_bytes[at + 3] == 0) saw_derivative_pixel = true;
     }
     try std.testing.expect(saw_derivative_pixel);
+    const frag_coord_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .builtin_frag_coord = true },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const frag_coord_input_operands = [_]u32{0};
+    const frag_coord_scale_literal = [_]u8{ 0, 0, 128, 62 };
+    const frag_coord_scale_operands = [_]u32{ 0, 1 };
+    const frag_coord_output_operands = [_]u32{ 1, 2 };
+    const frag_coord_instructions = [_]render_ir.Instruction{
+        .{ .op = .input, .ty = vec4, .operands = &frag_coord_input_operands, .literal = &.{} },
+        .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = &.{}, .literal = &frag_coord_scale_literal },
+        .{ .op = .vector_times_scalar, .ty = vec4, .operands = &frag_coord_scale_operands, .literal = &.{} },
+        .{ .op = .output, .ty = vec4, .operands = &frag_coord_output_operands, .literal = &.{} },
+    };
+    const frag_coord_program = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&fragment_name), .interfaces = @constCast(&frag_coord_interfaces), .instructions = @constCast(&frag_coord_instructions), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    const frag_coord_contract = profileGraphicsContract(&vertex_program, &frag_coord_program, &vi).?;
+    var frag_coord_executor = try render_ir_exec.Executor.init(std.testing.allocator, &frag_coord_program);
+    defer frag_coord_executor.deinit();
+    const frag_coord_profile = ProfileGraphics{
+        .vertex = vertex_executor,
+        .fragment = frag_coord_executor,
+        .inputs = frag_coord_contract.inputs,
+        .input_count = frag_coord_contract.input_count,
+        .vertex_output = frag_coord_contract.vertex_output - 1,
+        .vertex_outputs = frag_coord_contract.vertex_outputs,
+        .vertex_output_count = frag_coord_contract.vertex_output_count,
+        .vertex_position_slot = frag_coord_contract.vertex_position_slot,
+        .varyings = frag_coord_contract.varyings,
+        .varying_count = frag_coord_contract.varying_count,
+        .fragment_frag_coord = frag_coord_contract.fragment_frag_coord,
+        .fragment_output = frag_coord_contract.fragment_output,
+        .fragment_bool = frag_coord_contract.fragment_bool,
+    };
+    var frag_coord_pipeline = pipeline;
+    frag_coord_pipeline.execution_abi = .{ .profile_v1_scalar_graphics = frag_coord_profile };
+    var frag_coord_command = command;
+    frag_coord_command.cube_draw.pipeline = &frag_coord_pipeline;
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    executeValidatedCommand(frag_coord_command, &context);
+    var minimum_red: u8 = 255;
+    var maximum_red: u8 = 0;
+    var frag_coord_pixels: usize = 0;
+    for (0..16) |pixel| {
+        const at = pixel * 4;
+        if (color_bytes[at + 3] == 63) {
+            minimum_red = @min(minimum_red, color_bytes[at + 2]);
+            maximum_red = @max(maximum_red, color_bytes[at + 2]);
+            frag_coord_pixels += 1;
+        }
+    }
+    try std.testing.expect(frag_coord_pixels > 1);
+    try std.testing.expect(minimum_red < maximum_red);
     var masked_pipeline = pipeline;
     masked_pipeline.color_write_mask = 0x1;
     var masked_command = command;
