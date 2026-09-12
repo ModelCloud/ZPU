@@ -11634,6 +11634,55 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(a.offset);
     }
     const profile_contract = if (profile_pair) profileGraphicsContract(&vertex_program.?, &fragment_program.?, vi) else null;
+    if (profile_pair and profile_contract == null and failureDiagnosticsEnabled()) {
+        std.debug.print(
+            "ZPU graphics profile rejected vertexInterfaces={} fragmentInterfaces={} bindings={} attributes={}\n",
+            .{ vertex_program.?.interfaces.len, fragment_program.?.interfaces.len, vi.binding_count, vi.attribute_count },
+        );
+        for (vertex_program.?.interfaces, 0..) |interface, index| std.debug.print(
+            "  vertex[{d}] storage={s} scalar={s} columns={} rows={} location={any} set={any} binding={any} block={} members={} position={} flat={}\n",
+            .{
+                index,
+                @tagName(interface.storage),
+                @tagName(interface.ty.scalar),
+                interface.ty.columns,
+                interface.ty.rows,
+                interface.location,
+                interface.descriptor_set,
+                interface.binding,
+                interface.block,
+                interface.member_count,
+                interface.builtin_position,
+                interface.flat,
+            },
+        );
+        for (fragment_program.?.interfaces, 0..) |interface, index| std.debug.print(
+            "  fragment[{d}] storage={s} scalar={s} columns={} rows={} location={any} set={any} binding={any} block={} members={} fragCoord={} frontFacing={} flat={}\n",
+            .{
+                index,
+                @tagName(interface.storage),
+                @tagName(interface.ty.scalar),
+                interface.ty.columns,
+                interface.ty.rows,
+                interface.location,
+                interface.descriptor_set,
+                interface.binding,
+                interface.block,
+                interface.member_count,
+                interface.builtin_frag_coord,
+                interface.builtin_front_facing,
+                interface.flat,
+            },
+        );
+        for (bindings, 0..) |binding, index| std.debug.print(
+            "  binding[{d}] binding={} stride={} rate={}\n",
+            .{ index, binding.binding, binding.stride, binding.input_rate },
+        );
+        for (attributes, 0..) |attribute, index| std.debug.print(
+            "  attribute[{d}] location={} binding={} format={} offset={}\n",
+            .{ index, attribute.location, attribute.binding, attribute.format, attribute.offset },
+        );
+    }
     const ia = ci.input_assembly orelse return pipelineInvalid(@src().line);
     if (ia.s_type != 20 or ia.p_next != null or ia.flags != 0 or ia.topology < 0 or ia.topology > 10) return pipelineInvalid(@src().line);
     try w.i32le(ia.topology);
