@@ -15644,7 +15644,13 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1)) return .error_initialization_failed;
+    if (ci.s_type != 1_000_001_000 or ci.p_next != null or ci.flags & ~swapchain_present_timing_bit != 0 or ci.min_image_count < 2 or ci.min_image_count > 4 or ci.image_format != 44 or ci.image_color_space != 0 or ci.image_extent.width == 0 or ci.image_extent.height == 0 or ci.image_extent.width > max_2d_extent or ci.image_extent.height > max_2d_extent or ci.image_array_layers != 1 or ci.image_usage != 0x10 or ci.image_sharing_mode != 0 or ci.queue_family_index_count != 0 or ci.queue_family_indices != null or ci.pre_transform != 1 or ci.composite_alpha != 1 or ci.present_mode != 2 or (ci.clipped != 0 and ci.clipped != 1)) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU swapchain rejected sType={d} pNext={} flags=0x{x} minImages={d} format={d} colorSpace={d} extent={d}x{d} layers={d} usage=0x{x} sharingMode={d} queueFamilies={d} queueFamilyIndices={} transform=0x{x} alpha=0x{x} presentMode={d} clipped={d}\n",
+            .{ ci.s_type, ci.p_next != null, ci.flags, ci.min_image_count, ci.image_format, ci.image_color_space, ci.image_extent.width, ci.image_extent.height, ci.image_array_layers, ci.image_usage, ci.image_sharing_mode, ci.queue_family_index_count, ci.queue_family_indices != null, ci.pre_transform, ci.composite_alpha, ci.present_mode, ci.clipped },
+        );
+        return .error_initialization_failed;
+    }
     lock();
     defer mutex.unlock();
     const surface = validSurfaceLocked(ci.surface) orelse return .error_initialization_failed;
