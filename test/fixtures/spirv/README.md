@@ -30,3 +30,7 @@ the structured position and push-constant interfaces.
 `chromium_skia_fragment_flat.spvasm` captures the matching fragment path. It
 exercises the fragment origin mode, output index zero, `FrontFacing`, and a flat
 `vec4` input.
+
+`chromium_skia_fragment_circle.spvasm` captures Skia's analytic circle coverage
+path. It exercises the standard GLSL `Length` instruction and fragment
+execution with multiple `vec4` inputs.

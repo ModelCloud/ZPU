@@ -1,0 +1,82 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Google Skia SkSL; 0
+; Bound: 41
+; Schema: 0
+               OpCapability Shader
+          %5 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %6 "main" %7 %11 %13 %14
+               OpExecutionMode %6 OriginUpperLeft
+               OpName %7 "sk_FragColor"
+               OpName %11 "vinCircleEdge_S0"
+               OpName %13 "vinColor_S0"
+               OpName %14 "sk_Clockwise"
+               OpName %6 "main"
+               OpName %20 "circleEdge"
+               OpName %23 "outputColor_S0"
+               OpName %25 "d"
+               OpName %30 "distanceToOuterEdge"
+               OpName %35 "edgeAlpha"
+               OpName %38 "outputCoverage_S0"
+               OpDecorate %7 RelaxedPrecision
+               OpDecorate %7 Location 0
+               OpDecorate %7 Index 0
+               OpDecorate %11 Location 0
+               OpDecorate %13 RelaxedPrecision
+               OpDecorate %13 Location 1
+               OpDecorate %14 BuiltIn FrontFacing
+               OpDecorate %23 RelaxedPrecision
+               OpDecorate %24 RelaxedPrecision
+               OpDecorate %30 RelaxedPrecision
+               OpDecorate %35 RelaxedPrecision
+               OpDecorate %36 RelaxedPrecision
+               OpDecorate %38 RelaxedPrecision
+               OpDecorate %39 RelaxedPrecision
+               OpDecorate %40 RelaxedPrecision
+          %1 = OpTypeInt 32 1
+          %2 = OpTypePointer Input %1
+          %8 = OpTypeFloat 32
+          %9 = OpTypeVector %8 4
+         %10 = OpTypePointer Output %9
+          %7 = OpVariable %10 Output
+         %12 = OpTypePointer Input %9
+         %11 = OpVariable %12 Input
+         %13 = OpVariable %12 Input
+         %15 = OpTypeBool
+         %16 = OpTypePointer Input %15
+         %14 = OpVariable %16 Input
+         %17 = OpTypeVoid
+         %18 = OpTypeFunction %17
+         %21 = OpTypePointer Function %9
+         %26 = OpTypePointer Function %8
+         %29 = OpTypeVector %8 2
+         %32 = OpConstant %8 1
+         %37 = OpConstant %8 0
+          %6 = OpFunction %17 None %18
+         %19 = OpLabel
+         %20 = OpVariable %21 Function
+         %23 = OpVariable %21 Function
+         %25 = OpVariable %26 Function
+         %30 = OpVariable %26 Function
+         %35 = OpVariable %26 Function
+         %38 = OpVariable %21 Function
+         %22 = OpLoad %9 %11
+               OpStore %20 %22
+         %24 = OpLoad %9 %13
+               OpStore %23 %24
+         %28 = OpVectorShuffle %29 %22 %22 0 1
+         %27 = OpExtInst %8 %5 Length %28
+               OpStore %25 %27
+         %31 = OpCompositeExtract %8 %22 2
+         %33 = OpFSub %8 %32 %27
+         %34 = OpFMul %8 %31 %33
+               OpStore %30 %34
+         %36 = OpExtInst %8 %5 FClamp %34 %37 %32
+               OpStore %35 %36
+         %39 = OpCompositeConstruct %9 %36 %36 %36 %36
+               OpStore %38 %39
+         %40 = OpFMul %9 %24 %39
+               OpStore %7 %40
+               OpReturn
+               OpFunctionEnd
