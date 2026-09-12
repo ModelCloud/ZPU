@@ -362,6 +362,9 @@ pub const Op = enum(u8) {
     branch_conditional,
     phi,
     return_,
+    dpdx,
+    dpdy,
+    fwidth,
 };
 
 pub const Instruction = struct {
@@ -521,7 +524,7 @@ fn valueOperand(op: Op, operand_index: usize) bool {
         .composite => true,
         .extract => operand_index == 0,
         .shuffle => operand_index < 2,
-        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .convert, .bitcast, .copy_object, .quantize_f16 => operand_index == 0,
+        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .convert, .bitcast, .copy_object, .quantize_f16, .dpdx, .dpdy, .fwidth => operand_index == 0,
         .select => operand_index < 3,
         .u_min, .i_min, .u_max, .i_max => operand_index < 2,
         .f_clamp, .u_clamp, .i_clamp, .f_n_clamp => operand_index < 3,

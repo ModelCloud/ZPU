@@ -32,6 +32,9 @@ pub const Error = error{
 pub const Value = struct {
     ty: ir.Type,
     bits: [16]u32 = .{0} ** 16,
+    dpdx_bits: [16]u32 = .{0} ** 16,
+    dpdy_bits: [16]u32 = .{0} ** 16,
+    derivatives_valid: bool = false,
 
     pub fn lanes(self: Value) usize {
         return @as(usize, self.ty.columns) * self.ty.rows;
@@ -57,6 +60,8 @@ pub const SampledImage = struct {
 pub const Binding = struct {
     interface: u32,
     bytes: []const u8 = &.{},
+    dpdx_bytes: []const u8 = &.{},
+    dpdy_bytes: []const u8 = &.{},
     sampled_image: ?SampledImage = null,
 };
 pub const Output = struct { interface: u32, bytes: []u8 };
@@ -255,11 +260,33 @@ fn readUniformValue(ty: ir.Type, bytes: []const u8) Error!Value {
     };
     return result;
 }
+fn readInputValue(ty: ir.Type, binding: Binding) Error!Value {
+    var result = try readValue(ty, binding.bytes);
+    if (binding.dpdx_bytes.len == 0 and binding.dpdy_bytes.len == 0) return result;
+    if (ty.scalar != .f32 or ty.rows != 1) return error.InvalidType;
+    const dx = try readValue(ty, binding.dpdx_bytes);
+    const dy = try readValue(ty, binding.dpdy_bytes);
+    @memcpy(result.dpdx_bits[0..result.lanes()], dx.bits[0..result.lanes()]);
+    @memcpy(result.dpdy_bits[0..result.lanes()], dy.bits[0..result.lanes()]);
+    result.derivatives_valid = true;
+    return result;
+}
+fn markConstant(value: *Value) void {
+    value.derivatives_valid = true;
+}
 fn findBinding(bindings: []const Binding, index: u32) Error![]const u8 {
     var found: ?[]const u8 = null;
     for (bindings) |binding| if (binding.interface == index) {
         if (found != null) return error.InvalidOperand;
         found = binding.bytes;
+    };
+    return found orelse error.MissingInput;
+}
+fn findBindingRecord(bindings: []const Binding, index: u32) Error!Binding {
+    var found: ?Binding = null;
+    for (bindings) |binding| if (binding.interface == index) {
+        if (found != null) return error.InvalidOperand;
+        found = binding;
     };
     return found orelse error.MissingInput;
 }
@@ -451,7 +478,11 @@ pub const Executor = struct {
                         result = source;
                     } else {
                         if (instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.ty.scalar or pointer.bits[1] - 1 >= source.lanes()) return error.InvalidType;
-                        result.bits[0] = source.bits[pointer.bits[1] - 1];
+                        const lane = pointer.bits[1] - 1;
+                        result.bits[0] = source.bits[lane];
+                        result.dpdx_bits[0] = source.dpdx_bits[lane];
+                        result.dpdy_bits[0] = source.dpdy_bits[lane];
+                        result.derivatives_valid = source.derivatives_valid;
                     }
                 },
                 .local_store => {
@@ -464,7 +495,11 @@ pub const Executor = struct {
                     } else {
                         const target = &self.locals[pointer.bits[0]];
                         if (source.lanes() != 1 or source.ty.scalar != target.ty.scalar or pointer.bits[1] - 1 >= target.lanes()) return error.InvalidType;
-                        target.bits[pointer.bits[1] - 1] = source.bits[0];
+                        const lane = pointer.bits[1] - 1;
+                        target.bits[lane] = source.bits[0];
+                        target.dpdx_bits[lane] = source.dpdx_bits[0];
+                        target.dpdy_bits[lane] = source.dpdy_bits[0];
+                        target.derivatives_valid = target.derivatives_valid and source.derivatives_valid;
                     }
                 },
                 .label => current_label = std.mem.readInt(u32, instruction.literal[0..4], .little),
@@ -490,19 +525,27 @@ pub const Executor = struct {
                 .return_ => next_pc = self.program.instructions.len,
                 .constant => {
                     if (instruction.ty.scalar == .bool) result.bits[0] = instruction.literal[0] else result = try readValue(instruction.ty, instruction.literal);
+                    markConstant(&result);
                 },
                 .constant_composite, .composite => {
                     var at: usize = 0;
+                    result.derivatives_valid = true;
                     for (instruction.operands) |operand| {
                         const part = try valueRef(self.values, pc, operand);
-                        for (part.bits[0..part.lanes()]) |bits| {
-                            result.bits[at] = bits;
+                        result.derivatives_valid = result.derivatives_valid and part.derivatives_valid;
+                        for (0..part.lanes()) |lane| {
+                            result.bits[at] = part.bits[lane];
+                            result.dpdx_bits[at] = part.dpdx_bits[lane];
+                            result.dpdy_bits[at] = part.dpdy_bits[lane];
                             at += 1;
                         }
                     }
                 },
-                .input => result = try readValue(instruction.ty, try findBinding(bindings, instruction.operands[0])),
-                .uniform => result = try readValue(instruction.ty, try findBinding(bindings, instruction.operands[0])),
+                .input => result = try readInputValue(instruction.ty, try findBindingRecord(bindings, instruction.operands[0])),
+                .uniform => {
+                    result = try readValue(instruction.ty, try findBinding(bindings, instruction.operands[0]));
+                    markConstant(&result);
+                },
                 .storage => {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
@@ -544,6 +587,7 @@ pub const Executor = struct {
                         if (index >= loaded.lanes()) return error.Bounds;
                         result.bits[0] = loaded.bits[index];
                     }
+                    markConstant(&result);
                 },
                 .extract => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
@@ -562,9 +606,15 @@ pub const Executor = struct {
                         if (source.ty.rows == 1) {
                             if (selector >= source.lanes()) return error.Bounds;
                             result.bits[0] = source.bits[selector];
+                            result.dpdx_bits[0] = source.dpdx_bits[selector];
+                            result.dpdy_bits[0] = source.dpdy_bits[selector];
+                            result.derivatives_valid = source.derivatives_valid;
                         } else {
                             if (selector >= source.ty.columns or instruction.ty.rows != 1 or instruction.ty.columns != source.ty.rows or instruction.ty.scalar != source.ty.scalar) return error.Bounds;
                             @memcpy(result.bits[0..source.ty.rows], source.bits[selector * source.ty.rows ..][0..source.ty.rows]);
+                            @memcpy(result.dpdx_bits[0..source.ty.rows], source.dpdx_bits[selector * source.ty.rows ..][0..source.ty.rows]);
+                            @memcpy(result.dpdy_bits[0..source.ty.rows], source.dpdy_bits[selector * source.ty.rows ..][0..source.ty.rows]);
+                            result.derivatives_valid = source.derivatives_valid;
                         }
                     }
                 },
@@ -577,6 +627,9 @@ pub const Executor = struct {
                     const index = selector.bits[0];
                     if (index >= source.lanes()) return error.Bounds;
                     result.bits[0] = source.bits[index];
+                    result.dpdx_bits[0] = source.dpdx_bits[index];
+                    result.dpdy_bits[0] = source.dpdy_bits[index];
+                    result.derivatives_valid = source.derivatives_valid;
                 },
                 .vector_insert_dynamic => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
@@ -586,6 +639,9 @@ pub const Executor = struct {
                     if (index >= source.lanes()) return error.Bounds;
                     result = source;
                     result.bits[index] = component.bits[0];
+                    result.dpdx_bits[index] = component.dpdx_bits[0];
+                    result.dpdy_bits[index] = component.dpdy_bits[0];
+                    result.derivatives_valid = source.derivatives_valid and component.derivatives_valid;
                 },
                 .composite_insert => {
                     const object = try valueRef(self.values, pc, instruction.operands[0]);
@@ -594,24 +650,37 @@ pub const Executor = struct {
                     if (index >= composite.lanes()) return error.Bounds;
                     result = composite;
                     result.bits[index] = object.bits[0];
+                    result.dpdx_bits[index] = object.dpdx_bits[0];
+                    result.dpdy_bits[index] = object.dpdy_bits[0];
+                    result.derivatives_valid = composite.derivatives_valid and object.derivatives_valid;
                 },
                 .shuffle => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
                     for (instruction.operands[2..], 0..) |selector, i| {
                         if (selector >= a.lanes() + b.lanes()) return error.Bounds;
                         result.bits[i] = if (selector < a.lanes()) a.bits[selector] else b.bits[selector - a.lanes()];
+                        result.dpdx_bits[i] = if (selector < a.lanes()) a.dpdx_bits[selector] else b.dpdx_bits[selector - a.lanes()];
+                        result.dpdy_bits[i] = if (selector < a.lanes()) a.dpdy_bits[selector] else b.dpdy_bits[selector - a.lanes()];
                     }
                 },
                 .fneg, .ineg, .bit_not, .logical_not => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    for (0..result.lanes()) |i| result.bits[i] = switch (instruction.op) {
-                        .fneg => canonicalFloat(a.bits[i] ^ 0x80000000),
-                        .ineg => 0 -% a.bits[i],
-                        .bit_not => ~a.bits[i],
-                        .logical_not => @intFromBool(a.bits[i] == 0),
-                        else => unreachable,
-                    };
+                    result.derivatives_valid = instruction.op == .fneg and a.derivatives_valid;
+                    for (0..result.lanes()) |i| {
+                        result.bits[i] = switch (instruction.op) {
+                            .fneg => canonicalFloat(a.bits[i] ^ 0x80000000),
+                            .ineg => 0 -% a.bits[i],
+                            .bit_not => ~a.bits[i],
+                            .logical_not => @intFromBool(a.bits[i] == 0),
+                            else => unreachable,
+                        };
+                        if (instruction.op == .fneg) {
+                            result.dpdx_bits[i] = canonicalFloat(a.dpdx_bits[i] ^ 0x80000000);
+                            result.dpdy_bits[i] = canonicalFloat(a.dpdy_bits[i] ^ 0x80000000);
+                        }
+                    }
                 },
                 .f_abs, .i_abs, .f_sign, .i_sign => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
@@ -1172,6 +1241,8 @@ pub const Executor = struct {
                 .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_n_min, .f_n_max, .f_step => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid and
+                        (instruction.op == .fadd or instruction.op == .fsub or instruction.op == .fmul or instruction.op == .fdiv);
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const y: f32 = @bitCast(b.bits[i]);
@@ -1196,6 +1267,28 @@ pub const Executor = struct {
                             else => unreachable,
                         };
                         result.bits[i] = canonicalFloat(@bitCast(z));
+                        if (result.derivatives_valid) {
+                            const ax: f32 = @bitCast(a.dpdx_bits[i]);
+                            const ay: f32 = @bitCast(a.dpdy_bits[i]);
+                            const bx: f32 = @bitCast(b.dpdx_bits[i]);
+                            const by: f32 = @bitCast(b.dpdy_bits[i]);
+                            const dx = switch (instruction.op) {
+                                .fadd => ax + bx,
+                                .fsub => ax - bx,
+                                .fmul => ax * y + x * bx,
+                                .fdiv => (ax * y - x * bx) / (y * y),
+                                else => unreachable,
+                            };
+                            const dy = switch (instruction.op) {
+                                .fadd => ay + by,
+                                .fsub => ay - by,
+                                .fmul => ay * y + x * by,
+                                .fdiv => (ay * y - x * by) / (y * y),
+                                else => unreachable,
+                            };
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(dx));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
+                        }
                     }
                 },
                 .u_min, .i_min, .u_max, .i_max => {
@@ -1246,6 +1339,7 @@ pub const Executor = struct {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
                     const c = try valueRef(self.values, pc, instruction.operands[2]);
+                    result.derivatives_valid = instruction.op == .fma and a.derivatives_valid and b.derivatives_valid and c.derivatives_valid;
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const y: f32 = @bitCast(b.bits[i]);
@@ -1255,6 +1349,31 @@ pub const Executor = struct {
                         else
                             x * (1.0 - z) + y * z;
                         result.bits[i] = canonicalFloat(@bitCast(value));
+                        if (result.derivatives_valid) {
+                            const dx = @as(f32, @bitCast(a.dpdx_bits[i])) * y +
+                                x * @as(f32, @bitCast(b.dpdx_bits[i])) +
+                                @as(f32, @bitCast(c.dpdx_bits[i]));
+                            const dy = @as(f32, @bitCast(a.dpdy_bits[i])) * y +
+                                x * @as(f32, @bitCast(b.dpdy_bits[i])) +
+                                @as(f32, @bitCast(c.dpdy_bits[i]));
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(dx));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
+                        }
+                    }
+                },
+                .dpdx, .dpdy, .fwidth => {
+                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    if (!source.derivatives_valid) return error.MissingInput;
+                    markConstant(&result);
+                    for (0..result.lanes()) |i| {
+                        const dx: f32 = @bitCast(source.dpdx_bits[i]);
+                        const dy: f32 = @bitCast(source.dpdy_bits[i]);
+                        result.bits[i] = canonicalFloat(@bitCast(switch (instruction.op) {
+                            .dpdx => dx,
+                            .dpdy => dy,
+                            .fwidth => @abs(dx) + @abs(dy),
+                            else => unreachable,
+                        }));
                     }
                 },
                 .f_smooth_step => {
@@ -1421,7 +1540,7 @@ fn validate(program: *const ir.Program) Error!void {
             .vector_insert_dynamic => n == 3,
             .composite_insert => n == 3,
             .shuffle => n == 2 + try lanes(instruction.ty),
-            .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize, .i_find_lsb, .i_find_s_msb, .i_find_u_msb, .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .i_pack_half2x16, .f_unpack_half2x16, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => n == 1,
+            .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .f_determinant, .f_matrix_inverse, .f_length, .f_normalize, .i_find_lsb, .i_find_s_msb, .i_find_u_msb, .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16, .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8, .i_pack_half2x16, .f_unpack_half2x16, .bit_not, .logical_not, .transpose, .any, .all, .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16, .dpdx, .dpdy, .fwidth => n == 1,
             .f_modf, .f_frexp => n == 2,
             .f_modf_struct, .f_frexp_struct => n == 1,
             .bit_field_insert => n == 4,
@@ -1477,7 +1596,7 @@ fn validate(program: *const ir.Program) Error!void {
                 } else if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose, .dpdx, .dpdy, .fwidth => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_determinant => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType,
                 .f_matrix_inverse => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType,
                 .f_length => if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns < 2 or source_ty.columns > 4) return error.InvalidType,
@@ -1624,6 +1743,9 @@ fn validate(program: *const ir.Program) Error!void {
         }
         switch (instruction.op) {
             .fneg, .f_abs, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix => if (instruction.ty.scalar != .f32) return error.InvalidType,
+            .dpdx, .dpdy, .fwidth => {
+                if (program.stage != .fragment or instruction.ty.scalar != .f32 or instruction.ty.rows != 1) return error.InvalidType;
+            },
             .ineg, .i_abs => if (instruction.ty.scalar != .i32) return error.InvalidType,
             .bit_not, .bit_or, .bit_xor, .bit_and => if (instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) return error.InvalidType,
             .udiv, .umod => if (instruction.ty.scalar != .u32) return error.InvalidType,
@@ -2259,6 +2381,42 @@ test "GLSL mix and fused multiply-add preserve component semantics" {
     defer invalid_executor.deinit();
     try std.testing.expectError(error.NumericDomain, invalid_executor.execute(&.{ .{ .interface = 0, .bytes = &left }, .{ .interface = 1, .bytes = &right }, .{ .interface = 2, .bytes = &factor } }, &.{}));
     for (0..4096) |_| try executor.execute(&.{ .{ .interface = 0, .bytes = &left }, .{ .interface = 1, .bytes = &right }, .{ .interface = 2, .bytes = &factor } }, &.{});
+}
+
+test "fragment derivatives propagate through floating arithmetic" {
+    const ty = ir.Type{ .scalar = .f32, .columns = 2 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = ty, .location = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = ty, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .fmul, .ty = ty, .operands = &.{ 0, 0 }, .literal = &.{} },
+        .{ .op = .dpdx, .ty = ty, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .dpdy, .ty = ty, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .fwidth, .ty = ty, .operands = &.{1}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+
+    const input = [_]f32{ 2, 3 };
+    const dpdx = [_]f32{ 0.5, -1 };
+    const dpdy = [_]f32{ 2, 4 };
+    try executor.execute(&.{.{
+        .interface = 0,
+        .bytes = std.mem.sliceAsBytes(&input),
+        .dpdx_bytes = std.mem.sliceAsBytes(&dpdx),
+        .dpdy_bytes = std.mem.sliceAsBytes(&dpdy),
+    }}, &.{});
+    try std.testing.expectEqual(@as(f32, 2), @as(f32, @bitCast(executor.values[2].bits[0])));
+    try std.testing.expectEqual(@as(f32, -6), @as(f32, @bitCast(executor.values[2].bits[1])));
+    try std.testing.expectEqual(@as(f32, 8), @as(f32, @bitCast(executor.values[3].bits[0])));
+    try std.testing.expectEqual(@as(f32, 24), @as(f32, @bitCast(executor.values[3].bits[1])));
+    try std.testing.expectEqual(@as(f32, 10), @as(f32, @bitCast(executor.values[4].bits[0])));
+    try std.testing.expectEqual(@as(f32, 30), @as(f32, @bitCast(executor.values[4].bits[1])));
+    try std.testing.expectError(error.MissingInput, executor.execute(&.{.{ .interface = 0, .bytes = std.mem.sliceAsBytes(&input) }}, &.{}));
 }
 
 test "GLSL round round-even and trunc preserve bounded f32 lanes" {
@@ -4389,7 +4547,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const source = try propertyConstant(arena, &instructions, source_ty);
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{source}, &.{});
         },
-        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16 => {
+        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .bit_reverse, .bit_count, .convert, .bitcast, .copy_object, .quantize_f16, .dpdx, .dpdy, .fwidth => {
             var source_ty = result_ty;
             if (convert_from) |scalar| source_ty.scalar = scalar;
             const source = try propertyConstant(arena, &instructions, source_ty);
@@ -4549,6 +4707,7 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
     }
     var source = try testProgram(interfaces[0..interface_count], instructions.items);
     defer std.testing.allocator.free(source.bytes);
+    if (op == .dpdx or op == .dpdy or op == .fwidth) source.stage = .fragment;
     var executor = try Executor.init(std.testing.allocator, &source);
     defer executor.deinit();
     try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
@@ -4603,6 +4762,10 @@ test "generated bounded operation by type-family property matrix is complete" {
             totals[@intFromEnum(op)] += 1;
         };
         if (is_float and is_non_matrix) {
+            inline for ([_]ir.Op{ .dpdx, .dpdy, .fwidth }) |op| {
+                try runPropertyCase(op, ty, null, null);
+                totals[@intFromEnum(op)] += 1;
+            }
             inline for ([_]ir.Op{ .f_atan2, .f_pow }) |op| {
                 try runPropertyCase(op, ty, null, null);
                 totals[@intFromEnum(op)] += 1;
@@ -4816,15 +4979,15 @@ test "generated bounded operation by type-family property matrix is complete" {
     inline for ([_]ir.Op{ .local, .local_access, .local_load, .local_store, .label, .branch, .branch_conditional, .phi, .return_ }) |op|
         totals[@intFromEnum(op)] = 1;
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9;
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 698), total);
-    std.debug.print("generated property matrix: operations=180 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 710), total);
+    std.debug.print("generated property matrix: operations=183 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -4969,13 +5132,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 180), malformed);
+    try std.testing.expectEqual(@as(usize, 183), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=171 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=183 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

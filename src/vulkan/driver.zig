@@ -9407,6 +9407,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     var varying_bytes: [3][8][16]u8 = undefined;
     var fragment_bindings: [14]render_ir_exec.Binding = undefined;
     var fragment_binding_storage: [8][16]u8 = undefined;
+    var fragment_dpdx_storage: [8][16]u8 = undefined;
+    var fragment_dpdy_storage: [8][16]u8 = undefined;
     var vertex_uniform_bindings: [5]render_ir_exec.Binding = undefined;
     var fragment_uniform_bindings: [5]render_ir_exec.Binding = undefined;
     var vertex_uniform_count: usize = 0;
@@ -9520,16 +9522,43 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 const q2 = b2 / vertices[2].w;
                 const denominator = q0 + q1 + q2;
                 if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                const db0_dx = (vertices[2].y - vertices[1].y) * inverse_area;
+                const db1_dx = (vertices[0].y - vertices[2].y) * inverse_area;
+                const db2_dx = (vertices[1].y - vertices[0].y) * inverse_area;
+                const db0_dy = (vertices[1].x - vertices[2].x) * inverse_area;
+                const db1_dy = (vertices[2].x - vertices[0].x) * inverse_area;
+                const db2_dy = (vertices[0].x - vertices[1].x) * inverse_area;
+                const dq0_dx = db0_dx / vertices[0].w;
+                const dq1_dx = db1_dx / vertices[1].w;
+                const dq2_dx = db2_dx / vertices[2].w;
+                const dq0_dy = db0_dy / vertices[0].w;
+                const dq1_dy = db1_dy / vertices[1].w;
+                const dq2_dy = db2_dy / vertices[2].w;
+                const denominator_dx = dq0_dx + dq1_dx + dq2_dx;
+                const denominator_dy = dq0_dy + dq1_dy + dq2_dy;
                 for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
                     for (0..varying.lanes) |lane| {
                         const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
                         const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
                         const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
-                        const value = if (varying.flat) a else (q0 * a + q1 * b + q2 * c) / denominator;
-                        if (!std.math.isFinite(value)) return;
+                        const numerator = q0 * a + q1 * b + q2 * c;
+                        const value = if (varying.flat) a else numerator / denominator;
+                        const numerator_dx = dq0_dx * a + dq1_dx * b + dq2_dx * c;
+                        const numerator_dy = dq0_dy * a + dq1_dy * b + dq2_dy * c;
+                        const derivative_scale = denominator * denominator;
+                        const dpdx = if (varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
+                        const dpdy = if (varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
+                        if (!std.math.isFinite(value) or !std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)) return;
                         std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
+                        std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
+                        std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
                     }
-                    fragment_bindings[varying_index] = .{ .interface = varying.fragment_interface, .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4] };
+                    fragment_bindings[varying_index] = .{
+                        .interface = varying.fragment_interface,
+                        .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
+                        .dpdx_bytes = fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4],
+                        .dpdy_bytes = fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4],
+                    };
                 }
                 var fragment_binding_count: usize = profile.varying_count;
                 for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
@@ -14325,6 +14354,31 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     var context = QueryExecutionContext{ .pool = null, .index = 0 };
     executeValidatedCommand(command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+    const fragment_derivative_operands = [_]u32{0};
+    const fragment_derivative_output_operands = [_]u32{ 1, 1 };
+    const fragment_derivative_instructions = [_]render_ir.Instruction{
+        .{ .op = .input, .ty = vec4, .operands = &fragment_input_operands, .literal = &.{} },
+        .{ .op = .fwidth, .ty = vec4, .operands = &fragment_derivative_operands, .literal = &.{} },
+        .{ .op = .output, .ty = vec4, .operands = &fragment_derivative_output_operands, .literal = &.{} },
+    };
+    const fragment_derivative_program = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&fragment_name), .interfaces = @constCast(&fragment_interfaces), .instructions = @constCast(&fragment_derivative_instructions), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    var fragment_derivative_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_derivative_program);
+    defer fragment_derivative_executor.deinit();
+    var derivative_profile = profile;
+    derivative_profile.fragment = fragment_derivative_executor;
+    var derivative_pipeline = pipeline;
+    derivative_pipeline.execution_abi = .{ .profile_v1_scalar_graphics = derivative_profile };
+    var derivative_command = command;
+    derivative_command.cube_draw.pipeline = &derivative_pipeline;
+    @memset(color_bytes[0..], 0);
+    for (0..16) |index| std.mem.writeInt(u32, depth_bytes[index * 4 ..][0..4], 0x3f80_0000, .little);
+    executeValidatedCommand(derivative_command, &context);
+    var saw_derivative_pixel = false;
+    for (0..16) |pixel| {
+        const at = pixel * 4;
+        if (color_bytes[at + 0] == 0 and color_bytes[at + 1] == 127 and color_bytes[at + 2] == 127 and color_bytes[at + 3] == 0) saw_derivative_pixel = true;
+    }
+    try std.testing.expect(saw_derivative_pixel);
     var masked_pipeline = pipeline;
     masked_pipeline.color_write_mask = 0x1;
     var masked_command = command;

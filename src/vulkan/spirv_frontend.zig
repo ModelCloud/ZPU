@@ -179,6 +179,8 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 177, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 178, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 179, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 180, .operands = .{ .min = 4, .max = 4 } },
+    .{ .opcode = 181, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 182, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 183, .operands = .{ .min = 4, .max = 4 } },
     .{ .opcode = 184, .operands = .{ .min = 4, .max = 4 } },
@@ -205,6 +207,9 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 203, .operands = .{ .min = 5, .max = 5 } },
     .{ .opcode = 204, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 205, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 207, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 208, .operands = .{ .min = 3, .max = 3 } },
+    .{ .opcode = 209, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 248, .operands = .{ .min = 1, .max = 1 } },
     // Structured selection metadata is semantically consumed by the CFG
     // resolver; only the default control mask is admitted in profile v1.
@@ -1050,7 +1055,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
@@ -1063,8 +1068,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     80 => w.len >= 3,
                     81 => w.len >= 4,
                     82 => w.len == 5,
-                    83, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160 => w.len == 3,
-                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 161, 162, 163, 164...167, 170...179, 182...199 => w.len == 4,
+                    83, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 154, 155, 156, 157, 158, 159, 160, 207, 208, 209 => w.len == 3,
+                    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 161, 162, 163, 164...167, 170...199 => w.len == 4,
                     201 => w.len == 6,
                     202, 203 => w.len == 5,
                     204, 205 => w.len == 3,
@@ -1714,7 +1719,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         for (module.instructions, instruction_functions) |instruction, instruction_function| {
             if (instruction_function != entry.function) continue;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => instruction.words[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
                 248 => instruction.words[0],
                 else => null,
             };
@@ -1738,7 +1743,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -2053,7 +2058,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...179, 182...205, 245 => w[1],
+            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
@@ -2188,6 +2193,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             203 => .bit_field_u_extract,
             204 => .bit_reverse,
             205 => .bit_count,
+            207 => .dpdx,
+            208 => .dpdy,
+            209 => .fwidth,
             142 => .vector_times_scalar,
             143 => .matrix_times_scalar,
             144 => .vector_times_matrix,
@@ -2231,18 +2239,18 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 179 => .sle,
                 else => unreachable,
             },
-            182 => .ford_eq,
-            183 => .funord_eq,
-            184 => .ford_ne,
-            185 => .funord_ne,
-            186 => .ford_lt,
-            187 => .funord_lt,
-            188 => .ford_gt,
-            189 => .funord_gt,
-            190 => .ford_le,
-            191 => .funord_le,
-            192 => .ford_ge,
-            193 => .funord_ge,
+            180 => .ford_eq,
+            181 => .funord_eq,
+            182 => .ford_ne,
+            183 => .funord_ne,
+            184 => .ford_lt,
+            185 => .funord_lt,
+            186 => .ford_gt,
+            187 => .funord_gt,
+            188 => .ford_le,
+            189 => .funord_le,
+            190 => .ford_ge,
+            191 => .funord_ge,
             else => unreachable,
         };
         if (general_control_flow and (instruction.opcode == 61 or instruction.opcode == 65)) {
@@ -4193,7 +4201,7 @@ test "compute profile lowers dynamic boolean logical operations" {
 }
 
 test "compute profile lowers ordered and unordered float comparisons" {
-    const opcodes = [_]u16{ 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193 };
+    const opcodes = [_]u16{ 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191 };
     const expected = [_]ir.Op{ .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge };
     for (opcodes, expected) |opcode, expected_op| {
         var words = compute_dynamic_float_compare_store;
@@ -4680,7 +4688,7 @@ test "every explicitly excluded instruction family capability type storage and c
     const excluded_opcodes = [_]u16{
         45, // OpUndef
         57, // OpFunctionCall
-        207, // derivative family
+        210, // fine derivative family
         224, // OpControlBarrier
         227, // atomic family
         246, // OpLoopMerge
@@ -5056,7 +5064,10 @@ test "Chromium Skia large vertex shader compiles" {
             outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
             output_count += 1;
         } else {
-            for (0..16) |lane| std.mem.writeInt(u32, backing[interface_index][lane * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+            if (interface.location == 5) {
+                std.mem.writeInt(u32, backing[interface_index][0..4], @bitCast(@as(f32, 4)), .little);
+                std.mem.writeInt(u32, backing[interface_index][12..16], @bitCast(@as(f32, 4)), .little);
+            }
             bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
             binding_count += 1;
         }
@@ -5192,6 +5203,16 @@ test "Chromium Skia sampled fragment shader executes combined image sampling" {
     const expected = [_]f32{ 64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1 };
     for (expected, 0..) |channel, index|
         try std.testing.expectEqual(channel, @as(f32, @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little))));
+}
+
+test "Chromium Skia derivative fragment shaders compile" {
+    const fwidth_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_396.spv").*;
+    var fwidth_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &fwidth_bytes), .fragment, "main", &.{});
+    defer fwidth_program.deinit(std.testing.allocator);
+
+    const gradient_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_674.spv").*;
+    var gradient_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &gradient_bytes), .fragment, "main", &.{});
+    defer gradient_program.deinit(std.testing.allocator);
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {
