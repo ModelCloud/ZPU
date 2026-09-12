@@ -227,8 +227,8 @@ fn opcodeMeta(opcode: u16) ?OpcodeMeta {
 const ValueMeta = struct { value: u32, supported: bool, operands: Count = .{ .min = 0, .max = 0 } };
 const capability_schema = [_]ValueMeta{.{ .value = 1, .supported = true }};
 const storage_schema = [_]ValueMeta{
-    .{ .value = 1, .supported = true }, .{ .value = 2, .supported = true },   .{ .value = 3, .supported = true },
-    .{ .value = 9, .supported = true }, .{ .value = 12, .supported = false },
+    .{ .value = 1, .supported = true }, .{ .value = 2, .supported = true }, .{ .value = 3, .supported = true },
+    .{ .value = 7, .supported = true }, .{ .value = 9, .supported = true }, .{ .value = 12, .supported = false },
 };
 const type_schema = [_]ValueMeta{
     .{ .value = 19, .supported = true }, .{ .value = 20, .supported = true },
@@ -1128,7 +1128,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             62 => {
                 const pointer_value = nodes[try id(nodes, w[0])];
                 const pointer = nodes[try id(nodes, pointer_value.type_id)];
-                if (pointer.kind != .pointer or (pointer.a != 3 and !(requested_stage == .compute and pointer.a == 12))) return error.Unsupported;
+                if (pointer.kind != .pointer or (pointer.a != 3 and pointer.a != 7 and !(requested_stage == .compute and pointer.a == 12))) return error.Unsupported;
                 const pointee = nodes[try id(nodes, pointer.b)];
                 const pointee_shape = if (requested_stage == .compute and pointer.a == 12 and pointee.kind == .structure and pointee.words.len == 1) try resultShape(nodes, pointee.words[0]) else try resultShape(nodes, pointer.b);
                 if (!sameShape(pointee_shape, try valueShape(nodes, w[1]))) return error.Malformed;
@@ -1807,6 +1807,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (instruction.opcode == 62) {
             const target_pointer = nodes[try id(nodes, w[0])];
             const target = if (target_pointer.kind == .function_value and target_pointer.opcode == 65) nodes[try id(nodes, target_pointer.words[0])] else target_pointer;
+            if (target.kind == .variable and target.a == 7) continue;
             if (target.kind != .variable or (target.a != 3 and !(requested_stage == .compute and target.a == 12))) return error.Unsupported;
             const value = canonical_ids[try id(nodes, w[1])];
             if (value == std.math.maxInt(u32)) return error.Malformed;
@@ -4457,7 +4458,7 @@ test "every explicitly excluded instruction family capability type storage and c
     changed[3] = max_profile_bound + 1;
     try std.testing.expectError(error.LimitExceeded, compile(std.testing.allocator, &changed, .vertex, "main", &.{}));
     changed = positive_vertex;
-    changed[testOpcodeOffset(&changed, 71, 0).? + 2] = 0;
+    changed[testOpcodeOffset(&changed, 71, 0).? + 2] = 31;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &changed, .vertex, "main", &.{}));
     changed = positive_vertex;
     changed[testOpcodeOffset(&changed, 22, 0).? + 2] = 64;
