@@ -248,6 +248,8 @@ const decoration_schema = [_]ValueMeta{
     .{ .value = 0, .supported = true },
     .{ .value = 1, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 2, .supported = true },
+    .{ .value = 5, .supported = true },
+    .{ .value = 7, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 11, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 14, .supported = true },
     .{ .value = 30, .supported = true, .operands = .{ .min = 1, .max = 1 } },
@@ -275,7 +277,10 @@ fn validateProfileSchema(module: *const decode.Module) Error!void {
 }
 
 fn uniformSizeAlignment(shape: ir.Type) Error!struct { size: u32, alignment: u32 } {
-    if (shape.rows == 4 and shape.columns == 4 and shape.scalar == .f32) return .{ .size = 64, .alignment = 16 };
+    if (shape.rows > 1) {
+        if (shape.scalar != .f32) return error.Unsupported;
+        return .{ .size = @as(u32, shape.columns) * 16, .alignment = 16 };
+    }
     if (shape.rows != 1) return error.Unsupported;
     return switch (shape.columns) {
         1 => .{ .size = 4, .alignment = 4 },
@@ -314,7 +319,7 @@ fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
         },
         .matrix => blk: {
             const column = try resultShape(nodes, node.a);
-            if ((node.b != 2 and node.b != 4) or column.scalar != .f32 or column.columns != node.b or column.rows != 1) return error.Unsupported;
+            if (node.b < 2 or node.b > 4 or column.scalar != .f32 or column.columns < 2 or column.columns > 4 or column.rows != 1) return error.Unsupported;
             break :blk .{ .scalar = .f32, .columns = @intCast(node.b), .rows = column.columns };
         },
         // The bounded arithmetic profile represents the two scalar members
@@ -719,6 +724,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     const member_offsets = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
     defer allocator.free(member_offsets);
     @memset(member_offsets, null);
+    const member_matrix_strides = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    defer allocator.free(member_matrix_strides);
+    @memset(member_matrix_strides, null);
+    const member_col_major = allocator.alloc(bool, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    defer allocator.free(member_col_major);
+    @memset(member_col_major, false);
     const member_builtins = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
     defer allocator.free(member_builtins);
     @memset(member_builtins, null);
@@ -819,7 +830,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const meta = valueMeta(&decoration_schema, w[2]) orelse return error.Unsupported;
                 const payload = w.len - 3;
                 if (payload < meta.operands.min or payload > meta.operands.max) return error.Malformed;
-                if (!meta.supported or (w[2] != 11 and w[2] != 35)) return error.Unsupported;
+                if (!meta.supported or (w[2] != 5 and w[2] != 7 and w[2] != 11 and w[2] != 35)) return error.Unsupported;
                 const target = try id(nodes, w[0]);
                 if (w[1] >= 16) return error.Unsupported;
                 const member_index = target * 16 + w[1];
@@ -827,6 +838,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     if (w[3] % 4 != 0) return error.Unsupported;
                     if (member_offsets[member_index] != null) return error.Malformed;
                     member_offsets[member_index] = w[3];
+                } else if (w[2] == 7) {
+                    if (w[3] != 16) return error.Unsupported;
+                    if (member_matrix_strides[member_index] != null) return error.Malformed;
+                    member_matrix_strides[member_index] = w[3];
+                } else if (w[2] == 5) {
+                    if (member_col_major[member_index]) return error.Malformed;
+                    member_col_major[member_index] = true;
                 } else {
                     if (w[3] > 1) return error.Unsupported;
                     if (member_builtins[member_index] != null) return error.Malformed;
@@ -1134,7 +1152,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                         const part = try valueShape(nodes, operand);
                         if (part.scalar != result.scalar or part.columns != 1 or part.rows != 1) return error.Malformed;
                     }
-                } else if (result.rows == result.columns and (result.rows == 2 or result.rows == 4)) {
+                } else if (result.rows > 1) {
                     if (w.len - 2 != result.columns) return error.Malformed;
                     for (w[2..]) |operand| {
                         const part = try valueShape(nodes, operand);
@@ -1202,7 +1220,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             },
             81 => {
                 const source = try valueShape(nodes, w[2]);
-                if (w.len != 4 or source.rows != 1 or w[3] >= source.columns) return error.Unsupported;
+                if (w.len != 4 or w[3] >= source.columns) return error.Unsupported;
                 const result = try resultShape(nodes, w[0]);
                 const source_node = nodes[try id(nodes, w[2])];
                 if (source_node.kind == .function_value and source_node.opcode == 12 and source_node.b == 52) {
@@ -1211,7 +1229,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     if (!sameShape(result, try resultShape(nodes, structure.words[w[3]]))) return error.Malformed;
                 } else {
                     var expected = source;
-                    expected.columns = 1;
+                    if (source.rows == 1) {
+                        expected.columns = 1;
+                    } else {
+                        expected.columns = source.rows;
+                        expected.rows = 1;
+                    }
                     if (!sameShape(expected, result)) return error.Malformed;
                 }
             },
@@ -1293,7 +1316,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const result = try resultShape(nodes, w[0]);
                 const matrix = try valueShape(nodes, w[2]);
                 const vector = try valueShape(nodes, w[3]);
-                if (matrix.scalar != .f32 or matrix.columns != 4 or matrix.rows != 4 or result.scalar != .f32 or result.columns != 4 or result.rows != 1 or !sameShape(result, vector)) return error.Malformed;
+                if (matrix.scalar != .f32 or result.scalar != .f32 or result.columns != matrix.rows or result.rows != 1 or vector.scalar != .f32 or vector.columns != matrix.columns or vector.rows != 1) return error.Malformed;
             },
             143 => {
                 const result = try resultShape(nodes, w[0]);
@@ -1495,6 +1518,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             for (pointee.words, 0..) |member, member_index| {
                 const member_shape = try resultShape(nodes, member);
                 const offset = member_offsets[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
+                const matrix_stride = member_matrix_strides[@as(usize, pointer.b) * 16 + member_index];
+                const col_major = member_col_major[@as(usize, pointer.b) * 16 + member_index];
+                if (member_shape.rows > 1) {
+                    if (matrix_stride != 16 or !col_major) return error.Unsupported;
+                } else if (matrix_stride != null or col_major) return error.Unsupported;
                 const layout = try uniformSizeAlignment(member_shape);
                 if (offset % layout.alignment != 0) return error.Unsupported;
                 const end = std.math.add(u32, offset, layout.size) catch return error.LimitExceeded;
@@ -4687,7 +4715,7 @@ test "every explicitly excluded instruction family capability type storage and c
     rich_changed[testOpcodeOffset(&rich_changed, 23, 0).? + 3] = 1;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &rich_changed, .vertex, "main", &.{}));
     rich_changed = rich_vertex;
-    rich_changed[testOpcodeOffset(&rich_changed, 24, 0).? + 3] = 3;
+    rich_changed[testOpcodeOffset(&rich_changed, 24, 0).? + 3] = 5;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &rich_changed, .vertex, "main", &.{}));
     changed = positive_vertex;
     changed[testOpcodeOffset(&changed, 32, 0).? + 2] = 0;
@@ -5034,6 +5062,36 @@ test "Chromium Skia large vertex shader compiles" {
         }
     }
     try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+}
+
+fn executeChromiumMatrixVertexFixture(words: []const u32) !void {
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    var backing = [_][64]u8{.{0} ** 64} ** max_interfaces;
+    var bindings: [max_interfaces]render_ir_exec.Binding = undefined;
+    var outputs: [max_interfaces]render_ir_exec.Output = undefined;
+    var binding_count: usize = 0;
+    var output_count: usize = 0;
+    for (program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+            output_count += 1;
+        } else {
+            for (0..16) |lane| std.mem.writeInt(u32, backing[interface_index][lane * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+            bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+            binding_count += 1;
+        }
+    }
+    try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+}
+
+test "Chromium Skia matrix vertex shaders execute column-major push constants" {
+    const bytes_512 align(4) = @embedFile("fixtures/chromium_skia_vertex_512.spv").*;
+    try executeChromiumMatrixVertexFixture(std.mem.bytesAsSlice(u32, &bytes_512));
+    const bytes_525 align(4) = @embedFile("fixtures/chromium_skia_vertex_525.spv").*;
+    try executeChromiumMatrixVertexFixture(std.mem.bytesAsSlice(u32, &bytes_525));
 }
 
 test "Chromium Skia flat-color vertex shader preserves interpolation mode" {

@@ -104,7 +104,7 @@ pub const ExecutableKey = struct {
 
 fn lanes(ty: ir.Type) Error!usize {
     if (ty._pad != 0 or ty.columns < 1 or ty.columns > 4 or ty.rows < 1 or ty.rows > 4) return error.InvalidShape;
-    if (ty.rows != 1 and !(ty.scalar == .f32 and ty.rows == ty.columns and (ty.rows == 2 or ty.rows == 4))) return error.InvalidShape;
+    if (ty.rows != 1 and ty.scalar != .f32) return error.InvalidShape;
     return @as(usize, ty.columns) * ty.rows;
 }
 fn byteSize(ty: ir.Type) Error!usize {
@@ -242,6 +242,17 @@ fn readValue(ty: ir.Type, bytes: []const u8) Error!Value {
             else => bits,
         };
     }
+    return result;
+}
+fn readUniformValue(ty: ir.Type, bytes: []const u8) Error!Value {
+    if (ty.rows == 1) return readValue(ty, bytes);
+    const size = @as(usize, ty.columns) * 16;
+    if (bytes.len < size) return error.Bounds;
+    var result = Value{ .ty = ty };
+    for (0..ty.columns) |column| for (0..ty.rows) |row| {
+        const offset = column * 16 + row * 4;
+        result.bits[column * ty.rows + row] = canonicalFloat(std.mem.readInt(u32, bytes[offset..][0..4], .little));
+    };
     return result;
 }
 fn findBinding(bindings: []const Binding, index: u32) Error![]const u8 {
@@ -521,9 +532,9 @@ pub const Executor = struct {
                     } else try findBinding(bindings, interface_index);
                     const offset = interface.members[member_index].offset;
                     const member_ty = interface.members[member_index].ty;
-                    const size = try byteSize(member_ty);
+                    const size = if (member_ty.rows == 1) try byteSize(member_ty) else @as(usize, member_ty.columns) * 16;
                     if (offset > bytes.len or size > bytes.len - offset) return error.Bounds;
-                    const loaded = try readValue(member_ty, bytes[offset..]);
+                    const loaded = try readUniformValue(member_ty, bytes[offset..]);
                     if (instruction.operands.len == 2) {
                         if (!same(member_ty, instruction.ty)) return error.InvalidType;
                         result = loaded;
@@ -548,8 +559,13 @@ pub const Executor = struct {
                         @memcpy(result.bits[0..width], source.bits[start .. start + width]);
                     } else {
                         const selector = instruction.operands[1];
-                        if (selector >= source.lanes()) return error.Bounds;
-                        result.bits[0] = source.bits[selector];
+                        if (source.ty.rows == 1) {
+                            if (selector >= source.lanes()) return error.Bounds;
+                            result.bits[0] = source.bits[selector];
+                        } else {
+                            if (selector >= source.ty.columns or instruction.ty.rows != 1 or instruction.ty.columns != source.ty.rows or instruction.ty.scalar != source.ty.scalar) return error.Bounds;
+                            @memcpy(result.bits[0..source.ty.rows], source.bits[selector * source.ty.rows ..][0..source.ty.rows]);
+                        }
                     }
                 },
                 .copy_object => {
@@ -1273,9 +1289,9 @@ pub const Executor = struct {
                 .matrix_times_vector => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
-                    for (0..4) |row| {
+                    for (0..a.ty.rows) |row| {
                         var sum: f32 = 0;
-                        for (0..4) |col| sum += @as(f32, @bitCast(a.bits[col * 4 + row])) * @as(f32, @bitCast(b.bits[col]));
+                        for (0..a.ty.columns) |col| sum += @as(f32, @bitCast(a.bits[col * a.ty.rows + row])) * @as(f32, @bitCast(b.bits[col]));
                         result.bits[row] = canonicalFloat(@bitCast(sum));
                     }
                 },
@@ -1497,7 +1513,12 @@ fn validate(program: *const ir.Program) Error!void {
                 } else if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .output => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .vector_times_scalar => if ((oi == 0 and !same(source_ty, instruction.ty)) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
-                .matrix_times_vector => if ((oi == 0 and !(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4)) or (oi == 1 and !same(source_ty, instruction.ty))) return error.InvalidType,
+                .matrix_times_vector => if (oi == 0) {
+                    if (source_ty.scalar != .f32 or source_ty.rows != instruction.ty.columns or instruction.ty.rows != 1) return error.InvalidType;
+                } else {
+                    const matrix_ty = program.instructions[instruction.operands[0]].ty;
+                    if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns != matrix_ty.columns) return error.InvalidType;
+                },
                 .matrix_times_scalar => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty))) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
                 .vector_times_matrix => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns >= 2 and source_ty.rows == 1) or !same(source_ty, instruction.ty))) or (oi == 1 and !(source_ty.scalar == .f32 and source_ty.columns == instruction.ty.columns and source_ty.rows == instruction.ty.columns))) return error.InvalidType,
                 .matrix_times_matrix => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty)) return error.InvalidType,
@@ -1572,7 +1593,13 @@ fn validate(program: *const ir.Program) Error!void {
                     const member_width = source.columns / 2;
                     const member_scalar: ir.Scalar = if (program.instructions[instruction.operands[0]].op == .f_modf_struct or instruction.operands[1] == 0) .f32 else .i32;
                     if (source.scalar != .f32 or source.rows != 1 or (source.columns != 2 and source.columns != 4) or instruction.operands[1] >= 2 or instruction.ty.rows != 1 or instruction.ty.columns != member_width or instruction.ty.scalar != member_scalar) return error.InvalidType;
-                } else if (source.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.scalar) return error.InvalidType else if (instruction.operands[1] >= source.columns) return error.Bounds;
+                } else if (source.rows == 1) {
+                    if (instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.scalar) return error.InvalidType;
+                    if (instruction.operands[1] >= source.columns) return error.Bounds;
+                } else {
+                    if (instruction.ty.rows != 1 or instruction.ty.columns != source.rows or instruction.ty.scalar != source.scalar) return error.InvalidType;
+                    if (instruction.operands[1] >= source.columns) return error.Bounds;
+                }
             },
             .shuffle => {
                 const a = program.instructions[instruction.operands[0]].ty;
@@ -3927,6 +3954,12 @@ fn frontendAccessVariant(allocator: std.mem.Allocator, width: u32, matrix: bool,
     if (matrix) {
         const structure = frontendOpcodeOffset(words.items, 30, 0);
         try words.insertSlice(allocator, structure, &.{ (4 << 16) | 24, 8, 7, 4 });
+        const first_member_decoration = frontendOpcodeOffset(words.items, 72, 0);
+        try words.insertSlice(allocator, first_member_decoration, &.{
+            (4 << 16) | 72, 12, 0, 5,
+            (5 << 16) | 72, 12, 0, 7,
+            16,
+        });
         words.items[frontendOpcodeOffset(words.items, 30, 0) + 2] = member_type;
         words.items[frontendOpcodeOffset(words.items, 32, 0) + 3] = member_type;
         words.items[frontendOpcodeOffset(words.items, 32, 2) + 3] = member_type;
@@ -3936,8 +3969,18 @@ fn frontendAccessVariant(allocator: std.mem.Allocator, width: u32, matrix: bool,
         const structure = frontendOpcodeOffset(words.items, 30, 0);
         try words.insertSlice(allocator, structure + 3, &.{member_type});
         words.items[structure] += 1 << 16;
-        const first_member_decoration = frontendOpcodeOffset(words.items, 72, 0);
-        try words.insertSlice(allocator, first_member_decoration + 5, &.{ (5 << 16) | 72, 12, 1, 35, 64 });
+        if (matrix) {
+            const first_offset_decoration = frontendOpcodeOffset(words.items, 72, 2);
+            try words.insertSlice(allocator, first_offset_decoration, &.{
+                (4 << 16) | 72, 12,             1,  5,
+                (5 << 16) | 72, 12,             1,  7,
+                16,             (5 << 16) | 72, 12, 1,
+                35,             64,
+            });
+        } else {
+            const first_member_decoration = frontendOpcodeOffset(words.items, 72, 0);
+            try words.insertSlice(allocator, first_member_decoration + 5, &.{ (5 << 16) | 72, 12, 1, 35, 64 });
+        }
     }
     words.items[frontendOpcodeOffset(words.items, 43, 0) + 3] = member_index;
     return words.toOwnedSlice(allocator);
