@@ -7952,7 +7952,18 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         };
         const ignored: u32 = std.math.maxInt(u32);
         const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
-        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !supportedLayout(barrier.new_layout) or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or image.owner != c.impl.owner or !validRangeForImage(image, barrier.subresource_range)) {
+        const shape_valid = barrier.s_type == 45 and barrier.p_next == null;
+        const layouts_valid = supportedLayout(barrier.old_layout) and supportedLayout(barrier.new_layout);
+        const access_valid = stagesSupportAccess(src_stage_mask, barrier.src_access_mask) and stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask);
+        const owner_valid = image.owner == c.impl.owner;
+        const range_valid = validRangeForImage(image, barrier.subresource_range);
+        if (!shape_valid or !layouts_valid or !access_valid or !queues_valid or !owner_valid or !range_valid) {
+            if (failureDiagnosticsEnabled()) {
+                std.debug.print(
+                    "ZPU image barrier rejected shape={} layouts={} access={} queues={} owner={} range={} imageFormat={d} imageLayers={d}\n",
+                    .{ shape_valid, layouts_valid, access_valid, queues_valid, owner_valid, range_valid, image.format, image.array_layers },
+                );
+            }
             hit(.invalid_barrier);
             c.impl.invalid = true;
             return;
