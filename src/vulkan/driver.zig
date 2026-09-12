@@ -1256,6 +1256,7 @@ const DescriptorSetObj = struct {
     // A command-local snapshot keeps the source descriptor-set pointer so
     // queue submission can defer its canonical storage through destruction.
     source_set: ?*DescriptorSetObj = null,
+    sampled_source_set: ?*DescriptorSetObj = null,
     // Push-descriptor snapshots borrow VkPipelineLayout::set0 bytes.
     layout_source: ?*PipelineLayoutObj = null,
     synthetic: bool = false,
@@ -1328,8 +1329,11 @@ const VertexBindingState = struct {
 const PipelineLayoutObj = struct {
     owner: DeviceIdentity,
     canonical: Canonical,
+    set_count: u32,
     set0: Canonical,
     set0_layout: *DescriptorSetLayoutObj,
+    set1: Canonical = .{},
+    set1_layout: ?*DescriptorSetLayoutObj = null,
     push_descriptor: bool,
     push_ranges: [core_shader_stage_bits.len]PushConstantRange,
     // Dispatch commands and push-descriptor snapshots retain the canonical
@@ -1401,6 +1405,7 @@ const ProfileGraphics = struct {
     fragment_uniform_count: u8 = 0,
     fragment_push_constant: ?ProfileUniform = null,
     fragment_front_facing: ?u32 = null,
+    fragment_sampled_image: ?u32 = null,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -1420,6 +1425,7 @@ const ProfileGraphicsContract = struct {
     fragment_uniform_count: u8 = 0,
     fragment_push_constant: ?ProfileUniform = null,
     fragment_front_facing: ?u32 = null,
+    fragment_sampled_image: ?u32 = null,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -1446,6 +1452,7 @@ const GraphicsPipelineObj = struct {
     canonical: Canonical,
     layout: Canonical,
     set0: Canonical,
+    set1: Canonical,
     render_compatibility: Canonical,
     vertex_program: ?render_ir.Program,
     fragment_program: ?render_ir.Program,
@@ -1602,7 +1609,7 @@ const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeli
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, clear_attachments_deferred: struct { color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -4601,6 +4608,7 @@ fn retirePipelineLayoutLocked(layout: *PipelineLayoutObj) void {
     if (!layout.retire_pending or layout.active_users.load(.acquire) != 0) return;
     layout.canonical.deinit();
     layout.set0.deinit();
+    layout.set1.deinit();
     layout.retire_pending = false;
 }
 
@@ -4632,6 +4640,7 @@ fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     set.texture = null;
     set.sampler = null;
     set.source_set = null;
+    set.sampled_source_set = null;
     set.layout_source = null;
     set.retire_pending = false;
 }
@@ -4662,6 +4671,7 @@ fn retireGraphicsPipelineLocked(pipeline: *GraphicsPipelineObj) void {
     pipeline.canonical.deinit();
     pipeline.layout.deinit();
     pipeline.set0.deinit();
+    pipeline.set1.deinit();
     pipeline.render_compatibility.deinit();
     if (pipeline.vertex_program) |*program| {
         program.deinit(allocator);
@@ -4803,6 +4813,7 @@ fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, 
     const set = descriptors orelse return true;
     if (!liveDescriptorObject(set) or !set.owner.eql(owner)) return false;
     if (set.source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
+    if (set.sampled_source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
     if (set.layout_source) |layout| if (!pinPipelineLayoutLocked(layout, owner, pinned_layouts)) return false;
     if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
@@ -5971,6 +5982,7 @@ fn resetCommandBufferState(c: *CommandBufferObj) void {
     c.impl.bound_compute_pipeline = null;
     c.impl.bound_compute_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
+    c.impl.bound_sampled_descriptors = null;
     c.impl.bound_descriptor_bind_point = 0;
     c.impl.bound_descriptor_stage_flags = 0;
     c.impl.bound_layout = null;
@@ -6130,6 +6142,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.bound_compute_pipeline = null;
     c.impl.bound_compute_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
+    c.impl.bound_sampled_descriptors = null;
     c.impl.bound_descriptor_bind_point = 0;
     c.impl.bound_descriptor_stage_flags = 0;
     c.impl.bound_layout = null;
@@ -6788,6 +6801,7 @@ fn cmdNextSubpass(cb: ?CommandBuffer, contents: i32) callconv(.c) void {
     c.impl.bound_pipeline = null;
     c.impl.bound_pipeline_handle = 0;
     c.impl.bound_descriptors = null;
+    c.impl.bound_sampled_descriptors = null;
     c.impl.bound_descriptor_bind_point = 0;
     c.impl.bound_descriptor_stage_flags = 0;
     c.impl.bound_layout = null;
@@ -9337,6 +9351,41 @@ test "scalar profile depth bias applies constant slope and clamp terms" {
     try std.testing.expect(profileDepthBias(vertices, area, .{ std.math.inf(f32), 0, 0 }) == null);
 }
 
+fn profileSampledImage(descriptors: *const DescriptorSetObj) ?render_ir_exec.SampledImage {
+    const image = descriptors.texture orelse return null;
+    const sampler = descriptors.sampler orelse return null;
+    if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler.unnormalized_coordinates or sampler.mag_filter != sampler.min_filter) return null;
+    const format: render_ir_exec.SampledImage.Format = switch (image.format) {
+        37 => .rgba8_unorm,
+        44 => .bgra8_unorm,
+        else => return null,
+    };
+    const filter: render_ir_exec.SampledImage.Filter = switch (sampler.mag_filter) {
+        0 => .nearest,
+        1 => .linear,
+        else => return null,
+    };
+    const address_u = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, sampler.address_mode_u) orelse return null;
+    const address_v = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, sampler.address_mode_v) orelse return null;
+    const border: [4]f32 = switch (sampler.border_color) {
+        0, 1 => .{ 0, 0, 0, 0 },
+        2, 3 => .{ 0, 0, 0, 1 },
+        4, 5 => .{ 1, 1, 1, 1 },
+        else => return null,
+    };
+    return .{
+        .pixels = imageBytes(image),
+        .width = image.width,
+        .height = image.height,
+        .row_stride = image.width * 4,
+        .format = format,
+        .filter = filter,
+        .address_u = address_u,
+        .address_v = address_v,
+        .border = border,
+    };
+}
+
 fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32) void {
     const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
@@ -9388,6 +9437,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = push.interface, .bytes = op.push_constants.values[4][0..push.byte_size] };
         fragment_uniform_count += 1;
     }
+    const fragment_sampled_image = if (profile.fragment_sampled_image) |interface| render_ir_exec.Binding{
+        .interface = interface,
+        .sampled_image = profileSampledImage(op.descriptors) orelse return,
+    } else null;
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
     var vertices: [3]ProfileScreenVertex = undefined;
@@ -9442,6 +9495,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
                 fragment_binding_count += 1;
             }
+            if (fragment_sampled_image) |binding| {
+                fragment_bindings[fragment_binding_count] = binding;
+                fragment_binding_count += 1;
+            }
             profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch return;
         }
         const inverse_area = 1.0 / area;
@@ -9482,6 +9539,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
                 if (profile.fragment_front_facing) |interface| {
                     fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
+                    fragment_binding_count += 1;
+                }
+                if (fragment_sampled_image) |binding| {
+                    fragment_bindings[fragment_binding_count] = binding;
                     fragment_binding_count += 1;
                 }
                 profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch return;
@@ -10495,18 +10556,25 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
     const push_ranges = pipelinePushRanges(ci) catch |err| return creationFailure(err);
     var canonical = buildPipelineLayoutLocked(d, ci) catch |err| return creationFailure(err);
     const source_set = validDescriptorSetLayoutLocked(ci.set_layouts.?[0]).?;
+    const source_set1 = if (ci.set_layout_count > 1) validDescriptorSetLayoutLocked(ci.set_layouts.?[1]).? else null;
     var set0 = source_set.canonical.clone() catch {
         canonical.deinit();
         return .error_out_of_host_memory;
     };
+    var set1 = if (source_set1) |layout| layout.canonical.clone() catch {
+        canonical.deinit();
+        set0.deinit();
+        return .error_out_of_host_memory;
+    } else Canonical{};
     for (&pipeline_layout_objects, &pipeline_layout_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .set0 = set0, .set0_layout = source_set, .push_descriptor = source_set.flags & 1 != 0, .push_ranges = push_ranges };
+        object.* = .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .set_count = ci.set_layout_count, .set0 = set0, .set0_layout = source_set, .set1 = set1, .set1_layout = source_set1, .push_descriptor = source_set.flags & 1 != 0, .push_ranges = push_ranges };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
     };
     canonical.deinit();
     set0.deinit();
+    set1.deinit();
     return .error_out_of_host_memory;
 }
 fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -11405,7 +11473,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const profile_pair = vertex_program != null and fragment_program != null and cpu_cube_stage_mask == 0;
     const cpu_cube_pair = vertex_program == null and fragment_program == null and cpu_cube_stage_mask == 0x11;
     if (!profile_pair and !cpu_cube_pair) return pipelineInvalid(@src().line);
-    if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) return pipelineInvalid(@src().line);
+    if (profile_pair and (!frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0) or !frontendSampledImagesCompatible(&vertex_program.?, &fragment_program.?, layout))) return pipelineInvalid(@src().line);
     const vi = ci.vertex_input orelse return pipelineInvalid(@src().line);
     if (vi.s_type != 19 or !pipelineVertexInputDivisorStateValid(vi.p_next) or vi.flags != 0 or vi.binding_count > 16 or vi.attribute_count > 16 or (vi.binding_count != 0 and vi.bindings == null) or (vi.attribute_count != 0 and vi.attributes == null)) return pipelineInvalid(@src().line);
     var binding_indices: [16]u8 = undefined;
@@ -11619,6 +11687,8 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     errdefer layout_identity.deinit();
     var set0 = try layout.set0.clone();
     errdefer set0.deinit();
+    var set1 = try layout.set1.clone();
+    errdefer set1.deinit();
     if (test_fail_render_compatibility_clone) return error.OutOfMemory;
     var render_compatibility = if (render_pass) |pass| try pass.compatibility.clone() else try dynamic_render_compatibility.?.clone();
     errdefer render_compatibility.deinit();
@@ -11633,9 +11703,9 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
             error.OutOfMemory => error.OutOfMemory,
             else => error.Invalid,
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_front_facing = contract.fragment_front_facing, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_image = contract.fragment_sampled_image, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -11680,6 +11750,21 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
     return true;
 }
 
+fn frontendSampledImagesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, layout: *const PipelineLayoutObj) bool {
+    for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .sampled_image) {
+        if (program.stage != .fragment or interface.descriptor_set != 1 or interface.binding == null or layout.set_count < 2 or layout.set1.bytes.len < 36) return false;
+        const count = std.mem.readInt(u32, layout.set1.bytes[32..36], .little);
+        if (layout.set1.bytes.len != 36 + @as(usize, count) * 16) return false;
+        var found = false;
+        for (0..count) |index| {
+            const item = layout.set1.bytes[36 + index * 16 ..][0..16];
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 1 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
+        }
+        if (!found) return false;
+    };
+    return true;
+}
+
 /// The Vulkan draw bridge intentionally accepts only a small, fully bounded
 /// graphics profile. It executes scalar vertex-input programs, one bounded
 /// descriptor-backed set-0 uniform block, interpolated fragment varyings, and
@@ -11717,6 +11802,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (result.vertex_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
+        .sampled_image => return null,
     };
     if (result.vertex_output == 0 or vertex_inputs == 0) return null;
     var fragment_outputs: u32 = 0;
@@ -11748,6 +11834,10 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         .push_constant => {
             if (result.fragment_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.fragment_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
+        },
+        .sampled_image => {
+            if (result.fragment_sampled_image != null or interface.descriptor_set != 1 or interface.binding != 0 or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1) return null;
+            result.fragment_sampled_image = @intCast(index);
         },
         .output => {
             if (fragment_outputs != 0 or interface.location == null or interface.location.? != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
@@ -12778,7 +12868,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.storage_offset = info.offset;
             update.storage_range = range;
             update.writes_storage = true;
-        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding == 1 and set.binding_types[1] == 1 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 1 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
             const info = descriptor_write.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return;
             const view = validImageViewLocked(info.image_view) orelse return;
@@ -12824,7 +12914,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding != 1 or layout.binding_types[1] != 1))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* == .never) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -13225,7 +13315,7 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     lock();
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
-    if ((bind_point != 0 and bind_point != 1) or first_set != 0 or count != 1 or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
+    if ((bind_point != 0 and bind_point != 1) or count == 0 or count > 2 or first_set > 1 or count > 2 - first_set or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
         command_buffer.impl.invalid = true;
         return;
     }
@@ -13233,21 +13323,33 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    const descriptor = validDescriptorSetLocked(sets.?[0]) orelse {
-        command_buffer.impl.invalid = true;
-        return;
-    };
-    if (!layout_object.owner.eql(command_buffer.impl.owner) or !descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(&layout_object.set0)) {
+    if (!layout_object.owner.eql(command_buffer.impl.owner) or first_set + count > layout_object.set_count) {
         command_buffer.impl.invalid = true;
         return;
     }
-    const expected_dynamic_count: u32 = if (descriptor.uniform_dynamic) 1 else 0;
+    var descriptors: [2]*DescriptorSetObj = undefined;
+    var expected_dynamic_count: u32 = 0;
+    for (0..count) |index| {
+        const set_index = first_set + @as(u32, @intCast(index));
+        const descriptor = validDescriptorSetLocked(sets.?[index]) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        const expected_layout = if (set_index == 0) &layout_object.set0 else &layout_object.set1;
+        if (!descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(expected_layout) or (set_index != 0 and descriptor.uniform_dynamic)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        descriptors[index] = descriptor;
+        if (descriptor.uniform_dynamic) expected_dynamic_count += 1;
+    }
     if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null) or (dynamic_count == 0 and offsets != null)) {
         command_buffer.impl.invalid = true;
         return;
     }
     var dynamic_offset: u64 = 0;
-    if (descriptor.uniform_dynamic) {
+    if (expected_dynamic_count != 0) {
+        const descriptor = descriptors[0];
         dynamic_offset = offsets.?[0];
         const buffer = descriptor.uniform orelse {
             command_buffer.impl.invalid = true;
@@ -13263,7 +13365,9 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
             return;
         }
     }
-    command_buffer.impl.bound_descriptors = descriptor;
+    for (descriptors[0..count], first_set..) |descriptor, set_index| {
+        if (set_index == 0) command_buffer.impl.bound_descriptors = descriptor else command_buffer.impl.bound_sampled_descriptors = descriptor;
+    }
     command_buffer.impl.bound_descriptor_bind_point = bind_point;
     command_buffer.impl.bound_descriptor_stage_flags = if (bind_point == 1) 0x20 else 0x1f;
     command_buffer.impl.bound_layout = layout_object;
@@ -13707,7 +13811,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             candidate.storage_binding = item.dst_binding;
             candidate.storage_offset = info.offset;
             candidate.storage_range = range;
-        } else if (item.descriptor_type == 1 and item.dst_binding == 1 and candidate.binding_types[1] == 1 and item.image_info != null and item.buffer_info == null) {
+        } else if (item.descriptor_type == 1 and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == 1 and item.image_info != null and item.buffer_info == null) {
             if (candidate.counts[1] == 0) return false;
             const info = item.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return false;
@@ -13720,6 +13824,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
     command_buffer.impl.push_descriptor = candidate;
     command_buffer.impl.push_descriptor_active = true;
     command_buffer.impl.bound_descriptors = null;
+    command_buffer.impl.bound_sampled_descriptors = null;
     command_buffer.impl.bound_descriptor_bind_point = 0;
     command_buffer.impl.bound_descriptor_stage_flags = 0;
     return true;
@@ -14596,7 +14701,13 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
     snapshot.active_users = .init(0);
     snapshot.retire_pending = false;
     snapshot.source_set = null;
+    snapshot.sampled_source_set = null;
     if (!descriptors.synthetic) snapshot.source_set = @constCast(descriptors);
+    if (command_buffer.impl.bound_sampled_descriptors) |sampled| {
+        snapshot.texture = sampled.texture;
+        snapshot.sampler = sampled.sampler;
+        snapshot.sampled_source_set = sampled;
+    }
     if (descriptors.uniform_dynamic) {
         if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
         snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;

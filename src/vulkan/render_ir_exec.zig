@@ -38,7 +38,27 @@ pub const Value = struct {
     }
 };
 
-pub const Binding = struct { interface: u32, bytes: []const u8 };
+pub const SampledImage = struct {
+    pub const Format = enum { rgba8_unorm, bgra8_unorm };
+    pub const Filter = enum { nearest, linear };
+    pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
+
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    row_stride: u32,
+    format: Format,
+    filter: Filter,
+    address_u: AddressMode,
+    address_v: AddressMode,
+    border: [4]f32 = .{ 0, 0, 0, 0 },
+};
+
+pub const Binding = struct {
+    interface: u32,
+    bytes: []const u8 = &.{},
+    sampled_image: ?SampledImage = null,
+};
 pub const Output = struct { interface: u32, bytes: []u8 };
 
 pub const KeyFields = struct {
@@ -232,6 +252,76 @@ fn findBinding(bindings: []const Binding, index: u32) Error![]const u8 {
     };
     return found orelse error.MissingInput;
 }
+fn findSampledImage(bindings: []const Binding, index: u32) Error!SampledImage {
+    var found: ?SampledImage = null;
+    for (bindings) |binding| if (binding.interface == index) {
+        if (found != null or binding.sampled_image == null) return error.InvalidOperand;
+        found = binding.sampled_image;
+    };
+    return found orelse error.MissingInput;
+}
+fn addressCoordinate(value: i32, size: u32, mode: SampledImage.AddressMode) ?u32 {
+    const signed_size: i32 = @intCast(size);
+    return switch (mode) {
+        .repeat => @intCast(@mod(value, signed_size)),
+        .mirrored_repeat => blk: {
+            const period = signed_size * 2;
+            const repeated = @mod(value, period);
+            break :blk @intCast(if (repeated < signed_size) repeated else period - repeated - 1);
+        },
+        .clamp_to_edge => @intCast(std.math.clamp(value, 0, signed_size - 1)),
+        .clamp_to_border => if (value < 0 or value >= signed_size) null else @intCast(value),
+        .mirror_clamp_to_edge => @intCast(std.math.clamp(if (value < 0) -value - 1 else value, 0, signed_size - 1)),
+    };
+}
+fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
+    const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return image.border;
+    const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return image.border;
+    const offset = std.math.add(
+        usize,
+        std.math.mul(usize, addressed_y, image.row_stride) catch return error.Bounds,
+        std.math.mul(usize, addressed_x, 4) catch return error.Bounds,
+    ) catch return error.Bounds;
+    if (offset > image.pixels.len or image.pixels.len - offset < 4) return error.Bounds;
+    const pixel = image.pixels[offset..][0..4];
+    const r = if (image.format == .rgba8_unorm) pixel[0] else pixel[2];
+    const b = if (image.format == .rgba8_unorm) pixel[2] else pixel[0];
+    return .{
+        @as(f32, @floatFromInt(r)) / 255,
+        @as(f32, @floatFromInt(pixel[1])) / 255,
+        @as(f32, @floatFromInt(b)) / 255,
+        @as(f32, @floatFromInt(pixel[3])) / 255,
+    };
+}
+fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
+    if (image.width == 0 or image.height == 0 or image.row_stride < image.width * 4) return error.Bounds;
+    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or bias.ty.scalar != .f32 or bias.ty.columns != 1 or bias.ty.rows != 1) return error.InvalidType;
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const lod_bias: f32 = @bitCast(bias.bits[0]);
+    if (!std.math.isFinite(u) or !std.math.isFinite(v) or !std.math.isFinite(lod_bias)) return error.NumericDomain;
+    const fx = u * @as(f32, @floatFromInt(image.width)) - 0.5;
+    const fy = v * @as(f32, @floatFromInt(image.height)) - 0.5;
+    var rgba: [4]f32 = undefined;
+    if (image.filter == .nearest) {
+        rgba = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+    } else {
+        const x0: i32 = @intFromFloat(@floor(fx));
+        const y0: i32 = @intFromFloat(@floor(fy));
+        const tx = fx - @floor(fx);
+        const ty = fy - @floor(fy);
+        const p00 = try texel(image, x0, y0);
+        const p10 = try texel(image, x0 + 1, y0);
+        const p01 = try texel(image, x0, y0 + 1);
+        const p11 = try texel(image, x0 + 1, y0 + 1);
+        for (0..4) |lane| rgba[lane] =
+            (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+            (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+    }
+    var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
+    for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    return result;
+}
 fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);
 }
@@ -267,7 +357,8 @@ pub const Executor = struct {
         for (bindings, 0..) |binding, i| {
             if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
             const storage = self.program.interfaces[binding.interface].storage;
-            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output) return error.InvalidStorage;
+            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image) return error.InvalidStorage;
+            if ((storage == .sampled_image) != (binding.sampled_image != null) or (storage == .sampled_image and binding.bytes.len != 0)) return error.InvalidStorage;
             for (bindings[0..i]) |prior| if (prior.interface == binding.interface) return error.InvalidOperand;
         }
         var out_offset: usize = 0;
@@ -330,6 +421,11 @@ pub const Executor = struct {
                     if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
                     result = try readValue(instruction.ty, try findBinding(bindings, interface_index));
                 },
+                .image_sample_implicit_lod => result = try sample(
+                    try findSampledImage(bindings, instruction.operands[0]),
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
+                ),
                 .access => {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len) return error.InvalidOperand;
@@ -1208,6 +1304,8 @@ fn validate(program: *const ir.Program) Error!void {
         if (interface.storage == .uniform) {
             if (!interface.block or interface.member_count == 0 or interface.member_count > ir.max_uniform_members) return error.InvalidStorage;
             for (interface.members[0..interface.member_count]) |m| try validateType(m.ty);
+        } else if (interface.storage == .sampled_image) {
+            if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) return error.InvalidStorage;
         }
     }
     var outputs_seen: [ir.max_values]bool = .{false} ** ir.max_values;
@@ -1218,6 +1316,7 @@ fn validate(program: *const ir.Program) Error!void {
             .constant => n == 0,
             .constant_composite, .composite => n > 0,
             .input, .uniform, .storage => n == 1,
+            .image_sample_implicit_lod => n == 3,
             .access => n >= 2 and n <= 3,
             .extract => n == 1 or n == 2,
             .vector_extract_dynamic => n == 2,
@@ -1252,6 +1351,11 @@ fn validate(program: *const ir.Program) Error!void {
             if (x >= program.interfaces.len or (program.interfaces[x].storage != expected and !(instruction.op == .uniform and program.interfaces[x].storage == .push_constant))) return error.InvalidStorage;
             if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
+        if (instruction.op == .image_sample_implicit_lod) {
+            const x = instruction.operands[0];
+            if (x >= program.interfaces.len or program.interfaces[x].storage != .sampled_image) return error.InvalidStorage;
+            if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
+        }
         if (instruction.op == .output) {
             const x = instruction.operands[0];
             if (x >= program.interfaces.len or program.interfaces[x].storage != .output) return error.InvalidOutput;
@@ -1263,6 +1367,9 @@ fn validate(program: *const ir.Program) Error!void {
             const source_ty = program.instructions[operand].ty;
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
+                .image_sample_implicit_lod => if (oi == 1) {
+                    if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
+                } else if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose => if (!same(source_ty, instruction.ty)) return error.InvalidType,
@@ -1631,6 +1738,7 @@ fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void 
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
         .constant, .input, .uniform, .storage => false,
+        .image_sample_implicit_lod => i != 0,
         .access => i != 0,
         .extract => i == 0,
         .shuffle => i < 2,
@@ -3935,6 +4043,16 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
                 output_count = 1;
             }
         },
+        .image_sample_implicit_lod => {
+            interfaces[0] = .{ .storage = .sampled_image, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 1, .binding = 0 };
+            interface_count = 1;
+            @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
+            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } };
+            binding_count = 1;
+            const coordinate = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
+            const bias = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, bias }, &.{});
+        },
         .access => {
             interfaces[0] = .{ .storage = .uniform, .ty = result_ty, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 };
             interfaces[0].members[0] = .{ .ty = result_ty, .offset = 0 };
@@ -4496,16 +4614,18 @@ test "generated bounded operation by type-family property matrix is complete" {
         try runPropertyCase(op, .{ .scalar = if (op == .smul_extended) .i32 else .u32, .columns = 2 }, null, null);
         totals[@intFromEnum(op)] += 1;
     }
+    try runPropertyCase(.image_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_sample_implicit_lod)] += 1;
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1};
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1};
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 688), total);
-    std.debug.print("generated property matrix: operations=170 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 689), total);
+    std.debug.print("generated property matrix: operations=171 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -4637,13 +4757,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 170), malformed);
+    try std.testing.expectEqual(@as(usize, 171), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=170 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=171 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

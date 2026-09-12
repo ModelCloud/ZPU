@@ -4,7 +4,7 @@
 const std = @import("std");
 
 pub const profile_version: u32 = 1;
-pub const serialization_version: u32 = 4;
+pub const serialization_version: u32 = 5;
 pub const max_values: usize = 4096;
 pub const max_instructions: usize = 4096;
 
@@ -349,6 +349,10 @@ pub const Op = enum(u8) {
     /// The second lane stores the signed i32 exponent as raw bits. Appended
     /// to preserve serialized values.
     f_frexp_struct,
+    /// Sample a bound two-dimensional combined image sampler using normalized
+    /// coordinates. The first operand is the resource interface, followed by
+    /// the coordinate and implicit-LOD bias values.
+    image_sample_implicit_lod,
 };
 
 pub const Instruction = struct {
@@ -358,7 +362,7 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform, push_constant };
+pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image };
 pub const max_uniform_members: usize = 16;
 pub const UniformMember = struct { ty: Type = .{ .scalar = .u32 }, offset: u32 = 0 };
 pub const Interface = struct {
@@ -500,6 +504,7 @@ pub fn identify(bytes: []const u8) Identity {
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
         .constant, .input, .uniform, .storage => false,
+        .image_sample_implicit_lod => operand_index != 0,
         .constant_composite => true,
         .access => operand_index != 0,
         .composite => true,
@@ -638,7 +643,7 @@ test "serialization is exact little endian and identity checks full bytes" {
     const instructions = [_]Instruction{.{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{ 4, 3, 2, 1 } }};
     const bytes = try serialize(std.testing.allocator, .fragment, "main", &interfaces, &instructions);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x04\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
+    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x05\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
     const first = identify(bytes);
     var changed = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(changed);
