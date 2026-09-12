@@ -1160,6 +1160,7 @@ pub const Physical = *PhysicalObj;
 pub const Device = *DeviceObj;
 pub const Queue = *QueueObj;
 const MemoryObj = struct {
+    handle: usize = 0,
     owner: Device,
     bytes: []align(64) u8,
     mapped: bool,
@@ -1926,6 +1927,7 @@ const Requirement = enum(u6) {
     shader_invalid,
     shader_lifetime,
     shader_exhaustion,
+    memory_slot_exhaustion,
 };
 var requirement_hits: u64 = 0;
 var overlap_hold = std.atomic.Value(bool).init(false);
@@ -4330,7 +4332,9 @@ fn findLiveHandle(comptime T: type, handle: usize, objects: []T, states: []SlotS
     return null;
 }
 fn validMemoryLocked(handle: usize) ?*MemoryObj {
-    const result = findLiveHandle(MemoryObj, handle, &memory_objects, &memory_state);
+    const result = for (&memory_objects, memory_state) |*object, state| {
+        if (object.handle == handle) break if (state == .live) object else null;
+    } else null;
     if (handle != 0 and result == null) hit(.stale_memory);
     return result;
 }
@@ -4969,14 +4973,16 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
     _ = cpu_locality.pinCurrent(.render);
     const bytes = allocateBytes(std.math.cast(usize, ci.allocation_size) orelse return .error_out_of_host_memory) catch return .error_out_of_host_memory;
     @memset(bytes, 0);
-    for (&memory_objects, &memory_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .bytes = bytes, .mapped = false };
+    for (&memory_objects, &memory_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
+        const handle = allocateGenericHandle();
+        object.* = .{ .handle = handle, .owner = d, .bytes = bytes, .mapped = false };
         state.* = .live;
         d.heap_used += ci.allocation_size;
-        out.* = @intFromPtr(object);
+        out.* = handle;
         return .success;
     };
     allocator.free(bytes);
+    hit(.memory_slot_exhaustion);
     return .error_out_of_host_memory;
 }
 fn freeMemory(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -27836,7 +27842,7 @@ test "mapped-memory coherency ABI layout and behavior" {
     var malformed_unmap_info2 = unmap_info2;
     malformed_unmap_info2.flags = 1;
     try std.testing.expectEqual(Result.error_memory_map_failed, unmapMemory2(ctx.device, &malformed_unmap_info2));
-    try std.testing.expect(@as(*MemoryObj, @ptrFromInt(memory)).mapped);
+    try std.testing.expect(validMemoryLocked(memory).?.mapped);
     try std.testing.expectEqual(Result.success, unmapMemory2(ctx.device, &unmap_info2));
     try std.testing.expectEqual(Result.error_memory_map_failed, unmapMemory2(ctx.device, &unmap_info2));
     try std.testing.expectEqual(Result.error_initialization_failed, invalidateMappedMemoryRanges(ctx.device, 1, &ranges));
@@ -27872,7 +27878,7 @@ test "mapped-memory coherency performance regression is bounded and allocation f
     }
     try std.testing.expectEqual(@as(u64, 1024 * max_api_items), inspected);
     try std.testing.expectEqual(@as(u64, 1024 * max_api_items * 64), bytes);
-    try std.testing.expect(@as(*MemoryObj, @ptrFromInt(memory)).mapped);
+    try std.testing.expect(validMemoryLocked(memory).?.mapped);
 
     unmapMemory(ctx.device, memory);
     // The promoted Vulkan 1.4 map/unmap pair must retain the same bounded,
