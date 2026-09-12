@@ -573,7 +573,9 @@ evidence contract.
 
 ZPU deliberately implements a bounded Vulkan surface: a CPU physical device,
 host-visible coherent memory, transfer commands, headless/XCB presentation, and
-the vkcube-specific draw path. Unsupported features fail closed. There is no
+graphics execution for admitted SPIR-V with structured control flow, mutable
+function locals, column-major matrices, and bounded uniform arrays. Unsupported
+features fail closed. There is no
 claim of full Vulkan feature/profile conformance yet. The ABI is complete; the
 feature implementation is the work still ahead. 🚧
 

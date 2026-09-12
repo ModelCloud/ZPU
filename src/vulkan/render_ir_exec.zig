@@ -14,6 +14,7 @@ const frontend = @import("spirv_frontend.zig");
 pub const abi_version: u32 = 1;
 pub const backend_version: u32 = 1;
 pub const max_key_ir_bytes: usize = 256 * 1024;
+const max_execution_steps: usize = ir.max_instructions * 64;
 
 pub const Error = error{
     InvalidProgram,
@@ -364,11 +365,10 @@ fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);
 }
 
-fn branchTarget(program: *const ir.Program, pc: usize, label_id: u32) Error!usize {
+fn branchTarget(program: *const ir.Program, label_id: u32) Error!usize {
     for (program.instructions, 0..) |instruction, index| {
         if (instruction.op != .label or instruction.literal.len != 4) continue;
         if (std.mem.readInt(u32, instruction.literal[0..4], .little) != label_id) continue;
-        if (index <= pc) return error.InvalidOperand;
         return index;
     }
     return error.InvalidOperand;
@@ -451,9 +451,12 @@ pub const Executor = struct {
         @memset(self.output_scratch, 0);
         out_offset = 0;
         var pc: usize = 0;
+        var execution_steps: usize = 0;
         var current_label: u32 = std.math.maxInt(u32);
         var predecessor_label: u32 = std.math.maxInt(u32);
         while (pc < self.program.instructions.len) {
+            if (execution_steps == max_execution_steps) return error.LimitExceeded;
+            execution_steps += 1;
             const instruction = self.program.instructions[pc];
             var next_pc = pc + 1;
             var result = Value{ .ty = instruction.ty };
@@ -505,14 +508,14 @@ pub const Executor = struct {
                 .label => current_label = std.mem.readInt(u32, instruction.literal[0..4], .little),
                 .branch => {
                     predecessor_label = current_label;
-                    next_pc = try branchTarget(&self.program, pc, std.mem.readInt(u32, instruction.literal[0..4], .little));
+                    next_pc = try branchTarget(&self.program, std.mem.readInt(u32, instruction.literal[0..4], .little));
                 },
                 .branch_conditional => {
                     const condition = try valueRef(self.values, pc, instruction.operands[0]);
                     if (condition.ty.scalar != .bool or condition.lanes() != 1) return error.InvalidType;
                     const offset: usize = if (condition.bits[0] != 0) 0 else 4;
                     predecessor_label = current_label;
-                    next_pc = try branchTarget(&self.program, pc, std.mem.readInt(u32, instruction.literal[offset..][0..4], .little));
+                    next_pc = try branchTarget(&self.program, std.mem.readInt(u32, instruction.literal[offset..][0..4], .little));
                 },
                 .phi => {
                     var selected: ?u32 = null;
@@ -573,12 +576,19 @@ pub const Executor = struct {
                         };
                         break :blk self.output_scratch[offset..];
                     } else try findBinding(bindings, interface_index);
-                    const offset = interface.members[member_index].offset;
-                    const member_ty = interface.members[member_index].ty;
+                    const member = interface.members[member_index];
+                    var offset = member.offset;
+                    const member_ty = member.ty;
+                    if (member.array_stride != 0) {
+                        if (instruction.operands.len != 3) return error.InvalidShape;
+                        const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
+                        if (index >= member.array_count) return error.Bounds;
+                        offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
+                    }
                     const size = if (member_ty.rows == 1) try byteSize(member_ty) else @as(usize, member_ty.columns) * 16;
                     if (offset > bytes.len or size > bytes.len - offset) return error.Bounds;
                     const loaded = try readUniformValue(member_ty, bytes[offset..]);
-                    if (instruction.operands.len == 2) {
+                    if (instruction.operands.len == 2 or member.array_stride != 0) {
                         if (!same(member_ty, instruction.ty)) return error.InvalidType;
                         result = loaded;
                     } else {
@@ -1516,7 +1526,10 @@ fn validate(program: *const ir.Program) Error!void {
         try validateType(interface.ty);
         if (interface.storage == .uniform) {
             if (!interface.block or interface.member_count == 0 or interface.member_count > ir.max_uniform_members) return error.InvalidStorage;
-            for (interface.members[0..interface.member_count]) |m| try validateType(m.ty);
+            for (interface.members[0..interface.member_count]) |m| {
+                try validateType(m.ty);
+                if (m.array_count == 0 or (m.array_stride == 0 and m.array_count != 1) or (m.array_stride != 0 and (m.array_stride % 16 != 0 or m.ty.rows != 1))) return error.InvalidStorage;
+            }
         } else if (interface.storage == .sampled_image) {
             if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) return error.InvalidStorage;
         }
@@ -1688,20 +1701,29 @@ fn validate(program: *const ir.Program) Error!void {
                 for (instruction.operands[1..], 0..) |index_id, index_position| {
                     const index_ty = program.instructions[index_id].ty;
                     if ((index_ty.scalar != .u32 and index_ty.scalar != .i32) or try lanes(index_ty) != 1) return error.InvalidType;
-                    // The member selector must remain static so the backing
-                    // interface offset is deterministic. A second selector
-                    // may be dynamic only when it addresses a vector lane.
+                    // The member selector remains static so the backing
+                    // interface offset is deterministic.
                     if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
-                    if (program.instructions[index_id].op != .constant and index_ty.scalar != .u32) return error.InvalidType;
                 }
                 const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
                 if (member_id >= interface.member_count) return error.Bounds;
-                const member_ty = interface.members[member_id].ty;
-                if (instruction.operands.len == 2) {
+                const member = interface.members[member_id];
+                const member_ty = member.ty;
+                if (member.array_stride != 0) {
+                    if (instruction.operands.len != 3 or !same(instruction.ty, member_ty)) return error.InvalidType;
+                    if (program.instructions[instruction.operands[2]].op == .constant) {
+                        const index = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
+                        if (index >= member.array_count) return error.Bounds;
+                    }
+                } else if (instruction.operands.len == 2) {
                     if (!same(instruction.ty, member_ty)) return error.InvalidType;
-                } else if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType else if (program.instructions[instruction.operands[2]].op == .constant) {
-                    const component = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
-                    if (component >= member_ty.columns) return error.Bounds;
+                } else {
+                    if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType;
+                    const index_instruction = program.instructions[instruction.operands[2]];
+                    if (index_instruction.op == .constant) {
+                        const component = std.mem.readInt(u32, index_instruction.literal[0..4], .little);
+                        if (component >= member_ty.columns) return error.Bounds;
+                    } else if (index_instruction.ty.scalar != .u32) return error.InvalidType;
                 }
             },
             .extract => {
@@ -2061,6 +2083,19 @@ test "forward branches execute local stores and select phi predecessors" {
     try executor.execute(&bindings, &outputs);
     try std.testing.expectEqual(@as(f32, 20), @as(f32, @bitCast(std.mem.readInt(u32, &local_output, .little))));
     try std.testing.expectEqual(@as(f32, 20), @as(f32, @bitCast(std.mem.readInt(u32, &phi_output, .little))));
+}
+
+test "backward branches fail closed when the execution budget is exhausted" {
+    const loop_label = [_]u8{ 100, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &loop_label },
+        .{ .op = .branch, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &loop_label },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectError(error.LimitExceeded, executor.execute(&.{}, &.{}));
 }
 
 test "GLSL absolute-value operations preserve lanes and reject signed overflow" {

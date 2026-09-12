@@ -42,6 +42,8 @@ fn referenceSerialize(allocator: std.mem.Allocator, program: *const ir.Program) 
             try out.append(allocator, member.ty.columns);
             try out.append(allocator, member.ty.rows);
             try u32le(&out, allocator, member.offset);
+            try u32le(&out, allocator, member.array_count);
+            try u32le(&out, allocator, member.array_stride);
         }
     }
     try u32le(&out, allocator, @intCast(program.instructions.len));
@@ -127,10 +129,10 @@ test "independent serializer and frontend-only interpreter match canonical progr
 test "checked-in full canonical bytes and digests are exact" {
     const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
     const cases = .{
-        .{ &frontend.positive_vertex, ir.Stage.vertex, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/basic.hex"), [32]u8{ 203, 242, 69, 54, 222, 0, 3, 151, 46, 85, 239, 251, 223, 126, 162, 154, 1, 126, 42, 74, 37, 90, 185, 28, 113, 134, 45, 69, 241, 214, 26, 246 } },
-        .{ &frontend.rich_vertex, ir.Stage.vertex, &[_]frontend.Specialization{.{ .id = 7, .bytes = &replacement }}, @embedFile("fixtures/render_ir/rich-specialized.hex"), [32]u8{ 32, 54, 120, 171, 171, 47, 37, 140, 249, 223, 164, 90, 213, 117, 244, 105, 27, 199, 198, 147, 250, 157, 214, 189, 189, 56, 122, 213, 62, 182, 128, 184 } },
-        .{ &frontend.uniform_vertex, ir.Stage.vertex, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/uniform.hex"), [32]u8{ 4, 251, 107, 70, 145, 166, 94, 68, 132, 217, 147, 216, 245, 172, 184, 175, 208, 170, 80, 235, 66, 218, 171, 187, 47, 60, 251, 20, 5, 236, 98, 211 } },
-        .{ &frontend.bool_fragment, ir.Stage.fragment, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/fragment.hex"), [32]u8{ 3, 96, 59, 154, 106, 162, 89, 4, 120, 130, 239, 208, 160, 86, 145, 157, 132, 181, 51, 33, 96, 218, 195, 223, 199, 40, 210, 139, 230, 176, 86, 139 } },
+        .{ &frontend.positive_vertex, ir.Stage.vertex, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/basic.hex"), [32]u8{ 188, 75, 239, 235, 38, 160, 189, 135, 39, 234, 228, 202, 60, 244, 40, 151, 248, 0, 57, 26, 17, 54, 212, 253, 88, 72, 57, 156, 25, 68, 241, 130 } },
+        .{ &frontend.rich_vertex, ir.Stage.vertex, &[_]frontend.Specialization{.{ .id = 7, .bytes = &replacement }}, @embedFile("fixtures/render_ir/rich-specialized.hex"), [32]u8{ 229, 67, 18, 34, 187, 77, 98, 157, 210, 58, 212, 96, 107, 174, 202, 92, 205, 181, 133, 237, 69, 24, 42, 37, 109, 87, 252, 111, 174, 114, 136, 159 } },
+        .{ &frontend.uniform_vertex, ir.Stage.vertex, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/uniform.hex"), [32]u8{ 109, 0, 134, 181, 205, 57, 49, 35, 140, 245, 129, 165, 252, 14, 83, 154, 8, 174, 133, 139, 26, 172, 130, 194, 46, 225, 123, 202, 109, 229, 144, 48 } },
+        .{ &frontend.bool_fragment, ir.Stage.fragment, &[_]frontend.Specialization{}, @embedFile("fixtures/render_ir/fragment.hex"), [32]u8{ 63, 54, 23, 252, 29, 135, 77, 150, 234, 213, 91, 37, 199, 250, 124, 141, 45, 54, 186, 176, 86, 95, 37, 227, 247, 222, 54, 58, 220, 37, 33, 194 } },
     };
     inline for (cases) |case| {
         var program = try frontend.compile(std.testing.allocator, case[0], case[1], "main", case[2]);

@@ -17,7 +17,7 @@ pub const Error = error{ Malformed, Unsupported, LimitExceeded, OutOfMemory };
 
 pub const Specialization = struct { id: u32, bytes: []const u8 };
 
-const Kind = enum { none, void, bool, int, float, vector, matrix, image, sampled_image, pointer, structure, function, ext_inst_import, constant, variable, function_value, label };
+const Kind = enum { none, void, bool, int, float, vector, matrix, array, image, sampled_image, pointer, structure, function, ext_inst_import, constant, variable, function_value, label };
 const Node = struct {
     kind: Kind = .none,
     type_id: u32 = 0,
@@ -37,6 +37,7 @@ const Decorations = struct {
     builtin_front_facing: bool = false,
     flat: bool = false,
     block: bool = false,
+    array_stride: ?u32 = null,
 };
 const Entry = struct { stage: ir.Stage, function: u32, name: []const u8, interfaces: []const u32 };
 
@@ -85,6 +86,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 24, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 25, .operands = .{ .min = 8, .max = 8 } },
     .{ .opcode = 27, .operands = .{ .min = 2, .max = 2 } },
+    .{ .opcode = 28, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 30, .operands = .{ .min = 1, .max = 17 } },
     .{ .opcode = 32, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 33, .operands = .{ .min = 2, .max = 2 } },
@@ -116,6 +118,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 250, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 251, .operands = .{ .min = 0, .max = max_entry_point_operands } },
     .{ .opcode = 245, .operands = .{ .min = 0, .max = max_entry_point_operands } },
+    .{ .opcode = 246, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 109, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 110, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 111, .operands = .{ .min = 3, .max = 3 } },
@@ -247,14 +250,15 @@ const type_schema = [_]ValueMeta{
     .{ .value = 21, .supported = true }, .{ .value = 22, .supported = true },
     .{ .value = 23, .supported = true }, .{ .value = 24, .supported = true },
     .{ .value = 25, .supported = true }, .{ .value = 27, .supported = true },
-    .{ .value = 30, .supported = true }, .{ .value = 32, .supported = true },
-    .{ .value = 33, .supported = true },
+    .{ .value = 28, .supported = true }, .{ .value = 30, .supported = true },
+    .{ .value = 32, .supported = true }, .{ .value = 33, .supported = true },
 };
 const decoration_schema = [_]ValueMeta{
     .{ .value = 0, .supported = true },
     .{ .value = 1, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 2, .supported = true },
     .{ .value = 5, .supported = true },
+    .{ .value = 6, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 7, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 11, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 14, .supported = true },
@@ -525,6 +529,14 @@ fn scalarU32Constant(nodes: []const Node, value_id: u32) Error!u32 {
     return node.words[0];
 }
 
+fn positiveScalarIntegerConstant(nodes: []const Node, value_id: u32) Error!u32 {
+    const node = nodes[try id(nodes, value_id)];
+    if (node.kind != .constant or node.opcode != 43 or node.words.len != 1) return error.Unsupported;
+    const shape = try resultShape(nodes, node.type_id);
+    if ((shape.scalar != .i32 and shape.scalar != .u32) or shape.columns != 1 or shape.rows != 1 or node.words[0] == 0 or node.words[0] > std.math.maxInt(i32)) return error.Unsupported;
+    return node.words[0];
+}
+
 fn controlBarrierValuesValid(execution_scope: u32, memory_scope: u32, memory_semantics: u32) bool {
     return execution_scope == 2 and memory_scope == 2 and memory_semantics == 0;
 }
@@ -592,12 +604,12 @@ fn staticConditionAt(nodes: []const Node, value_id: u32, depth: u8) Error!?bool 
         170 => unsigned_left == unsigned_right,
         171 => unsigned_left != unsigned_right,
         172 => unsigned_left > unsigned_right,
-        173 => unsigned_left >= unsigned_right,
-        174 => unsigned_left < unsigned_right,
-        175 => unsigned_left <= unsigned_right,
-        176 => signed_left > signed_right,
-        177 => signed_left >= signed_right,
-        178 => signed_left < signed_right,
+        173 => signed_left > signed_right,
+        174 => unsigned_left >= unsigned_right,
+        175 => signed_left >= signed_right,
+        176 => unsigned_left < unsigned_right,
+        177 => signed_left < signed_right,
+        178 => unsigned_left <= unsigned_right,
         179 => signed_left <= signed_right,
         else => unreachable,
     };
@@ -630,6 +642,7 @@ fn indexedType(nodes: []const Node, current_type: u32, index: u32) Error!u32 {
         .structure => if (index < aggregate.words.len) aggregate.words[index] else error.Unsupported,
         .vector => if (index < aggregate.b) aggregate.a else error.Unsupported,
         .matrix => if (index < aggregate.b) aggregate.a else error.Unsupported,
+        .array => if (index < aggregate.b) aggregate.a else error.Unsupported,
         else => error.Unsupported,
     };
 }
@@ -809,6 +822,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     2 => if (!decorations[target].block) {
                         decorations[target].block = true;
                     } else return error.Malformed,
+                    6 => if (decorations[target].array_stride == null and w[2] != 0 and w[2] % 4 == 0) {
+                        decorations[target].array_stride = w[2];
+                    } else return error.Unsupported,
                     11 => if (w[2] == 0 and !decorations[target].builtin_position and !decorations[target].builtin_frag_coord and !decorations[target].builtin_front_facing) {
                         decorations[target].builtin_position = true;
                     } else if (w[2] == 15 and !decorations[target].builtin_position and !decorations[target].builtin_frag_coord and !decorations[target].builtin_front_facing) {
@@ -838,11 +854,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const meta = valueMeta(&decoration_schema, w[2]) orelse return error.Unsupported;
                 const payload = w.len - 3;
                 if (payload < meta.operands.min or payload > meta.operands.max) return error.Malformed;
-                if (!meta.supported or (w[2] != 5 and w[2] != 7 and w[2] != 11 and w[2] != 35)) return error.Unsupported;
+                if (!meta.supported or (w[2] != 0 and w[2] != 5 and w[2] != 7 and w[2] != 11 and w[2] != 35)) return error.Unsupported;
                 const target = try id(nodes, w[0]);
                 if (w[1] >= 16) return error.Unsupported;
                 const member_index = target * 16 + w[1];
-                if (w[2] == 35) {
+                if (w[2] == 0) {
+                    continue;
+                } else if (w[2] == 35) {
                     if (w[3] % 4 != 0) return error.Unsupported;
                     if (member_offsets[member_index] != null) return error.Malformed;
                     member_offsets[member_index] = w[3];
@@ -890,6 +908,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             27 => {
                 if (nodes[try id(nodes, w[1])].kind != .image) return error.Malformed;
                 try define(nodes, w[0], .{ .kind = .sampled_image, .a = w[1] });
+            },
+            28 => {
+                const count = try positiveScalarIntegerConstant(nodes, w[2]);
+                if (count > 64) return error.Unsupported;
+                const element = nodes[try id(nodes, w[1])];
+                if (element.kind != .float and element.kind != .int and element.kind != .vector and element.kind != .matrix) return error.Unsupported;
+                try define(nodes, w[0], .{ .kind = .array, .a = w[1], .b = count });
             },
             30 => {
                 if (w.len < 1 or w.len > 17) return if (w.len < 1) error.Malformed else error.LimitExceeded;
@@ -949,6 +974,11 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!in_function or !label_seen or terminated or block_terminated or w.len != 2) return error.Malformed;
                 if (w[1] != 0) return error.Unsupported;
                 _ = try id(nodes, w[0]);
+            },
+            246 => {
+                if (!in_function or !label_seen or terminated or block_terminated or w.len != 3 or w[2] != 0) return error.Unsupported;
+                _ = try id(nodes, w[0]);
+                _ = try id(nodes, w[1]);
             },
             253 => {
                 if (!in_function or !label_seen or terminated or block_terminated or w.len != 0) return error.Malformed;
@@ -1210,12 +1240,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                         if (index_node.words.len != 1) return error.Malformed;
                         current_type = try indexedType(nodes, current_type, index_node.words[0]);
                     } else {
-                        // A dynamic index is admitted only for a final vector
-                        // component. Structure, matrix, and nested aggregate
-                        // indices remain statically resolved so offsets and
-                        // ABI ranges stay deterministic.
+                        // A dynamic index is admitted only for a final bounded
+                        // vector component or fixed-size array element.
                         const aggregate = nodes[try id(nodes, current_type)];
-                        if (index_position + 1 != w[3..].len or aggregate.kind != .vector or index_shape.scalar != .u32) return error.Unsupported;
+                        if (index_position + 1 != w[3..].len or
+                            (aggregate.kind != .vector and aggregate.kind != .array) or
+                            (aggregate.kind == .vector and index_shape.scalar != .u32))
+                            return error.Unsupported;
                         current_type = aggregate.a;
                     }
                 }
@@ -1443,8 +1474,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const right = try valueShape(nodes, w[3]);
                 const scalar_ok = switch (instruction.opcode) {
                     170, 171 => scalarClass(left, .integer),
-                    172, 173, 174, 175 => left.scalar == .u32,
-                    176, 177, 178, 179 => left.scalar == .i32,
+                    172, 174, 176, 178 => left.scalar == .u32,
+                    173, 175, 177, 179 => left.scalar == .i32,
                     else => unreachable,
                 };
                 if (result.scalar != .bool or result.columns < 1 or result.columns > 4 or result.rows != 1 or !scalar_ok or !sameShape(left, right) or result.columns != left.columns or result.rows != left.rows) return error.Malformed;
@@ -1526,20 +1557,33 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const Range = struct { start: u32 = 0, end: u32 = 0 };
             var ranges: [ir.max_uniform_members]Range = .{Range{}} ** ir.max_uniform_members;
             for (pointee.words, 0..) |member, member_index| {
-                const member_shape = try resultShape(nodes, member);
+                const member_node = nodes[try id(nodes, member)];
+                const member_shape = try resultShape(nodes, if (member_node.kind == .array) member_node.a else member);
                 const offset = member_offsets[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
                 const matrix_stride = member_matrix_strides[@as(usize, pointer.b) * 16 + member_index];
                 const col_major = member_col_major[@as(usize, pointer.b) * 16 + member_index];
-                if (member_shape.rows > 1) {
-                    if (matrix_stride != 16 or !col_major) return error.Unsupported;
-                } else if (matrix_stride != null or col_major) return error.Unsupported;
+                var array_count: u32 = 1;
+                var array_stride: u32 = 0;
                 const layout = try uniformSizeAlignment(member_shape);
+                const size = if (member_node.kind == .array) blk: {
+                    if (member_shape.rows != 1 or matrix_stride != null or col_major) return error.Unsupported;
+                    array_count = member_node.b;
+                    array_stride = decorations[try id(nodes, member)].array_stride orelse return error.Unsupported;
+                    if (array_stride < layout.size or array_stride % 16 != 0) return error.Unsupported;
+                    break :blk std.math.mul(u32, array_count, array_stride) catch return error.LimitExceeded;
+                } else if (member_shape.rows > 1) blk: {
+                    if (matrix_stride != 16 or !col_major) return error.Unsupported;
+                    break :blk layout.size;
+                } else blk: {
+                    if (matrix_stride != null or col_major) return error.Unsupported;
+                    break :blk layout.size;
+                };
                 if (offset % layout.alignment != 0) return error.Unsupported;
-                const end = std.math.add(u32, offset, layout.size) catch return error.LimitExceeded;
+                const end = std.math.add(u32, offset, size) catch return error.LimitExceeded;
                 if (end > max_uniform_block_bytes) return error.LimitExceeded;
                 for (ranges[0..member_index]) |prior| if (offset < prior.end and prior.start < end) return error.Unsupported;
                 ranges[member_index] = .{ .start = offset, .end = end };
-                interface.members[member_index] = .{ .ty = member_shape, .offset = offset };
+                interface.members[member_index] = .{ .ty = member_shape, .offset = offset, .array_count = array_count, .array_stride = array_stride };
             }
             if (storage == .uniform) {
                 if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
@@ -1571,8 +1615,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     var general_control_flow = false;
     if (requested_stage != .compute) {
         for (module.instructions, instruction_functions) |instruction, instruction_function| {
-            if (instruction_function != entry.function or instruction.opcode != 250) continue;
-            if (try staticCondition(nodes, instruction.words[0]) == null) {
+            if (instruction_function != entry.function) continue;
+            if ((instruction.opcode == 59 and instruction.words[2] == 7) or
+                (instruction.opcode == 250 and try staticCondition(nodes, instruction.words[0]) == null))
+            {
                 general_control_flow = true;
                 break;
             }
@@ -2070,6 +2116,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         const rid = result_id orelse continue;
         if (!needed[try id(nodes, rid)]) continue;
         const node = nodes[try id(nodes, rid)];
+        if (instruction.opcode == 61 and nodes[try id(nodes, node.type_id)].kind == .sampled_image) continue;
         const shape = if (instruction.opcode == 65) blk: {
             const pointer = nodes[try id(nodes, node.type_id)];
             if (pointer.kind != .pointer) return error.Malformed;
@@ -2236,12 +2283,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 170 => .ieq,
                 171 => .ine,
                 172 => .ugt,
-                173 => .uge,
-                174 => .ult,
-                175 => .ule,
-                176 => .sgt,
-                177 => .sge,
-                178 => .slt,
+                173 => .sgt,
+                174 => .uge,
+                175 => .sge,
+                176 => .ult,
+                177 => .slt,
+                178 => .ule,
                 179 => .sle,
                 else => unreachable,
             },
@@ -2371,7 +2418,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                             if (member_matches and item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set and (!direct_builtin or (item.builtin_position == decoration.builtin_position and item.builtin_frag_coord == decoration.builtin_frag_coord and item.builtin_front_facing == decoration.builtin_front_facing)))
                                 semantic_index = @intCast(interface_index);
                         }
-                        try operands.append(allocator, semantic_index orelse return error.Unsupported);
+                        if (semantic_index == null) {
+                            return error.Unsupported;
+                        }
+                        try operands.append(allocator, semantic_index.?);
                         continue;
                     }
                     return error.Malformed;
@@ -3105,7 +3155,7 @@ test "profile compiles selected straight-line vertex to owned canonical IR" {
     try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
     try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00", program.bytes[0..8]);
     try std.testing.expectEqualSlices(u8, &.{
-        90, 80,  85,  73,  82,  51,  68,  0,   1,   0,   0,   0,   6,   0, 0, 0,
+        90, 80,  85,  73,  82,  51,  68,  0,   1,   0,   0,   0,   7,   0, 0, 0,
         0,  4,   0,   0,   0,   109, 97,  105, 110, 1,   0,   0,   0,   1, 3, 4,
         1,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0,
         0,  0,   0,   3,   0,   0,   0,   0,   3,   1,   1,   0,   0,   0, 0, 4,
@@ -3115,8 +3165,8 @@ test "profile compiles selected straight-line vertex to owned canonical IR" {
         0,  0,   0,   0,   0,   0,   0,
     }, program.bytes);
     try std.testing.expectEqualSlices(u8, &.{
-        203, 242, 69, 54, 222, 0,  3,   151, 46,  85,  239, 251, 223, 126, 162, 154,
-        1,   126, 42, 74, 37,  90, 185, 28,  113, 134, 45,  69,  241, 214, 26,  246,
+        188, 75, 239, 235, 38, 160, 189, 135, 39, 234, 228, 202, 60, 244, 40,  151,
+        248, 0,  57,  26,  17, 54,  212, 253, 88, 72,  57,  156, 25, 68,  241, 130,
     }, &program.identity.digest);
     var clone = try program.clone(std.testing.allocator);
     defer clone.deinit(std.testing.allocator);
@@ -4452,12 +4502,12 @@ test "compute profile folds constant integer comparisons for branch phi" {
     try std.testing.expectEqual(@as(u32, 99), std.mem.readInt(u32, not_equal_program.instructions[0].literal[0..4], .little));
 
     const comparison_opcodes = [_]u16{ 170, 171, 172, 173, 174, 175, 176, 177, 178, 179 };
-    const expected_true = [_]bool{ true, false, false, true, false, true, false, true, false, true };
+    const expected_true = [_]bool{ true, false, false, false, true, true, false, false, true, true };
     for (comparison_opcodes, expected_true) |opcode, expected| {
         var candidate = compute_static_compare_phi_store;
         const candidate_compare = testOpcodeOffset(&candidate, 170, 0).?;
         candidate[candidate_compare] = (@as(u32, 5) << 16) | opcode;
-        if (opcode >= 176) {
+        if (opcode == 173 or opcode == 175 or opcode == 177 or opcode == 179) {
             const integer_type = testOpcodeOffset(&candidate, 21, 0).?;
             candidate[integer_type + 3] = 1;
         }
@@ -4699,7 +4749,6 @@ test "every explicitly excluded instruction family capability type storage and c
         210, // fine derivative family
         224, // OpControlBarrier
         227, // atomic family
-        246, // OpLoopMerge
         252, // OpKill
     };
     for (excluded_opcodes) |opcode| {
@@ -5292,12 +5341,110 @@ test "Chromium Skia derivative fragment shaders compile" {
         try std.testing.expectEqual(channel, @as(f32, @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little))));
 }
 
+test "Chromium Skia convolution shaders execute local state and uniform arrays" {
+    const vertex_bytes align(4) = @embedFile("fixtures/chromium_skia_vertex_650.spv").*;
+    var vertex_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &vertex_bytes), .vertex, "main", &.{});
+    defer vertex_program.deinit(std.testing.allocator);
+    var vertex_executor = try render_ir_exec.Executor.init(std.testing.allocator, &vertex_program);
+    defer vertex_executor.deinit();
+    var vertex_backing = [_][512]u8{.{0} ** 512} ** max_interfaces;
+    var vertex_bindings: [max_interfaces]render_ir_exec.Binding = undefined;
+    var vertex_outputs: [max_interfaces]render_ir_exec.Output = undefined;
+    var vertex_binding_count: usize = 0;
+    var vertex_output_count: usize = 0;
+    for (vertex_program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            vertex_outputs[vertex_output_count] = .{ .interface = @intCast(interface_index), .bytes = &vertex_backing[interface_index] };
+            vertex_output_count += 1;
+            continue;
+        }
+        if (interface.storage == .input) {
+            const values: []const f32 = if (interface.location == 0)
+                &.{ 0.25, 0.5 }
+            else if (interface.location == 1)
+                &.{ 0.2, 0.4, 0.6, 0.8 }
+            else
+                &.{ 1, 2, 3, 4 };
+            @memcpy(vertex_backing[interface_index][0 .. values.len * 4], std.mem.sliceAsBytes(values));
+        } else if (interface.storage == .uniform) {
+            const values = [_]struct { offset: usize, value: f32 }{
+                .{ .offset = 0, .value = 1 },
+                .{ .offset = 8, .value = 1 },
+                .{ .offset = 16, .value = 1 },
+                .{ .offset = 24, .value = 1 },
+                .{ .offset = 336, .value = 1 },
+                .{ .offset = 356, .value = 1 },
+                .{ .offset = 376, .value = 1 },
+            };
+            for (values) |value| std.mem.writeInt(u32, vertex_backing[interface_index][value.offset..][0..4], @bitCast(value.value), .little);
+        }
+        vertex_bindings[vertex_binding_count] = .{ .interface = @intCast(interface_index), .bytes = &vertex_backing[interface_index] };
+        vertex_binding_count += 1;
+    }
+    try vertex_executor.execute(vertex_bindings[0..vertex_binding_count], vertex_outputs[0..vertex_output_count]);
+
+    const fragment_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_839.spv").*;
+    var fragment_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &fragment_bytes), .fragment, "main", &.{});
+    defer fragment_program.deinit(std.testing.allocator);
+    var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
+    defer fragment_executor.deinit();
+    var fragment_backing = [_][512]u8{.{0} ** 512} ** max_interfaces;
+    var fragment_bindings: [max_interfaces]render_ir_exec.Binding = undefined;
+    var fragment_outputs: [max_interfaces]render_ir_exec.Output = undefined;
+    var fragment_binding_count: usize = 0;
+    var fragment_output_count: usize = 0;
+    const pixels = [_]u8{ 64, 128, 192, 255 };
+    for (fragment_program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            fragment_outputs[fragment_output_count] = .{ .interface = @intCast(interface_index), .bytes = &fragment_backing[interface_index] };
+            fragment_output_count += 1;
+            continue;
+        }
+        if (interface.storage == .sampled_image) {
+            fragment_bindings[fragment_binding_count] = .{
+                .interface = @intCast(interface_index),
+                .sampled_image = .{
+                    .pixels = &pixels,
+                    .width = 1,
+                    .height = 1,
+                    .row_stride = 4,
+                    .format = .rgba8_unorm,
+                    .filter = .nearest,
+                    .address_u = .clamp_to_edge,
+                    .address_v = .clamp_to_edge,
+                },
+            };
+            fragment_binding_count += 1;
+            continue;
+        }
+        if (interface.storage == .input and interface.location == 1) {
+            const coordinates = [_]f32{ 0.25, 0.25 };
+            @memcpy(fragment_backing[interface_index][0..8], std.mem.sliceAsBytes(&coordinates));
+        } else if (interface.storage == .input and interface.builtin_front_facing) {
+            fragment_backing[interface_index][0] = 1;
+        } else if (interface.storage == .uniform) {
+            for (0..3) |column| std.mem.writeInt(u32, fragment_backing[interface_index][16 + column * 16 + column * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+            for (0..8) |index| {
+                std.mem.writeInt(u32, fragment_backing[interface_index][64 + index * 16 + 4 ..][0..4], @bitCast(@as(f32, 0.0625)), .little);
+                std.mem.writeInt(u32, fragment_backing[interface_index][64 + index * 16 + 12 ..][0..4], @bitCast(@as(f32, 0.0625)), .little);
+            }
+            for (0..3) |column| std.mem.writeInt(u32, fragment_backing[interface_index][304 + column * 16 + column * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+        }
+        fragment_bindings[fragment_binding_count] = .{ .interface = @intCast(interface_index), .bytes = &fragment_backing[interface_index] };
+        fragment_binding_count += 1;
+    }
+    try fragment_executor.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]);
+    const expected = [_]f32{ 64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1 };
+    for (expected, 0..) |channel, index|
+        try std.testing.expectEqual(channel, @as(f32, @bitCast(std.mem.readInt(u32, fragment_backing[fragment_outputs[0].interface][index * 4 ..][0..4], .little))));
+}
+
 test "specialization uniform matrix and fragment canonical identities are golden" {
     const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
     const cases = .{
-        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 289), @as(usize, 9), @as(usize, 2), [32]u8{ 32, 54, 120, 171, 171, 47, 37, 140, 249, 223, 164, 90, 213, 117, 244, 105, 27, 199, 198, 147, 250, 157, 214, 189, 189, 56, 122, 213, 62, 182, 128, 184 } },
-        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 156), @as(usize, 4), @as(usize, 2), [32]u8{ 4, 251, 107, 70, 145, 166, 94, 68, 132, 217, 147, 216, 245, 172, 184, 175, 208, 170, 80, 235, 66, 218, 171, 187, 47, 60, 251, 20, 5, 236, 98, 211 } },
-        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 88), @as(usize, 2), @as(usize, 1), [32]u8{ 3, 96, 59, 154, 106, 162, 89, 4, 120, 130, 239, 208, 160, 86, 145, 157, 132, 181, 51, 33, 96, 218, 195, 223, 199, 40, 210, 139, 230, 176, 86, 139 } },
+        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 289), @as(usize, 9), @as(usize, 2), [32]u8{ 229, 67, 18, 34, 187, 77, 98, 157, 210, 58, 212, 96, 107, 174, 202, 92, 205, 181, 133, 237, 69, 24, 42, 37, 109, 87, 252, 111, 174, 114, 136, 159 } },
+        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 164), @as(usize, 4), @as(usize, 2), [32]u8{ 109, 0, 134, 181, 205, 57, 49, 35, 140, 245, 129, 165, 252, 14, 83, 154, 8, 174, 133, 139, 26, 172, 130, 194, 46, 225, 123, 202, 109, 229, 144, 48 } },
+        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 88), @as(usize, 2), @as(usize, 1), [32]u8{ 63, 54, 23, 252, 29, 135, 77, 150, 234, 213, 91, 37, 199, 250, 124, 141, 45, 54, 186, 176, 86, 95, 37, 227, 247, 222, 54, 58, 220, 37, 33, 194 } },
     };
     inline for (cases) |case| {
         var program = try compile(std.testing.allocator, case[0], case[1], "main", case[2]);
