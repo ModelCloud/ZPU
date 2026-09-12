@@ -358,7 +358,7 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform };
+pub const Storage = enum(u8) { input, output, uniform, push_constant };
 pub const max_uniform_members: usize = 16;
 pub const UniformMember = struct { ty: Type = .{ .scalar = .u32 }, offset: u32 = 0 };
 pub const Interface = struct {

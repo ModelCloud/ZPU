@@ -267,7 +267,7 @@ pub const Executor = struct {
         for (bindings, 0..) |binding, i| {
             if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
             const storage = self.program.interfaces[binding.interface].storage;
-            if (storage != .input and storage != .uniform and storage != .output) return error.InvalidStorage;
+            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output) return error.InvalidStorage;
             for (bindings[0..i]) |prior| if (prior.interface == binding.interface) return error.InvalidOperand;
         }
         var out_offset: usize = 0;
@@ -334,10 +334,19 @@ pub const Executor = struct {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len) return error.InvalidOperand;
                     const interface = self.program.interfaces[interface_index];
-                    if (interface.storage != .uniform and interface.storage != .output) return error.InvalidStorage;
+                    if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) return error.InvalidStorage;
                     const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
                     if (member_index >= interface.member_count) return error.Bounds;
-                    const bytes = try findBinding(bindings, interface_index);
+                    const bytes = if (interface.storage == .output and
+                        interface.descriptor_set == null and
+                        interface.binding == null)
+                    blk: {
+                        var offset: usize = 0;
+                        for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
+                            offset += try byteSize(item.ty);
+                        };
+                        break :blk self.output_scratch[offset..];
+                    } else try findBinding(bindings, interface_index);
                     const offset = interface.members[member_index].offset;
                     const member_ty = interface.members[member_index].ty;
                     const size = try byteSize(member_ty);
@@ -1240,12 +1249,12 @@ fn validate(program: *const ir.Program) Error!void {
                 .storage => .output,
                 else => unreachable,
             };
-            if (x >= program.interfaces.len or program.interfaces[x].storage != expected) return error.InvalidStorage;
+            if (x >= program.interfaces.len or (program.interfaces[x].storage != expected and !(instruction.op == .uniform and program.interfaces[x].storage == .push_constant))) return error.InvalidStorage;
             if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
         if (instruction.op == .output) {
             const x = instruction.operands[0];
-            if (x >= program.interfaces.len or program.interfaces[x].storage != .output or outputs_seen[x]) return error.InvalidOutput;
+            if (x >= program.interfaces.len or program.interfaces[x].storage != .output) return error.InvalidOutput;
             outputs_seen[x] = true;
             if (!same(program.interfaces[x].ty, instruction.ty)) return error.InvalidType;
         }
@@ -1331,15 +1340,16 @@ fn validate(program: *const ir.Program) Error!void {
         switch (instruction.op) {
             .access => {
                 const interface_index = instruction.operands[0];
-                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .output)) return error.InvalidStorage;
+                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .push_constant and program.interfaces[interface_index].storage != .output)) return error.InvalidStorage;
                 const interface = program.interfaces[interface_index];
                 for (instruction.operands[1..], 0..) |index_id, index_position| {
                     const index_ty = program.instructions[index_id].ty;
-                    if (index_ty.scalar != .u32 or try lanes(index_ty) != 1) return error.InvalidType;
+                    if ((index_ty.scalar != .u32 and index_ty.scalar != .i32) or try lanes(index_ty) != 1) return error.InvalidType;
                     // The member selector must remain static so the backing
                     // interface offset is deterministic. A second selector
                     // may be dynamic only when it addresses a vector lane.
                     if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
+                    if (program.instructions[index_id].op != .constant and index_ty.scalar != .u32) return error.InvalidType;
                 }
                 const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
                 if (member_id >= interface.member_count) return error.Bounds;

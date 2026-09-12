@@ -4,6 +4,7 @@
 const std = @import("std");
 pub const decode = @import("spirv_decode.zig");
 pub const ir = @import("render_ir.zig");
+const render_ir_exec = @import("render_ir_exec.zig");
 
 pub const max_profile_bound: u32 = 8192;
 pub const max_interfaces: usize = 64;
@@ -226,8 +227,8 @@ fn opcodeMeta(opcode: u16) ?OpcodeMeta {
 const ValueMeta = struct { value: u32, supported: bool, operands: Count = .{ .min = 0, .max = 0 } };
 const capability_schema = [_]ValueMeta{.{ .value = 1, .supported = true }};
 const storage_schema = [_]ValueMeta{
-    .{ .value = 1, .supported = true },  .{ .value = 2, .supported = true },   .{ .value = 3, .supported = true },
-    .{ .value = 9, .supported = false }, .{ .value = 12, .supported = false },
+    .{ .value = 1, .supported = true }, .{ .value = 2, .supported = true },   .{ .value = 3, .supported = true },
+    .{ .value = 9, .supported = true }, .{ .value = 12, .supported = false },
 };
 const type_schema = [_]ValueMeta{
     .{ .value = 19, .supported = true }, .{ .value = 20, .supported = true },
@@ -709,6 +710,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
     const member_offsets = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
     defer allocator.free(member_offsets);
     @memset(member_offsets, null);
+    const member_builtins = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    defer allocator.free(member_builtins);
+    @memset(member_builtins, null);
 
     var capability = false;
     var memory_model = false;
@@ -797,12 +801,19 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const meta = valueMeta(&decoration_schema, w[2]) orelse return error.Unsupported;
                 const payload = w.len - 3;
                 if (payload < meta.operands.min or payload > meta.operands.max) return error.Malformed;
-                if (!meta.supported or w[2] != 35) return error.Unsupported;
+                if (!meta.supported or (w[2] != 11 and w[2] != 35)) return error.Unsupported;
                 const target = try id(nodes, w[0]);
-                if (w[1] >= 16 or w[3] % 4 != 0) return error.Unsupported;
-                const offset_index = target * 16 + w[1];
-                if (member_offsets[offset_index] != null) return error.Malformed;
-                member_offsets[offset_index] = w[3];
+                if (w[1] >= 16) return error.Unsupported;
+                const member_index = target * 16 + w[1];
+                if (w[2] == 35) {
+                    if (w[3] % 4 != 0) return error.Unsupported;
+                    if (member_offsets[member_index] != null) return error.Malformed;
+                    member_offsets[member_index] = w[3];
+                } else {
+                    if (w[3] > 1) return error.Unsupported;
+                    if (member_builtins[member_index] != null) return error.Malformed;
+                    member_builtins[member_index] = w[3];
+                }
             },
             19 => {
                 if (w.len != 1) return error.Malformed;
@@ -1110,7 +1121,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const pointer_value = nodes[try id(nodes, w[2])];
                 const pointer = nodes[try id(nodes, pointer_value.type_id)];
                 if (pointer.kind != .pointer or !sameShape(try resultShape(nodes, w[0]), try resultShape(nodes, pointer.b))) return error.Malformed;
-                if (pointer.a != 1 and pointer.a != 2 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
+                if (pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
             },
             62 => {
                 const pointer_value = nodes[try id(nodes, w[0])];
@@ -1378,10 +1389,22 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         }
     }
 
+    var interface_ids: std.ArrayList(u32) = .empty;
+    defer interface_ids.deinit(allocator);
+    try interface_ids.appendSlice(allocator, entry.interfaces);
+    for (nodes, 0..) |node, node_index| {
+        if (node.kind != .variable or (node.a != 2 and node.a != 9)) continue;
+        var present = false;
+        for (interface_ids.items) |interface_id| if (interface_id == node_index) {
+            present = true;
+            break;
+        };
+        if (!present) try interface_ids.append(allocator, @intCast(node_index));
+    }
     var interfaces: std.ArrayList(ir.Interface) = .empty;
     defer interfaces.deinit(allocator);
-    if (entry.interfaces.len > max_interfaces) return error.LimitExceeded;
-    for (entry.interfaces) |interface_id| {
+    if (interface_ids.items.len > max_interfaces) return error.LimitExceeded;
+    for (interface_ids.items) |interface_id| {
         const index = try id(nodes, interface_id);
         const variable = nodes[index];
         if (variable.kind != .variable) return error.Malformed;
@@ -1390,13 +1413,37 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             1 => .input,
             3 => .output,
             2 => .uniform,
+            9 => .push_constant,
             12 => if (requested_stage == .compute) .output else return error.Unsupported,
             else => return error.Unsupported,
         };
         var shape: ir.Type = undefined;
         var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position };
         const pointee = nodes[try id(nodes, pointer.b)];
-        if (storage == .uniform) {
+        if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
+            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position) return error.Unsupported;
+            var position_seen = false;
+            for (pointee.words, 0..) |member, member_index| {
+                const builtin = member_builtins[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
+                if (builtin == 1) {
+                    const point_size = try resultShape(nodes, member);
+                    if (point_size.scalar != .f32 or point_size.columns != 1 or point_size.rows != 1) return error.Unsupported;
+                    continue;
+                }
+                if (builtin != 0 or position_seen) return error.Unsupported;
+                shape = try resultShape(nodes, member);
+                if (shape.scalar != .f32 or shape.columns != 4 or shape.rows != 1) return error.Unsupported;
+                interface.ty = shape;
+                interface.builtin_position = true;
+                interface.block = true;
+                interface.member_count = 1;
+                interface.members[0] = .{ .ty = shape, .offset = 0 };
+                try interfaces.append(allocator, interface);
+                position_seen = true;
+            }
+            if (!position_seen) return error.Unsupported;
+            continue;
+        } else if (storage == .uniform or storage == .push_constant) {
             if (pointee.kind != .structure or !decorations[try id(nodes, pointer.b)].block) return error.Unsupported;
             shape = .{ .scalar = .u32 }; // structural uniform marker; members are validated below
             interface.block = true;
@@ -1414,7 +1461,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 ranges[member_index] = .{ .start = offset, .end = end };
                 interface.members[member_index] = .{ .ty = member_shape, .offset = offset };
             }
-            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position) return error.Unsupported;
+            if (storage == .uniform) {
+                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position) return error.Unsupported;
+            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position) return error.Unsupported;
         } else if (requested_stage == .compute and variable.a == 12) {
             if (pointee.kind == .structure and decorations[try id(nodes, pointer.b)].block and pointee.words.len == 1) {
                 shape = try resultShape(nodes, pointee.words[0]);
@@ -1754,20 +1803,29 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         if (instruction.opcode == 62) {
-            const target = nodes[try id(nodes, w[0])];
+            const target_pointer = nodes[try id(nodes, w[0])];
+            const target = if (target_pointer.kind == .function_value and target_pointer.opcode == 65) nodes[try id(nodes, target_pointer.words[0])] else target_pointer;
             if (target.kind != .variable or (target.a != 3 and !(requested_stage == .compute and target.a == 12))) return error.Unsupported;
             const value = canonical_ids[try id(nodes, w[1])];
             if (value == std.math.maxInt(u32)) return error.Malformed;
             var semantic_index: ?u32 = null;
-            const decoration = decorations[try id(nodes, w[0])];
+            const decoration = decorations[try id(nodes, if (target_pointer.kind == .function_value) target_pointer.words[0] else w[0])];
+            var member_builtin: ?u32 = null;
+            if (target_pointer.kind == .function_value) {
+                if (target_pointer.words.len != 2) return error.Unsupported;
+                const member = nodes[try id(nodes, target_pointer.words[1])];
+                if (member.kind != .constant or member.words.len != 1) return error.Unsupported;
+                const target_type = nodes[try id(nodes, nodes[try id(nodes, target.type_id)].b)];
+                if (target_type.kind != .structure or member.words[0] >= target_type.words.len) return error.Unsupported;
+                member_builtin = member_builtins[@as(usize, nodes[try id(nodes, target.type_id)].b) * 16 + member.words[0]];
+            }
             for (interfaces.items, 0..) |item, interface_index| {
                 if (requested_stage == .compute and target.a == 12) {
                     if (item.storage == .output and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set) semantic_index = @intCast(interface_index);
-                } else if (item.storage == .output and item.location == decoration.location and item.builtin_position == decoration.builtin_position) semantic_index = @intCast(interface_index);
+                } else if (item.storage == .output and (if (member_builtin) |builtin| builtin == 0 and item.builtin_position else item.location == decoration.location and item.builtin_position == decoration.builtin_position)) semantic_index = @intCast(interface_index);
             }
             const target_index = semantic_index orelse return error.Unsupported;
-            const pointer = nodes[try id(nodes, target.type_id)];
-            const output_shape = if (requested_stage == .compute and target.a == 12) interfaces.items[target_index].ty else try resultShape(nodes, pointer.b);
+            const output_shape = interfaces.items[target_index].ty;
             lowered.ensureUnusedCapacity(allocator, 1) catch return error.OutOfMemory;
             const operands = allocator.dupe(u32, &.{ target_index, value }) catch return error.OutOfMemory;
             const literal = allocator.dupe(u8, &.{}) catch return error.OutOfMemory;
@@ -2032,11 +2090,22 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                         var semantic_index: ?u32 = null;
                         const expected_storage: ir.Storage = switch (pointer_node.a) {
                             2 => .uniform,
+                            3 => .output,
+                            9 => .push_constant,
                             12 => .output,
                             else => .input,
                         };
                         for (interfaces.items, 0..) |item, interface_index| {
-                            if (item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
+                            var member_matches = true;
+                            if (instruction.opcode == 65 and pointer_node.a == 3 and nodes[try id(nodes, nodes[try id(nodes, pointer_node.type_id)].b)].kind == .structure) {
+                                if (node.words.len < 2) return error.Unsupported;
+                                const member = nodes[try id(nodes, node.words[1])];
+                                if (member.kind != .constant or member.words.len != 1) return error.Unsupported;
+                                const structure_id = nodes[try id(nodes, pointer_node.type_id)].b;
+                                const builtin = member_builtins[@as(usize, structure_id) * 16 + member.words[0]] orelse return error.Unsupported;
+                                member_matches = builtin == 0 and item.builtin_position;
+                            }
+                            if (member_matches and item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
                                 semantic_index = @intCast(interface_index);
                         }
                         try operands.append(allocator, semantic_index orelse return error.Unsupported);
@@ -2051,7 +2120,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const pointer_id = node.words[0];
                 const pointer_node = nodes[try id(nodes, pointer_id)];
                 op = if (pointer_node.kind == .variable) switch (pointer_node.a) {
-                    2 => .uniform,
+                    2, 9 => .uniform,
                     12 => .storage,
                     else => .input,
                 } else .extract;
@@ -4401,7 +4470,7 @@ test "every explicitly excluded instruction family capability type storage and c
     rich_changed[testOpcodeOffset(&rich_changed, 24, 0).? + 3] = 3;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &rich_changed, .vertex, "main", &.{}));
     changed = positive_vertex;
-    changed[testOpcodeOffset(&changed, 32, 0).? + 2] = 9;
+    changed[testOpcodeOffset(&changed, 32, 0).? + 2] = 0;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &changed, .vertex, "main", &.{}));
     for ([_]u32{ 0x7f80_0000, 0xff80_0000, 0x7fc0_0000 }) |non_finite| {
         changed = positive_vertex;
@@ -4668,6 +4737,43 @@ test "composite specialization payloads are explicitly rejected in profile v1" {
     defer std.testing.allocator.free(nested);
     nested[3] = 40;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, nested, .vertex, "main", &.{}));
+}
+
+test "Chromium Skia vertex shader executes push constants and structured outputs" {
+    const bytes align(4) = @embedFile("fixtures/chromium_skia_vertex.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), program.interfaces.len);
+    try std.testing.expectEqual(ir.Storage.input, program.interfaces[0].storage);
+    try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 2 }, program.interfaces[0].ty);
+    try std.testing.expectEqual(ir.Storage.output, program.interfaces[2].storage);
+    try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 2 }, program.interfaces[2].ty);
+    try std.testing.expect(program.interfaces[3].builtin_position);
+    try std.testing.expectEqual(ir.Storage.push_constant, program.interfaces[4].storage);
+    try std.testing.expectEqual(@as(u8, 1), program.interfaces[4].member_count);
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    var position = [_]f32{ 1, 2 };
+    var local = [_]f32{ 3, 4 };
+    var push = [_]f32{ 1, 0, 1, 0 };
+    var varying = [_]u8{0} ** 8;
+    var clip = [_]u8{0} ** 16;
+    try executor.execute(&.{
+        .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&position) },
+        .{ .interface = 1, .bytes = std.mem.sliceAsBytes(&local) },
+        .{ .interface = 4, .bytes = std.mem.sliceAsBytes(&push) },
+    }, &.{
+        .{ .interface = 2, .bytes = &varying },
+        .{ .interface = 3, .bytes = &clip },
+    });
+    try std.testing.expectEqual(@as(f32, 3), @as(f32, @bitCast(std.mem.readInt(u32, varying[0..4], .little))));
+    try std.testing.expectEqual(@as(f32, 4), @as(f32, @bitCast(std.mem.readInt(u32, varying[4..8], .little))));
+    const expected_clip = [_]f32{ 1, 2, 0, 1 };
+    for (expected_clip, 0..) |expected, index| {
+        try std.testing.expectEqual(expected, @as(f32, @bitCast(std.mem.readInt(u32, clip[index * 4 ..][0..4], .little))));
+    }
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {
