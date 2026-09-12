@@ -1605,6 +1605,7 @@ pub const CommandBuffer = *CommandBufferObj;
 
 const max_objects = 64;
 const max_child_objects = 64;
+const max_shader_modules = 4000;
 // A primary command buffer may contain a long ordered draw stream.  Allocate
 // this storage lazily on first begin so command-buffer creation stays cheap,
 // while keeping the Mosaic batch bound and descriptor snapshot capacity in
@@ -1693,8 +1694,8 @@ var descriptor_pool_objects: [max_child_objects]DescriptorPoolObj = undefined;
 var descriptor_pool_state = [_]SlotState{.never} ** max_child_objects;
 var descriptor_set_objects: [max_child_objects]DescriptorSetObj = undefined;
 var descriptor_set_state = [_]SlotState{.never} ** max_child_objects;
-var shader_module_objects: [max_child_objects]ShaderModuleObj = undefined;
-var shader_module_state = [_]SlotState{.never} ** max_child_objects;
+var shader_module_objects: [max_shader_modules]ShaderModuleObj = undefined;
+var shader_module_state = [_]SlotState{.never} ** max_shader_modules;
 var descriptor_set_layout_objects: [max_child_objects]DescriptorSetLayoutObj = undefined;
 var descriptor_set_layout_state = [_]SlotState{.never} ** max_child_objects;
 var pipeline_layout_objects: [max_child_objects]PipelineLayoutObj = undefined;
@@ -26733,7 +26734,7 @@ test "shader modules use owned validated words and dedicated lifetime-safe ABI h
 test "shader module device identity rejects cross-generation address reuse and device slots never reuse" {
     instance_state = [_]SlotState{.never} ** max_objects;
     device_state = [_]SlotState{.never} ** max_objects;
-    shader_module_state = [_]SlotState{.never} ** max_child_objects;
+    shader_module_state = [_]SlotState{.never} ** max_shader_modules;
     const first = try createTestDeviceContext();
     const words = [_]u32{ spirv.magic, spirv.supported_spirv_version, 0, 1, 0 };
     const info = ShaderModuleCreateInfo{ .s_type = 16, .p_next = null, .flags = 0, .code_size = @sizeOf(@TypeOf(words)), .p_code = &words };
@@ -26830,7 +26831,7 @@ test "shader module ABI rejects malformed and unsupported inputs without publish
     try std.testing.expectEqual(never_before, std.mem.count(SlotState, &shader_module_state, &.{.never}));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), output);
 
-    var created: [max_child_objects]usize = undefined;
+    var created: [max_shader_modules]usize = undefined;
     var created_count: usize = 0;
     while (std.mem.count(SlotState, &shader_module_state, &.{.never}) != 0) {
         try std.testing.expectEqual(Result.success, createShaderModule(ctx.device, &info, null, &created[created_count]));
