@@ -14242,6 +14242,17 @@ fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, 
     }
     return pipeline.rendering_stencil_format == 0;
 }
+fn pipelineUsesBlendConstants(pipeline: *const GraphicsPipelineObj) bool {
+    if (pipeline.color_blend_enable == 0) return false;
+    return inline for (.{
+        pipeline.src_color_blend_factor,
+        pipeline.dst_color_blend_factor,
+        pipeline.src_alpha_blend_factor,
+        pipeline.dst_alpha_blend_factor,
+    }) |factor| {
+        if (factor >= 10 and factor <= 13) break true;
+    } else false;
+}
 fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsPipelineObj) ?DrawRasterState {
     var missing: u32 = 0;
     if (pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) missing |= 1 << 0;
@@ -14250,7 +14261,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     if (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) missing |= 1 << 3;
     if (pipeline.dynamic_line_stipple and !command_buffer.impl.line_stipple_set) missing |= 1 << 4;
     if (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) missing |= 1 << 5;
-    if (pipeline.dynamic_blend_constants and !command_buffer.impl.blend_constants_set) missing |= 1 << 6;
+    if (pipeline.dynamic_blend_constants and pipelineUsesBlendConstants(pipeline) and !command_buffer.impl.blend_constants_set) missing |= 1 << 6;
     if (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) missing |= 1 << 7;
     if (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) missing |= 1 << 8;
     if (pipeline.dynamic_stencil_reference and command_buffer.impl.stencil_reference_set != 3) missing |= 1 << 9;
@@ -14368,6 +14379,8 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     impl.viewport_set = true;
     impl.scissor_set = true;
     impl.vertex_bindings = .{};
+    impl.blend_constants = .{ 0, 0, 0, 0 };
+    impl.blend_constants_set = false;
     impl.line_stipple_set = false;
     impl.dynamic.rasterizer_discard_enable_set = false;
     impl.dynamic.depth_test_enable_set = false;
@@ -14543,10 +14556,15 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     pipeline.dynamic_depth_bias = false;
     pipeline.dynamic_blend_constants = true;
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) != null);
+    pipeline.color_blend_enable = 1;
+    pipeline.src_color_blend_factor = 10;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.blend_constants_set = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     pipeline.dynamic_blend_constants = false;
+    pipeline.color_blend_enable = 0;
+    pipeline.src_color_blend_factor = 1;
     pipeline.dynamic_stencil_compare_mask = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_compare_mask_set = 3;
