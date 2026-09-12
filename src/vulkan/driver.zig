@@ -1214,7 +1214,7 @@ const QueryPoolObj = struct {
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
-const ImageViewObj = struct { owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -4365,7 +4365,10 @@ fn semaphoreSlot(object: *SemaphoreObj) usize {
     return (@intFromPtr(object) - @intFromPtr(&semaphore_objects[0])) / @sizeOf(SemaphoreObj);
 }
 fn validImageViewLocked(handle: usize) ?*ImageViewObj {
-    return findLiveHandle(ImageViewObj, handle, &image_view_objects, &image_view_state);
+    if (handle == 0) return null;
+    return for (&image_view_objects, image_view_state) |*object, state| {
+        if (object.handle == handle) break if (state == .live) object else null;
+    } else null;
 }
 fn validSamplerLocked(handle: usize) ?*SamplerObj {
     return findLiveHandle(SamplerObj, handle, &sampler_objects, &sampler_state);
@@ -12683,10 +12686,11 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const image = validImageLocked(ci.image) orelse return .error_initialization_failed;
     const usage = if (pnext.has_usage) pnext.usage else image.usage;
     if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) return .error_initialization_failed;
-    for (&image_view_objects, &image_view_state) |*object, *state| if (state.* == .never) {
-        object.* = .{ .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+    for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
+        const handle = allocateGenericHandle();
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
-        out.* = @intFromPtr(object);
+        out.* = handle;
         return .success;
     };
     return objectPoolExhausted("image view");
@@ -19716,7 +19720,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(Result.error_out_of_host_memory, createSemaphore(device, &semaphore_info, null, &exhausted_handle));
     semaphore_state = saved_semaphore_state;
     const saved_view_state = image_view_state;
-    @memset(&image_view_state, .tombstone);
+    @memset(&image_view_state, .live);
     try std.testing.expectEqual(Result.error_out_of_host_memory, createImageView(device, &view_info, null, &exhausted_handle));
     image_view_state = saved_view_state;
     const saved_framebuffer_state = framebuffer_state;
@@ -22744,6 +22748,16 @@ test "dynamic rendering begin and end own attachment scope" {
     validImageLocked(image).?.layout = 1;
     const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
     var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    const stale_view = view;
+    destroyImageView(ctx.device, stale_view, null);
+    for (0..max_child_objects + 1) |_| {
+        var recycled_view: usize = 0;
+        try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &recycled_view));
+        try std.testing.expect(recycled_view != stale_view);
+        try std.testing.expect(validImageViewLocked(stale_view) == null);
+        destroyImageView(ctx.device, recycled_view, null);
+    }
     try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
     var usage_info = ImageViewUsageCreateInfo{ .s_type = 1000117002, .p_next = null, .usage = 0x10 };
     var usage_view_info = view_info;
