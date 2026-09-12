@@ -16291,6 +16291,12 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         for (cbs[0..submit.command_buffer_count], 0..) |cb, command_buffer_index| {
             const valid_cb = validCommandBufferLocked(cb) orelse return queueSubmitFailed(@src().line);
             if (valid_cb.impl.owner != q.owner or valid_cb.impl.level != 0 or valid_cb.impl.state != 2) {
+                if (failureDiagnosticsEnabled()) {
+                    std.debug.print(
+                        "ZPU queue submit command buffer rejected handle=0x{x} owner_match={} level={} state={} begin_flags=0x{x} pool_flags=0x{x} active_users={}\n",
+                        .{ @intFromPtr(valid_cb), valid_cb.impl.owner == q.owner, valid_cb.impl.level, valid_cb.impl.state, valid_cb.impl.begin_flags, valid_cb.impl.pool.flags, command_buffer_active_users[commandBufferSlot(valid_cb)].load(.acquire) },
+                    );
+                }
                 return queueSubmitFailed(@src().line);
             }
             const cb_slot = @divExact(@intFromPtr(valid_cb) - @intFromPtr(&command_buffer_objects), @sizeOf(CommandBufferObj));
