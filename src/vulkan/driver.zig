@@ -2059,11 +2059,11 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
             pipeline_rendering_create_info_stype => {
                 if (seen_rendering) return null;
                 const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
-                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or info.color_attachment_formats.?[0] != 44)) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
+                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !transferableColorFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
                 const color_format = if (info.color_attachment_count == 0) 0 else info.color_attachment_formats.?[0];
                 // ZPU's dynamic-rendering attachment path is deliberately
                 // bounded to the same formats accepted by vkCmdBeginRendering.
-                if (color_format != 0 and color_format != 44) return null;
+                if (color_format != 0 and !transferableColorFormat(color_format)) return null;
                 rendering = .{ .view_mask = info.view_mask, .color_format = color_format, .depth_format = info.depth_attachment_format, .stencil_format = info.stencil_attachment_format };
                 seen_rendering = true;
             },
@@ -3665,9 +3665,9 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // and vkCreateImage both receive the tiling explicitly.
     _ = tiling;
     return switch (format) {
-        37 => 0x1 | 0x2 | 0x4,
+        37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
-        44 => 0x1 | 0x2 | 0x4 | 0x10,
+        44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         124 => 0x2 | 0x20,
         126 => 0x2 | 0x20,
         else => 0,
@@ -3698,9 +3698,9 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
     out.* = switch (format) {
-        37 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
-        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
@@ -6044,7 +6044,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
             const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
             if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
             const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
-            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or dynamic_info.color_attachment_formats.?[0] != 44)) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !transferableColorFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
             inherited_dynamic = true;
             inherited_dynamic_view_mask = dynamic_info.view_mask;
             inherited_dynamic_color_format = if (dynamic_info.color_attachment_count == 0) 0 else dynamic_info.color_attachment_formats.?[0];
@@ -6635,7 +6635,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
                 c.impl.invalid = true;
                 return;
             }
-            if (color_image == null and inherited_color_format != 44) {
+            if (color_image == null and !transferableColorFormat(inherited_color_format)) {
                 c.impl.invalid = true;
                 return;
             }
@@ -9165,8 +9165,17 @@ fn profileBlendEquation(op: i32, source: f32, destination: f32) ?f32 {
     };
 }
 
-fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+fn colorStorageIndices(format: i32) ?[4]usize {
+    return switch (format) {
+        37 => .{ 0, 1, 2, 3 },
+        44 => .{ 2, 1, 0, 3 },
+        else => null,
+    };
+}
+
+fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+    const storage_indices = colorStorageIndices(format) orelse return null;
     var source: [4]f32 = undefined;
     if (fragment_bool) {
         if (output.len < 4) return null;
@@ -9180,12 +9189,8 @@ fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8, color
             value.* = std.math.clamp(component, 0, 1);
         }
     }
-    const destination: [4]f32 = .{
-        @as(f32, @floatFromInt(bytes[2])) / 255.0,
-        @as(f32, @floatFromInt(bytes[1])) / 255.0,
-        @as(f32, @floatFromInt(bytes[0])) / 255.0,
-        @as(f32, @floatFromInt(bytes[3])) / 255.0,
-    };
+    var destination: [4]f32 = undefined;
+    for (&destination, 0..) |*value, channel| value.* = @as(f32, @floatFromInt(bytes[storage_indices[channel]])) / 255.0;
     var result = source;
     if (blend.enable != 0) {
         for (0..4) |channel| {
@@ -9199,9 +9204,6 @@ fn profileWriteColor(bytes: []u8, fragment_bool: bool, output: []const u8, color
     }
     var rgba: [4]u8 = undefined;
     for (&rgba, 0..) |*value, index| value.* = @intFromFloat(std.math.clamp(result[index], 0, 1) * 255.0);
-    // Vulkan's color-write mask is expressed in logical RGBA order while
-    // ZPU's BGRA8 image bytes are stored in B,G,R,A order.
-    const storage_indices = [_]usize{ 2, 1, 0, 3 };
     for (storage_indices, 0..) |storage_index, channel| {
         if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) bytes[storage_index] = rgba[channel];
     }
@@ -9212,12 +9214,25 @@ test "scalar profile color write mask preserves disabled channels" {
     var bytes = [_]u8{ 11, 22, 33, 44 };
     var output = [_]u8{0} ** 16;
     for ([_]f32{ 1, 0.5, 0, 0.25 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, false, &output, 0x5, .{}));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0x5, .{}));
     try std.testing.expectEqual([_]u8{ 0, 22, 255, 44 }, bytes);
     bytes = .{ 11, 22, 33, 44 };
     var boolean = [_]u8{ 0xff, 0, 0, 0 };
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, true, &boolean, 0x8, .{}));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, true, &boolean, 0x8, .{}));
     try std.testing.expectEqual([_]u8{ 11, 22, 33, 255 }, bytes);
+}
+
+test "scalar profile color writes preserve RGBA and BGRA storage order" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 1, 0.5, 0.25, 1 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+
+    var rgba = [_]u8{0} ** 4;
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&rgba, 37, false, &output, 0xf, .{}));
+    try std.testing.expectEqual([_]u8{ 255, 127, 63, 255 }, rgba);
+
+    var bgra = [_]u8{0} ** 4;
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, 44, false, &output, 0xf, .{}));
+    try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
 }
 
 test "scalar profile color blending uses source and destination factors" {
@@ -9225,7 +9240,7 @@ test "scalar profile color blending uses source and destination factors" {
     var output = [_]u8{0} ** 16;
     for ([_]f32{ 1, 0, 0, 0.5 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
     const blend = ProfileBlendState{ .enable = 1, .src_color_factor = 6, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, false, &output, 0xf, blend));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0xf, blend));
     try std.testing.expectEqual(@as(u8, 127), bytes[2]);
     try std.testing.expectEqual(@as(u8, 0), bytes[1]);
     try std.testing.expectEqual(@as(u8, 0), bytes[0]);
@@ -9234,7 +9249,7 @@ test "scalar profile color blending uses source and destination factors" {
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
         bytes = .{ 0, 0, 0, 255 };
-        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, false, &output, 0xf, blend));
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0xf, blend));
     }
 }
 
@@ -9428,7 +9443,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
                 if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
             }
-            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, .{
+            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, .{
                 .enable = op.pipeline.color_blend_enable,
                 .src_color_factor = op.pipeline.src_color_blend_factor,
                 .dst_color_factor = op.pipeline.dst_color_blend_factor,
@@ -10624,10 +10639,12 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
         if (subpass_index == 0) has_color = subpass_has_color else if (subpass_has_color != has_color) return .{};
         const depth = subpass.depth_stencil_attachment;
         if (depth) |reference| {
-            const expected_attachment: u32 = if (has_color) 1 else 0;
-            if (reference.attachment != expected_attachment) return .{};
-            if (subpass_index != 0 and !has_depth) return .{};
-            has_depth = true;
+            if (reference.attachment != 0xffff_ffff) {
+                const expected_attachment: u32 = if (has_color) 1 else 0;
+                if (reference.attachment != expected_attachment) return .{};
+                if (subpass_index != 0 and !has_depth) return .{};
+                has_depth = true;
+            } else if (subpass_index != 0 and has_depth) return .{};
         } else if (subpass_index != 0 and has_depth) return .{};
     }
     if (!has_color and !has_depth) return .{};
@@ -12903,7 +12920,12 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .layer_count = framebuffer.layers } });
     if (clear_color or clear_depth) {
         if (color_image) |color_target| {
-            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = .{ @intFromFloat(std.math.clamp(color[2], 0, 1) * 255), @intFromFloat(std.math.clamp(color[1], 0, 1) * 255), @intFromFloat(std.math.clamp(color[0], 0, 1) * 255), @intFromFloat(std.math.clamp(color[3], 0, 1) * 255) }, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
+            var clear_bytes = [4]u8{ 0, 0, 0, 0 };
+            if (clear_color) {
+                for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
+                if (color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
+            }
+            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
         } else if (depth) |depth_image| if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .layer_count = framebuffer.layers } });
     }
 }
@@ -12934,7 +12956,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             return;
         };
         tracked_color_layout = commandBufferImageLayout(command_buffer, view.image);
-        if (view.image.owner != command_buffer.impl.owner or view.aspect_mask != 1 or view.usage & 0x10 == 0 or view.image.format != 44 or tracked_color_layout != attachment.image_layout or view.base_array_layer >= view.image.array_layers or view.layer_count < ci.layer_count or ci.layer_count > view.image.array_layers - view.base_array_layer) {
+        if (view.image.owner != command_buffer.impl.owner or view.aspect_mask != 1 or view.usage & 0x10 == 0 or !transferableColorFormat(view.image.format) or tracked_color_layout != attachment.image_layout or view.base_array_layer >= view.image.array_layers or view.layer_count < ci.layer_count or ci.layer_count > view.image.array_layers - view.base_array_layer) {
             command_buffer.impl.invalid = true;
             return;
         }
@@ -16477,7 +16499,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u64, heap_size), memory_properties.memory_heaps[0].size);
         var format_properties: FormatProperties = undefined;
         getFormatProperties(physical[0], 44, &format_properties);
-        try std.testing.expectEqual(@as(u32, 0xd081), format_properties.optimal_tiling_features);
+        try std.testing.expectEqual(@as(u32, 0xd181), format_properties.optimal_tiling_features);
         var image_format_properties: ImageFormatProperties = undefined;
         try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 44, 1, 0, 0x13, 0, &image_format_properties));
         try std.testing.expectEqual(@as(u32, 1), image_format_properties.sample_counts);
@@ -17058,7 +17080,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(@as(i32, 44), dynamic_pipeline_object.rendering_color_format);
     try std.testing.expectEqual(@as(i32, 126), dynamic_pipeline_object.rendering_depth_format);
     dynamic_pipeline_object.execution_abi = .cpu_cube_v1;
-    dynamic_pipeline_formats[0] = 37;
+    dynamic_pipeline_formats[0] = 43;
     const dynamic_pipeline_states_before_rejection = graphics_pipeline_state;
     var invalid_dynamic_pipeline = [_]usize{0xfeed_face};
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&dynamic_pipeline_info), null, &invalid_dynamic_pipeline));
@@ -19591,15 +19613,15 @@ test "all physical queries cover success boundaries and invalid handles" {
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
     const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
-        .{ .format = 37, .linear = 0xd001, .optimal = 0xd001, .buffer = 0, .linear_usage = 0x7, .optimal_usage = 0x7 },
+        .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .linear_usage = 0x4, .optimal_usage = 0x4 },
-        .{ .format = 44, .linear = 0xd081, .optimal = 0xd081, .buffer = 0, .linear_usage = 0x17, .optimal_usage = 0x17 },
+        .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
     };
     for (format_cases) |case| {
         getFormatProperties(p, case.format, &format);
         try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = case.linear, .optimal_tiling_features = case.optimal, .buffer_features = case.buffer }, format);
-        for (0..2) |tiling| for (1..0x40) |usage| {
+        for (0..2) |tiling| for (1..0x100) |usage| {
             var properties = std.mem.zeroes(ImageFormatProperties);
             const allowed_usage = if (tiling == 0) case.optimal_usage else case.linear_usage;
             const supported = allowed_usage != 0 and usage & ~@as(usize, allowed_usage) == 0;
@@ -20447,13 +20469,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     properties.p_next = null;
     var format = PhysicalDeviceFormatProperties2{ .s_type = 1000059002, .p_next = null, .format_properties = std.mem.zeroes(FormatProperties) };
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u32, 0xd001), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u32, 0xd181), format.format_properties.optimal_tiling_features);
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(FormatProperties3));
     var format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xffff_ffff_ffff_ffff, .optimal_tiling_features = 0xffff_ffff_ffff_ffff, .buffer_features = 0xffff_ffff_ffff_ffff };
     format.p_next = @ptrCast(&format3);
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u64, 0xd001), format3.optimal_tiling_features);
-    try std.testing.expectEqual(@as(u64, 0xd001), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xd181), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xd181), format3.linear_tiling_features);
     var duplicate_format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xaaaa, .optimal_tiling_features = 0xbbbb, .buffer_features = 0xcccc };
     format3.p_next = @ptrCast(&duplicate_format3);
     format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
@@ -22528,7 +22550,7 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const area = RenderingAreaInfo{ .s_type = 1000470003, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = @ptrCast(&image_info.format), .depth_attachment_format = 0, .stencil_attachment_format = 0 };
     getRenderingAreaGranularity(ctx.device, &area, &granularity);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, granularity);
-    var unsupported_area_format: i32 = 37;
+    var unsupported_area_format: i32 = 43;
     var bad_area = area;
     bad_area.color_attachment_formats = @ptrCast(&unsupported_area_format);
     granularity = .{ .width = 0xdead, .height = 0xbeef };
@@ -26991,6 +27013,20 @@ test "traditional render passes honor load operations and image layout transitio
     const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
     var framebuffer: usize = 0;
     try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    const unused_depth_ref = AttachmentReference{ .attachment = 0xffff_ffff, .layout = 0 };
+    var subpass_with_unused_depth = subpass;
+    subpass_with_unused_depth.depth_stencil_attachment = @ptrCast(&unused_depth_ref);
+    var unused_depth_render_info = render_info;
+    unused_depth_render_info.subpasses = @ptrCast(&subpass_with_unused_depth);
+    var unused_depth_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &unused_depth_render_info, null, &unused_depth_render_pass));
+    try std.testing.expect(validRenderPassLocked(unused_depth_render_pass).?.framebuffer_supported);
+    var unused_depth_framebuffer_info = framebuffer_info;
+    unused_depth_framebuffer_info.render_pass = unused_depth_render_pass;
+    var unused_depth_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &unused_depth_framebuffer_info, null, &unused_depth_framebuffer));
+    destroyFramebuffer(ctx.device, unused_depth_framebuffer, null);
+    destroyRenderPass(ctx.device, unused_depth_render_pass, null);
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
