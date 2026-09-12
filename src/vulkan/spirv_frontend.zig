@@ -32,6 +32,7 @@ const Decorations = struct {
     binding: ?u32 = null,
     descriptor_set: ?u32 = null,
     builtin_position: bool = false,
+    flat: bool = false,
     block: bool = false,
 };
 const Entry = struct { stage: ir.Stage, function: u32, name: []const u8, interfaces: []const u32 };
@@ -242,6 +243,7 @@ const decoration_schema = [_]ValueMeta{
     .{ .value = 1, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 2, .supported = true },
     .{ .value = 11, .supported = true, .operands = .{ .min = 1, .max = 1 } },
+    .{ .value = 14, .supported = true },
     .{ .value = 30, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 33, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 34, .supported = true, .operands = .{ .min = 1, .max = 1 } },
@@ -787,6 +789,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                     11 => if (!decorations[target].builtin_position and w[2] == 0) {
                         decorations[target].builtin_position = true;
                     } else return error.Unsupported,
+                    14 => if (!decorations[target].flat) {
+                        decorations[target].flat = true;
+                    } else return error.Malformed,
                     30 => if (decorations[target].location == null) {
                         decorations[target].location = w[2];
                     } else return error.Malformed,
@@ -1420,10 +1425,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             else => return error.Unsupported,
         };
         var shape: ir.Type = undefined;
-        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position };
+        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .flat = decorations[index].flat };
         const pointee = nodes[try id(nodes, pointer.b)];
         if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
-            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position) return error.Unsupported;
+            if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
             for (pointee.words, 0..) |member, member_index| {
                 const builtin = member_builtins[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
@@ -1464,8 +1469,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 interface.members[member_index] = .{ .ty = member_shape, .offset = offset };
             }
             if (storage == .uniform) {
-                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position) return error.Unsupported;
-            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position) return error.Unsupported;
+                if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
+            } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
         } else if (requested_stage == .compute and variable.a == 12) {
             if (pointee.kind == .structure and decorations[try id(nodes, pointer.b)].block and pointee.words.len == 1) {
                 shape = try resultShape(nodes, pointee.words[0]);
@@ -1474,11 +1479,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 interface.members[0] = .{ .ty = shape, .offset = member_offsets[@as(usize, pointer.b) * 16] orelse return error.Unsupported };
                 if (interface.members[0].offset != 0) return error.Unsupported;
             } else shape = try resultShape(nodes, pointer.b);
-            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position) return error.Unsupported;
+            if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].flat) return error.Unsupported;
         } else {
             shape = try resultShape(nodes, pointer.b);
             if ((decorations[index].location == null) == !decorations[index].builtin_position or decorations[index].binding != null or decorations[index].descriptor_set != null) return error.Unsupported;
             if (decorations[index].builtin_position and !(storage == .output and requested_stage == .vertex and shape.scalar == .f32 and shape.columns == 4)) return error.Unsupported;
+            if (decorations[index].flat and !((storage == .output and requested_stage == .vertex) or (storage == .input and requested_stage == .fragment))) return error.Unsupported;
         }
         interface.ty = shape;
         try interfaces.append(allocator, interface);
@@ -2845,14 +2851,18 @@ test "profile compiles selected straight-line vertex to owned canonical IR" {
     try std.testing.expectEqual(ir.Op.output, program.instructions[2].op);
     try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00", program.bytes[0..8]);
     try std.testing.expectEqualSlices(u8, &.{
-        90, 80, 85, 73, 82,  51,  68,  0,   1,   0,   0,   0,   2,   0,   0,   0,   0, 4, 0, 0, 0, 109, 97, 105, 110, 1, 0, 0, 0,
-        1,  3,  4,  1,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0, 3, 0, 0,   0,  0,   3,   1, 1, 0, 0,
-        0,  0,  4,  0,  0,   0,   0,   0,   128, 63,  1,   3,   4,   1,   4,   0,   0, 0, 0, 0, 0, 0,   0,  0,   0,   0, 0, 0, 0,
-        0,  0,  0,  0,  0,   0,   0,   0,   0,   18,  3,   4,   1,   2,   0,   0,   0, 0, 0, 0, 0, 1,   0,  0,   0,   0, 0, 0, 0,
+        0x5a, 0x50, 0x55, 0x49, 0x52, 0x33, 0x44, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 0x01, 0x00, 0x00, 0x00, 0x01, 0x03, 0x04,
+        0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x00, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x80, 0x3f, 0x01, 0x03, 0x04, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x12, 0x03, 0x04, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
     }, program.bytes);
     try std.testing.expectEqualSlices(u8, &.{
-        147, 176, 210, 157, 182, 241, 166, 53, 43, 75, 183, 222, 184, 184, 234, 234,
-        215, 129, 120, 163, 36,  111, 87,  19, 0,  16, 171, 170, 61,  214, 239, 158,
+        214, 105, 39, 65, 200, 5,   170, 212, 193, 169, 237, 220, 218, 113, 33,  150,
+        96,  24,  35, 46, 137, 171, 110, 125, 73,  84,  12,  15,  143, 116, 127, 68,
     }, &program.identity.digest);
     var clone = try program.clone(std.testing.allocator);
     defer clone.deinit(std.testing.allocator);
@@ -4794,12 +4804,24 @@ test "Chromium Skia relaxed-precision vertex shader compiles" {
     try std.testing.expectEqual(ir.Storage.push_constant, program.interfaces[6].storage);
 }
 
+test "Chromium Skia flat-color vertex shader preserves interpolation mode" {
+    const bytes align(4) = @embedFile("fixtures/chromium_skia_vertex_flat.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), program.interfaces.len);
+    try std.testing.expectEqual(@as(?u32, 0), program.interfaces[2].location);
+    try std.testing.expect(program.interfaces[2].flat);
+    try std.testing.expect(program.interfaces[3].builtin_position);
+    try std.testing.expectEqual(ir.Storage.push_constant, program.interfaces[4].storage);
+}
+
 test "specialization uniform matrix and fragment canonical identities are golden" {
     const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
     const cases = .{
-        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 283), @as(usize, 9), @as(usize, 2), [32]u8{ 242, 93, 216, 29, 239, 147, 201, 3, 137, 2, 38, 142, 165, 61, 60, 169, 8, 175, 106, 183, 205, 163, 191, 253, 124, 28, 118, 43, 152, 86, 230, 249 } },
-        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 150), @as(usize, 4), @as(usize, 2), [32]u8{ 30, 212, 169, 98, 196, 78, 72, 125, 143, 18, 20, 237, 172, 191, 75, 237, 76, 143, 228, 48, 240, 29, 76, 137, 99, 203, 167, 140, 34, 44, 186, 23 } },
-        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 85), @as(usize, 2), @as(usize, 1), [32]u8{ 30, 165, 50, 56, 182, 94, 19, 153, 156, 158, 78, 65, 182, 13, 122, 116, 179, 148, 44, 58, 254, 23, 145, 87, 22, 132, 220, 133, 154, 106, 223, 87 } },
+        .{ &rich_vertex, ir.Stage.vertex, &[_]Specialization{.{ .id = 7, .bytes = &replacement }}, @as(usize, 285), @as(usize, 9), @as(usize, 2), [32]u8{ 91, 182, 18, 163, 40, 236, 162, 38, 201, 93, 239, 87, 6, 77, 238, 83, 227, 69, 100, 78, 203, 32, 223, 99, 22, 209, 4, 252, 64, 43, 183, 7 } },
+        .{ &uniform_vertex, ir.Stage.vertex, &[_]Specialization{}, @as(usize, 152), @as(usize, 4), @as(usize, 2), [32]u8{ 215, 149, 142, 75, 106, 244, 255, 170, 14, 102, 161, 23, 23, 206, 241, 107, 114, 19, 78, 206, 73, 233, 194, 42, 222, 226, 87, 124, 2, 85, 166, 126 } },
+        .{ &bool_fragment, ir.Stage.fragment, &[_]Specialization{}, @as(usize, 86), @as(usize, 2), @as(usize, 1), [32]u8{ 69, 93, 130, 159, 244, 29, 10, 39, 146, 253, 203, 169, 5, 31, 50, 43, 201, 163, 87, 212, 73, 51, 115, 123, 237, 101, 64, 37, 95, 78, 123, 181 } },
     };
     inline for (cases) |case| {
         var program = try compile(std.testing.allocator, case[0], case[1], "main", case[2]);

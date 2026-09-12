@@ -22,3 +22,7 @@ block, member-decorated `sk_PerVertex`, and output access chains.
 `chromium_skia_vertex_relaxed.spvasm` captures a later Chromium Skia vertex
 shader with relaxed-precision decorations, multiple `vec4` inputs and
 varyings, and function-local storage.
+
+`chromium_skia_vertex_flat.spvasm` captures Chromium's flat-color vertex path.
+It exercises `Flat` interpolation metadata on a `vec4` output while retaining
+the structured position and push-constant interfaces.

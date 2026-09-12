@@ -1377,6 +1377,7 @@ const ProfileVarying = struct {
     fragment_interface: u32,
     vertex_slot: u8,
     lanes: u8,
+    flat: bool = false,
 };
 const ProfileUniform = struct {
     interface: u32,
@@ -9455,7 +9456,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                         const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
                         const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
                         const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
-                        const value = (q0 * a + q1 * b + q2 * c) / denominator;
+                        const value = if (varying.flat) a else (q0 * a + q1 * b + q2 * c) / denominator;
                         if (!std.math.isFinite(value)) return;
                         std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
                     }
@@ -11624,7 +11625,7 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
     for (fragment.interfaces) |input| if (input.storage == .input) {
         var matched = false;
         for (vertex.interfaces) |output| if (output.storage == .output and output.location == input.location and output.builtin_position == input.builtin_position) {
-            matched = output.ty.scalar == input.ty.scalar and output.ty.columns == input.ty.columns and output.ty.rows == input.ty.rows;
+            matched = output.ty.scalar == input.ty.scalar and output.ty.columns == input.ty.columns and output.ty.rows == input.ty.rows and output.flat == input.flat;
             break;
         };
         if (!matched) return false;
@@ -11704,9 +11705,9 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             var matched = false;
             for (result.vertex_outputs[0..result.vertex_output_count], 0..) |vertex_interface_index, vertex_slot| {
                 const vertex_interface = vertex.interfaces[vertex_interface_index];
-                if (!vertex_interface.builtin_position and vertex_interface.location == interface.location and vertex_interface.ty.scalar == interface.ty.scalar and vertex_interface.ty.columns == interface.ty.columns and vertex_interface.ty.rows == interface.ty.rows) {
+                if (!vertex_interface.builtin_position and vertex_interface.location == interface.location and vertex_interface.ty.scalar == interface.ty.scalar and vertex_interface.ty.columns == interface.ty.columns and vertex_interface.ty.rows == interface.ty.rows and vertex_interface.flat == interface.flat) {
                     if (matched) return null;
-                    result.varyings[result.varying_count] = .{ .vertex_interface = vertex_interface_index, .fragment_interface = @intCast(index), .vertex_slot = @intCast(vertex_slot), .lanes = interface.ty.columns };
+                    result.varyings[result.varying_count] = .{ .vertex_interface = vertex_interface_index, .fragment_interface = @intCast(index), .vertex_slot = @intCast(vertex_slot), .lanes = interface.ty.columns, .flat = interface.flat };
                     result.varying_count += 1;
                     matched = true;
                 }
@@ -14323,6 +14324,33 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     defer test_allocations_before_failure = null;
     for (0..4096) |_| executeValidatedCommand(command, &context);
     for (0..4096) |_| executeValidatedCommand(indirect_command, &context);
+}
+
+test "scalar graphics profile preserves flat varying interpolation" {
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+        .{ .storage = .output, .ty = vec4, .location = 0, .flat = true },
+    };
+    var fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0, .flat = true },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = @constCast(&vertex_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = &fragment_interfaces, .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 16, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 109, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const empty_layout = Canonical{ .bytes = &.{}, .digest = .{0} ** 32 };
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &empty_layout));
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expect(contract.varyings[0].flat);
+    fragment_interfaces[0].flat = false;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &empty_layout));
+    try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &vi) == null);
 }
 
 test "scalar graphics profile contract is explicit and allocation free" {
