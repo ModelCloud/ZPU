@@ -1630,13 +1630,16 @@ const max_command_buffer_commands: usize = cpu_cube.max_batch_commands;
 // A submitted command stream can retain one instance of every live buffer
 // and image, and each of those can point at a distinct allocation.  Keep the
 // pin lists fixed-size so the submission hot path remains allocation-free.
-const max_resource_pins = max_child_objects * 2;
+const max_resource_pins = 1024;
 const max_memory_objects = 4096;
 const max_sampler_objects = 4000;
 // Chromium's Skia backend keeps a descriptor set live per draw-state
 // combination across its render-target cache, so this registry is sized for a
 // compositor rather than for the bounded child registries.
 const max_descriptor_set_objects = 4096;
+// Skia allocates an image per render target, texture upload and atlas page,
+// so images also need a compositor-scale registry.
+const max_image_objects = 4096;
 const heap_size: u64 = 256 * 1024 * 1024;
 const max_2d_extent: u32 = 8192;
 const max_image_array_layers: u32 = 256;
@@ -1683,8 +1686,8 @@ var buffer_objects: [max_buffer_objects]BufferObj = undefined;
 var buffer_state = [_]SlotState{.never} ** max_buffer_objects;
 var buffer_view_objects: [max_child_objects]BufferViewObj = undefined;
 var buffer_view_state = [_]SlotState{.never} ** max_child_objects;
-var image_objects: [max_child_objects]ImageObj = undefined;
-var image_state = [_]SlotState{.never} ** max_child_objects;
+var image_objects: [max_image_objects]ImageObj = undefined;
+var image_state = [_]SlotState{.never} ** max_image_objects;
 var fence_objects: [max_child_objects]FenceObj = undefined;
 var fence_state = [_]SlotState{.never} ** max_child_objects;
 var event_objects: [max_child_objects]EventObj = undefined;
@@ -6837,7 +6840,7 @@ test "secondary attachment clears bind inherited targets atomically" {
     var out_of_bounds = deferred;
     out_of_bounds.clear_attachments_deferred.rect.extent.width = 5;
     try std.testing.expect(commandForSecondaryExecution(out_of_bounds, &framebuffer, null, null, 2, -1, 0, 0, 1) == null);
-    var layouts = [_]i32{2} ** max_child_objects;
+    var layouts = [_]i32{2} ** max_image_objects;
     try std.testing.expect(!prevalidateCommand(deferred, undefined, &layouts));
     test_allocations_before_failure = 0;
     for (0..4096) |_| _ = commandForSecondaryExecution(deferred, &framebuffer, null, null, 2, -1, 0, 0, 1).?;
@@ -8588,7 +8591,7 @@ fn indirectFirstInstanceValid(op: IndirectDrawState) bool {
     return true;
 }
 
-fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_child_objects]i32) bool {
+fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_objects]i32) bool {
     switch (command) {
         .fill => |op| {
             if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
@@ -16458,7 +16461,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     if (!validDeviceLocked(q.owner)) return queueSubmitFailed(@src().line);
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return queueSubmitFailed(@src().line);
     if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return queueSubmitFailed(@src().line);
-    var layouts: [max_child_objects]i32 = undefined;
+    var layouts: [max_image_objects]i32 = undefined;
     for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
     var semaphore_states = [_]bool{false} ** max_child_objects;
     var timeline_states = [_]u64{0} ** max_child_objects;
@@ -19676,7 +19679,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const stale_sampler_command = Command{ .cube_draw = static_draw };
     destroySampler(device, stale_sampler, null);
     try std.testing.expect(validSamplerLocked(stale_sampler) == null);
-    var stale_sampler_layouts = [_]i32{0} ** max_child_objects;
+    var stale_sampler_layouts = [_]i32{0} ** max_image_objects;
     try std.testing.expect(!prevalidateCommand(stale_sampler_command, device, &stale_sampler_layouts));
     stale_descriptor_snapshot.sampler = saved_sampler;
     cmdEndRenderPass(commands[0]);
@@ -24173,7 +24176,7 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     destroyBuffer(ctx.device, src, null);
     const dead_src: *BufferObj = @ptrFromInt(src);
     const dead_dst: *BufferObj = @ptrFromInt(dst);
-    var validation_layouts = [_]i32{0} ** max_child_objects;
+    var validation_layouts = [_]i32{0} ** max_image_objects;
     try std.testing.expect(!prevalidateCommand(.{ .copy_buffer = .{ .src = dead_src, .dst = dead_dst, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 1 } } }, ctx.device, &validation_layouts));
     freeMemory(ctx.device, memory_a, null);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(ctx.device, memory_a, 0, 1, 0, &mapped));
@@ -24219,13 +24222,13 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     const live_image: *ImageObj = imageObjectForHandle(image).?;
     const live_src_object: *BufferObj = @ptrFromInt(live_src);
     const live_dst_object: *BufferObj = @ptrFromInt(live_dst);
-    var mismatched_layouts = [_]i32{0} ** max_child_objects;
+    var mismatched_layouts = [_]i32{0} ** max_image_objects;
     const mismatch_region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
     try std.testing.expect(!prevalidateCommand(.{ .buffer_to_image = .{ .src = live_src_object, .dst = live_image, .layout = 1, .region = mismatch_region } }, ctx.device, &mismatched_layouts));
     try std.testing.expect(!prevalidateCommand(.{ .image_to_buffer = .{ .src = live_image, .layout = 1, .dst = live_dst_object, .region = mismatch_region } }, ctx.device, &mismatched_layouts));
     const mismatch_copy = ImageCopy{ .src_subresource = mismatch_region.image_subresource, .src_offset = mismatch_region.image_offset, .dst_subresource = mismatch_region.image_subresource, .dst_offset = mismatch_region.image_offset, .extent = mismatch_region.image_extent };
     try std.testing.expect(!prevalidateCommand(.{ .copy_image = .{ .src = live_image, .src_layout = 1, .dst = live_image, .dst_layout = 1, .region = mismatch_copy } }, ctx.device, &mismatched_layouts));
-    var ownership_layouts = [_]i32{0} ** max_child_objects;
+    var ownership_layouts = [_]i32{0} ** max_image_objects;
     const wrong_owner: *DeviceObj = @ptrFromInt(8);
     try std.testing.expect(!prevalidateCommand(.{ .fill = .{ .dst = live_dst_object, .offset = 0, .size = 4, .data = 0 } }, wrong_owner, &ownership_layouts));
     try std.testing.expect(!prevalidateCommand(.{ .copy_buffer = .{ .src = live_src_object, .dst = live_dst_object, .region = .{ .src_offset = 0, .dst_offset = 0, .size = 4 } } }, wrong_owner, &ownership_layouts));
@@ -25665,7 +25668,7 @@ test "depth stencil image clear uses exact D32 depth semantics" {
     cmdClearDepthStencilImage(commands[0], image, 1, &value, 1, @ptrCast(&color_range));
     try std.testing.expect(commands[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
-    var mismatched_layouts = [_]i32{0} ** max_child_objects;
+    var mismatched_layouts = [_]i32{0} ** max_image_objects;
     const live_image: *ImageObj = imageObjectForHandle(image).?;
     try std.testing.expect(!prevalidateCommand(.{ .clear_depth = .{ .image = live_image, .layout = 1, .depth = value.depth } }, ctx.device, &mismatched_layouts));
     test_allocations_before_failure = 0;
@@ -27492,7 +27495,7 @@ test "bounded child registries fail safely while buffer handles recycle slots" {
         destroyImage(ctx.device, recycled, null);
     }
     exhausted = false;
-    for (0..max_child_objects + 1) |_| {
+    for (0..max_image_objects + 1) |_| {
         var handle: usize = 0;
         const result = createImage(ctx.device, &image_info, null, &handle);
         if (result == .error_out_of_host_memory) {
@@ -27768,8 +27771,12 @@ fn resetDeadChildSlotsForAbiTest() !void {
         try std.testing.expect(state != .live);
     }
     image_view_state = [_]SlotState{.never} ** max_image_view_objects;
+    for (image_state, 0..) |state, i| {
+        if (state == .live) std.debug.print("resetDeadChildSlotsForAbiTest leak: image[{d}]\n", .{i});
+        try std.testing.expect(state != .live);
+    }
+    image_state = [_]SlotState{.never} ** max_image_objects;
     const state_pairs = .{
-        .{ "image", &image_state },
         .{ "framebuffer", &framebuffer_state },
         .{ "render_pass", &render_pass_state },
         .{ "command_pool", &command_pool_state },
