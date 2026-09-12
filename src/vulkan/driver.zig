@@ -6224,7 +6224,15 @@ fn endCommandBuffer(cb: ?CommandBuffer) callconv(.c) Result {
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(c.impl.owner) or c.impl.state != 1 or c.impl.invalid or c.impl.active_query_pool != null or (c.impl.dynamic_rendering and !c.impl.dynamic_inheritance) or (c.impl.active_render_pass != null and !c.impl.render_pass_continue)) return .error_initialization_failed;
+    if (!validDeviceLocked(c.impl.owner) or c.impl.state != 1 or c.impl.invalid or c.impl.active_query_pool != null or (c.impl.dynamic_rendering and !c.impl.dynamic_inheritance) or (c.impl.active_render_pass != null and !c.impl.render_pass_continue)) {
+        if (failureDiagnosticsEnabled()) {
+            std.debug.print(
+                "ZPU end command buffer rejected handle=0x{x} device_valid={} level={} state={} invalid={} active_query={} dynamic_rendering={} dynamic_inheritance={} active_render_pass={} render_pass_continue={} commands={}/{}\n",
+                .{ @intFromPtr(c), validDeviceLocked(c.impl.owner), c.impl.level, c.impl.state, c.impl.invalid, c.impl.active_query_pool != null, c.impl.dynamic_rendering, c.impl.dynamic_inheritance, c.impl.active_render_pass != null, c.impl.render_pass_continue, c.impl.count, c.impl.commands.len },
+            );
+        }
+        return .error_initialization_failed;
+    }
     c.impl.state = 2;
     return .success;
 }
@@ -16293,8 +16301,8 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             if (valid_cb.impl.owner != q.owner or valid_cb.impl.level != 0 or valid_cb.impl.state != 2) {
                 if (failureDiagnosticsEnabled()) {
                     std.debug.print(
-                        "ZPU queue submit command buffer rejected handle=0x{x} owner_match={} level={} state={} begin_flags=0x{x} pool_flags=0x{x} active_users={}\n",
-                        .{ @intFromPtr(valid_cb), valid_cb.impl.owner == q.owner, valid_cb.impl.level, valid_cb.impl.state, valid_cb.impl.begin_flags, valid_cb.impl.pool.flags, command_buffer_active_users[commandBufferSlot(valid_cb)].load(.acquire) },
+                        "ZPU queue submit command buffer rejected handle=0x{x} owner_match={} level={} state={} invalid={} begin_flags=0x{x} pool_flags=0x{x} active_users={} active_query={} dynamic_rendering={} dynamic_inheritance={} active_render_pass={} render_pass_continue={} commands={}/{}\n",
+                        .{ @intFromPtr(valid_cb), valid_cb.impl.owner == q.owner, valid_cb.impl.level, valid_cb.impl.state, valid_cb.impl.invalid, valid_cb.impl.begin_flags, valid_cb.impl.pool.flags, command_buffer_active_users[commandBufferSlot(valid_cb)].load(.acquire), valid_cb.impl.active_query_pool != null, valid_cb.impl.dynamic_rendering, valid_cb.impl.dynamic_inheritance, valid_cb.impl.active_render_pass != null, valid_cb.impl.render_pass_continue, valid_cb.impl.count, valid_cb.impl.commands.len },
                     );
                 }
                 return queueSubmitFailed(@src().line);
