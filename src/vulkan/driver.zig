@@ -1620,6 +1620,7 @@ pub const CommandBuffer = *CommandBufferObj;
 
 const max_objects = 64;
 const max_child_objects = 64;
+const max_buffer_objects = 4096;
 const max_shader_modules = 4000;
 // A primary command buffer may contain a long ordered draw stream.  Allocate
 // this storage lazily on first begin so command-buffer creation stays cheap,
@@ -1674,8 +1675,8 @@ var device_state = [_]SlotState{.never} ** max_objects;
 var next_device_generation: u64 = 1;
 var memory_objects: [max_memory_objects]MemoryObj = undefined;
 var memory_state = [_]SlotState{.never} ** max_memory_objects;
-var buffer_objects: [max_child_objects]BufferObj = undefined;
-var buffer_state = [_]SlotState{.never} ** max_child_objects;
+var buffer_objects: [max_buffer_objects]BufferObj = undefined;
+var buffer_state = [_]SlotState{.never} ** max_buffer_objects;
 var buffer_view_objects: [max_child_objects]BufferViewObj = undefined;
 var buffer_view_state = [_]SlotState{.never} ** max_child_objects;
 var image_objects: [max_child_objects]ImageObj = undefined;
@@ -27185,7 +27186,8 @@ test "bounded child registries fail safely without reusing tombstones" {
     try std.testing.expect(exhausted);
     const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     exhausted = false;
-    for (0..max_child_objects + 1) |_| {
+    var created_buffers: usize = 0;
+    for (0..max_buffer_objects + 1) |_| {
         var handle: usize = 0;
         const result = createBuffer(ctx.device, &buffer_info, null, &handle);
         if (result == .error_out_of_host_memory) {
@@ -27193,7 +27195,9 @@ test "bounded child registries fail safely without reusing tombstones" {
             break;
         }
         try std.testing.expectEqual(Result.success, result);
+        created_buffers += 1;
     }
+    try std.testing.expect(created_buffers > max_child_objects);
     try std.testing.expect(exhausted);
     const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 1, .usage = 3, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
     exhausted = false;
