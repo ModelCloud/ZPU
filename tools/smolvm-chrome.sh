@@ -30,6 +30,7 @@ host_screenshot=${ZPU_HOST_SCREENSHOT:-$repo/docs/assets/zpu-chromium-google.png
 width=${ZPU_CHROME_WIDTH:-1280}
 height=${ZPU_CHROME_HEIGHT:-720}
 wait_budget=${ZPU_CHROME_WAIT:-10000}
+diagnose_failures=${ZPU_DIAGNOSE_FAILURES:-0}
 
 socket_root=/tmp/.X11-unix
 host_socket=$socket_root/X${display#:}
@@ -42,6 +43,8 @@ die() {
     printf 'zpu-chrome: %s\n' "$*" >&2
     exit 2
 }
+
+[[ $diagnose_failures == 0 || $diagnose_failures == 1 ]] || die 'ZPU_DIAGNOSE_FAILURES must be 0 or 1'
 
 run() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
@@ -273,13 +276,18 @@ launch_chrome() {
         XAUTHORITY=/run/zpu-xauth/Xauthority \
         VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
+        ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
         "$chrome_bin" --no-sandbox \
         --disable-gpu-sandbox \
         --headless \
+        --enable-gpu \
+        --use-angle=vulkan \
+        --enable-angle-features=exposeES32ForTesting \
         --ozone-platform=headless \
         --use-vulkan=native \
         --enable-features=Vulkan \
         --disable-vulkan-fallback-to-gl-for-testing \
+        --disable-software-compositing-fallback \
         --run-all-compositor-stages-before-draw \
         --virtual-time-budget="$wait_budget" \
         --window-size="${width},${height}" \
