@@ -1621,6 +1621,7 @@ pub const CommandBuffer = *CommandBufferObj;
 const max_objects = 64;
 const max_child_objects = 64;
 const max_buffer_objects = 4096;
+const max_image_view_objects = 4096;
 const max_shader_modules = 4000;
 // A primary command buffer may contain a long ordered draw stream.  Allocate
 // this storage lazily on first begin so command-buffer creation stays cheap,
@@ -1698,8 +1699,8 @@ var command_buffer_active_users = [_]std.atomic.Value(u32){std.atomic.Value(u32)
 var command_buffer_retire_pending = [_]bool{false} ** max_child_objects;
 var surface_objects: [max_child_objects]SurfaceObj = undefined;
 var surface_state = [_]SlotState{.never} ** max_child_objects;
-var image_view_objects: [max_child_objects]ImageViewObj = undefined;
-var image_view_state = [_]SlotState{.never} ** max_child_objects;
+var image_view_objects: [max_image_view_objects]ImageViewObj = undefined;
+var image_view_state = [_]SlotState{.never} ** max_image_view_objects;
 var sampler_objects: [max_sampler_objects]SamplerObj = undefined;
 var sampler_state = [_]SlotState{.never} ** max_sampler_objects;
 var framebuffer_objects: [max_child_objects]FramebufferObj = undefined;
@@ -27672,9 +27673,13 @@ fn resetDeadMemorySlotsForAbiTest() !void {
 
 fn resetDeadChildSlotsForAbiTest() !void {
     if (!builtin.is_test) return error.TestUnexpectedResult;
+    for (image_view_state, 0..) |state, i| {
+        if (state == .live) std.debug.print("resetDeadChildSlotsForAbiTest leak: image_view[{d}]\n", .{i});
+        try std.testing.expect(state != .live);
+    }
+    image_view_state = [_]SlotState{.never} ** max_image_view_objects;
     const state_pairs = .{
         .{ "image", &image_state },
-        .{ "image_view", &image_view_state },
         .{ "framebuffer", &framebuffer_state },
         .{ "render_pass", &render_pass_state },
         .{ "command_pool", &command_pool_state },
