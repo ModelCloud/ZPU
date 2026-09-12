@@ -238,6 +238,7 @@ const type_schema = [_]ValueMeta{
     .{ .value = 33, .supported = true },
 };
 const decoration_schema = [_]ValueMeta{
+    .{ .value = 0, .supported = true },
     .{ .value = 1, .supported = true, .operands = .{ .min = 1, .max = 1 } },
     .{ .value = 2, .supported = true },
     .{ .value = 11, .supported = true, .operands = .{ .min = 1, .max = 1 } },
@@ -776,6 +777,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 if (!meta.supported) return error.Unsupported;
                 const target = try id(nodes, w[0]);
                 switch (w[1]) {
+                    0 => {},
                     1 => if (decorations[target].spec_id == null) {
                         decorations[target].spec_id = w[2];
                     } else return error.Malformed,
@@ -4774,6 +4776,21 @@ test "Chromium Skia vertex shader executes push constants and structured outputs
     for (expected_clip, 0..) |expected, index| {
         try std.testing.expectEqual(expected, @as(f32, @bitCast(std.mem.readInt(u32, clip[index * 4 ..][0..4], .little))));
     }
+}
+
+test "Chromium Skia relaxed-precision vertex shader compiles" {
+    const bytes align(4) = @embedFile("fixtures/chromium_skia_vertex_relaxed.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 7), program.interfaces.len);
+    try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 2 }, program.interfaces[0].ty);
+    try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 4 }, program.interfaces[1].ty);
+    try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 4 }, program.interfaces[2].ty);
+    try std.testing.expectEqual(@as(?u32, 0), program.interfaces[3].location);
+    try std.testing.expectEqual(@as(?u32, 1), program.interfaces[4].location);
+    try std.testing.expect(program.interfaces[5].builtin_position);
+    try std.testing.expectEqual(ir.Storage.push_constant, program.interfaces[6].storage);
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {

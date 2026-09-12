@@ -18,3 +18,7 @@ report that seed and the mutated word offset so they can be replayed exactly.
 shader submitted by Chromium 152's Skia Vulkan backend during GPU-process
 startup. The fixture exercises `vec2` inputs and varyings, a push-constant
 block, member-decorated `sk_PerVertex`, and output access chains.
+
+`chromium_skia_vertex_relaxed.spvasm` captures a later Chromium Skia vertex
+shader with relaxed-precision decorations, multiple `vec4` inputs and
+varyings, and function-local storage.
