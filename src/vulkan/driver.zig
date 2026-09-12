@@ -4961,7 +4961,10 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (alloc != null or ci.s_type != 5 or !memoryAllocatePNextValid(ci.p_next) or ci.memory_type_index != 0 or ci.allocation_size == 0 or ci.allocation_size > heap_size) return .error_out_of_host_memory;
+    if (alloc != null or ci.s_type != 5 or !memoryAllocatePNextValid(ci.p_next) or ci.memory_type_index != 0 or ci.allocation_size == 0 or ci.allocation_size > heap_size) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU allocateMemory rejected alloc={} s_type={d} pnext_valid={} type_index={d} size={d}\n", .{ alloc != null, ci.s_type, memoryAllocatePNextValid(ci.p_next), ci.memory_type_index, ci.allocation_size });
+        return .error_out_of_host_memory;
+    }
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -5252,7 +5255,10 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage rejected alloc={} s_type={d} pnext={} flags=0x{x} type={d} allowed=0x{x} extent={d}x{d}x{d} mips={d} layers={d} samples={d} tiling={d} sharing={d} families={d} layout={d} format={d} usage=0x{x}\n", .{ alloc != null, ci.s_type, imageCreatePNextValid(ci.p_next, ci.format), ci.flags, ci.image_type, allowed_usage, ci.extent.width, ci.extent.height, ci.extent.depth, ci.mip_levels, ci.array_layers, ci.samples, ci.tiling, ci.sharing_mode, ci.queue_family_index_count, ci.initial_layout, ci.format, ci.usage });
+        return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
+    }
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
@@ -5307,7 +5313,10 @@ fn bindImageMemory(device: ?Device, handle: usize, memory_handle: usize, offset:
     const image = validImageLocked(handle) orelse return .error_initialization_failed;
     const memory = validMemoryLocked(memory_handle) orelse return .error_initialization_failed;
     const byte_size = imageByteSize(image) orelse return .error_initialization_failed;
-    if (!validDeviceLocked(d) or !validOwner(d, image.owner) or !validOwner(d, memory.owner) or image.memory != null or offset % 4 != 0 or offset > memory.bytes.len or byte_size > memory.bytes.len - offset) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or !validOwner(d, image.owner) or !validOwner(d, memory.owner) or image.memory != null or offset % 4 != 0 or offset > memory.bytes.len or byte_size > memory.bytes.len - offset) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bindImageMemory rejected bound={} offset={d} memory_len={d} byte_size={d}\n", .{ image.memory != null, offset, memory.bytes.len, byte_size });
+        return .error_initialization_failed;
+    }
     image.memory = memory;
     image.offset = offset;
     return .success;
