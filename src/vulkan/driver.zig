@@ -11776,7 +11776,27 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const attachment = cb.attachments.?[0];
         const blend_enable = try bool32(attachment.blend_enable);
         if (attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask & ~@as(u32, 0xf) != 0) return pipelineInvalid(@src().line);
-        if (blend_enable != 0 and (profile_contract == null or attachment.src_color_blend_factor > 14 or attachment.dst_color_blend_factor > 14 or attachment.src_alpha_blend_factor > 14 or attachment.dst_alpha_blend_factor > 14)) return pipelineInvalid(@src().line);
+        if (blend_enable != 0 and
+            (profile_contract == null or
+                attachment.src_color_blend_factor > 14 or
+                attachment.dst_color_blend_factor > 14 or
+                attachment.src_alpha_blend_factor > 14 or
+                attachment.dst_alpha_blend_factor > 14))
+        {
+            if (failureDiagnosticsEnabled()) std.debug.print(
+                "ZPU graphics blend rejected profile={} srcColor={} dstColor={} colorOp={} srcAlpha={} dstAlpha={} alphaOp={}\n",
+                .{
+                    profile_contract != null,
+                    attachment.src_color_blend_factor,
+                    attachment.dst_color_blend_factor,
+                    attachment.color_blend_op,
+                    attachment.src_alpha_blend_factor,
+                    attachment.dst_alpha_blend_factor,
+                    attachment.alpha_blend_op,
+                },
+            );
+            return pipelineInvalid(@src().line);
+        }
         try w.u32le(blend_enable);
         try w.i32le(attachment.src_color_blend_factor);
         try w.i32le(attachment.dst_color_blend_factor);
