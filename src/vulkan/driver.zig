@@ -1763,6 +1763,7 @@ var render_diagnostic_text_texture_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_glyph_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_page_target_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_page_target_matches = std.atomic.Value(u32).init(0);
 var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
@@ -1806,6 +1807,11 @@ fn failureDiagnosticsEnabled() bool {
 fn renderDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+fn pageTargetDumpMatch() u32 {
+    const raw = std.c.getenv("ZPU_PAGE_TARGET_DUMP_MATCH") orelse return 1;
+    return @max(std.fmt.parseInt(u32, std.mem.span(raw), 10) catch 1, 1);
 }
 
 fn objectPoolExhausted(comptime object_name: []const u8) Result {
@@ -10171,8 +10177,11 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256)
         dumpDiagnosticImage(target, "ZPU_GLYPH_TARGET_DUMP", &render_diagnostic_glyph_target_dump);
-    if (target.width == 1024 and target.height == 512)
-        dumpDiagnosticImage(target, "ZPU_PAGE_TARGET_DUMP", &render_diagnostic_page_target_dump);
+    if (target.width == 1024 and target.height == 512) {
+        const match = render_diagnostic_page_target_matches.fetchAdd(1, .monotonic) + 1;
+        if (match >= pageTargetDumpMatch())
+            dumpDiagnosticImage(target, "ZPU_PAGE_TARGET_DUMP", &render_diagnostic_page_target_dump);
+    }
     if (diagnostic_draw == 305) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
     if (diagnostic_draw == 270) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
 }
