@@ -8728,7 +8728,7 @@ fn diagnoseCubeDrawResources(op: anytype) void {
         if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) dead = true;
     }
     if (op.descriptors.texture) |image| {
-        if (!liveImageObject(image) or image.memory == null or !liveMemoryObject(image.memory.?)) dead = true;
+        if (!liveImageObject(image) or !imageStorageValid(image)) dead = true;
     }
     if (op.descriptors.sampler) |sampler| {
         if (stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state)) |state| {
@@ -8736,7 +8736,7 @@ fn diagnoseCubeDrawResources(op: anytype) void {
         } else dead = true;
     }
     for (op.descriptors.sampled_images, 0..) |sampled, index| if (sampled.image) |image| {
-        if (!liveImageObject(image) or image.memory == null or !liveMemoryObject(image.memory.?)) {
+        if (!liveImageObject(image) or !imageStorageValid(image)) {
             dead = true;
             if (failureDiagnosticsEnabled()) std.debug.print("ZPU dead cube sampled index={d} image={x} image_live={} image_users={} memory={x} memory_live={} memory_state={s} memory_users={} memory_retire={} memory_storage_released={}\n", .{ index, @intFromPtr(image), liveImageObject(image), image.active_users.load(.acquire), if (image.memory) |memory| @intFromPtr(memory) else 0, image.memory != null and liveMemoryObject(image.memory.?), if (image.memory) |memory| if (stateForObject(MemoryObj, memory, &memory_objects, &memory_state)) |state| @tagName(state.*) else "missing" else "none", if (image.memory) |memory| memory.active_users.load(.acquire) else 0, if (image.memory) |memory| memory.retire_pending else false, if (image.memory) |memory| memory.storage_released else false });
         }
@@ -8831,8 +8831,8 @@ fn prevalidateProfileSampledImages(op: anytype, owner: *DeviceObj) bool {
         const sampled = op.descriptors.sampled_images[sampled_profile.binding];
         const image = sampled.image orelse return deadResource();
         const sampler = sampled.sampler orelse return deadResource();
-        if (!liveImageObject(image) or image.memory == null or !liveMemoryObject(image.memory.?)) return deadResource();
-        if (image.owner != owner or image.memory.?.owner != owner) return wrongSubmittingDevice();
+        if (!liveImageObject(image) or !imageStorageValid(image)) return deadResource();
+        if (image.owner != owner or (image.memory != null and image.memory.?.owner != owner)) return wrongSubmittingDevice();
         if (!imageStorageValid(image)) return false;
         if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
         if (sampler.owner != owner) return wrongSubmittingDevice();
@@ -12480,7 +12480,13 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (!layout.owner.eql(d) or (render_pass != null and !render_pass.?.owner.eql(d)) or (render_pass != null and ci.subpass >= render_pass.?.subpass_count)) return pipelineInvalid(@src().line);
     var dynamic_render_compatibility: ?Canonical = null;
     if (dynamic_rendering_state) |state| {
-        dynamic_render_compatibility = try pipelineRenderingCompatibility(state);
+        dynamic_render_compatibility = pipelineRenderingCompatibility(state) catch |err| {
+            if (failureDiagnosticsEnabled()) std.debug.print(
+                "ZPU graphics pipeline rendering compatibility failed error={s} view_mask={} color_format={} depth_format={} stencil_format={}\n",
+                .{ @errorName(err), state.view_mask, state.color_format, state.depth_format, state.stencil_format },
+            );
+            return err;
+        };
     }
     defer if (dynamic_render_compatibility) |*compatibility| compatibility.deinit();
     var w: CanonicalWriter = .{};
@@ -13639,7 +13645,13 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const ci = info orelse return imageViewInvalid("create-info");
     const out = output orelse return imageViewInvalid("output");
     const pnext = imageViewCreatePNextState(ci.p_next);
-    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return imageViewInvalid("structure");
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU image view rejected reason=structure s_type={} pnext_valid={} flags=0x{x} view_type={} components={any} mip={} levels={} aspect=0x{x} base_layer={} layers={} usage_present={} usage=0x{x}\n",
+            .{ ci.s_type, pnext.valid, ci.flags, ci.view_type, ci.components, ci.subresource_range.base_mip_level, ci.subresource_range.level_count, ci.subresource_range.aspect_mask, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, pnext.has_usage, pnext.usage },
+        );
+        return .error_initialization_failed;
+    }
     if (pnext.has_ycbcr_conversion) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU image view rejected reason=ycbcr\n", .{});
         return .error_format_not_supported;
