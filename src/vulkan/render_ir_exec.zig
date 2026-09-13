@@ -716,7 +716,15 @@ pub const Executor = struct {
                 .storage => {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
-                    result = try readValue(instruction.ty, try findBinding(bindings, interface_index));
+                    const interface = self.program.interfaces[interface_index];
+                    const bytes = if (interface.descriptor_set == null and interface.binding == null) blk: {
+                        var offset: usize = 0;
+                        for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
+                            offset += try byteSize(item.ty);
+                        };
+                        break :blk self.output_scratch[offset..];
+                    } else try findBinding(bindings, interface_index);
+                    result = try readValue(instruction.ty, bytes);
                 },
                 .image_sample_implicit_lod => result = try sample(
                     try findSampledImage(bindings, instruction.operands[0]),

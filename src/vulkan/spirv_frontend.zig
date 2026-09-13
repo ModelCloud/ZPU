@@ -2441,7 +2441,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const pointer_node = nodes[try id(nodes, pointer_id)];
                 op = if (pointer_node.kind == .variable) switch (pointer_node.a) {
                     2, 9 => .uniform,
-                    12 => .storage,
+                    // Storage-class Output has the same bounded read/write
+                    // representation as the compute storage-buffer subset.
+                    // In particular, fragment shaders can write their color
+                    // output and subsequently reload it before the final
+                    // store. It must not be misclassified as an input.
+                    3, 12 => .storage,
                     else => .input,
                 } else .extract;
             }
@@ -4727,6 +4732,34 @@ test "boolean true and false constants retain exact frontend values" {
     try std.testing.expectEqualSlices(u8, &.{0}, specialized.instructions[0].literal);
     const invalid_specialization = [_]u8{ 2, 0, 0, 0 };
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &bool_fragment, .fragment, "main", &.{.{ .id = 9, .bytes = &invalid_specialization }}));
+}
+
+test "fragment profile reloads a prior output through storage" {
+    var source = bool_fragment;
+    // Insert `OpStore %5 %6; %9 = OpLoad %bool %5` before the existing
+    // output store, then feed that load back into the final store. The output
+    // storage class is a writable per-invocation variable, not a fragment
+    // input.
+    source[3] = 10;
+    const store = testOpcodeOffset(&source, 62, 0).?;
+    source[store + 2] = 9;
+    const words = try testInsertWords(std.testing.allocator, &source, store, &.{
+        (3 << 16) | 62, 5, 6,
+        (4 << 16) | 61, 2, 9,
+        5,
+    });
+    defer std.testing.allocator.free(words);
+    var program = try compile(std.testing.allocator, words, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var saw_storage = false;
+    for (program.instructions) |instruction| saw_storage = saw_storage or instruction.op == .storage;
+    try std.testing.expect(saw_storage);
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    var output = [_]u8{0} ** 4;
+    try executor.execute(&.{}, &.{.{ .interface = 0, .bytes = &output }});
+    try std.testing.expectEqual(@as(u8, 1), output[0]);
 }
 
 test "profile distinguishes malformed from unsupported" {
