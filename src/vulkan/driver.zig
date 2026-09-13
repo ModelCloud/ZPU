@@ -17259,6 +17259,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
                 const prevalid = prevalidateCommand(command, q.owner, &layouts);
                 const query_valid = queryCommandSequenceValid(command, list[0..count], submit_index, command_buffer_index, command_index);
                 if (!prevalid or !query_valid) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU queue submit command rejected submit={d} command_buffer={d} command={d} kind={s} prevalid={} query_valid={}\n", .{ submit_index, command_buffer_index, command_index, @tagName(command), prevalid, query_valid });
                     hit(.submission_atomicity);
                     return queueSubmitFailed(@src().line);
                 }
