@@ -7865,6 +7865,13 @@ fn legacyDependencyScopeValid(command_buffer: *const CommandBufferObj, src_stage
 }
 
 fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callconv(.c) void {
+    if (failureDiagnosticsEnabled()) {
+        lock();
+        if (validCommandBufferLocked(cb)) |command_buffer| {
+            std.debug.print("ZPU pipeline barrier2 entry cb=0x{x} invalid={} state={} memory={} buffers={} images={}\n", .{ @intFromPtr(command_buffer), command_buffer.impl.invalid, command_buffer.impl.state, if (info) |value| value.memory_barrier_count else 0, if (info) |value| value.buffer_memory_barrier_count else 0, if (info) |value| value.image_memory_barrier_count else 0 });
+        }
+        mutex.unlock();
+    }
     if (!dependencyInfoShapeValid(info)) {
         markCommandBufferInvalid(cb);
         return;
@@ -8174,7 +8181,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     lock();
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
-    if (failureDiagnosticsEnabled() and !c.impl.invalid) {
+    if (failureDiagnosticsEnabled()) {
         std.debug.print(
             "ZPU pipeline barrier cb=0x{x} srcStages=0x{x} dstStages=0x{x} dependencyFlags=0x{x} memory={d} buffers={d} images={d}\n",
             .{ @intFromPtr(c), src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, buffer_barrier_count, image_barrier_count },
