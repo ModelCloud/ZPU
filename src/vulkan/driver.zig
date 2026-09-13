@@ -8192,8 +8192,8 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     const c = validCommandBufferLocked(cb) orelse return;
     if (failureDiagnosticsEnabled()) {
         std.debug.print(
-            "ZPU pipeline barrier cb=0x{x} srcStages=0x{x} dstStages=0x{x} dependencyFlags=0x{x} memory={d} buffers={d} images={d}\n",
-            .{ @intFromPtr(c), src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, buffer_barrier_count, image_barrier_count },
+            "ZPU pipeline barrier cb=0x{x} invalid={} srcStages=0x{x} dstStages=0x{x} dependencyFlags=0x{x} memory={d} buffers={d} images={d}\n",
+            .{ @intFromPtr(c), c.impl.invalid, src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, buffer_barrier_count, image_barrier_count },
         );
         if (image_barrier_count <= max_api_items) if (image_barriers) |barriers| for (barriers[0..image_barrier_count], 0..) |barrier, index| {
             std.debug.print(
@@ -8278,7 +8278,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     }
     for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
     for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
-    if (failureDiagnosticsEnabled() and c.impl.invalid) std.debug.print("ZPU pipeline barrier became invalid after recording cb=0x{x} count={d}\n", .{ @intFromPtr(c), c.impl.count });
+    if (failureDiagnosticsEnabled()) std.debug.print("ZPU pipeline barrier recorded cb=0x{x} invalid={} count={d}\n", .{ @intFromPtr(c), c.impl.invalid, c.impl.count });
 }
 fn validPipelineStageMask(stage_mask: u32) bool {
     // The only queue family advertises graphics, compute, and transfer.
