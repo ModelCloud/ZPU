@@ -22,7 +22,7 @@ ZPU ICD, the ICD validates the call, and the CPU does the work. 🧠➡️🖼�
 <p align="center">
   <img src="docs/assets/zpu-chromium-google.png" alt="ZPU rendering google.com in headless Chromium" width="720">
   <br>
-  <em>SmolVM → Linux Desktop → Chromium: ZPU as the Vulkan driver rendering google.com headlessly with ANGLE.</em>
+  <em>SmolVM → Linux Desktop → packaged Chromium: native Skia Ganesh Vulkan raster/composition executes through ZPU's CPU Mosaic Vulkan path.</em>
 </p>
 
 <p align="center">
@@ -115,7 +115,7 @@ with Keyboard() as k:
 | Runtime Vulkan API ceiling | ✅ Vulkan **1.4.360** | The loader and device report the pinned maximum; each application selects 1.0, 1.1, 1.2, 1.3, or 1.4 at `vkCreateInstance`. |
 | Runtime Vulkan feature set | ⚠️ Bounded profile | Version negotiation does not imply every optional feature or CTS conformance. Feature bits and limits remain truthful and bounded; [`docs/api-policy.md`](docs/api-policy.md) is normative. |
 | Opt-in Metal-shaped CPU ABI | 🧪 Bounded core | `zpu_metal_render` plus owned buffers/textures, deferred CPU compute (including indirect dispatch and copied bindings), Metal 4 CPU command submission/argument tables, resource metadata, heap validation, ordered render/blit command buffers, and an explicit Apple object adapter; [`docs/metal-abi.md`](docs/metal-abi.md) documents the boundary and macOS byte-accuracy test. |
-| Chromium / ANGLE headless | ✅ `google.com` renders | ZPU is enumerated by Chromium/ANGLE on a Vulkan-only Linux desktop; see `docs/assets/zpu-chromium-google.png`. |
+| Chromium native Vulkan headless | ✅ Google/Bing + changing compositor fixture | Packaged guest Chromium reports `GaneshVulkan`, enabled Vulkan/rasterization/GPU composition, and zero GPU-process crashes while native ZPU graphics/Mosaic draw, transition, submit, and present counters advance. The launcher uses the ZPU ICD alone and does not use `exposeES32ForTesting`; see `docs/assets/zpu-chromium-google.png`. |
 | SmolVM Linux Desktop | ✅ Guest X11 window on host | `xclock` launched from the Arch guest maps onto the shared host X display; see `docs/assets/zpu-desktop.png`. |
 | SmolVM fluid desktop + simulated pointer | ✅ 60 Hz, p99 <= 17 ms | `tools/smolvm-fluid-desktop.sh` drives a guest `xtest_mouse` pointer while `vkcube` renders; see `docs/assets/zpu-fluid-desktop.png` and `test/smolvm_fluid_desktop.sh`. |
 | Emulated Linux input devices | ✅ zmouse / zkeyboard build + `zpu` PyPI package | `tools/zmouse.c` and `tools/zkeyboard.c` create `uinput` mouse/keyboard devices and listen on Unix sockets; the `zpu` package (and `tools/zinput.py`) exposes them to Python via `libzinput.so`. Install with `pip install zpu`; see `tools/smolvm-zinput.sh` and `test/zinput.sh`. |
