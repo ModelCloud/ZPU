@@ -331,12 +331,30 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
         verification_done = true;
-        const reply = xcb_get_image_reply(connection, xcb_get_image(connection, 2, transport.window, @intCast(width / 2), @intCast(height / 2), 1, 1, std.math.maxInt(u32)), null);
+        var sample_x: u32 = width / 2;
+        var sample_y: u32 = height / 2;
+        if (verify.?[0] == '2') {
+            var found = false;
+            var y: u32 = 0;
+            while (y < height and !found) : (y += 1) {
+                var x: u32 = 0;
+                while (x < width) : (x += 1) {
+                    const offset = (@as(usize, y) * width + x) * 4;
+                    if (pixels[offset] < 200 or pixels[offset + 1] < 200 or pixels[offset + 2] < 200) {
+                        sample_x = x;
+                        sample_y = y;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        const sample_offset = (@as(usize, sample_y) * width + sample_x) * 4;
+        const reply = xcb_get_image_reply(connection, xcb_get_image(connection, 2, transport.window, @intCast(sample_x), @intCast(sample_y), 1, 1, std.math.maxInt(u32)), null);
         if (reply) |image_reply| {
             defer std.c.free(image_reply);
             const data = xcb_get_image_data(image_reply);
-            const source_offset = (@as(usize, height / 2) * width + width / 2) * 4;
-            if (std.mem.eql(u8, data[0..4], pixels[source_offset..][0..4])) std.debug.print("zpu_visual_present=BGRA({},{},{},{})\n", .{ data[0], data[1], data[2], data[3] });
+            std.debug.print("zpu_visual_present xy={d},{d} source=({},{},{},{}) drawable=({},{},{},{}) equal={}\n", .{ sample_x, sample_y, pixels[sample_offset], pixels[sample_offset + 1], pixels[sample_offset + 2], pixels[sample_offset + 3], data[0], data[1], data[2], data[3], std.mem.eql(u8, data[0..4], pixels[sample_offset..][0..4]) });
         }
     }
     return true;
