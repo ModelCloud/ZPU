@@ -14064,8 +14064,9 @@ test "profile block byte size preserves std140 matrix and array strides" {
     try std.testing.expectEqual(@as(?u8, 80), profileBlockByteSize(interface));
 }
 
-/// Exact bridge for the immutable distro-vkcube shader pair used by the
-/// cpu_cube_v1 readiness path. This is not render-profile acceptance.
+/// Exact bridges for the distro-vkcube shader pairs used by the cpu_cube_v1
+/// readiness path. This is not render-profile acceptance: both revisions are
+/// independently pinned to their full module identities and ABI word counts.
 fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
     if (spec_count != 0 or !std.mem.eql(u8, name, "main")) return false;
     const expected_len: usize = if (stage == .vertex) 390 else 320;
@@ -14074,6 +14075,24 @@ fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.St
     else
         .{ 0x4b, 0x02, 0xf6, 0x81, 0xa1, 0xff, 0x80, 0x94, 0x1d, 0x4e, 0xfa, 0xaa, 0x5e, 0x27, 0x85, 0xc5, 0xcf, 0xe5, 0xa8, 0x53, 0x94, 0xd7, 0xac, 0xec, 0xb2, 0x0f, 0xd8, 0x6a, 0x7d, 0xa3, 0x08, 0x64 };
     return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
+}
+
+/// Ubuntu's current vkcube build keeps the same bounded cube ABI but emits a
+/// distinct SPIR-V revision (including unused PointSize/ClipDistance members).
+/// Keep it as a separate exact identity; do not route it through the general
+/// profile frontend, which intentionally does not claim those built-ins.
+fn cpuCubeV2ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
+    if (spec_count != 0 or !std.mem.eql(u8, name, "main")) return false;
+    const expected_len: usize = if (stage == .vertex) 390 else 320;
+    const expected: [32]u8 = if (stage == .vertex)
+        .{ 0x3e, 0x08, 0xa6, 0xd9, 0xc7, 0x27, 0x5c, 0xb8, 0x9b, 0x03, 0x79, 0xc6, 0x65, 0x35, 0xfa, 0xa6, 0x3b, 0x31, 0xec, 0x82, 0xd3, 0xee, 0x57, 0x0b, 0x1e, 0x0c, 0xe7, 0x29, 0x77, 0xc5, 0xb3, 0x5b }
+    else
+        .{ 0x67, 0xf8, 0xe8, 0xa5, 0x4b, 0xa0, 0xfe, 0x62, 0x0a, 0xf0, 0x0d, 0x25, 0x78, 0x53, 0xac, 0x6e, 0x6e, 0x17, 0x09, 0x06, 0x87, 0x73, 0xad, 0xa5, 0x34, 0x4f, 0xcf, 0xb9, 0x81, 0xcd, 0xa4, 0x11 };
+    return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
+}
+
+fn cpuCubeShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
+    return cpuCubeV1ShaderCompatible(shader, stage, name, spec_count) or cpuCubeV2ShaderCompatible(shader, stage, name, spec_count);
 }
 
 fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) void {
@@ -14095,7 +14114,7 @@ fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) voi
 }
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
-    if (cpuCubeV1ShaderCompatible(shader, stage, name, specs.len)) return null;
+    if (cpuCubeShaderCompatible(shader, stage, name, specs.len)) return null;
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => {
@@ -14129,6 +14148,22 @@ test "cpu_cube_v1 shader compatibility bridge is exact" {
 
     shader.module.words = &words;
     try std.testing.expect((try compileFrontendStage(std.testing.allocator, &shader, .vertex, "main", &.{})) == null);
+    var v2_vertex = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = .{ 0x3e, 0x08, 0xa6, 0xd9, 0xc7, 0x27, 0x5c, 0xb8, 0x9b, 0x03, 0x79, 0xc6, 0x65, 0x35, 0xfa, 0xa6, 0x3b, 0x31, 0xec, 0x82, 0xd3, 0xee, 0x57, 0x0b, 0x1e, 0x0c, 0xe7, 0x29, 0x77, 0xc5, 0xb3, 0x5b },
+    } } };
+    try std.testing.expect(cpuCubeV2ShaderCompatible(&v2_vertex, .vertex, "main", 0));
+    try std.testing.expect((try compileFrontendStage(std.testing.allocator, &v2_vertex, .vertex, "main", &.{})) == null);
+    var v2_fragment_words = [_]u32{0} ** 320;
+    var v2_fragment = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &v2_fragment_words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = .{ 0x67, 0xf8, 0xe8, 0xa5, 0x4b, 0xa0, 0xfe, 0x62, 0x0a, 0xf0, 0x0d, 0x25, 0x78, 0x53, 0xac, 0x6e, 0x6e, 0x17, 0x09, 0x06, 0x87, 0x73, 0xad, 0xa5, 0x34, 0x4f, 0xcf, 0xb9, 0x81, 0xcd, 0xa4, 0x11 },
+    } } };
+    try std.testing.expect(cpuCubeV2ShaderCompatible(&v2_fragment, .fragment, "main", 0));
+    v2_fragment.module.identity.digest[0] ^= 1;
+    try std.testing.expect(!cpuCubeV2ShaderCompatible(&v2_fragment, .fragment, "main", 0));
     var valid = ShaderModuleObj{ .owner = undefined, .module = .{ .words = @constCast(&spirv_frontend.positive_vertex), .identity = undefined } };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, compileFrontendStage(failing.allocator(), &valid, .vertex, "main", &.{}));
