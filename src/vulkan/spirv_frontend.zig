@@ -5626,6 +5626,26 @@ test "Chromium Skia convolution shaders execute local state and uniform arrays" 
     try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), fragment_backing[fragment_outputs[0].interface][0..16]);
 }
 
+test "captured Chromium circular-gradient fragment remains a hot Render IR fixture" {
+    const fragment_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_2004.spv").*;
+    var fragment_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &fragment_bytes), .fragment, "main", &.{});
+    defer fragment_program.deinit(std.testing.allocator);
+    // Captured from the native Chromium VP9 Mosaic workload. Its dynamic
+    // branching, uniform-array loads, atan2, and sampled color path are the
+    // current interpreter hot spot; preserve the exact canonical identity so
+    // a future ORC specialization has a real regression input.
+    try std.testing.expectEqual(@as(usize, 251), fragment_program.instructions.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0xee, 0x41, 0x2f, 0xa1, 0xcc, 0xd0, 0x0a, 0xe3,
+        0x4e, 0x59, 0xf2, 0x24, 0x1a, 0x1f, 0x03, 0x0c,
+        0x13, 0x57, 0xcb, 0x2f, 0x94, 0xc8, 0xfc, 0x21,
+        0xed, 0xad, 0x76, 0x0e, 0x37, 0xc3, 0x5d, 0x41,
+    }, &fragment_program.identity.digest);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+}
+
 test "specialization uniform matrix and fragment canonical identities are golden" {
     const replacement = [_]u8{ 0, 0, 0x80, 0x40 };
     const cases = .{
