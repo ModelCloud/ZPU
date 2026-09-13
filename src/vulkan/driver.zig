@@ -8692,7 +8692,7 @@ fn diagnoseCubeDrawResources(op: anytype) void {
     for (op.descriptors.sampled_images, 0..) |sampled, index| if (sampled.image) |image| {
         if (!liveImageObject(image) or image.memory == null or !liveMemoryObject(image.memory.?)) {
             dead = true;
-            if (failureDiagnosticsEnabled()) std.debug.print("ZPU dead cube sampled index={d} image={x} image_live={} memory_live={}\n", .{ index, @intFromPtr(image), liveImageObject(image), image.memory != null and liveMemoryObject(image.memory.?) });
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU dead cube sampled index={d} image={x} image_live={} image_users={} memory={x} memory_live={} memory_state={s} memory_users={} memory_retire={} memory_storage_released={}\n", .{ index, @intFromPtr(image), liveImageObject(image), image.active_users.load(.acquire), if (image.memory) |memory| @intFromPtr(memory) else 0, image.memory != null and liveMemoryObject(image.memory.?), if (image.memory) |memory| if (stateForObject(MemoryObj, memory, &memory_objects, &memory_state)) |state| @tagName(state.*) else "missing" else "none", if (image.memory) |memory| memory.active_users.load(.acquire) else 0, if (image.memory) |memory| memory.retire_pending else false, if (image.memory) |memory| memory.storage_released else false });
         }
     };
     for (op.vertex_bindings.buffers, 0..) |buffer, index| if (buffer) |value| if (!liveBufferObject(value) or value.memory == null or !liveMemoryObject(value.memory.?)) {
