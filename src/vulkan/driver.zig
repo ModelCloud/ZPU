@@ -1791,6 +1791,17 @@ var render_diagnostic_page_target_matches = std.atomic.Value(u32).init(0);
 var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
+// These counters deliberately describe accepted native work rather than API
+// attempts.  They make a Chromium run auditable even when its per-draw trace
+// is capped: every line is scoped to this ICD process and is emitted only by
+// the native Vulkan executor at present time.
+var render_diagnostic_session_id = std.atomic.Value(u64).init(0);
+var render_diagnostic_pipeline_creations = std.atomic.Value(u64).init(0);
+var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
+var render_diagnostic_submissions = std.atomic.Value(u64).init(0);
+var render_diagnostic_session_summaries = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -1831,6 +1842,33 @@ fn failureDiagnosticsEnabled() bool {
 fn renderDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+fn renderDiagnosticSessionId() u64 {
+    const existing = render_diagnostic_session_id.load(.acquire);
+    if (existing != 0) return existing;
+    const candidate = @max(frame_pacing.monotonicNs(), 1);
+    if (render_diagnostic_session_id.cmpxchgStrong(0, candidate, .acq_rel, .acquire)) |winner| return winner;
+    return candidate;
+}
+
+fn emitRenderDiagnosticSession(presents: u64) void {
+    if (!renderDiagnosticsEnabled()) return;
+    const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
+    if (sequence >= 64) return;
+    std.debug.print(
+        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
+        .{
+            renderDiagnosticSessionId(),
+            render_diagnostic_pipeline_creations.load(.acquire),
+            render_diagnostic_recorded_draws.load(.acquire),
+            render_diagnostic_executed_profile_draws.load(.acquire),
+            render_diagnostic_executed_transitions.load(.acquire),
+            render_diagnostic_submissions.load(.acquire),
+            render_diagnostic_mosaic_batches.load(.acquire),
+            presents,
+        },
+    );
 }
 
 fn pageTargetDumpMatch() u32 {
@@ -10633,6 +10671,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         candidate.advance();
     }
     if (batch_count < 2) return null;
+    if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
     const start = cursor.*;
     var tile_y: u32 = 0;
@@ -10905,6 +10944,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
             const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
+                if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(1, .monotonic);
                 var draw = op;
                 const instance_count = draw.instance_count;
                 draw.instance_count = 1;
@@ -11076,6 +11116,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         },
         .transition => |op| {
             op.image.layout = op.new_layout;
+            if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_transitions.fetchAdd(1, .monotonic);
             hit(.barrier_transition);
         },
         .event_set => |operation| {
@@ -14008,6 +14049,7 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*
         cache_object.data = cache_candidate.?;
         cache_candidate = null;
     }
+    if (renderDiagnosticsEnabled()) _ = render_diagnostic_pipeline_creations.fetchAdd(count, .monotonic);
     return .success;
 }
 fn destroyPipeline(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
@@ -16593,6 +16635,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         return;
     };
     record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .instance_index = first_instance, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
+    if (renderDiagnosticsEnabled()) _ = render_diagnostic_recorded_draws.fetchAdd(1, .monotonic);
 }
 fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
     lock();
@@ -16689,6 +16732,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         return;
     };
     record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
+    if (renderDiagnosticsEnabled()) _ = render_diagnostic_recorded_draws.fetchAdd(1, .monotonic);
 }
 fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
     lock();
@@ -17425,6 +17469,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
                 "ZPU present seq={d} image={d}x{d} bounds={d},{d} {d}x{d} forceFull={} complex={} dark={}\n",
                 .{ present_diagnostic, image.width, image.height, content.x, content.y, content.width, content.height, force_full, image.complex_3d_content, diagnosticDarkPixelCount(image) },
             );
+            emitRenderDiagnosticSession(present_diagnostic + 1);
         }
         if (builtin.is_test) {
             const dequeued = frame_pacing.monotonicNs();
@@ -17801,6 +17846,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
         }
     };
     _ = active_queue_submissions.fetchAdd(1, .acq_rel);
+    if (renderDiagnosticsEnabled()) _ = render_diagnostic_submissions.fetchAdd(count, .monotonic);
     mutex.unlock();
     mutex_held = false;
     defer {
