@@ -10498,7 +10498,7 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
 
 const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
 
-fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
+fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip, publish_metadata: bool) void {
     const profile = profile_override orelse switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
@@ -11142,6 +11142,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             pixels_written += 1;
         };
     }
+    // A parallel Mosaic lane owns disjoint pixels but must not race on image
+    // content metadata. Its caller publishes a conservative whole-target
+    // envelope after every lane has completed.
+    if (!publish_metadata) return;
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
     if (color) |color_image| {
         color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
@@ -11303,6 +11307,59 @@ fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
     return &profile_lane_cache.?.clone.graphics;
 }
 
+/// The VP9 color-transform specialization has no mutable fragment state once
+/// its descriptor ABI is resolved. Give its one large video quad to Mosaic's
+/// established worker lanes by horizontal bands. Every lane writes disjoint
+/// pixels; metadata is published once after the worker barrier.
+const Vp9MosaicLaneContext = struct {
+    command: *const Command,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *Vp9MosaicLaneContext = @ptrCast(@alignCast(raw));
+        if (lane_count == 0 or lane_index >= lane_count) return;
+        const op = switch (context.command.*) {
+            .cube_draw => |value| value,
+            else => return,
+        };
+        const source = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile,
+            else => return,
+        };
+        if (source.fragment.vp9ColorTransformPlan() == null) return;
+        const lane_profile = cachedProfileLane(source) orelse return;
+        const min_y: u32 = @intCast((@as(u64, context.height) * lane_index) / lane_count);
+        const max_y: u32 = @intCast((@as(u64, context.height) * (lane_index + 1)) / lane_count);
+        if (min_y == max_y) return;
+        executeProfileDraw(op, lane_profile, context.query_context, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y }, false);
+    }
+};
+
+fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExecutionContext) bool {
+    const op = switch (command.*) {
+        .cube_draw => |value| value,
+        else => return false,
+    };
+    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null) return false;
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    if (profile.fragment.vp9ColorTransformPlan() == null) return false;
+    const color = op.color_image orelse (if (op.framebuffer) |framebuffer| framebuffer.color_image else null) orelse return false;
+    if (@as(u64, color.width) * color.height < @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size) return false;
+    var context = Vp9MosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, Vp9MosaicLaneContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+    if (op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null) |depth| depth.content_bounds = unionRect(depth.content_bounds, full_target);
+    return true;
+}
+
 /// Mosaic is worthwhile for a group of profile draws that share a target.
 /// A one-command "batch" repeats that draw's complete vertex setup for every
 /// target tile; sparse Skia UI quads then pay a framebuffer-sized cost even
@@ -11357,11 +11414,27 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         batch_count += 1;
         candidate.advance();
     }
-    // Chromium's video composite is often one large textured quad. Route it
-    // through the same ordered Mosaic tile scheduler as adjacent profile
-    // draws; execution stays serial because profile executors own mutable
-    // scratch, but every tile is explicit and auditable. Small draws retain
-    // the direct path so UI glyphs do not pay scheduler overhead.
+    // Chromium's video transform is a single large quad. Its exact native
+    // path has no mutable fragment state, so it may use Mosaic's disjoint
+    // worker bands even though the ordinary profile scheduler requires two
+    // adjacent draws. All other one-draw profiles retain the direct path.
+    if (batch_count == 1) {
+        const operation_start = frame_pacing.monotonicNs();
+        if (executeMosaicSingleVp9Draw(first_raw, query_context)) {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic VP9 profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+                std.debug.print("ZPU Mosaic VP9 profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
+            cursor.* = candidate;
+            return 1;
+        }
+    }
+    // Adjacent profiles still use ordered serial tiles: arbitrary executors
+    // own mutable scratch and cannot be parallelized safely.
     if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
@@ -11388,7 +11461,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                     else => return null,
                 };
                 const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
-                executeProfileDraw(op, null, query_context, 0, clip);
+                executeProfileDraw(op, null, query_context, 0, clip, true);
                 if (timing_enabled) command_elapsed_ns[draw_index] += frame_pacing.monotonicNs() - command_start;
                 draw_cursor.advance();
             }
@@ -11682,7 +11755,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 while (instance < instance_count) : (instance += 1) {
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
-                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null);
+                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null, true);
                 }
                 if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < 512) {
                     const target = color orelse depth;
