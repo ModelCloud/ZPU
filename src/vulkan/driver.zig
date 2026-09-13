@@ -12035,6 +12035,28 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
     return result;
 }
 
+fn diagnoseUnsupportedFramebufferRenderPass(ci: *const RenderPassCreateInfo) void {
+    if (!failureDiagnosticsEnabled()) return;
+    std.debug.print(
+        "ZPU render pass framebuffer unsupported attachments={} subpasses={}\n",
+        .{ ci.attachment_count, ci.subpass_count },
+    );
+    if (ci.attachments) |attachments| for (attachments[0..ci.attachment_count], 0..) |attachment, index| {
+        std.debug.print(
+            "ZPU render pass attachment {} format={} samples={} load={} store={} initial={} final={}\n",
+            .{ index, attachment.format, attachment.samples, attachment.load_op, attachment.store_op, attachment.initial_layout, attachment.final_layout },
+        );
+    };
+    if (ci.subpasses) |subpasses| for (subpasses[0..ci.subpass_count], 0..) |subpass, index| {
+        const color_attachment = if (subpass.color_attachment_count == 1 and subpass.color_attachments != null) subpass.color_attachments.?[0].attachment else 0xffff_ffff;
+        const depth_attachment = if (subpass.depth_stencil_attachment) |attachment| attachment.attachment else 0xffff_ffff;
+        std.debug.print(
+            "ZPU render pass subpass {} input={} color={} color_attachment={} resolve={} depth_attachment={} preserve={}\n",
+            .{ index, subpass.input_attachment_count, subpass.color_attachment_count, color_attachment, subpass.resolve_attachments != null, depth_attachment, subpass.preserve_attachment_count },
+        );
+    };
+}
+
 fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
@@ -12046,6 +12068,7 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
         return creationFailure(err);
     };
     const framebuffer_metadata = snapshotRenderPassFramebufferMetadata(ci);
+    if (!framebuffer_metadata.supported) diagnoseUnsupportedFramebufferRenderPass(ci);
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) {
