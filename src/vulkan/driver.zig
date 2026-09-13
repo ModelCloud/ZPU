@@ -1754,6 +1754,7 @@ var render_diagnostic_clears = std.atomic.Value(u32).init(0);
 var render_diagnostic_begins = std.atomic.Value(u32).init(0);
 var render_diagnostic_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_ir = std.atomic.Value(u32).init(0);
+var render_diagnostic_vertex_inputs = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -9781,6 +9782,18 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     );
                     return;
                 };
+                if (renderDiagnosticsEnabled() and input.interface == 2 and op.descriptors.texture != null and
+                    op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512)
+                {
+                    const input_sequence = render_diagnostic_vertex_inputs.fetchAdd(1, .monotonic);
+                    if (input_sequence < 16) std.debug.print(
+                        "ZPU profile vertex input seq={d} interface={d} binding={d} format={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
+                        .{
+                            input_sequence,                                                                            input.interface,                                                                           input.binding,                                                                               input.format,                                                                                 vertex_index, start, stride,
+                            if (bytes.len >= 4) @as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))) else 0, if (bytes.len >= 8) @as(f32, @bitCast(std.mem.readInt(u32, bytes[4..8], .little))) else 0, if (bytes.len >= 12) @as(f32, @bitCast(std.mem.readInt(u32, bytes[8..12], .little))) else 0, if (bytes.len >= 16) @as(f32, @bitCast(std.mem.readInt(u32, bytes[12..16], .little))) else 0,
+                        },
+                    );
+                }
                 vertex_bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
                 binding_count += 1;
             }
