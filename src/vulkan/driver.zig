@@ -9361,8 +9361,8 @@ fn diagnoseImageTransfer(kind: []const u8, src: ?*ImageObj, dst: *ImageObj) void
     const source = if (src) |image| image else null;
     if ((dst.width < 256 and dst.height < 64) or (source != null and source.?.width < 256 and source.?.height < 64)) return;
     std.debug.print(
-        "ZPU image transfer seq={d} op={s} src={d}x{d}/dark={d} dst-before={d}x{d}/dark={d}\n",
-        .{ sequence, kind, if (source) |image| image.width else 0, if (source) |image| image.height else 0, if (source) |image| diagnosticDarkPixelCount(image) else 0, dst.width, dst.height, diagnosticDarkPixelCount(dst) },
+        "ZPU image transfer seq={d} op={s} src={x} {d}x{d}/dark={d} dst={x} {d}x{d}/dark={d}\n",
+        .{ sequence, kind, if (source) |image| @intFromPtr(image) else 0, if (source) |image| image.width else 0, if (source) |image| image.height else 0, if (source) |image| diagnosticDarkPixelCount(image) else 0, @intFromPtr(dst), dst.width, dst.height, diagnosticDarkPixelCount(dst) },
     );
 }
 
@@ -9688,8 +9688,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         );
     }
     if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
-        "ZPU profile draw seq={d} target={d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
-        .{ diagnostic_draw, target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image != null, profile.varying_count, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).x else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).y else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).width else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).height else 0 },
+        "ZPU profile draw seq={d} target={x} {d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={x} {d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
+        .{ diagnostic_draw, @intFromPtr(target), target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image != null, profile.varying_count, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, if (op.descriptors.texture) |texture| @intFromPtr(texture) else 0, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).x else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).y else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).width else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).height else 0 },
     );
     const color_bytes = if (color) |color_image| imageLayerBytes(color_image, op.color_base_layer + layer) else null;
     const depth_bytes = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + layer) else null;
