@@ -10965,6 +10965,41 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
 const profile_mosaic_tile_size: u32 = 256;
 const profile_mosaic_batch_commands: usize = 64;
 
+const ProfileGraphicsClone = struct {
+    graphics: ProfileGraphics,
+    fn init(source: *const ProfileGraphics) render_ir_exec.Error!ProfileGraphicsClone {
+        var graphics = source.*;
+        graphics.vertex = try render_ir_exec.Executor.init(source.vertex.allocator, &source.vertex.program);
+        errdefer graphics.vertex.deinit();
+        graphics.fragment = try render_ir_exec.Executor.init(source.fragment.allocator, &source.fragment.program);
+        return .{ .graphics = graphics };
+    }
+    fn deinit(self: *ProfileGraphicsClone) void {
+        self.graphics.vertex.deinit();
+        self.graphics.fragment.deinit();
+        self.* = undefined;
+    }
+};
+
+const ProfileLaneCache = struct {
+    source: *const ProfileGraphics,
+    vertex_identity: [32]u8,
+    fragment_identity: [32]u8,
+    clone: ProfileGraphicsClone,
+};
+threadlocal var profile_lane_cache: ?ProfileLaneCache = null;
+
+fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
+    if (profile_lane_cache) |*entry| {
+        if (entry.source == source and std.mem.eql(u8, &entry.vertex_identity, &source.vertex.program.identity.digest) and std.mem.eql(u8, &entry.fragment_identity, &source.fragment.program.identity.digest)) return &entry.clone.graphics;
+        entry.clone.deinit();
+        profile_lane_cache = null;
+    }
+    const clone = ProfileGraphicsClone.init(source) catch return null;
+    profile_lane_cache = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
+    return &profile_lane_cache.?.clone.graphics;
+}
+
 /// Mosaic is worthwhile either for a group of profile draws or for one
 /// framebuffer-sized composite. Chromium's video compositor produces the
 /// latter: a single textured quad over a large target. Keep smaller UI work
