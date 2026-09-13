@@ -378,8 +378,8 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     }
     var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
     for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
-    if (renderDiagnosticsEnabled() and image.width == 1024) {
-        if (rgba[3] > 0.001) {
+    if (renderDiagnosticsEnabled() and image.width == 1024 and v > 0.1) {
+        if (diagnostic_samples.fetchAdd(1, .monotonic) < 64) {
             const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
             if (sequence < 64) std.debug.print(
                 "ZPU IR sample seq={d} uv={d:.4},{d:.4} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
