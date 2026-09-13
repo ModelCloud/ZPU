@@ -13779,7 +13779,7 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*
     }
     const create_infos: [*]const GraphicsPipelineCreateInfo = @ptrCast(raw);
     var built: [max_child_objects]GraphicsPipelineObj = undefined;
-    var slots: [max_child_objects]u8 = undefined;
+    var slots: [max_graphics_pipeline_objects]u16 = undefined;
     var free_count: usize = 0;
     for (graphics_pipeline_state, 0..) |state, index| if (state != .live) {
         slots[free_count] = @intCast(index);
