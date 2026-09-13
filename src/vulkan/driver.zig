@@ -1266,6 +1266,9 @@ const DescriptorSetObj = struct {
     // Keep a bounded sampled-image table for the native profile ABI while
     // retaining the historical binding-0 aliases used by the cpu_cube ABI.
     sampled_images: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
+    // Input attachments carry no sampler. They are only consumed by the
+    // bounded framebuffer-fetch profile after validation against its target.
+    input_attachments: [max_profile_sampled_bindings]DescriptorInputAttachment = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings,
     // A command-local snapshot keeps the source descriptor-set pointer so
     // queue submission can defer its canonical storage through destruction.
     source_set: ?*DescriptorSetObj = null,
@@ -1277,6 +1280,7 @@ const DescriptorSetObj = struct {
     retire_pending: bool = false,
 };
 const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
+const DescriptorInputAttachment = struct { image: ?*ImageObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
@@ -1370,6 +1374,7 @@ const RenderPassObj = struct {
     color_initial_layout: i32 = 0,
     color_subpass_layout: i32 = 0,
     color_final_layout: i32 = 0,
+    color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
@@ -1405,6 +1410,7 @@ const ProfileUniform = struct {
     byte_size: u8 = 0,
 };
 const ProfileSampledImage = struct { interface: u32, binding: u32 };
+const ProfileInputAttachment = struct { interface: u32, binding: u32 };
 const ProfileGraphics = struct {
     vertex: render_ir_exec.Executor,
     fragment: render_ir_exec.Executor,
@@ -1426,6 +1432,8 @@ const ProfileGraphics = struct {
     fragment_front_facing: ?u32 = null,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_input_attachments: [8]ProfileInputAttachment = undefined,
+    fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -1448,6 +1456,8 @@ const ProfileGraphicsContract = struct {
     fragment_front_facing: ?u32 = null,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_input_attachments: [8]ProfileInputAttachment = undefined,
+    fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -4891,6 +4901,7 @@ fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     set.texture = null;
     set.sampler = null;
     set.sampled_images = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
+    set.input_attachments = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings;
     set.source_set = null;
     set.sampled_source_set = null;
     set.layout_source = null;
@@ -5080,6 +5091,10 @@ fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, 
     if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.texture) |image| if (!pinImageLocked(image, owner, pinned)) return false;
     for (set.sampled_images) |sampled| if (sampled.image) |image| {
+        if (set.texture == image) continue;
+        if (!pinImageLocked(image, owner, pinned)) return false;
+    };
+    for (set.input_attachments) |input| if (input.image) |image| {
         if (set.texture == image) continue;
         if (!pinImageLocked(image, owner, pinned)) return false;
     };
@@ -10118,6 +10133,34 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     };
 }
 
+/// Input-attachment reads are framebuffer fetches, not filtered texture
+/// samples.  Keep the implemented profile intentionally narrow: the
+/// descriptor must name the live color target currently being rendered, with
+/// one layer/sample and GENERAL layout established by the render pass.
+fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, color: *ImageObj, color_bytes: []const u8) ?render_ir_exec.SampledImage {
+    if (binding >= descriptors.input_attachments.len) return null;
+    const input = descriptors.input_attachments[binding];
+    const image = input.image orelse return null;
+    if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * 4) return null;
+    const format: render_ir_exec.SampledImage.Format = switch (color.format) {
+        37 => .rgba8_unorm,
+        44 => .bgra8_unorm,
+        else => return null,
+    };
+    return .{
+        .pixels = color_bytes,
+        .width = color.width,
+        .height = color.height,
+        .row_stride = color.width * 4,
+        .bytes_per_texel = 4,
+        .format = format,
+        .swizzle = input.components,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+}
+
 const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
 
 fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
@@ -10172,7 +10215,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     var vertex_outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| vertex_outputs[slot] = .{ .interface = interface, .bytes = &vertex_output_bytes[slot] };
     var varying_bytes: [3][8][16]u8 = undefined;
-    var fragment_bindings: [14]render_ir_exec.Binding = undefined;
+    var fragment_bindings: [24]render_ir_exec.Binding = undefined;
     var fragment_binding_storage: [8][16]u8 = undefined;
     var fragment_dpdx_storage: [8][16]u8 = undefined;
     var fragment_dpdy_storage: [8][16]u8 = undefined;
@@ -10213,6 +10256,16 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             return;
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
+    }
+    var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
+    for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
+        const input_color = color orelse return;
+        const bytes = color_bytes orelse return;
+        const input = profileInputAttachment(op.descriptors, input_profile.binding, input_color, bytes) orelse {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render input-attachment setup failed binding={d} interface={d}\n", .{ input_profile.binding, input_profile.interface });
+            return;
+        };
+        fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
     }
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
@@ -10361,6 +10414,11 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 fragment_bindings[fragment_binding_count] = binding;
                 fragment_binding_count += 1;
             }
+            for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+                if (fragment_binding_count == fragment_bindings.len) return;
+                fragment_bindings[fragment_binding_count] = binding;
+                fragment_binding_count += 1;
+            }
             profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                 if (renderDiagnosticsEnabled()) std.debug.print(
                     "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
@@ -10466,6 +10524,11 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_binding_count += 1;
                 }
                 for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+                    if (fragment_binding_count == fragment_bindings.len) return;
+                    fragment_bindings[fragment_binding_count] = binding;
+                    fragment_binding_count += 1;
+                }
+                for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
                     if (fragment_binding_count == fragment_bindings.len) return;
                     fragment_bindings[fragment_binding_count] = binding;
                     fragment_binding_count += 1;
@@ -11963,6 +12026,7 @@ const RenderPassFramebufferMetadata = struct {
     color_initial_layout: i32 = 0,
     color_subpass_layout: i32 = 0,
     color_final_layout: i32 = 0,
+    color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
@@ -11982,14 +12046,23 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
     }
     var has_color = false;
     var has_depth = false;
+    var color_feedback_input = false;
     for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, subpass_index| {
-        if (subpass.input_attachment_count != 0 or subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0) return .{};
+        if (subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0) return .{};
         const subpass_has_color = if (subpass.color_attachment_count == 0 and subpass.color_attachments == null)
             false
         else if (subpass.color_attachment_count == 1 and subpass.color_attachments != null and subpass.color_attachments.?[0].attachment == 0)
             true
         else
             return .{};
+        if (subpass.input_attachment_count != 0) {
+            // Chromium Skia's framebuffer-fetch pass has exactly one
+            // single-sample BGRA/RGBA attachment, read and written at the
+            // same pixel through GENERAL.  Admit only that self-reference;
+            // arbitrary input-attachment graphs remain unsupported.
+            if (ci.subpass_count != 1 or ci.attachment_count != 1 or subpass_index != 0 or subpass.input_attachment_count != 1 or subpass.input_attachments == null or !subpass_has_color or subpass.input_attachments.?[0].attachment != 0 or subpass.color_attachments.?[0].layout != 1 or subpass.input_attachments.?[0].layout != 1) return .{};
+            color_feedback_input = true;
+        }
         if (subpass_index == 0) has_color = subpass_has_color else if (subpass_has_color != has_color) return .{};
         const depth = subpass.depth_stencil_attachment;
         if (depth) |reference| {
@@ -12006,7 +12079,7 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
     if (ci.attachment_count != expected_count) return .{};
     const descriptions = ci.attachments.?;
     const first_subpass = ci.subpasses.?[0];
-    var result = RenderPassFramebufferMetadata{ .supported = true, .attachment_count = expected_count };
+    var result = RenderPassFramebufferMetadata{ .supported = true, .attachment_count = expected_count, .color_feedback_input = color_feedback_input };
     if (has_color) {
         const color_reference = first_subpass.color_attachments.?[0];
         result.attachments[0] = .{ .format = descriptions[0].format, .samples = descriptions[0].samples, .role = .color };
@@ -12090,6 +12163,7 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
             .color_initial_layout = framebuffer_metadata.color_initial_layout,
             .color_subpass_layout = framebuffer_metadata.color_subpass_layout,
             .color_final_layout = framebuffer_metadata.color_final_layout,
+            .color_feedback_input = framebuffer_metadata.color_feedback_input,
             .depth_load_op = framebuffer_metadata.depth_load_op,
             .depth_store_op = framebuffer_metadata.depth_store_op,
             .depth_initial_layout = framebuffer_metadata.depth_initial_layout,
@@ -12844,6 +12918,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(a.offset);
     }
     const profile_contract = if (profile_pair) profileGraphicsContract(&vertex_program.?, &fragment_program.?, vi) else null;
+    if (profile_contract) |contract| if (contract.fragment_input_attachment_count != 0 and (render_pass == null or !render_pass.?.color_feedback_input)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU graphics input attachment rejected: requires the bounded GENERAL self-feedback render pass\n", .{});
+        return pipelineInvalid(@src().line);
+    };
     if (profile_pair and profile_contract == null and failureDiagnosticsEnabled()) {
         std.debug.print(
             "ZPU graphics profile rejected vertexInterfaces={} fragmentInterfaces={} bindings={} attributes={}\n",
@@ -13112,7 +13190,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
                 return error.Invalid;
             },
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
@@ -13160,6 +13238,17 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         for (0..count) |index| {
             const item = set0.bytes[36 + index * 16 ..][0..16];
             if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 6 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
+        }
+        if (!found) return false;
+    };
+    for (fragment.interfaces) |interface| if (interface.storage == .input_attachment) {
+        if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
+        const count = std.mem.readInt(u32, set0.bytes[32..36], .little);
+        if (set0.bytes.len != 36 + @as(usize, count) * 16) return false;
+        var found = false;
+        for (0..count) |index| {
+            const item = set0.bytes[36 + index * 16 ..][0..16];
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 10 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
         }
         if (!found) return false;
     };
@@ -13220,7 +13309,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (result.vertex_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
-        .sampled_image => return null,
+        .sampled_image, .input_attachment => return null,
     };
     if (result.vertex_output == 0 or vertex_inputs == 0) return null;
     var fragment_outputs: u32 = 0;
@@ -13264,6 +13353,14 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.binding == interface.binding.?) return null;
             result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
             result.fragment_sampled_image_count += 1;
+        },
+        .input_attachment => {
+            // The profile intentionally supports only the one-set
+            // framebuffer-fetch shape used by Chromium's Skia blend pass.
+            if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_input_attachment_count == result.fragment_input_attachments.len) return null;
+            for (result.fragment_input_attachments[0..result.fragment_input_attachment_count]) |prior| if (prior.binding == interface.binding.?) return null;
+            result.fragment_input_attachments[result.fragment_input_attachment_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
+            result.fragment_input_attachment_count += 1;
         },
         .output => {
             if (fragment_outputs != 0 or interface.location == null or interface.location.? != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
@@ -13966,7 +14063,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
             }
             switch (requirement.role) {
                 .color => {
-                    if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
+                    if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or (render_pass.color_feedback_input and view.usage & 0x80 == 0) or color != null) return .error_initialization_failed;
                     color = view.image;
                 },
                 .depth => {
@@ -14385,13 +14482,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_binding: u8, writes_texture: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_binding = 0, .writes_texture = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -14424,6 +14521,16 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.texture_components = view.components;
             update.texture_binding = @intCast(descriptor_write.dst_binding);
             update.writes_texture = true;
+        } else if (descriptor_write.descriptor_type == 10 and descriptor_write.dst_binding < update.set.input_attachments.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 10 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+            const info = descriptor_write.image_info.?[0];
+            const view = validImageViewLocked(info.image_view) orelse return;
+            // Input attachments have no sampler and this backend executes
+            // only a GENERAL-layout, color-aspect framebuffer fetch.
+            if (info.sampler != 0 or view.owner != d or view.usage & 0x80 == 0 or view.aspect_mask != 1 or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count != 1 or !liveImageObject(view.image) or view.image.samples != 1 or view.image.array_layers != 1 or info.image_layout != 1) return;
+            update.input_attachment = view.image;
+            update.input_components = view.components;
+            update.input_binding = @intCast(descriptor_write.dst_binding);
+            update.writes_input_attachment = true;
         } else return;
         updates[index] = update;
     }
@@ -14445,6 +14552,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
+        if (update.writes_input_attachment) update.set.input_attachments[update.input_binding] = .{ .image = update.input_attachment, .components = update.input_components };
     }
 }
 fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdateTemplateCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -16603,7 +16711,7 @@ fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool
 }
 const GraphicsDescriptorRequirements = struct { set0: bool, set1: bool, layout: bool };
 fn profileGraphicsDescriptorRequirements(profile: *const ProfileGraphics) GraphicsDescriptorRequirements {
-    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0;
+    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0 or profile.fragment_input_attachment_count != 0;
     const set1 = profile.fragment_sampled_image_count != 0;
     return .{ .set0 = set0, .set1 = set1, .layout = set0 or set1 };
 }
@@ -16621,6 +16729,7 @@ test "graphics descriptor requirements exclude push-constant-only pipelines" {
     profile.vertex_push_constant = .{ .interface = 0, .byte_size = 16 };
     profile.fragment_push_constant = .{ .interface = 0, .byte_size = 16 };
     profile.fragment_sampled_image_count = 0;
+    profile.fragment_input_attachment_count = 0;
     try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = false, .set1 = false, .layout = false }, profileGraphicsDescriptorRequirements(&profile));
 
     profile.vertex_uniform_count = 1;
@@ -16661,6 +16770,7 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
         snapshot.sampled_images = sampled.sampled_images;
+        snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
     if (descriptors.uniform_dynamic) {
@@ -16699,6 +16809,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
         snapshot.sampled_images = sampled.sampled_images;
+        snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
     snapshot.synthetic = true;
@@ -22073,6 +22184,77 @@ fn createTestDeviceContext() !TestDeviceContext {
     var queue: Queue = undefined;
     getDeviceQueue(device, 0, 0, &queue);
     return .{ .instance = instance, .physical = physicals[0], .device = device, .queue = queue };
+}
+
+test "framebuffer fetch accepts only a GENERAL self input attachment and descriptor" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x90, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    defer destroyImage(ctx.device, image, null);
+    const allocation_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation_info, null, &memory));
+    defer freeMemory(ctx.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    defer destroyImageView(ctx.device, view, null);
+
+    const description = [_]AttachmentDescription{.{ .flags = 0, .format = 44, .samples = 1, .load_op = 0, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 1, .final_layout = 1 }};
+    const general_ref = AttachmentReference{ .attachment = 0, .layout = 1 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 1, .input_attachments = @ptrCast(&general_ref), .color_attachment_count = 1, .color_attachments = @ptrCast(&general_ref), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &description, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &pass_info, null, &render_pass));
+    defer destroyRenderPass(ctx.device, render_pass, null);
+    try std.testing.expect(validRenderPassLocked(render_pass).?.color_feedback_input);
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    defer destroyFramebuffer(ctx.device, framebuffer, null);
+    const view_object = validImageViewLocked(view).?;
+    const view_usage = view_object.usage;
+    view_object.usage &= ~@as(u32, 0x80);
+    var missing_input_usage_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(ctx.device, &framebuffer_info, null, &missing_input_usage_framebuffer));
+    view_object.usage = view_usage;
+
+    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 10, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &layout));
+    defer destroyDescriptorSetLayout(ctx.device, layout, null);
+    const size = DescriptorPoolSize{ .descriptor_type = 10, .descriptor_count = 1 };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&size) };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    defer destroyDescriptorPool(ctx.device, pool, null);
+    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&layout) };
+    var set: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &set_info, @ptrCast(&set)));
+    const image_descriptor = DescriptorImageInfo{ .sampler = 0, .image_view = view, .image_layout = 1 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 10, .image_info = @ptrCast(&image_descriptor), .buffer_info = null, .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(validImageLocked(image).?, validDescriptorSetLocked(set).?.input_attachments[0].image.?);
+    const invalid_image_descriptor = DescriptorImageInfo{ .sampler = 1, .image_view = view, .image_layout = 1 };
+    descriptor_write.image_info = @ptrCast(&invalid_image_descriptor);
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(validImageLocked(image).?, validDescriptorSetLocked(set).?.input_attachments[0].image.?);
+
+    var non_general_ref = general_ref;
+    non_general_ref.layout = 2;
+    var malformed_subpass = subpass;
+    malformed_subpass.input_attachments = @ptrCast(&non_general_ref);
+    const malformed_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &description, .subpass_count = 1, .subpasses = @ptrCast(&malformed_subpass), .dependency_count = 0, .dependencies = null };
+    var rejected: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &malformed_info, null, &rejected));
+    defer destroyRenderPass(ctx.device, rejected, null);
+    try std.testing.expect(!validRenderPassLocked(rejected).?.framebuffer_supported);
 }
 
 test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {

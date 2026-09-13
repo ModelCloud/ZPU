@@ -111,6 +111,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 83, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 84, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 87, .operands = .{ .min = 6, .max = 6 } },
+    .{ .opcode = 98, .operands = .{ .min = 4, .max = 4 } }, // OpImageRead, SubpassData only
     // Branch widths are checked by the stage-aware function parser below so
     // non-compute profiles classify the entire family as unsupported rather
     // than exposing a misleading schema-arity error.
@@ -651,7 +652,7 @@ fn interfacesUnique(items: []const ir.Interface) bool {
     if (items.len < 2) return true;
     for (items[1..], items[0 .. items.len - 1]) |item, prior| {
         if (item.storage != prior.storage) continue;
-        if (item.storage == .uniform or item.storage == .sampled_image) {
+        if (item.storage == .uniform or item.storage == .sampled_image or item.storage == .input_attachment) {
             if (item.descriptor_set == prior.descriptor_set and item.binding == prior.binding) return false;
         } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_frag_coord and prior.builtin_frag_coord) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.location != null and item.location == prior.location)) return false;
     }
@@ -902,8 +903,15 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             },
             25 => {
                 const sampled_type = try resultShape(nodes, w[1]);
-                if (sampled_type.scalar != .f32 or sampled_type.columns != 1 or sampled_type.rows != 1 or w[2] != 1 or w[3] != 0 or w[4] != 0 or w[5] != 0 or w[6] != 1 or w[7] != 0) return error.Unsupported;
-                try define(nodes, w[0], .{ .kind = .image, .a = w[1] });
+                if (sampled_type.scalar != .f32 or sampled_type.columns != 1 or sampled_type.rows != 1) return error.Unsupported;
+                // Sampled 2D images and single-sample SubpassData input
+                // attachments are intentionally the only image domains in
+                // the bounded fragment profile.
+                if (w[2] == 1 and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 1 and w[7] == 0) {
+                    try define(nodes, w[0], .{ .kind = .image, .a = w[1], .b = w[2] });
+                } else if (w[2] == 6 and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 2 and w[7] == 0) {
+                    try define(nodes, w[0], .{ .kind = .image, .a = w[1], .b = w[2] });
+                } else return error.Unsupported;
             },
             27 => {
                 if (nodes[try id(nodes, w[1])].kind != .image) return error.Malformed;
@@ -1088,11 +1096,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
                     87 => w.len == 6,
+                    98 => w.len == 4,
                     62 => w.len == 2,
                     65 => w.len >= 4,
                     77 => w.len == 4,
@@ -1205,7 +1214,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const pointer = nodes[try id(nodes, pointer_value.type_id)];
                 if (pointer.kind != .pointer) return error.Malformed;
                 if (pointer.a == 0) {
-                    if (nodes[try id(nodes, w[0])].kind != .sampled_image or pointer.b != w[0]) return error.Malformed;
+                    const loaded = nodes[try id(nodes, w[0])];
+                    if ((loaded.kind != .sampled_image and loaded.kind != .image) or pointer.b != w[0]) return error.Malformed;
                 } else if (!sameShape(try resultShape(nodes, w[0]), try resultShape(nodes, pointer.b))) return error.Malformed;
                 if (pointer.a != 0 and pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 7 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
             },
@@ -1217,6 +1227,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const coordinates = try valueShape(nodes, w[3]);
                 const bias = try valueShape(nodes, w[5]);
                 if (coordinates.scalar != .f32 or coordinates.columns != 2 or coordinates.rows != 1 or bias.scalar != .f32 or bias.columns != 1 or bias.rows != 1) return error.Unsupported;
+            },
+            98 => {
+                const result = try resultShape(nodes, w[0]);
+                if (requested_stage != .fragment or result.scalar != .f32 or result.columns != 4 or result.rows != 1) return error.Unsupported;
+                const image = nodes[try id(nodes, w[2])];
+                if (image.kind != .function_value or image.opcode != 61 or nodes[try id(nodes, image.type_id)].kind != .image) return error.Unsupported;
+                const image_type = nodes[try id(nodes, image.type_id)];
+                if (image_type.b != 6) return error.Unsupported;
+                const coordinates = try valueShape(nodes, w[3]);
+                if (coordinates.scalar != .i32 or coordinates.columns != 2 or coordinates.rows != 1) return error.Unsupported;
             },
             62 => {
                 const pointer_value = nodes[try id(nodes, w[0])];
@@ -1517,8 +1537,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         const variable = nodes[index];
         if (variable.kind != .variable) return error.Malformed;
         const pointer = nodes[try id(nodes, variable.type_id)];
+        const pointee = nodes[try id(nodes, pointer.b)];
         const storage: ir.Storage = switch (variable.a) {
-            0 => .sampled_image,
+            0 => if (pointee.kind == .sampled_image) .sampled_image else if (pointee.kind == .image and pointee.b == 6) .input_attachment else return error.Unsupported,
             1 => .input,
             3 => .output,
             2 => .uniform,
@@ -1529,7 +1550,6 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (decorations[index].index_zero and !(requested_stage == .fragment and storage == .output and decorations[index].location == 0)) return error.Unsupported;
         var shape: ir.Type = undefined;
         var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_frag_coord = decorations[index].builtin_frag_coord, .builtin_front_facing = decorations[index].builtin_front_facing, .flat = decorations[index].flat };
-        const pointee = nodes[try id(nodes, pointer.b)];
         if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
             if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
@@ -1555,6 +1575,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         } else if (storage == .sampled_image) {
             if (pointee.kind != .sampled_image or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
+            shape = .{ .scalar = .f32, .columns = 4 };
+        } else if (storage == .input_attachment) {
+            if (requested_stage != .fragment or pointee.kind != .image or pointee.b != 6 or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
             shape = .{ .scalar = .f32, .columns = 4 };
         } else if (storage == .uniform or storage == .push_constant) {
             if (pointee.kind != .structure or !decorations[try id(nodes, pointer.b)].block) return error.Unsupported;
@@ -1778,7 +1801,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         for (module.instructions, instruction_functions) |instruction, instruction_function| {
             if (instruction_function != entry.function) continue;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
                 248 => instruction.words[0],
                 else => null,
             };
@@ -1802,7 +1825,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1817,6 +1840,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                             needed[operand_index] = true;
                             changed = true;
                         }
+                    }
+                    continue;
+                },
+                98 => {
+                    const operand_index = try id(nodes, w[3]);
+                    if (!needed[operand_index]) {
+                        needed[operand_index] = true;
+                        changed = true;
                     }
                     continue;
                 },
@@ -2117,13 +2148,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
+            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
         if (!needed[try id(nodes, rid)]) continue;
         const node = nodes[try id(nodes, rid)];
-        if (instruction.opcode == 61 and nodes[try id(nodes, node.type_id)].kind == .sampled_image) continue;
+        if (instruction.opcode == 61 and (nodes[try id(nodes, node.type_id)].kind == .sampled_image or nodes[try id(nodes, node.type_id)].kind == .image)) continue;
         const shape = if (instruction.opcode == 65) blk: {
             const pointer = nodes[try id(nodes, node.type_id)];
             if (pointer.kind != .pointer) return error.Malformed;
@@ -2222,6 +2253,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             83 => .copy_object,
             84 => .transpose,
             87 => .image_sample_implicit_lod,
+            98 => .image_read_input_attachment,
             109, 110, 111, 112, 113, 114, 115 => .convert,
             116 => .quantize_f16,
             124 => .bitcast,
@@ -2343,6 +2375,21 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const bias = canonical_ids[try id(nodes, node.words[3])];
             if (coordinates == std.math.maxInt(u32) or bias == std.math.maxInt(u32)) return error.Malformed;
             try operands.appendSlice(allocator, &.{ semantic_index orelse return error.Unsupported, coordinates, bias });
+        } else if (instruction.opcode == 98) {
+            const image_load = nodes[try id(nodes, node.words[0])];
+            if (image_load.kind != .function_value or image_load.opcode != 61 or image_load.words.len != 1) return error.Unsupported;
+            const resource_id = try id(nodes, image_load.words[0]);
+            const resource = nodes[resource_id];
+            if (resource.kind != .variable or resource.a != 0 or nodes[try id(nodes, resource.type_id)].kind != .pointer) return error.Unsupported;
+            const decoration = decorations[resource_id];
+            var semantic_index: ?u32 = null;
+            for (interfaces.items, 0..) |item, interface_index| {
+                if (item.storage == .input_attachment and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
+                    semantic_index = @intCast(interface_index);
+            }
+            const coordinates = canonical_ids[try id(nodes, node.words[1])];
+            if (coordinates == std.math.maxInt(u32)) return error.Malformed;
+            try operands.appendSlice(allocator, &.{ semantic_index orelse return error.Unsupported, coordinates });
         } else if (op == .constant) {
             var value_words = node.words;
             var specialized = false;
@@ -3036,6 +3083,34 @@ pub const bool_fragment = [_]u32{
     2,              6,              (5 << 16) | 54,  1,              7,
     0,              4,              (2 << 16) | 248, 8,              (3 << 16) | 62,
     5,              6,              (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Minimal SubpassData shader for the bounded framebuffer-fetch path. It
+/// performs one integer-coordinate OpImageRead and writes the result directly
+/// to location zero, avoiding any sampled-image or GL emulation semantics.
+pub const input_attachment_fragment = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,              18,             0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14, 0,              1,
+    (7 << 16) | 15,  4,               10,             0x6e69616d,     0,
+    11,              12,              (3 << 16) | 16, 10,             7,
+    (4 << 16) | 71,  11,              34,             0,              (4 << 16) | 71,
+    11,              33,              0,              (4 << 16) | 71, 12,
+    30,              0,               (2 << 16) | 19, 1,              (3 << 16) | 33,
+    2,               1,               (3 << 16) | 22, 3,              32,
+    (4 << 16) | 23,  4,               3,              4,              (4 << 16) | 21,
+    5,               32,              1,              (4 << 16) | 23, 6,
+    5,               2,               (9 << 16) | 25, 7,              3,
+    6,               0,               0,              0,              2,
+    0,               (4 << 16) | 32,  8,              0,              7,
+    (4 << 16) | 32,  9,               3,              4,              (4 << 16) | 59,
+    8,               11,              0,              (4 << 16) | 59, 9,
+    12,              3,               (4 << 16) | 43, 5,              15,
+    0,               (5 << 16) | 44,  6,              16,             15,
+    15,              (5 << 16) | 54,  1,              10,             0,
+    2,               (2 << 16) | 248, 13,             (4 << 16) | 61, 7,
+    14,              11,              (5 << 16) | 98, 4,              17,
+    14,              16,              (3 << 16) | 62, 12,             17,
+    (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Minimal single-sample fragment module exercising all three bounded
@@ -4780,6 +4855,48 @@ test "profile distinguishes malformed from unsupported" {
     var unknown_opcode = positive_vertex;
     unknown_opcode[unknown_opcode.len - 2] = (1 << 16) | 999;
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &unknown_opcode, .vertex, "main", &.{}));
+}
+
+test "fragment SubpassData input attachment lowers and fetches the active pixel" {
+    var program = try compile(std.testing.allocator, &input_attachment_fragment, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var input_index: ?u32 = null;
+    var output_index: ?u32 = null;
+    var saw_read = false;
+    for (program.interfaces, 0..) |interface, index| {
+        if (interface.storage == .input_attachment) input_index = @intCast(index);
+        if (interface.storage == .output) output_index = @intCast(index);
+    }
+    for (program.instructions) |instruction| saw_read = saw_read or instruction.op == .image_read_input_attachment;
+    try std.testing.expect(input_index != null and output_index != null and saw_read);
+    try std.testing.expectEqual(@as(?u32, 0), program.interfaces[input_index.?].descriptor_set);
+    try std.testing.expectEqual(@as(?u32, 0), program.interfaces[input_index.?].binding);
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    const pixels = [_]u8{ 13, 27, 41, 255 };
+    var output = [_]u8{0} ** 16;
+    try executor.execute(
+        &.{.{ .interface = input_index.?, .input_attachment = .{
+            .pixels = &pixels,
+            .width = 1,
+            .height = 1,
+            .row_stride = 4,
+            .format = .rgba8_unorm,
+            .filter = .nearest,
+            .address_u = .clamp_to_edge,
+            .address_v = .clamp_to_edge,
+        } }},
+        &.{.{ .interface = output_index.?, .bytes = &output }},
+    );
+    const red: f32 = @bitCast(std.mem.readInt(u32, output[0..4], .little));
+    const green: f32 = @bitCast(std.mem.readInt(u32, output[4..8], .little));
+    const blue: f32 = @bitCast(std.mem.readInt(u32, output[8..12], .little));
+    const alpha: f32 = @bitCast(std.mem.readInt(u32, output[12..16], .little));
+    try std.testing.expectApproxEqAbs(@as(f32, 13.0 / 255.0), red, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 27.0 / 255.0), green, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 41.0 / 255.0), blue, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), alpha, 0.0001);
 }
 
 test "every explicitly excluded instruction family capability type storage and constant is unsupported" {

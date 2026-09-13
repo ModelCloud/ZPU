@@ -353,6 +353,10 @@ pub const Op = enum(u8) {
     /// coordinates. The first operand is the resource interface, followed by
     /// the coordinate and implicit-LOD bias values.
     image_sample_implicit_lod,
+    /// Load a fragment input attachment by integer pixel coordinate. Input
+    /// attachments are not sampled images: there is no sampler, filtering,
+    /// or normalized-coordinate conversion.
+    image_read_input_attachment,
     local,
     local_access,
     local_load,
@@ -374,7 +378,7 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image };
+pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment };
 pub const max_uniform_members: usize = 16;
 pub const UniformMember = struct {
     ty: Type = .{ .scalar = .u32 },
@@ -525,7 +529,7 @@ pub fn identify(bytes: []const u8) Identity {
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
         .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
-        .image_sample_implicit_lod => operand_index != 0,
+        .image_sample_implicit_lod, .image_read_input_attachment => operand_index != 0,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => operand_index == 0,
         .constant_composite => true,
