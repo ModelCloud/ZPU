@@ -1375,7 +1375,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const result = try resultShape(nodes, w[0]);
                 const left = try valueShape(nodes, w[2]);
                 const right = try valueShape(nodes, w[3]);
-                if (result.scalar != .f32 or result.columns != 4 or result.rows != 4 or !sameShape(result, left) or !sameShape(result, right)) return error.Malformed;
+                // SPIR-V matrices are column-major: A(CxK) * B(KxR)
+                // produces CxR.  Chromium's coverage shaders use 3x3
+                // matrices in addition to the existing 4x4 path.
+                if (result.scalar != .f32 or left.scalar != .f32 or right.scalar != .f32 or
+                    left.rows != result.rows or right.columns != result.columns or
+                    left.columns != right.rows or left.rows < 2 or left.rows > 4 or
+                    left.columns < 2 or left.columns > 4 or right.columns < 2 or right.columns > 4)
+                    return error.Malformed;
             },
             147 => {
                 const result = try resultShape(nodes, w[0]);
@@ -5160,6 +5167,21 @@ test "Chromium Skia matrix vertex shaders execute column-major push constants" {
     try executeChromiumMatrixVertexFixture(std.mem.bytesAsSlice(u32, &bytes_512));
     const bytes_525 align(4) = @embedFile("fixtures/chromium_skia_vertex_525.spv").*;
     try executeChromiumMatrixVertexFixture(std.mem.bytesAsSlice(u32, &bytes_525));
+}
+
+test "Chromium Skia 3x3 matrix vertex shader compiles" {
+    const bytes align(4) = @embedFile("fixtures/chromium_skia_vertex_3x3.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var matrix_products: usize = 0;
+    var matrix_vectors: usize = 0;
+    for (program.instructions) |instruction| {
+        if (instruction.op == .matrix_times_matrix) matrix_products += 1;
+        if (instruction.op == .matrix_times_vector) matrix_vectors += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), matrix_products);
+    try std.testing.expectEqual(@as(usize, 3), matrix_vectors);
 }
 
 test "Chromium Skia flat-color vertex shader preserves interpolation mode" {

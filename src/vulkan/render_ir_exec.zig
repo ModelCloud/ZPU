@@ -1578,10 +1578,10 @@ pub const Executor = struct {
                 .matrix_times_matrix => {
                     const left = try valueRef(self.values, pc, instruction.operands[0]);
                     const right = try valueRef(self.values, pc, instruction.operands[1]);
-                    for (0..4) |col| for (0..4) |row| {
+                    for (0..instruction.ty.columns) |col| for (0..instruction.ty.rows) |row| {
                         var sum: f32 = 0;
-                        for (0..4) |k| sum += @as(f32, @bitCast(left.bits[k * 4 + row])) * @as(f32, @bitCast(right.bits[col * 4 + k]));
-                        result.bits[col * 4 + row] = canonicalFloat(@bitCast(sum));
+                        for (0..left.ty.columns) |k| sum += @as(f32, @bitCast(left.bits[k * left.ty.rows + row])) * @as(f32, @bitCast(right.bits[col * right.ty.rows + k]));
+                        result.bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum));
                     };
                 },
                 .transpose => {
@@ -1789,7 +1789,9 @@ fn validate(program: *const ir.Program) Error!void {
                 },
                 .matrix_times_scalar => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty))) or (oi == 1 and (source_ty.scalar != .f32 or try lanes(source_ty) != 1))) return error.InvalidType,
                 .vector_times_matrix => if ((oi == 0 and (!(source_ty.scalar == .f32 and source_ty.columns >= 2 and source_ty.rows == 1) or !same(source_ty, instruction.ty))) or (oi == 1 and !(source_ty.scalar == .f32 and source_ty.columns == instruction.ty.columns and source_ty.rows == instruction.ty.columns))) return error.InvalidType,
-                .matrix_times_matrix => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 4) or !same(source_ty, instruction.ty)) return error.InvalidType,
+                .matrix_times_matrix => if (source_ty.scalar != .f32 or source_ty.rows < 2 or source_ty.rows > 4 or source_ty.columns < 2 or source_ty.columns > 4 or
+                    (oi == 0 and (source_ty.rows != instruction.ty.rows or source_ty.columns != program.instructions[instruction.operands[1]].ty.rows)) or
+                    (oi == 1 and (source_ty.columns != instruction.ty.columns or source_ty.rows != program.instructions[instruction.operands[0]].ty.columns))) return error.InvalidType,
                 .outer_product => if (!(source_ty.scalar == .f32 and source_ty.columns == 4 and source_ty.rows == 1) or (oi == 0 and instruction.ty.scalar != .f32) or (oi == 0 and (instruction.ty.columns != 4 or instruction.ty.rows != 4))) return error.InvalidType,
                 .dot => if (!(source_ty.scalar == .f32 and source_ty.columns >= 2 and source_ty.columns <= 4 and source_ty.rows == 1) or (oi == 0 and (instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1))) return error.InvalidType,
                 .any, .all => if (source_ty.scalar != .bool or source_ty.rows != 1 or source_ty.columns < 1 or source_ty.columns > 4 or instruction.ty.scalar != .bool or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType,
