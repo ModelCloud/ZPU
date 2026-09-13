@@ -582,7 +582,13 @@ pub const Executor = struct {
                     const interface = self.program.interfaces[interface_index];
                     if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) return error.InvalidStorage;
                     const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
-                    if (member_index >= interface.member_count) return error.Bounds;
+                    if (member_index >= interface.member_count) {
+                        if (renderDiagnosticsEnabled()) std.debug.print(
+                            "ZPU render access member out of bounds interface={} member={} count={}\n",
+                            .{ interface_index, member_index, interface.member_count },
+                        );
+                        return error.Bounds;
+                    }
                     const bytes = if (interface.storage == .output and
                         interface.descriptor_set == null and
                         interface.binding == null)
@@ -603,7 +609,13 @@ pub const Executor = struct {
                         offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
                     }
                     const size = if (member_ty.rows == 1) try byteSize(member_ty) else @as(usize, member_ty.columns) * 16;
-                    if (offset > bytes.len or size > bytes.len - offset) return error.Bounds;
+                    if (offset > bytes.len or size > bytes.len - offset) {
+                        if (renderDiagnosticsEnabled()) std.debug.print(
+                            "ZPU render access bytes out of bounds interface={} member={} offset={} size={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
+                            .{ interface_index, member_index, offset, size, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
+                        );
+                        return error.Bounds;
+                    }
                     const loaded = try readUniformValue(member_ty, bytes[offset..]);
                     if (instruction.operands.len == 2 or member.array_stride != 0) {
                         if (!same(member_ty, instruction.ty)) return error.InvalidType;
