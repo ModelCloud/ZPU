@@ -1785,6 +1785,11 @@ fn failureDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+fn renderDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
 fn objectPoolExhausted(comptime object_name: []const u8) Result {
     if (failureDiagnosticsEnabled()) {
         std.debug.print("ZPU {s} object pool exhausted\n", .{object_name});
@@ -9647,9 +9652,20 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = push.interface, .bytes = op.push_constants.values[4][0..push.byte_size] };
         fragment_uniform_count += 1;
     }
-    const fragment_sampled_image = if (profile.fragment_sampled_image) |interface| render_ir_exec.Binding{
-        .interface = interface,
-        .sampled_image = profileSampledImage(op.descriptors) orelse return,
+    const fragment_sampled_image = if (profile.fragment_sampled_image) |interface| blk: {
+        const sampled = profileSampledImage(op.descriptors);
+        if (sampled == null) {
+            if (renderDiagnosticsEnabled()) {
+                const image = op.descriptors.texture;
+                const sampler = op.descriptors.sampler;
+                std.debug.print(
+                    "ZPU render sampled-image setup failed image={} sampler={} format={d} size={d}x{d} filter={d}/{d} unnormalized={}\n",
+                    .{ image != null, sampler != null, if (image) |value| value.format else 0, if (image) |value| value.width else 0, if (image) |value| value.height else 0, if (sampler) |value| value.min_filter else 0, if (sampler) |value| value.mag_filter else 0, if (sampler) |value| value.unnormalized_coordinates else false },
+                );
+            }
+            return;
+        }
+        break :blk render_ir_exec.Binding{ .interface = interface, .sampled_image = sampled.? };
     } else null;
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
@@ -9679,7 +9695,13 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 vertex_bindings[binding_count] = uniform;
                 binding_count += 1;
             }
-            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch return;
+            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
+                if (renderDiagnosticsEnabled()) std.debug.print(
+                    "ZPU render vertex execution failed err={s} inputs={} outputs={} vertex={d} triangle={d}\n",
+                    .{ @errorName(err), profile.input_count, profile.vertex_output_count, corner, triangle_index },
+                );
+                return;
+            };
             const clip = profileReadClip(&vertex_output_bytes[profile.vertex_position_slot]) orelse return;
             if (@abs(clip[3]) < 0.000001) return;
             const inverse_w = 1.0 / clip[3];
@@ -9713,7 +9735,13 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 fragment_bindings[fragment_binding_count] = binding;
                 fragment_binding_count += 1;
             }
-            profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch return;
+            profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                if (renderDiagnosticsEnabled()) std.debug.print(
+                    "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
+                    .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image != null, triangle_index },
+                );
+                return;
+            };
         }
         const inverse_area = 1.0 / area;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0);
@@ -9815,7 +9843,13 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[fragment_binding_count] = binding;
                     fragment_binding_count += 1;
                 }
-                profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch return;
+                profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                    if (renderDiagnosticsEnabled()) std.debug.print(
+                        "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
+                        .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image != null, profile.fragment_frag_coord != null, triangle_index },
+                    );
+                    return;
+                };
             }
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
             if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;

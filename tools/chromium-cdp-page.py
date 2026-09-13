@@ -49,7 +49,7 @@ def send(sock: socket.socket, value: dict) -> None:
 
 def connect(url: str) -> socket.socket:
     parsed = urllib.parse.urlsplit(url)
-    sock = socket.create_connection((parsed.hostname, parsed.port), timeout=10)
+    sock = socket.create_connection((parsed.hostname, parsed.port), timeout=120)
     key = base64.b64encode(os.urandom(16)).decode()
     request = (
         f"GET {parsed.path} HTTP/1.1\r\n"
@@ -104,30 +104,41 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=9222)
     parser.add_argument("--screenshot", required=True)
     parser.add_argument("--query", action="append", default=[])
+    parser.add_argument("--settle-seconds", type=float, default=5)
+    parser.add_argument("--no-navigate", action="store_true")
     args = parser.parse_args()
     target = page_target(args.port)
     with connect(target["webSocketDebuggerUrl"]) as sock:
         cdp = Cdp(sock)
         cdp.call("Page.enable")
         cdp.call("Runtime.enable")
-        cdp.call("Page.navigate", {"url": args.url})
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            state = cdp.call("Runtime.evaluate", {"expression": "document.readyState"})
-            if state.get("result", {}).get("result", {}).get("value") == "complete":
-                break
-            time.sleep(0.25)
+        if not args.no_navigate:
+            cdp.call("Page.navigate", {"url": args.url})
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                state = cdp.call("Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True})
+                if state.get("result", {}).get("value") == "complete":
+                    break
+                time.sleep(0.25)
+        time.sleep(args.settle_seconds)
         checks = {}
         for selector in args.query:
             expression = f"Boolean(document.querySelector({json.dumps(selector)}))"
-            result = cdp.call("Runtime.evaluate", {"expression": expression})
-            checks[selector] = result.get("result", {}).get("result", {}).get("value", False)
+            result = cdp.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+            checks[selector] = result.get("result", {}).get("value", False)
+        page_state_response = cdp.call(
+            "Runtime.evaluate",
+            {"expression": "JSON.stringify({title:document.title, readyState:document.readyState, bodyText:document.body ? document.body.innerText.slice(0, 500) : '', bodyLength:document.body ? document.body.innerText.length : 0, htmlLength:document.documentElement ? document.documentElement.outerHTML.length : 0})", "returnByValue": True},
+        )
+        page_state = page_state_response.get("result", {}).get("value", "")
+        if not page_state:
+            print(json.dumps({"page_state_response": page_state_response}, sort_keys=True))
         cdp.call("Runtime.evaluate", {"expression": "window.scrollBy(0, Math.max(400, innerHeight));"})
         cdp.call("Runtime.evaluate", {"expression": "document.title"})
         screenshot = cdp.call("Page.captureScreenshot", {"format": "png", "fromSurface": True})
     with open(args.screenshot, "wb") as output:
         output.write(base64.b64decode(screenshot["data"]))
-    print(json.dumps({"url": args.url, "checks": checks, "screenshot": args.screenshot}))
+    print(json.dumps({"url": args.url, "checks": checks, "page": page_state, "screenshot": args.screenshot}))
 
 
 if __name__ == "__main__":
