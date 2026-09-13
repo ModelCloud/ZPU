@@ -331,9 +331,8 @@ pub const SparseImageFormatProperties = extern struct { aspect_mask: u32, image_
 pub const PhysicalDeviceFeatures2 = extern struct { s_type: i32, p_next: ?*anyopaque, features: Features };
 // Promoted core feature chains use only VkBool32 payloads.  Keeping these
 // declarations explicit gives the *2 queries a real ABI-sized destination
-// instead of treating every non-null pNext as an opaque rejection.  ZPU's
-// advertised Vulkan 1.1 profile enables samplerYcbcrConversion; every other
-// optional feature remains VK_FALSE while preserving the caller-owned chain links.
+// instead of treating every non-null pNext as an opaque rejection.  Optional
+// features remain VK_FALSE while preserving the caller-owned chain links.
 pub const PhysicalDeviceVulkan11Features = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -2671,12 +2670,6 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
         @memset(bytes[16 .. 16 + words * @sizeOf(u32)], 0);
         const payload = bytes[16 .. 16 + words * @sizeOf(u32)];
         switch (header.s_type) {
-            49 => { // VkPhysicalDeviceVulkan11Features
-                propertyWriteU32(payload, 40, 1); // samplerYcbcrConversion
-            },
-            1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
-                propertyWriteU32(payload, 0, 1);
-            },
             1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
                 propertyWriteU32(payload, 0, 1);
                 propertyWriteU32(payload, 4, 0);
@@ -2695,17 +2688,6 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
         const words = coreFeaturePayloadWords(header.s_type) orelse return true;
         const bytes: [*]const u8 = @ptrCast(item);
         switch (header.s_type) {
-            49 => { // VkPhysicalDeviceVulkan11Features
-                var i: usize = 0;
-                while (i < words) : (i += 1) {
-                    const value = std.mem.readInt(u32, @ptrCast(&bytes[16 + i * 4]), .little);
-                    if (value != 0 and i != 10) return true;
-                }
-            },
-            1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
-                const value = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
-                if (value != 0 and value != 1) return true;
-            },
             1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
                 const last = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
                 const preserve = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
@@ -22556,11 +22538,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         var i: usize = 0;
         while (i < 12) : (i += 1) {
             const value = std.mem.readInt(u32, @ptrCast(&v11_bytes[i * 4]), .little);
-            if (i == 10) {
-                try std.testing.expectEqual(@as(u32, 1), value);
-            } else {
-                try std.testing.expectEqual(@as(u32, 0), value);
-            }
+            try std.testing.expectEqual(@as(u32, 0), value);
         }
     }
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
