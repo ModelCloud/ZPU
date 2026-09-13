@@ -37,6 +37,22 @@ pub fn build(b: *std.Build) void {
         const run_llvm_orc_smoke = b.addRunArtifact(llvm_orc_smoke);
         const llvm_orc_smoke_step = b.step("llvm-jit-smoke", "Require the pinned LLVM 22 ORC API to compile and execute native code");
         llvm_orc_smoke_step.dependOn(&run_llvm_orc_smoke.step);
+
+        // This intentionally remains outside the ICD until its generated
+        // code has a complete Render-IR ABI and differential coverage.  It
+        // exercises a real dynamic Chromium radial-gradient inner stage
+        // (uniform-array index, color interpolation, sampling contribution,
+        // clamp, and coverage) through ORC rather than merely JITing add().
+        const llvm_orc_radial = b.addExecutable(.{
+            .name = "zpu-llvm-orc-radial",
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+        });
+        llvm_orc_radial.root_module.link_libc = true;
+        llvm_orc_radial.root_module.addCSourceFile(.{ .file = b.path("test/llvm_orc_radial_shader.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        llvm_orc_radial.root_module.linkSystemLibrary("LLVM", .{});
+        const run_llvm_orc_radial = b.addRunArtifact(llvm_orc_radial);
+        const llvm_orc_radial_step = b.step("llvm-jit-radial", "Differential-test LLVM ORC lowering of a dynamic Chromium radial-gradient stage");
+        llvm_orc_radial_step.dependOn(&run_llvm_orc_radial.step);
     }
 
     const build_config = b.addOptions();
