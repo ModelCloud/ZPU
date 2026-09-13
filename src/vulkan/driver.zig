@@ -4419,9 +4419,13 @@ fn maybeReleaseCommandBufferStorageLocked(command_buffer: *CommandBufferObj) voi
 
 fn ensureCommandBufferStorage(command_buffer: *CommandBufferObj) bool {
     if (command_buffer.impl.commands.len != 0) return true;
-    const commands = allocator.alloc(Command, max_command_buffer_commands) catch return false;
+    const commands = allocator.alloc(Command, max_command_buffer_commands) catch {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU command storage allocation failed commands={} bytes={}\n", .{ max_command_buffer_commands, @sizeOf(Command) * max_command_buffer_commands });
+        return false;
+    };
     const descriptor_snapshots = allocator.alloc(DescriptorSetObj, max_command_buffer_commands) catch {
         allocator.free(commands);
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor snapshot storage allocation failed commands={} bytes={}\n", .{ max_command_buffer_commands, @sizeOf(DescriptorSetObj) * max_command_buffer_commands });
         return false;
     };
     command_buffer.impl.commands = commands;
@@ -5100,7 +5104,14 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
         return .error_out_of_host_memory;
     }
     _ = cpu_locality.pinCurrent(.render);
-    const bytes = allocateBytes(std.math.cast(usize, ci.allocation_size) orelse return .error_out_of_host_memory) catch return .error_out_of_host_memory;
+    const allocation_size = std.math.cast(usize, ci.allocation_size) orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU host allocation size conversion failed size={}\n", .{ci.allocation_size});
+        return .error_out_of_host_memory;
+    };
+    const bytes = allocateBytes(allocation_size) catch {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU host allocation failed size={} heap_used={} heap_size={}\n", .{ ci.allocation_size, d.heap_used, heap_size });
+        return .error_out_of_host_memory;
+    };
     @memset(bytes, 0);
     for (&memory_objects, &memory_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending and object.active_users.load(.acquire) == 0)) {
         const handle = allocateGenericHandle();
@@ -6086,6 +6097,7 @@ fn allocateCommandBuffers(device: ?Device, info: ?*const CommandBufferAllocateIn
             break;
         };
         const index = slot orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU command buffer pool exhausted requested={} made={} capacity={} level={d}\n", .{ ci.command_buffer_count, made, max_child_objects, ci.level });
             for (out[0..made]) |prior| {
                 stateForObject(CommandBufferObj, prior, &command_buffer_objects, &command_buffer_state).?.* = .tombstone;
                 prior.loader_data = 0;
@@ -10506,7 +10518,7 @@ fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageOb
 }
 
 fn profileMosaicEligible(op: anytype) bool {
-    return false and op.pipeline.execution_abi == .profile_v1_scalar_graphics and
+    return op.pipeline.execution_abi == .profile_v1_scalar_graphics and
         op.rasterizer_discard_enable == 0 and op.layer_count == 1;
 }
 
