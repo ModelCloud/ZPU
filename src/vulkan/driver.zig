@@ -9449,7 +9449,7 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
                 std.mem.writeInt(u32, storage[index * 4 ..][0..4], @bitCast(value), .little);
             }
         },
-        100, 103, 109 => {
+        81, 100, 103, 109 => {
             if (input.source_byte_size != input.byte_size) return null;
             @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
         },
@@ -12628,7 +12628,9 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
     var vertex_inputs: u32 = 0;
     for (vertex.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
-            if (vertex_inputs == 16 or interface.location == null or interface.ty.scalar != .f32 or (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
+            if (vertex_inputs == 16 or interface.location == null or
+                (interface.ty.scalar != .f32 and !(interface.ty.scalar == .u32 and interface.ty.columns == 2)) or
+                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
             result.inputs[vertex_inputs].interface = @intCast(index);
             result.inputs[vertex_inputs].location = interface.location.?;
             result.inputs[vertex_inputs].byte_size = @as(u8, interface.ty.columns) * 4;
@@ -12711,6 +12713,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         for (attributes) |attribute| if (attribute.location == result.inputs[input_index].location) {
             const source_byte_size: u8 = switch (attribute.format) {
                 37 => if (result.inputs[input_index].byte_size == 16) 4 else return null,
+                81 => if (vertex.interfaces[result.inputs[input_index].interface].ty.scalar == .u32 and result.inputs[input_index].byte_size == 8) 8 else return null,
                 100 => if (result.inputs[input_index].byte_size == 4) 4 else return null,
                 103 => if (result.inputs[input_index].byte_size == 8) 8 else return null,
                 109 => if (result.inputs[input_index].byte_size == 16) 16 else return null,
@@ -15630,6 +15633,35 @@ test "scalar graphics profile admits Chromium packed vertex inputs" {
     try std.testing.expectEqual(@as(u8, 3), contract.input_count);
     try std.testing.expectEqual(@as(u8, 4), contract.inputs[1].source_byte_size);
     try std.testing.expectEqual(@as(i32, 100), contract.inputs[1].format);
+}
+
+test "scalar graphics profile admits Chromium R32G32_UINT vertex inputs" {
+    const uint2 = render_ir.Type{ .scalar = .u32, .columns = 2 };
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = uint2, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = @constCast(&vertex_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 8, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 81, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 1), contract.input_count);
+    try std.testing.expectEqual(@as(u8, 8), contract.inputs[0].byte_size);
+    try std.testing.expectEqual(@as(u8, 8), contract.inputs[0].source_byte_size);
+    try std.testing.expectEqual(@as(i32, 81), contract.inputs[0].format);
+    var storage: [16]u8 = undefined;
+    const decoded = profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, &storage).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, decoded);
 }
 
 test "scalar graphics profile executes descriptor uniform blocks" {
