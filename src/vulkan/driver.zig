@@ -16857,8 +16857,8 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     if (failureDiagnosticsEnabled()) std.debug.print(
-        "ZPU end render pass invalid={} commands={d} active={} framebuffer={} subpass={d}\n",
-        .{ command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.active_framebuffer != null, command_buffer.impl.active_subpass },
+        "ZPU end render pass invalid={} commands={d} active={} framebuffer={} subpass={d} subpass_count={d}\n",
+        .{ command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.active_framebuffer != null, command_buffer.impl.active_subpass, if (command_buffer.impl.active_render_pass) |pass| pass.subpass_count else 0 },
     );
     const render_pass = command_buffer.impl.active_render_pass;
     const framebuffer = command_buffer.impl.active_framebuffer;
@@ -16867,6 +16867,7 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     // active state on rejection keeps the command stream failure-atomic and
     // makes the subsequent end-query diagnostic deterministic.
     if (command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or render_pass == null or framebuffer == null or command_buffer.impl.active_query_pool != null) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU end render pass rejected initial level={} state={} active_query={} render_pass={} framebuffer={}\n", .{ command_buffer.impl.level, command_buffer.impl.state, command_buffer.impl.active_query_pool != null, render_pass != null, framebuffer != null });
         command_buffer.impl.invalid = true;
         return;
     }
@@ -16876,6 +16877,7 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     // state is rejected atomically rather than reaching an out-of-bounds
     // access.
     if (active_subpass >= render_pass.?.subpass_count or active_subpass + 1 != render_pass.?.subpass_count) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU end render pass rejected subpass={} subpass_count={}\n", .{ active_subpass, render_pass.?.subpass_count });
         command_buffer.impl.invalid = true;
         return;
     }
