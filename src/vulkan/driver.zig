@@ -10568,6 +10568,15 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         },
         .buffer_to_image => |op| {
             diagnoseImageTransfer("buffer_to_image", null, op.dst);
+            if (renderDiagnosticsEnabled() and op.dst.width == 256 and op.dst.height == 64) {
+                const source = bufferBytes(op.src);
+                const start: usize = @intCast(op.region.buffer_offset);
+                const sample = if (start < source.len) source[start..][0..@min(@as(usize, 32), source.len - start)] else &.{};
+                std.debug.print(
+                    "ZPU text upload buffer={} offset={} row_length={d} image_height={d} extent={d}x{d} sample={any}\n",
+                    .{ op.src.size, op.region.buffer_offset, op.region.buffer_row_length, op.region.buffer_image_height, op.region.image_extent.width, op.region.image_extent.height, sample },
+                );
+            }
             copyBufferImage(op.src, op.dst, op.region, true);
             invalidateImageContents(op.dst);
         },
