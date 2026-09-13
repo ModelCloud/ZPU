@@ -313,6 +313,7 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     const height = transport.height;
     if (transport.headless) {
         if (pixels.len != @as(usize, width) * height * 4) return false;
+        dumpPresentPixels(pixels);
         const now = monotonicNs();
         transport.last.copy_start_ns = now;
         transport.last.copy_end_ns = now;
