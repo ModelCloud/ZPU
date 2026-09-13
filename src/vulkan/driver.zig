@@ -9449,7 +9449,19 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
                 std.mem.writeInt(u32, storage[index * 4 ..][0..4], @bitCast(value), .little);
             }
         },
-        81, 100, 103, 109 => {
+        81 => {
+            // VK_FORMAT_R16G16_UINT is packed in the vertex buffer, while
+            // the shader input is a u32x2.  Vulkan widens each component;
+            // copying the four source bytes into the eight-byte IR value
+            // would instead make the second component consume the next
+            // vertex attribute (and leave both values in the wrong domain).
+            if (input.source_byte_size != 4 or input.byte_size != 8) return null;
+            for (0..2) |index| {
+                const value = std.mem.readInt(u16, source[index * 2 ..][0..2], .little);
+                std.mem.writeInt(u32, storage[index * 4 ..][0..4], value, .little);
+            }
+        },
+        100, 103, 109 => {
             if (input.source_byte_size != input.byte_size) return null;
             @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
         },
@@ -12738,7 +12750,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         for (attributes) |attribute| if (attribute.location == result.inputs[input_index].location) {
             const source_byte_size: u8 = switch (attribute.format) {
                 37 => if (result.inputs[input_index].byte_size == 16) 4 else return null,
-                81 => if (vertex.interfaces[result.inputs[input_index].interface].ty.scalar == .u32 and result.inputs[input_index].byte_size == 8) 8 else return null,
+                81 => if (vertex.interfaces[result.inputs[input_index].interface].ty.scalar == .u32 and result.inputs[input_index].byte_size == 8) 4 else return null,
                 100 => if (result.inputs[input_index].byte_size == 4) 4 else return null,
                 103 => if (result.inputs[input_index].byte_size == 8) 8 else return null,
                 109 => if (result.inputs[input_index].byte_size == 16) 16 else return null,
@@ -15659,7 +15671,7 @@ test "scalar graphics profile admits Chromium packed vertex inputs" {
     try std.testing.expectEqual(@as(i32, 100), contract.inputs[1].format);
 }
 
-test "scalar graphics profile admits Chromium R32G32_UINT vertex inputs" {
+test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
     const uint2 = render_ir.Type{ .scalar = .u32, .columns = 2 };
     const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
     const vertex_interfaces = [_]render_ir.Interface{
@@ -15681,11 +15693,11 @@ test "scalar graphics profile admits Chromium R32G32_UINT vertex inputs" {
     const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
     try std.testing.expectEqual(@as(u8, 1), contract.input_count);
     try std.testing.expectEqual(@as(u8, 8), contract.inputs[0].byte_size);
-    try std.testing.expectEqual(@as(u8, 8), contract.inputs[0].source_byte_size);
+    try std.testing.expectEqual(@as(u8, 4), contract.inputs[0].source_byte_size);
     try std.testing.expectEqual(@as(i32, 81), contract.inputs[0].format);
     var storage: [16]u8 = undefined;
-    const decoded = profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, &storage).?;
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, decoded);
+    const decoded = profileVertexInputBytes(contract.inputs[0], &[_]u8{ 97, 0, 95, 0 }, &storage).?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 97, 0, 0, 0, 95, 0, 0, 0 }, decoded);
 
     var crossing_attribute = attribute;
     crossing_attribute.offset = 12;
