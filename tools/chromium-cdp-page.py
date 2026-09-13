@@ -106,9 +106,14 @@ def main() -> None:
     parser.add_argument("--no-screenshot", action="store_true")
     parser.add_argument("--no-scroll", action="store_true")
     parser.add_argument("--query", action="append", default=[])
+    parser.add_argument("--click-selector")
+    parser.add_argument("--type-selector")
+    parser.add_argument("--type-text")
     parser.add_argument("--settle-seconds", type=float, default=5)
     parser.add_argument("--no-navigate", action="store_true")
     args = parser.parse_args()
+    if (args.type_selector is None) != (args.type_text is None):
+        parser.error("--type-selector and --type-text must be supplied together")
     target = page_target(args.port)
     with connect(target["webSocketDebuggerUrl"]) as sock:
         cdp = Cdp(sock)
@@ -123,6 +128,30 @@ def main() -> None:
                     break
                 time.sleep(0.25)
         time.sleep(args.settle_seconds)
+        actions = []
+        if args.click_selector:
+            expression = "Boolean(document.querySelector(%s))" % json.dumps(args.click_selector)
+            result = cdp.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+            if not result.get("result", {}).get("value", False):
+                raise RuntimeError("click selector not found: %s" % args.click_selector)
+            cdp.call(
+                "Runtime.evaluate",
+                {"expression": "document.querySelector(%s).click()" % json.dumps(args.click_selector)},
+            )
+            actions.append("click:%s" % args.click_selector)
+        if args.type_selector:
+            expression = "Boolean(document.querySelector(%s))" % json.dumps(args.type_selector)
+            result = cdp.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+            if not result.get("result", {}).get("value", False):
+                raise RuntimeError("type selector not found: %s" % args.type_selector)
+            cdp.call(
+                "Runtime.evaluate",
+                {"expression": "document.querySelector(%s).focus()" % json.dumps(args.type_selector)},
+            )
+            cdp.call("Input.insertText", {"text": args.type_text})
+            actions.append("type:%s" % args.type_selector)
+        if actions:
+            time.sleep(1)
         checks = {}
         for selector in args.query:
             expression = f"Boolean(document.querySelector({json.dumps(selector)}))"
@@ -143,7 +172,7 @@ def main() -> None:
     if not args.no_screenshot:
         with open(args.screenshot, "wb") as output:
             output.write(base64.b64decode(screenshot["data"]))
-    print(json.dumps({"url": args.url, "checks": checks, "page": page_state, "screenshot": args.screenshot}))
+    print(json.dumps({"url": args.url, "checks": checks, "actions": actions, "page": page_state, "screenshot": args.screenshot}))
 
 
 if __name__ == "__main__":
