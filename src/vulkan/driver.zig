@@ -2163,11 +2163,11 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
             pipeline_rendering_create_info_stype => {
                 if (seen_rendering) return null;
                 const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
-                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !transferableColorFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
+                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !colorAttachmentFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
                 const color_format = if (info.color_attachment_count == 0) 0 else info.color_attachment_formats.?[0];
                 // ZPU's dynamic-rendering attachment path is deliberately
                 // bounded to the same formats accepted by vkCmdBeginRendering.
-                if (color_format != 0 and !transferableColorFormat(color_format)) return null;
+                if (color_format != 0 and !colorAttachmentFormat(color_format)) return null;
                 rendering = .{ .view_mask = info.view_mask, .color_format = color_format, .depth_format = info.depth_attachment_format, .stencil_format = info.stencil_attachment_format };
                 seen_rendering = true;
             },
@@ -3792,9 +3792,10 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
     _ = tiling;
     return switch (format) {
         // R8_UNORM is retained in the internal image store as one red byte
-        // per texel followed by an opaque padding word.  It is a sampled
-        // transfer texture only; it is not a color attachment.
-        9 => 0x1 | 0x2 | 0x4,
+        // per texel followed by an opaque padding word. It supports the
+        // sampled, transfer, and single color-attachment paths used by
+        // Chromium's glyph atlases.
+        9 => 0x1 | 0x2 | 0x4 | 0x10,
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
@@ -3828,7 +3829,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
     out.* = switch (format) {
-        9 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
@@ -6228,7 +6229,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
             const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
             if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
             const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
-            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !transferableColorFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !colorAttachmentFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
             inherited_dynamic = true;
             inherited_dynamic_view_mask = dynamic_info.view_mask;
             inherited_dynamic_color_format = if (dynamic_info.color_attachment_count == 0) 0 else dynamic_info.color_attachment_formats.?[0];
@@ -6828,7 +6829,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
                 c.impl.invalid = true;
                 return;
             }
-            if (color_image == null and !transferableColorFormat(inherited_color_format)) {
+            if (color_image == null and !colorAttachmentFormat(inherited_color_format)) {
                 c.impl.invalid = true;
                 return;
             }
@@ -7197,6 +7198,10 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
 // formats retain their narrower sampled/destination-only contracts.
 fn transferableColorFormat(format: i32) bool {
     return format == 37 or format == 44;
+}
+
+fn colorAttachmentFormat(format: i32) bool {
+    return format == 9 or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
@@ -9493,6 +9498,7 @@ fn profileBlendEquation(op: i32, source: f32, destination: f32) ?f32 {
 
 fn colorStorageIndices(format: i32) ?[4]usize {
     return switch (format) {
+        9 => .{ 0, 1, 2, 3 },
         37 => .{ 0, 1, 2, 3 },
         44 => .{ 2, 1, 0, 3 },
         else => null,
@@ -13980,7 +13986,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             return;
         };
         tracked_color_layout = commandBufferImageLayout(command_buffer, view.image);
-        if (view.image.owner != command_buffer.impl.owner or view.aspect_mask != 1 or view.usage & 0x10 == 0 or !transferableColorFormat(view.image.format) or tracked_color_layout != attachment.image_layout or view.base_array_layer >= view.image.array_layers or view.layer_count < ci.layer_count or ci.layer_count > view.image.array_layers - view.base_array_layer) {
+        if (view.image.owner != command_buffer.impl.owner or view.aspect_mask != 1 or view.usage & 0x10 == 0 or !colorAttachmentFormat(view.image.format) or tracked_color_layout != attachment.image_layout or view.base_array_layer >= view.image.array_layers or view.layer_count < ci.layer_count or ci.layer_count > view.image.array_layers - view.base_array_layer) {
             command_buffer.impl.invalid = true;
             return;
         }
