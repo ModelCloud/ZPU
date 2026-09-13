@@ -9921,7 +9921,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 };
             }
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-            if (renderDiagnosticsEnabled() and diagnostic_draw >= 29 and diagnostic_draw <= 34 and diagnostic_fragments_logged < 4) {
+            if (renderDiagnosticsEnabled() and diagnostic_draw >= 70 and diagnostic_draw <= 75 and diagnostic_fragments_logged < 4) {
                 var diagnostic_source: [4]f32 = undefined;
                 var diagnostic_destination: [4]f32 = undefined;
                 for (0..4) |channel| {
