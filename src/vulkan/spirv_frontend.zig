@@ -111,6 +111,7 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 83, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 84, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 87, .operands = .{ .min = 6, .max = 6 } },
+    .{ .opcode = 98, .operands = .{ .min = 4, .max = 4 } }, // OpImageRead, SubpassData only
     // Branch widths are checked by the stage-aware function parser below so
     // non-compute profiles classify the entire family as unsupported rather
     // than exposing a misleading schema-arity error.
@@ -651,7 +652,7 @@ fn interfacesUnique(items: []const ir.Interface) bool {
     if (items.len < 2) return true;
     for (items[1..], items[0 .. items.len - 1]) |item, prior| {
         if (item.storage != prior.storage) continue;
-        if (item.storage == .uniform or item.storage == .sampled_image) {
+        if (item.storage == .uniform or item.storage == .sampled_image or item.storage == .input_attachment) {
             if (item.descriptor_set == prior.descriptor_set and item.binding == prior.binding) return false;
         } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_frag_coord and prior.builtin_frag_coord) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.location != null and item.location == prior.location)) return false;
     }
@@ -902,8 +903,15 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             },
             25 => {
                 const sampled_type = try resultShape(nodes, w[1]);
-                if (sampled_type.scalar != .f32 or sampled_type.columns != 1 or sampled_type.rows != 1 or w[2] != 1 or w[3] != 0 or w[4] != 0 or w[5] != 0 or w[6] != 1 or w[7] != 0) return error.Unsupported;
-                try define(nodes, w[0], .{ .kind = .image, .a = w[1] });
+                if (sampled_type.scalar != .f32 or sampled_type.columns != 1 or sampled_type.rows != 1) return error.Unsupported;
+                // Sampled 2D images and single-sample SubpassData input
+                // attachments are intentionally the only image domains in
+                // the bounded fragment profile.
+                if (w[2] == 1 and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 1 and w[7] == 0) {
+                    try define(nodes, w[0], .{ .kind = .image, .a = w[1], .b = w[2] });
+                } else if (w[2] == 6 and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 2 and w[7] == 0) {
+                    try define(nodes, w[0], .{ .kind = .image, .a = w[1], .b = w[2] });
+                } else return error.Unsupported;
             },
             27 => {
                 if (nodes[try id(nodes, w[1])].kind != .image) return error.Malformed;
@@ -1088,11 +1096,12 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
                 if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
                     87 => w.len == 6,
+                    98 => w.len == 4,
                     62 => w.len == 2,
                     65 => w.len >= 4,
                     77 => w.len == 4,
@@ -1205,7 +1214,8 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const pointer = nodes[try id(nodes, pointer_value.type_id)];
                 if (pointer.kind != .pointer) return error.Malformed;
                 if (pointer.a == 0) {
-                    if (nodes[try id(nodes, w[0])].kind != .sampled_image or pointer.b != w[0]) return error.Malformed;
+                    const loaded = nodes[try id(nodes, w[0])];
+                    if ((loaded.kind != .sampled_image and loaded.kind != .image) or pointer.b != w[0]) return error.Malformed;
                 } else if (!sameShape(try resultShape(nodes, w[0]), try resultShape(nodes, pointer.b))) return error.Malformed;
                 if (pointer.a != 0 and pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 7 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
             },
@@ -1217,6 +1227,16 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 const coordinates = try valueShape(nodes, w[3]);
                 const bias = try valueShape(nodes, w[5]);
                 if (coordinates.scalar != .f32 or coordinates.columns != 2 or coordinates.rows != 1 or bias.scalar != .f32 or bias.columns != 1 or bias.rows != 1) return error.Unsupported;
+            },
+            98 => {
+                const result = try resultShape(nodes, w[0]);
+                if (requested_stage != .fragment or result.scalar != .f32 or result.columns != 4 or result.rows != 1) return error.Unsupported;
+                const image = nodes[try id(nodes, w[2])];
+                if (image.kind != .function_value or image.opcode != 61 or nodes[try id(nodes, image.type_id)].kind != .image) return error.Unsupported;
+                const image_type = nodes[try id(nodes, image.type_id)];
+                if (image_type.b != 6) return error.Unsupported;
+                const coordinates = try valueShape(nodes, w[3]);
+                if (coordinates.scalar != .i32 or coordinates.columns != 2 or coordinates.rows != 1) return error.Unsupported;
             },
             62 => {
                 const pointer_value = nodes[try id(nodes, w[0])];
@@ -1517,8 +1537,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         const variable = nodes[index];
         if (variable.kind != .variable) return error.Malformed;
         const pointer = nodes[try id(nodes, variable.type_id)];
+        const pointee = nodes[try id(nodes, pointer.b)];
         const storage: ir.Storage = switch (variable.a) {
-            0 => .sampled_image,
+            0 => if (pointee.kind == .sampled_image) .sampled_image else if (pointee.kind == .image and pointee.b == 6) .input_attachment else return error.Unsupported,
             1 => .input,
             3 => .output,
             2 => .uniform,
@@ -1529,7 +1550,6 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         if (decorations[index].index_zero and !(requested_stage == .fragment and storage == .output and decorations[index].location == 0)) return error.Unsupported;
         var shape: ir.Type = undefined;
         var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_frag_coord = decorations[index].builtin_frag_coord, .builtin_front_facing = decorations[index].builtin_front_facing, .flat = decorations[index].flat };
-        const pointee = nodes[try id(nodes, pointer.b)];
         if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
             if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
@@ -1555,6 +1575,9 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         } else if (storage == .sampled_image) {
             if (pointee.kind != .sampled_image or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
+            shape = .{ .scalar = .f32, .columns = 4 };
+        } else if (storage == .input_attachment) {
+            if (requested_stage != .fragment or pointee.kind != .image or pointee.b != 6 or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
             shape = .{ .scalar = .f32, .columns = 4 };
         } else if (storage == .uniform or storage == .push_constant) {
             if (pointee.kind != .structure or !decorations[try id(nodes, pointer.b)].block) return error.Unsupported;
@@ -1778,7 +1801,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
         for (module.instructions, instruction_functions) |instruction, instruction_function| {
             if (instruction_function != entry.function) continue;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
                 248 => instruction.words[0],
                 else => null,
             };
@@ -1802,7 +1825,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
+                12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
@@ -1817,6 +1840,14 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                             needed[operand_index] = true;
                             changed = true;
                         }
+                    }
+                    continue;
+                },
+                98 => {
+                    const operand_index = try id(nodes, w[3]);
+                    if (!needed[operand_index]) {
+                        needed[operand_index] = true;
+                        changed = true;
                     }
                     continue;
                 },
@@ -2117,13 +2148,13 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
+            12, 41, 42, 43, 44, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
         if (!needed[try id(nodes, rid)]) continue;
         const node = nodes[try id(nodes, rid)];
-        if (instruction.opcode == 61 and nodes[try id(nodes, node.type_id)].kind == .sampled_image) continue;
+        if (instruction.opcode == 61 and (nodes[try id(nodes, node.type_id)].kind == .sampled_image or nodes[try id(nodes, node.type_id)].kind == .image)) continue;
         const shape = if (instruction.opcode == 65) blk: {
             const pointer = nodes[try id(nodes, node.type_id)];
             if (pointer.kind != .pointer) return error.Malformed;
@@ -2222,6 +2253,7 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             83 => .copy_object,
             84 => .transpose,
             87 => .image_sample_implicit_lod,
+            98 => .image_read_input_attachment,
             109, 110, 111, 112, 113, 114, 115 => .convert,
             116 => .quantize_f16,
             124 => .bitcast,
@@ -2343,6 +2375,21 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
             const bias = canonical_ids[try id(nodes, node.words[3])];
             if (coordinates == std.math.maxInt(u32) or bias == std.math.maxInt(u32)) return error.Malformed;
             try operands.appendSlice(allocator, &.{ semantic_index orelse return error.Unsupported, coordinates, bias });
+        } else if (instruction.opcode == 98) {
+            const image_load = nodes[try id(nodes, node.words[0])];
+            if (image_load.kind != .function_value or image_load.opcode != 61 or image_load.words.len != 1) return error.Unsupported;
+            const resource_id = try id(nodes, image_load.words[0]);
+            const resource = nodes[resource_id];
+            if (resource.kind != .variable or resource.a != 0 or nodes[try id(nodes, resource.type_id)].kind != .pointer) return error.Unsupported;
+            const decoration = decorations[resource_id];
+            var semantic_index: ?u32 = null;
+            for (interfaces.items, 0..) |item, interface_index| {
+                if (item.storage == .input_attachment and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
+                    semantic_index = @intCast(interface_index);
+            }
+            const coordinates = canonical_ids[try id(nodes, node.words[1])];
+            if (coordinates == std.math.maxInt(u32)) return error.Malformed;
+            try operands.appendSlice(allocator, &.{ semantic_index orelse return error.Unsupported, coordinates });
         } else if (op == .constant) {
             var value_words = node.words;
             var specialized = false;
@@ -3036,6 +3083,34 @@ pub const bool_fragment = [_]u32{
     2,              6,              (5 << 16) | 54,  1,              7,
     0,              4,              (2 << 16) | 248, 8,              (3 << 16) | 62,
     5,              6,              (1 << 16) | 253, (1 << 16) | 56,
+};
+
+/// Minimal SubpassData shader for the bounded framebuffer-fetch path. It
+/// performs one integer-coordinate OpImageRead and writes the result directly
+/// to location zero, avoiding any sampled-image or GL emulation semantics.
+pub const input_attachment_fragment = [_]u32{
+    0x0723_0203,     0x0001_0000,     0,              18,             0,
+    (2 << 16) | 17,  1,               (3 << 16) | 14, 0,              1,
+    (7 << 16) | 15,  4,               10,             0x6e69616d,     0,
+    11,              12,              (3 << 16) | 16, 10,             7,
+    (4 << 16) | 71,  11,              34,             0,              (4 << 16) | 71,
+    11,              33,              0,              (4 << 16) | 71, 12,
+    30,              0,               (2 << 16) | 19, 1,              (3 << 16) | 33,
+    2,               1,               (3 << 16) | 22, 3,              32,
+    (4 << 16) | 23,  4,               3,              4,              (4 << 16) | 21,
+    5,               32,              1,              (4 << 16) | 23, 6,
+    5,               2,               (9 << 16) | 25, 7,              3,
+    6,               0,               0,              0,              2,
+    0,               (4 << 16) | 32,  8,              0,              7,
+    (4 << 16) | 32,  9,               3,              4,              (4 << 16) | 59,
+    8,               11,              0,              (4 << 16) | 59, 9,
+    12,              3,               (4 << 16) | 43, 5,              15,
+    0,               (5 << 16) | 44,  6,              16,             15,
+    15,              (5 << 16) | 54,  1,              10,             0,
+    2,               (2 << 16) | 248, 13,             (4 << 16) | 61, 7,
+    14,              11,              (5 << 16) | 98, 4,              17,
+    14,              16,              (3 << 16) | 62, 12,             17,
+    (1 << 16) | 253, (1 << 16) | 56,
 };
 
 /// Minimal single-sample fragment module exercising all three bounded
@@ -4782,6 +4857,48 @@ test "profile distinguishes malformed from unsupported" {
     try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &unknown_opcode, .vertex, "main", &.{}));
 }
 
+test "fragment SubpassData input attachment lowers and fetches the active pixel" {
+    var program = try compile(std.testing.allocator, &input_attachment_fragment, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var input_index: ?u32 = null;
+    var output_index: ?u32 = null;
+    var saw_read = false;
+    for (program.interfaces, 0..) |interface, index| {
+        if (interface.storage == .input_attachment) input_index = @intCast(index);
+        if (interface.storage == .output) output_index = @intCast(index);
+    }
+    for (program.instructions) |instruction| saw_read = saw_read or instruction.op == .image_read_input_attachment;
+    try std.testing.expect(input_index != null and output_index != null and saw_read);
+    try std.testing.expectEqual(@as(?u32, 0), program.interfaces[input_index.?].descriptor_set);
+    try std.testing.expectEqual(@as(?u32, 0), program.interfaces[input_index.?].binding);
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    const pixels = [_]u8{ 13, 27, 41, 255 };
+    var output = [_]u8{0} ** 16;
+    try executor.execute(
+        &.{.{ .interface = input_index.?, .input_attachment = .{
+            .pixels = &pixels,
+            .width = 1,
+            .height = 1,
+            .row_stride = 4,
+            .format = .rgba8_unorm,
+            .filter = .nearest,
+            .address_u = .clamp_to_edge,
+            .address_v = .clamp_to_edge,
+        } }},
+        &.{.{ .interface = output_index.?, .bytes = &output }},
+    );
+    const red: f32 = @bitCast(std.mem.readInt(u32, output[0..4], .little));
+    const green: f32 = @bitCast(std.mem.readInt(u32, output[4..8], .little));
+    const blue: f32 = @bitCast(std.mem.readInt(u32, output[8..12], .little));
+    const alpha: f32 = @bitCast(std.mem.readInt(u32, output[12..16], .little));
+    try std.testing.expectApproxEqAbs(@as(f32, 13.0 / 255.0), red, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 27.0 / 255.0), green, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 41.0 / 255.0), blue, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), alpha, 0.0001);
+}
+
 test "every explicitly excluded instruction family capability type storage and constant is unsupported" {
     const excluded_opcodes = [_]u16{
         45, // OpUndef
@@ -5443,6 +5560,7 @@ test "Chromium Skia convolution shaders execute local state and uniform arrays" 
     defer fragment_program.deinit(std.testing.allocator);
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
+    try std.testing.expectEqualStrings("none", fragment_executor.jitCandidateName());
     var fragment_backing = [_][512]u8{.{0} ** 512} ** max_interfaces;
     var fragment_bindings: [max_interfaces]render_ir_exec.Binding = undefined;
     var fragment_outputs: [max_interfaces]render_ir_exec.Output = undefined;
@@ -5492,6 +5610,214 @@ test "Chromium Skia convolution shaders execute local state and uniform arrays" 
     const expected = [_]f32{ 64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1 };
     for (expected, 0..) |channel, index|
         try std.testing.expectEqual(channel, @as(f32, @bitCast(std.mem.readInt(u32, fragment_backing[fragment_outputs[0].interface][index * 4 ..][0..4], .little))));
+    const generic_output = fragment_backing[fragment_outputs[0].interface][0..16].*;
+    @memset(fragment_backing[fragment_outputs[0].interface][0..16], 0xa5);
+    try std.testing.expect(try fragment_executor.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]));
+    try std.testing.expectEqualSlices(u8, &generic_output, fragment_backing[fragment_outputs[0].interface][0..16]);
+
+    // The specialization keeps the interpreter's bounded descriptor-range
+    // contract. It must not turn a truncated live uniform buffer into a
+    // silent sample or a partial output write.
+    var short_bindings = fragment_bindings;
+    for (short_bindings[0..fragment_binding_count]) |*binding| {
+        if (binding.interface == 4) binding.bytes = binding.bytes[0..295];
+    }
+    @memset(fragment_backing[fragment_outputs[0].interface][0..16], 0xa5);
+    try std.testing.expectError(error.Bounds, fragment_executor.executePrevalidated(short_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), fragment_backing[fragment_outputs[0].interface][0..16]);
+}
+
+test "captured Chromium circular-gradient fragment remains a hot Render IR fixture" {
+    const fragment_bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_2004.spv").*;
+    var fragment_program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &fragment_bytes), .fragment, "main", &.{});
+    defer fragment_program.deinit(std.testing.allocator);
+    // Captured from the native Chromium VP9 Mosaic workload. Its dynamic
+    // branching, uniform-array loads, atan2, and sampled color path are the
+    // current interpreter hot spot; preserve the exact canonical identity so
+    // a future ORC specialization has a real regression input.
+    try std.testing.expectEqual(@as(usize, 251), fragment_program.instructions.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0xee, 0x41, 0x2f, 0xa1, 0xcc, 0xd0, 0x0a, 0xe3,
+        0x4e, 0x59, 0xf2, 0x24, 0x1a, 0x1f, 0x03, 0x0c,
+        0x13, 0x57, 0xcb, 0x2f, 0x94, 0xc8, 0xfc, 0x21,
+        0xed, 0xad, 0x76, 0x0e, 0x37, 0xc3, 0x5d, 0x41,
+    }, &fragment_program.identity.digest);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("radial_gradient_2004_reference", executor.prevalidatedPathName());
+    try std.testing.expectEqualStrings("chromium_radial_gradient_2004", executor.jitCandidateName());
+
+    // Exercise the captured profile with every live interface populated.  The
+    // values intentionally select the dynamic gradient lookup and texture
+    // path rather than the two border-color exits.  This is the semantic
+    // baseline a future ORC lowering must match bit-for-bit; do not replace it
+    // with a precomputed output golden that accidentally stops testing the
+    // branch, uniform-array, atan2, or sampled-image operations.
+    var backing = [_][512]u8{.{0} ** 512} ** max_interfaces;
+    var bindings: [max_interfaces]render_ir_exec.Binding = undefined;
+    var outputs: [max_interfaces]render_ir_exec.Output = undefined;
+    var binding_count: usize = 0;
+    var output_count: usize = 0;
+    var uniform_interface_index: ?usize = null;
+    const pixels = [_]u8{ 64, 128, 192, 255 };
+    for (fragment_program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+            output_count += 1;
+            continue;
+        }
+        if (interface.storage == .sampled_image) {
+            bindings[binding_count] = .{
+                .interface = @intCast(interface_index),
+                .sampled_image = .{
+                    .pixels = &pixels,
+                    .width = 1,
+                    .height = 1,
+                    .row_stride = 4,
+                    .format = .rgba8_unorm,
+                    .filter = .nearest,
+                    .address_u = .clamp_to_edge,
+                    .address_v = .clamp_to_edge,
+                },
+            };
+            binding_count += 1;
+            continue;
+        }
+        if (interface.storage == .uniform) {
+            uniform_interface_index = interface_index;
+            // thresholds[0] = { 0, .25, .75, 1 } keeps t=.5 inside the
+            // dynamic ramp. Every scale/bias entry is initialized because the
+            // selected index is data-dependent in the captured shader.
+            for ([_]f32{ 0, 0.25, 0.75, 1 }, 0..) |value, lane|
+                std.mem.writeInt(u32, backing[interface_index][32 + lane * 4 ..][0..4], @bitCast(value), .little);
+            for (0..8) |entry| for (0..4) |lane| {
+                const scale = @as(f32, @floatFromInt(entry + 1)) * 0.125;
+                const bias = @as(f32, @floatFromInt(lane + 1)) * 0.0625;
+                std.mem.writeInt(u32, backing[interface_index][64 + entry * 16 + lane * 4 ..][0..4], @bitCast(scale), .little);
+                std.mem.writeInt(u32, backing[interface_index][192 + entry * 16 + lane * 4 ..][0..4], @bitCast(bias), .little);
+            };
+            std.mem.writeInt(u32, backing[interface_index][324..][0..4], @bitCast(@as(f32, 1)), .little);
+            // The live sampler transform is a column-major identity matrix.
+            for (0..3) |column|
+                std.mem.writeInt(u32, backing[interface_index][416 + column * 16 + column * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+            // u_skRTFlip is sampled as a vec2 by this profile. A zero scale
+            // keeps the fixture independent of screen origin convention.
+            std.mem.writeInt(u32, backing[interface_index][464..][0..4], @bitCast(@as(f32, 0)), .little);
+            std.mem.writeInt(u32, backing[interface_index][468..][0..4], @bitCast(@as(f32, 0)), .little);
+            for ([_]f32{ 0.1, 0.2, 0.3, 1 }, 0..) |value, lane|
+                std.mem.writeInt(u32, backing[interface_index][384 + lane * 4 ..][0..4], @bitCast(value), .little);
+            for ([_]f32{ 0.8, 0.7, 0.6, 1 }, 0..) |value, lane|
+                std.mem.writeInt(u32, backing[interface_index][400 + lane * 4 ..][0..4], @bitCast(value), .little);
+        } else if (interface.storage == .input and interface.builtin_frag_coord) {
+            const value = [_]f32{ 0.5, 0.5, 0, 1 };
+            @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
+        } else if (interface.storage == .input and interface.builtin_front_facing) {
+            backing[interface_index][0] = 1;
+        } else if (interface.storage == .input and interface.location != null) switch (interface.location.?) {
+            0 => {
+                const value = [_]f32{ 0, 0, 1, 0 };
+                @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
+            },
+            1 => {
+                const value = [_]f32{ 1, 1, 1, 1 };
+                @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
+            },
+            2 => {
+                const value = [_]f32{ 1, 0 };
+                @memcpy(backing[interface_index][0..8], std.mem.sliceAsBytes(&value));
+            },
+            else => return error.TestUnexpectedResult,
+        };
+        bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+        binding_count += 1;
+    }
+    try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+    const result = backing[outputs[0].interface][0..16].*;
+    try std.testing.expect(std.mem.readInt(u32, result[12..16], .little) != 0);
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+    try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expect(try executor.executePrevalidated(bindings[0..binding_count], outputs[0..output_count]));
+    try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+
+    // The resolved ABI removes only per-pixel binding/output discovery. Its
+    // exact result remains byte-identical to the generic/reference path for
+    // the live Chromium profile, including the dynamic uniform-array lookup
+    // and sampled contribution.
+    const radial_plan = executor.radialGradientPlan() orelse return error.TestUnexpectedResult;
+    var circle_bytes: ?[]const u8 = null;
+    var coordinate_bytes: ?[]const u8 = null;
+    var frag_coord_bytes: ?[]const u8 = null;
+    var uniform_bytes: ?[]const u8 = null;
+    var image: ?render_ir_exec.SampledImage = null;
+    for (bindings[0..binding_count]) |binding| {
+        if (binding.interface == radial_plan.circle_interface) circle_bytes = binding.bytes;
+        if (binding.interface == radial_plan.coordinates_interface) coordinate_bytes = binding.bytes;
+        if (binding.interface == radial_plan.frag_coord_interface) frag_coord_bytes = binding.bytes;
+        if (binding.interface == radial_plan.uniform_interface) uniform_bytes = binding.bytes;
+        if (binding.interface == radial_plan.image_interface) image = binding.sampled_image;
+    }
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expect(try executor.executeRadialGradientDirect(
+        circle_bytes orelse return error.TestUnexpectedResult,
+        coordinate_bytes orelse return error.TestUnexpectedResult,
+        frag_coord_bytes orelse return error.TestUnexpectedResult,
+        uniform_bytes orelse return error.TestUnexpectedResult,
+        image orelse return error.TestUnexpectedResult,
+        backing[outputs[0].interface][0..16],
+    ));
+    try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expectError(error.Bounds, executor.executeRadialGradientDirect(
+        circle_bytes orelse return error.TestUnexpectedResult,
+        coordinate_bytes orelse return error.TestUnexpectedResult,
+        frag_coord_bytes orelse return error.TestUnexpectedResult,
+        (uniform_bytes orelse return error.TestUnexpectedResult)[0..479],
+        image orelse return error.TestUnexpectedResult,
+        backing[outputs[0].interface][0..16],
+    ));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), backing[outputs[0].interface][0..16]);
+
+    // Exercise both border exits and every data-dependent scale/bias array
+    // index. The generic interpreter is deliberately retained as oracle for
+    // each case, so a future ORC lowering inherits this branch coverage.
+    const uniform_index = uniform_interface_index orelse return error.TestUnexpectedResult;
+    for ([_]f32{ -2, -0.875, -0.625, -0.375, -0.125, 2 }) |phase_bias| {
+        std.mem.writeInt(u32, backing[uniform_index][320..][0..4], @bitCast(phase_bias), .little);
+        @memset(backing[outputs[0].interface][0..16], 0xa5);
+        try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+        const generic_case = backing[outputs[0].interface][0..16].*;
+        @memset(backing[outputs[0].interface][0..16], 0xa5);
+        try std.testing.expect(try executor.executePrevalidated(bindings[0..binding_count], outputs[0..output_count]));
+        try std.testing.expectEqualSlices(u8, &generic_case, backing[outputs[0].interface][0..16]);
+    }
+
+    // Validation must still happen before a JIT is selected. A descriptor
+    // range which cannot cover the last live uniform field fails closed and
+    // leaves the render target untouched.
+    var short_bindings = bindings;
+    for (short_bindings[0..binding_count]) |*binding| {
+        if (fragment_program.interfaces[binding.interface].storage == .uniform) binding.bytes = binding.bytes[0..468];
+    }
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expectError(error.Bounds, executor.execute(short_bindings[0..binding_count], outputs[0..output_count]));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), backing[outputs[0].interface][0..16]);
+    try std.testing.expectError(error.Bounds, executor.executePrevalidated(short_bindings[0..binding_count], outputs[0..output_count]));
+
+    // A canonical digest is necessary but not sufficient at the prospective
+    // JIT ABI boundary: direct Program construction can pair a stale identity
+    // with altered interface metadata. Such a program is not eligible for
+    // generated code even though the generic executor still owns validation.
+    var altered_program = try fragment_program.clone(std.testing.allocator);
+    defer altered_program.deinit(std.testing.allocator);
+    for (altered_program.interfaces) |*interface| if (interface.storage == .sampled_image) {
+        interface.binding = 7;
+        break;
+    };
+    var altered_executor = try render_ir_exec.Executor.init(std.testing.allocator, &altered_program);
+    defer altered_executor.deinit();
+    try std.testing.expectEqualStrings("none", altered_executor.jitCandidateName());
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {

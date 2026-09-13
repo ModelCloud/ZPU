@@ -9,6 +9,7 @@ machine=${ZPU_SMOLVM_MACHINE:-zpu-omarchy}
 image=${ZPU_SMOLVM_IMAGE:-archlinux:base-devel}
 cpus=${ZPU_SMOLVM_CPUS:-8}
 memory=${ZPU_SMOLVM_MEMORY:-8192}
+guest_cpu_tier=${ZPU_GUEST_CPU_TIER:-baseline}
 display=${DISPLAY:-:0}
 socket_root=${ZPU_SMOLVM_TEST_SOCKET_ROOT:-/tmp/.X11-unix}
 host_socket=$socket_root/X0
@@ -20,6 +21,7 @@ required_smolvm_version=1.15.0
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 [[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
+[[ $guest_cpu_tier == baseline || $guest_cpu_tier == native ]] || die 'ZPU_GUEST_CPU_TIER must be baseline or native'
 [[ ! -L $host_socket ]] || die "host X11 socket must not be a symlink: $host_socket"
 if [[ $socket_root != /tmp/.X11-unix ]]; then
     [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || die 'ZPU_SMOLVM_TEST_SOCKET_ROOT is test-only and requires ZPU_SMOLVM_TESTING=1'
@@ -378,7 +380,7 @@ sync_source() {
         rm -f -- "$source_archive" "$source_part_prefix"*
     fi
 }
-build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-build.sh; }
+build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- env "ZPU_GUEST_CPU_TIER=$guest_cpu_tier" /mnt/zpu-source/smolvm/guest-build.sh; }
 package_guest() {
     reject_host_injection
     assert_network_disabled

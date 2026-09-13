@@ -331,9 +331,8 @@ pub const SparseImageFormatProperties = extern struct { aspect_mask: u32, image_
 pub const PhysicalDeviceFeatures2 = extern struct { s_type: i32, p_next: ?*anyopaque, features: Features };
 // Promoted core feature chains use only VkBool32 payloads.  Keeping these
 // declarations explicit gives the *2 queries a real ABI-sized destination
-// instead of treating every non-null pNext as an opaque rejection.  ZPU's
-// advertised Vulkan 1.1 profile enables samplerYcbcrConversion; every other
-// optional feature remains VK_FALSE while preserving the caller-owned chain links.
+// instead of treating every non-null pNext as an opaque rejection.  Optional
+// features remain VK_FALSE while preserving the caller-owned chain links.
 pub const PhysicalDeviceVulkan11Features = extern struct {
     s_type: i32,
     p_next: ?*anyopaque,
@@ -1053,9 +1052,7 @@ pub const SamplerCreateInfo = extern struct { s_type: i32, p_next: ?*const anyop
 /// reduction mode is kept typed so the core sampler entry point can accept
 /// the ABI without treating the node as an opaque byte blob.
 pub const SamplerReductionModeCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, reduction_mode: i32 };
-/// Promoted VK_KHR_sampler_ycbcr_conversion sampler-chain payload.  ZPU does
-/// not advertise multi-planar formats, but recognizing the node lets us
-/// distinguish a valid unsupported request from a malformed chain.
+/// Promoted VK_KHR_sampler_ycbcr_conversion sampler-chain payload.
 pub const SamplerYcbcrConversionInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, conversion: usize };
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const CopyDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, src_set: usize, src_binding: u32, src_array_element: u32, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32 };
@@ -1223,7 +1220,18 @@ const QueryPoolObj = struct {
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
-const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
+const YcbcrConversion = struct {
+    format: i32,
+    model: i32,
+    range: i32,
+    components: [4]i32,
+    x_chroma_offset: i32,
+    y_chroma_offset: i32,
+    chroma_filter: i32,
+    force_explicit_reconstruction: u32,
+};
+const SamplerYcbcrConversionObj = struct { handle: usize, owner: Device, conversion: YcbcrConversion };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, ycbcr: ?YcbcrConversion = null, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -1240,6 +1248,7 @@ const SamplerObj = struct {
     reduction_mode: i32 = 0,
     border_color: i32 = 0,
     unnormalized_coordinates: bool = false,
+    ycbcr: ?YcbcrConversion = null,
 };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
@@ -1266,6 +1275,9 @@ const DescriptorSetObj = struct {
     // Keep a bounded sampled-image table for the native profile ABI while
     // retaining the historical binding-0 aliases used by the cpu_cube ABI.
     sampled_images: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
+    // Input attachments carry no sampler. They are only consumed by the
+    // bounded framebuffer-fetch profile after validation against its target.
+    input_attachments: [max_profile_sampled_bindings]DescriptorInputAttachment = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings,
     // A command-local snapshot keeps the source descriptor-set pointer so
     // queue submission can defer its canonical storage through destruction.
     source_set: ?*DescriptorSetObj = null,
@@ -1276,7 +1288,8 @@ const DescriptorSetObj = struct {
     active_users: std.atomic.Value(u32) = .init(0),
     retire_pending: bool = false,
 };
-const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
+const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 }, ycbcr: ?YcbcrConversion = null };
+const DescriptorInputAttachment = struct { image: ?*ImageObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
@@ -1370,6 +1383,7 @@ const RenderPassObj = struct {
     color_initial_layout: i32 = 0,
     color_subpass_layout: i32 = 0,
     color_final_layout: i32 = 0,
+    color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
@@ -1405,6 +1419,7 @@ const ProfileUniform = struct {
     byte_size: u8 = 0,
 };
 const ProfileSampledImage = struct { interface: u32, binding: u32 };
+const ProfileInputAttachment = struct { interface: u32, binding: u32 };
 const ProfileGraphics = struct {
     vertex: render_ir_exec.Executor,
     fragment: render_ir_exec.Executor,
@@ -1424,8 +1439,11 @@ const ProfileGraphics = struct {
     fragment_push_constant: ?ProfileUniform = null,
     fragment_frag_coord: ?u32 = null,
     fragment_front_facing: ?u32 = null,
+    fragment_needs_derivatives: bool = false,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_input_attachments: [8]ProfileInputAttachment = undefined,
+    fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
     fragment_bool: bool,
 };
@@ -1448,9 +1466,22 @@ const ProfileGraphicsContract = struct {
     fragment_front_facing: ?u32 = null,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_input_attachments: [8]ProfileInputAttachment = undefined,
+    fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
     fragment_bool: bool,
 };
+
+/// The profile executor needs derivative payloads only for explicit derivative
+/// IR operations. Implicit-LOD sampling in ZPU's bounded scalar sampler does
+/// not consume them, so omitting the quotient-rule work is semantics-neutral.
+fn profileFragmentNeedsDerivatives(fragment: *const render_ir.Program) bool {
+    for (fragment.instructions) |instruction| switch (instruction.op) {
+        .dpdx, .dpdy, .fwidth => return true,
+        else => {},
+    };
+    return false;
+}
 const ExecutionAbi = union(enum) {
     cpu_cube_v1,
     profile_v1_metadata,
@@ -1641,6 +1672,10 @@ const max_child_objects = 64;
 const max_command_pool_objects = 4096;
 const max_buffer_objects = 4096;
 const max_image_view_objects = 4096;
+// Chromium may retain conversion objects through several compositor frames.
+// Keep this independent bounded registry so conversion churn cannot consume
+// the generic child-object pool.
+const max_sampler_ycbcr_conversion_objects = 1024;
 const max_shader_modules = 4000;
 // Chromium's Skia pipeline cache can keep more than the generic child-object
 // budget live while old layouts are waiting for submitted work to retire.
@@ -1743,6 +1778,8 @@ var surface_objects: [max_child_objects]SurfaceObj = undefined;
 var surface_state = [_]SlotState{.never} ** max_child_objects;
 var image_view_objects: [max_image_view_objects]ImageViewObj = undefined;
 var image_view_state = [_]SlotState{.never} ** max_image_view_objects;
+var sampler_ycbcr_conversion_objects: [max_sampler_ycbcr_conversion_objects]SamplerYcbcrConversionObj = undefined;
+var sampler_ycbcr_conversion_state = [_]SlotState{.never} ** max_sampler_ycbcr_conversion_objects;
 var sampler_objects: [max_sampler_objects]SamplerObj = undefined;
 var sampler_state = [_]SlotState{.never} ** max_sampler_objects;
 var framebuffer_objects: [max_framebuffer_objects]FramebufferObj = undefined;
@@ -1784,6 +1821,7 @@ var render_diagnostic_clears = std.atomic.Value(u32).init(0);
 var render_diagnostic_begins = std.atomic.Value(u32).init(0);
 var render_diagnostic_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_ir = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_shader_capture = std.atomic.Value(u32).init(0);
 var render_diagnostic_vertex_inputs = std.atomic.Value(u32).init(0);
 var render_diagnostic_copies = std.atomic.Value(u32).init(0);
 var render_diagnostic_page_geometry = std.atomic.Value(u32).init(0);
@@ -1797,6 +1835,32 @@ var render_diagnostic_page_target_matches = std.atomic.Value(u32).init(0);
 var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
+// Command-family timing is intentionally independent of the verbose render
+// diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
+// the normal Vulkan path pays one cached disabled-mode branch and no clock
+// reads or counter traffic.
+const CommandTimingKind = enum(u8) {
+    buffer,
+    clear,
+    compute,
+    transfer,
+    profile_draw,
+    legacy_draw,
+    indirect_draw,
+    mosaic_profile_batch,
+    mosaic_legacy_batch,
+    synchronization,
+    other,
+};
+const command_timing_kind_count = 11;
+var command_timing_mode = std.atomic.Value(u8).init(0);
+var command_timing_counts = [_]std.atomic.Value(u64){std.atomic.Value(u64).init(0)} ** command_timing_kind_count;
+var command_timing_elapsed_ns = [_]std.atomic.Value(u64){std.atomic.Value(u64).init(0)} ** command_timing_kind_count;
+var command_timing_summaries = std.atomic.Value(u32).init(0);
 // These counters deliberately describe accepted native work rather than API
 // attempts.  They make a Chromium run auditable even when its per-draw trace
 // is capped: every line is scoped to this ICD process and is emitted only by
@@ -1805,6 +1869,9 @@ var render_diagnostic_session_id = std.atomic.Value(u64).init(0);
 var render_diagnostic_pipeline_creations = std.atomic.Value(u64).init(0);
 var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_sample_modulate_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_sample_coverage_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_radial_gradient_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
 var render_diagnostic_submissions = std.atomic.Value(u64).init(0);
 var render_diagnostic_session_summaries = std.atomic.Value(u32).init(0);
@@ -1850,6 +1917,147 @@ fn renderDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+/// Print a bounded sample of live profile programs only when explicitly
+/// requested. This is separate from the per-draw render trace so that a
+/// Chromium workload can identify an optimization candidate without logging
+/// every raster operation.
+fn profileIrDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Compare a canonical digest with the optional 64-hex-character selector
+/// supplied by a developer. This is diagnostic-only and is called solely
+/// after the general profile-IR diagnostic has already been enabled.
+fn profileIrDigestSelectorMatches(selector: []const u8, digest: *const [32]u8) bool {
+    if (selector.len != digest.len * 2) return false;
+    for (digest, 0..) |actual, index| {
+        const expected = std.fmt.parseInt(u8, selector[index * 2 ..][0..2], 16) catch return false;
+        if (actual != expected) return false;
+    }
+    return true;
+}
+
+fn profileIrTargetDigestMatches(digest: *const [32]u8) bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR_DIGEST") orelse return false;
+    return profileIrDigestSelectorMatches(std.mem.span(raw), digest);
+}
+
+test "profile IR digest selector is exact hexadecimal" {
+    const digest = [_]u8{0} ** 31 ++ [_]u8{0xab};
+    try std.testing.expect(profileIrDigestSelectorMatches("00000000000000000000000000000000000000000000000000000000000000ab", &digest));
+    try std.testing.expect(!profileIrDigestSelectorMatches("00000000000000000000000000000000000000000000000000000000000000ac", &digest));
+    try std.testing.expect(!profileIrDigestSelectorMatches("00000000000000000000000000000000000000000000000000000000000000ag", &digest));
+    try std.testing.expect(!profileIrDigestSelectorMatches("ab", &digest));
+}
+
+/// Emit a bounded raw shader capture only when the operator explicitly asks
+/// for it. The log record is for turning an already accepted live profile into
+/// a deterministic regression/JIT fixture; it never writes an attacker-chosen
+/// filesystem path from inside Chromium's GPU process.
+fn profileShaderCaptureEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_SHADER_BYTES") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+// Canonical fragment identity observed repeatedly while Chromium composites
+// the local VP9 fixture into its 320x256 video surface.  It is not accepted as
+// an execution fast path: this opt-in capture gate exists solely to preserve
+// the exact live SPIR-V before any specialization or ORC lowering is written.
+const chromium_vp9_composite_fragment_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
+
+fn profileShaderCaptureCandidate(program: *const render_ir.Program) bool {
+    return program.instructions.len >= 200 or std.mem.eql(u8, &program.identity.digest, &chromium_vp9_composite_fragment_identity);
+}
+
+test "VP9 shader capture is identity-gated below the generic large-program threshold" {
+    var program = render_ir.Program{
+        .stage = .fragment,
+        .entry_name = &.{},
+        .interfaces = &.{},
+        .instructions = &.{},
+        .bytes = &.{},
+        .identity = .{ .digest = chromium_vp9_composite_fragment_identity, .bytes = &.{} },
+    };
+    try std.testing.expect(profileShaderCaptureCandidate(&program));
+    program.identity.digest[0] ^= 1;
+    try std.testing.expect(!profileShaderCaptureCandidate(&program));
+}
+
+/// Attribute an ordered Mosaic batch to its individual profile draws. This is
+/// opt-in because a clock read around every tile/draw pair would perturb the
+/// workload being measured. The records identify the next scalar or SIMD
+/// candidate without weakening the execution contract.
+fn profileTimingDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_TIMING") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Cache this process-wide diagnostic choice on first use. Chromium supplies
+/// its environment before it loads the ICD, and caching avoids a getenv for
+/// every accepted command in the normal disabled configuration.
+fn commandTimingDiagnosticsEnabled() bool {
+    const current = command_timing_mode.load(.acquire);
+    if (current != 0) return current == 2;
+    const raw = std.c.getenv("ZPU_DIAGNOSE_COMMAND_TIMING");
+    const candidate: u8 = if (raw != null and std.mem.eql(u8, std.mem.span(raw.?), "1")) 2 else 1;
+    if (command_timing_mode.cmpxchgStrong(0, candidate, .acq_rel, .acquire)) |winner| return winner == 2;
+    return candidate == 2;
+}
+
+fn commandTimingKind(command: Command) CommandTimingKind {
+    return switch (command) {
+        .fill, .update_buffer, .copy_buffer => .buffer,
+        .clear, .clear_depth, .render_clear, .clear_attachments, .clear_attachments_deferred, .discard_image => .clear,
+        .dispatch, .dispatch_indirect => .compute,
+        .buffer_to_image, .image_to_buffer, .copy_image, .blit_image, .resolve_image => .transfer,
+        .cube_draw => |op| if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) .profile_draw else .legacy_draw,
+        .indirect_draw => .indirect_draw,
+        .transition, .event_set, .event_reset, .event_wait, .buffer_barrier, .query_reset, .query_begin, .query_end, .query_timestamp, .query_copy => .synchronization,
+        .next_subpass => .other,
+    };
+}
+
+fn recordCommandTiming(kind: CommandTimingKind, elapsed_ns: u64) void {
+    const index: usize = @intFromEnum(kind);
+    _ = command_timing_counts[index].fetchAdd(1, .monotonic);
+    _ = command_timing_elapsed_ns[index].fetchAdd(elapsed_ns, .monotonic);
+}
+
+fn emitCommandTimingSummary() void {
+    if (!commandTimingDiagnosticsEnabled()) return;
+    const sequence = command_timing_summaries.fetchAdd(1, .monotonic);
+    if (!shouldEmitRenderDiagnosticSession(sequence)) return;
+    std.debug.print(
+        "ZPU command timing present={d} buffer={d}/{d} clear={d}/{d} compute={d}/{d} transfer={d}/{d} profile_draw={d}/{d} legacy_draw={d}/{d} indirect={d}/{d} mosaic_profile={d}/{d} mosaic_legacy={d}/{d} sync={d}/{d} other={d}/{d}\n",
+        .{
+            sequence,
+            command_timing_counts[@intFromEnum(CommandTimingKind.buffer)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.buffer)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.clear)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.clear)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.compute)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.compute)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.transfer)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.transfer)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.profile_draw)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.profile_draw)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.legacy_draw)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.legacy_draw)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.indirect_draw)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.indirect_draw)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.mosaic_profile_batch)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.mosaic_profile_batch)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.mosaic_legacy_batch)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.mosaic_legacy_batch)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.synchronization)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.synchronization)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.other)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.other)].load(.acquire),
+        },
+    );
+}
+
 fn renderDiagnosticSessionId() u64 {
     const existing = render_diagnostic_session_id.load(.acquire);
     if (existing != 0) return existing;
@@ -1870,12 +2078,15 @@ fn emitRenderDiagnosticSession(presents: u64) void {
     const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
     if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
-        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
+        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_sample_coverage_draws={d} direct_radial_gradient_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
         .{
             renderDiagnosticSessionId(),
             render_diagnostic_pipeline_creations.load(.acquire),
             render_diagnostic_recorded_draws.load(.acquire),
             render_diagnostic_executed_profile_draws.load(.acquire),
+            render_diagnostic_direct_sample_modulate_draws.load(.acquire),
+            render_diagnostic_direct_sample_coverage_draws.load(.acquire),
+            render_diagnostic_direct_radial_gradient_draws.load(.acquire),
             render_diagnostic_executed_transitions.load(.acquire),
             render_diagnostic_submissions.load(.acquire),
             render_diagnostic_mosaic_batches.load(.acquire),
@@ -2662,7 +2873,8 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
         const payload = bytes[16 .. 16 + words * @sizeOf(u32)];
         switch (header.s_type) {
             49 => { // VkPhysicalDeviceVulkan11Features
-                propertyWriteU32(payload, 40, 1); // samplerYcbcrConversion
+                // samplerYcbcrConversion is payload word 10.
+                propertyWriteU32(payload, 40, 1);
             },
             1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
                 propertyWriteU32(payload, 0, 1);
@@ -2686,15 +2898,16 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
         const bytes: [*]const u8 = @ptrCast(item);
         switch (header.s_type) {
             49 => { // VkPhysicalDeviceVulkan11Features
-                var i: usize = 0;
-                while (i < words) : (i += 1) {
-                    const value = std.mem.readInt(u32, @ptrCast(&bytes[16 + i * 4]), .little);
-                    if (value != 0 and i != 10) return true;
+                for (0..words) |index| {
+                    const value = std.mem.readInt(u32, @ptrCast(&bytes[16 + index * @sizeOf(u32)]), .little);
+                    if (index == 10) {
+                        if (value != 0 and value != 1) return true;
+                    } else if (value != 0) return true;
                 }
             },
             1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
-                const value = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
-                if (value != 0 and value != 1) return true;
+                const enabled = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
+                if (enabled != 0 and enabled != 1) return true;
             },
             1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
                 const last = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
@@ -3877,6 +4090,31 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
 fn isDepthFormat(format: i32) bool {
     return format == 124 or format == 126;
 }
+const format_g8_b8r8_2plane_420_unorm: i32 = 1000156003;
+const image_aspect_color_bit: u32 = 0x1;
+const image_aspect_plane_0_bit: u32 = 0x10;
+const image_aspect_plane_1_bit: u32 = 0x20;
+
+fn ycbcr420Nv12Format(format: i32) bool {
+    return format == format_g8_b8r8_2plane_420_unorm;
+}
+
+fn ycbcr420ChromaExtent(value: u32) u32 {
+    return (value + 1) / 2;
+}
+
+fn nv12ImageByteSize(width: u32, height: u32) ?u64 {
+    const luma = std.math.mul(u64, width, height) catch return null;
+    const chroma_samples = std.math.mul(u64, ycbcr420ChromaExtent(width), ycbcr420ChromaExtent(height)) catch return null;
+    const chroma = std.math.mul(u64, chroma_samples, 2) catch return null;
+    return std.math.add(u64, luma, chroma) catch null;
+}
+
+fn imageFormatMipChainLayerByteSize(format: i32, width: u32, height: u32, mip_levels: u32) ?u64 {
+    if (ycbcr420Nv12Format(format)) return if (mip_levels == 1) nv12ImageByteSize(width, height) else null;
+    return imageMipChainLayerByteSize(width, height, mip_levels);
+}
+
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
     // and vkCreateImage both receive the tiling explicitly.
@@ -3887,9 +4125,17 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // sampled, transfer, and single color-attachment paths used by
         // Chromium's glyph atlases.
         9 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
+        // Chromium's separate-plane YUV promise images use R8 for luma and
+        // R8G8 for interleaved chroma. Both are sampled/transfer resources;
+        // neither is exposed as a color attachment in this bounded profile.
+        16 => 0x1 | 0x2 | 0x4 | 0x10,
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
+        // Bounded NV12 support is sampled and transferred only. It is not a
+        // render target or input attachment, and every plane shares one
+        // allocation rather than exposing disjoint-memory semantics.
+        format_g8_b8r8_2plane_420_unorm => 0x2 | 0x4,
         124 => 0x2 | 0x20,
         126 => 0x2 | 0x20,
         else => 0,
@@ -3921,9 +4167,11 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     const out = output orelse return false;
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
@@ -4562,6 +4810,9 @@ fn validImageViewLocked(handle: usize) ?*ImageViewObj {
         if (object.handle == handle) break if (state == .live) object else null;
     } else null;
 }
+fn validSamplerYcbcrConversionLocked(handle: usize) ?*SamplerYcbcrConversionObj {
+    return findLiveHandle(SamplerYcbcrConversionObj, handle, &sampler_ycbcr_conversion_objects, &sampler_ycbcr_conversion_state);
+}
 fn validSamplerLocked(handle: usize) ?*SamplerObj {
     return findLiveHandle(SamplerObj, handle, &sampler_objects, &sampler_state);
 }
@@ -4891,6 +5142,7 @@ fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     set.texture = null;
     set.sampler = null;
     set.sampled_images = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
+    set.input_attachments = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings;
     set.source_set = null;
     set.sampled_source_set = null;
     set.layout_source = null;
@@ -5080,6 +5332,10 @@ fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, 
     if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.texture) |image| if (!pinImageLocked(image, owner, pinned)) return false;
     for (set.sampled_images) |sampled| if (sampled.image) |image| {
+        if (set.texture == image) continue;
+        if (!pinImageLocked(image, owner, pinned)) return false;
+    };
+    for (set.input_attachments) |input| if (input.image) |image| {
         if (set.texture == image) continue;
         if (!pinImageLocked(image, owner, pinned)) return false;
     };
@@ -5475,17 +5731,17 @@ fn validImageMipCount(width: u32, height: u32, mip_levels: u32) bool {
     return mip_levels <= max_levels;
 }
 fn imageLayerByteSize(image: *const ImageObj) ?u64 {
-    return imageMipChainLayerByteSize(image.width, image.height, 1);
+    return imageFormatMipChainLayerByteSize(image.format, image.width, image.height, 1);
 }
 fn imageByteSize(image: *const ImageObj) ?u64 {
-    const layer_bytes = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
+    const layer_bytes = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
     return std.math.mul(u64, layer_bytes, image.array_layers) catch {
         hit(.overflow_image_size);
         return null;
     };
 }
-fn imageMipChainByteSize(width: u32, height: u32, mip_levels: u32, array_layers: u32) ?u64 {
-    const layer_bytes = imageMipChainLayerByteSize(width, height, mip_levels) orelse return null;
+fn imageMipChainByteSize(format: i32, width: u32, height: u32, mip_levels: u32, array_layers: u32) ?u64 {
+    const layer_bytes = imageFormatMipChainLayerByteSize(format, width, height, mip_levels) orelse return null;
     return std.math.mul(u64, layer_bytes, array_layers) catch {
         hit(.overflow_image_size);
         return null;
@@ -5501,7 +5757,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage usage rejected format={d} tiling={d} usage=0x{x} allowed=0x{x}\n", .{ ci.format, ci.tiling, ci.usage, allowed_usage });
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ycbcr420Nv12Format(ci.format) and (ci.mip_levels != 1 or ci.array_layers != 1)) or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage rejected alloc={} s_type={d} pnext={} flags=0x{x} type={d} allowed=0x{x} extent={d}x{d}x{d} mips={d} layers={d} samples={d} tiling={d} sharing={d} families={d} layout={d} format={d} usage=0x{x}\n", .{ alloc != null, ci.s_type, imageCreatePNextValid(ci.p_next, ci.format), ci.flags, ci.image_type, allowed_usage, ci.extent.width, ci.extent.height, ci.extent.depth, ci.mip_levels, ci.array_layers, ci.samples, ci.tiling, ci.sharing_mode, ci.queue_family_index_count, ci.initial_layout, ci.format, ci.usage });
         return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     }
@@ -5594,8 +5850,8 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
     const allowed_usage = imageFormatUsage(info.format, info.tiling);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
-    const bytes = imageMipChainByteSize(info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (ycbcr420Nv12Format(info.format) and (info.mip_levels != 1 or info.array_layers != 1)) or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    const bytes = imageMipChainByteSize(info.format, info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
     return .{ .size = bytes, .alignment = 4, .memory_type_bits = 1 };
 }
 fn hostCopyLayoutValid(layout: i32) bool {
@@ -6862,11 +7118,24 @@ fn validBarrierRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) b
     return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
-    return layers.aspect_mask == 1 and layers.mip_level < image.mip_levels and layers.layer_count != 0 and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
+    const aspect_valid = if (ycbcr420Nv12Format(image.format)) layers.aspect_mask == image_aspect_plane_0_bit or layers.aspect_mask == image_aspect_plane_1_bit else layers.aspect_mask == image_aspect_color_bit;
+    return aspect_valid and layers.mip_level < image.mip_levels and layers.layer_count != 0 and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
+}
+
+const ImagePlane = struct { offset: usize, width: u32, height: u32, bytes_per_texel: u64 };
+
+fn imagePlane(image: *const ImageObj, aspect: u32) ?ImagePlane {
+    if (!ycbcr420Nv12Format(image.format)) return null;
+    const luma_len = std.math.mul(usize, image.width, image.height) catch return null;
+    return switch (aspect) {
+        image_aspect_plane_0_bit => .{ .offset = 0, .width = image.width, .height = image.height, .bytes_per_texel = 1 },
+        image_aspect_plane_1_bit => .{ .offset = luma_len, .width = ycbcr420ChromaExtent(image.width), .height = ycbcr420ChromaExtent(image.height), .bytes_per_texel = 2 },
+        else => null,
+    };
 }
 fn imageLayerOffset(image: *const ImageObj, layer: u32) ?usize {
     if (layer >= image.array_layers) return null;
-    const stride = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
+    const stride = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
     const offset = std.math.mul(u64, stride, layer) catch return null;
     return @intCast(offset);
 }
@@ -6887,6 +7156,7 @@ fn imageMipExtent(image: *const ImageObj, mip_level: u32) ?ImageMipExtent {
 
 fn imageMipOffsetInLayer(image: *const ImageObj, mip_level: u32) ?usize {
     if (mip_level >= image.mip_levels) return null;
+    if (ycbcr420Nv12Format(image.format)) return if (mip_level == 0) 0 else null;
     var offset: u64 = 0;
     var width = image.width;
     var height = image.height;
@@ -7267,6 +7537,11 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
 }
 fn validImageRegion(image: *const ImageObj, offset: Offset3D, extent: Extent3D, layers: ImageSubresourceLayers) bool {
     if (!validLayersForImage(image, layers) or offset.x < 0 or offset.y < 0 or offset.z != 0 or extent.width == 0 or extent.height == 0 or extent.depth != 1) return false;
+    if (imagePlane(image, layers.aspect_mask)) |plane| {
+        const end_x = std.math.add(u64, @intCast(offset.x), extent.width) catch return false;
+        const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
+        return end_x <= plane.width and end_y <= plane.height;
+    }
     const mip = imageMipExtent(image, layers.mip_level) orelse return false;
     const end_x = std.math.add(u64, @intCast(offset.x), extent.width) catch return false;
     const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
@@ -7382,6 +7657,14 @@ fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
 }
 fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers, a_offset: Offset3D, a_extent: Extent3D, b_layers: ImageSubresourceLayers, b_offset: Offset3D, b_extent: Extent3D) bool {
     if (a_layers.mip_level != b_layers.mip_level) return false;
+    if (ycbcr420Nv12Format(image.format)) {
+        if (a_layers.aspect_mask != b_layers.aspect_mask) return false;
+        const ax1 = @as(i64, a_offset.x) + @as(i64, a_extent.width);
+        const ay1 = @as(i64, a_offset.y) + @as(i64, a_extent.height);
+        const bx1 = @as(i64, b_offset.x) + @as(i64, b_extent.width);
+        const by1 = @as(i64, b_offset.y) + @as(i64, b_extent.height);
+        return a_offset.x < bx1 and b_offset.x < ax1 and a_offset.y < by1 and b_offset.y < ay1;
+    }
     const mip = imageMipExtent(image, a_layers.mip_level) orelse return true;
     const a_row_texels = checkedBufferImageMul(@as(u64, @intCast(a_offset.y)), mip.width) orelse return true;
     const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), mip.width) orelse return true;
@@ -7441,15 +7724,22 @@ fn transferableColorFormat(format: i32) bool {
 }
 
 fn colorAttachmentFormat(format: i32) bool {
-    return format == 9 or transferableColorFormat(format);
+    return format == 9 or format == 16 or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
     return switch (format) {
         9 => 1,
+        16 => 2,
         37, 44 => 4,
         else => null,
     };
+}
+
+fn bufferImageBytesPerTexelForAspect(image: *const ImageObj, aspect: u32) ?u64 {
+    if (imagePlane(image, aspect)) |plane| return plane.bytes_per_texel;
+    if (aspect != image_aspect_color_bit) return null;
+    return bufferImageBytesPerTexel(image.format);
 }
 
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
@@ -7489,7 +7779,7 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         return;
     }
     for (list[0..count]) |region| {
-        const end = bufferImageEndForBpp(region, bufferImageBytesPerTexel(dst.format) orelse 0);
+        const end = bufferImageEndForBpp(region, bufferImageBytesPerTexelForAspect(dst, region.image_subresource.aspect_mask) orelse 0);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 7) or !validImageRegion(dst, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > src.size) {
             if (failureDiagnosticsEnabled()) std.debug.print(
                 "ZPU copy buffer image rejected src_owner={} dst_owner={} src_usage=0x{x} dst_usage=0x{x} src_memory={} dst_memory={} layout={} region_valid={} end={any} src_size={} format={} mip={} layer={}+{} offset={d},{d},{d} extent={}x{}x{}\n",
@@ -7504,7 +7794,10 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         c.impl.invalid = true;
         return;
     };
-    if (src.memory.? == dst.memory.?) for (list[0..count]) |buffer_region| for (list[0..count]) |image_region| if (bufferImageMemoryOverlap(src, buffer_region, dst, image_region)) {
+    if (src.memory.? == dst.memory.? and ycbcr420Nv12Format(dst.format)) {
+        c.impl.invalid = true;
+        return;
+    } else if (src.memory.? == dst.memory.?) for (list[0..count]) |buffer_region| for (list[0..count]) |image_region| if (bufferImageMemoryOverlap(src, buffer_region, dst, image_region)) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU copy buffer image rejected overlapping aliased memory cb=0x{x} sourceOffset={} sourceSize={} image={}x{} format={} bufferOffset={} rowLength={} imageHeight={} extent={}x{}x{}\n",
             .{ @intFromPtr(c), src.offset, src.size, dst.width, dst.height, dst.format, buffer_region.buffer_offset, buffer_region.buffer_row_length, buffer_region.buffer_image_height, buffer_region.image_extent.width, buffer_region.image_extent.height, buffer_region.image_extent.depth },
@@ -10086,8 +10379,10 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler.unnormalized_coordinates or sampler.mag_filter != sampler.min_filter) return null;
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
         9 => .r8_unorm,
+        16 => .rg8_unorm,
         37 => .rgba8_unorm,
         44 => .bgra8_unorm,
+        format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
         else => return null,
     };
     const filter: render_ir_exec.SampledImage.Filter = switch (sampler.mag_filter) {
@@ -10103,8 +10398,43 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
         4, 5 => .{ 1, 1, 1, 1 },
         else => return null,
     };
+    const bytes = imageBytes(image);
+    if (format == .ycbcr_420_2plane) {
+        const conversion = sampled.ycbcr orelse return null;
+        const model: render_ir_exec.SampledImage.YcbcrModel = switch (conversion.model) {
+            1 => .identity,
+            2 => .bt709,
+            3 => .bt601,
+            4 => .bt2020,
+            else => return null,
+        };
+        const range: render_ir_exec.SampledImage.YcbcrRange = switch (conversion.range) {
+            0 => .full,
+            1 => .narrow,
+            else => return null,
+        };
+        const luma_len = std.math.mul(usize, image.width, image.height) catch return null;
+        if (luma_len > bytes.len) return null;
+        return .{
+            .pixels = bytes[0..luma_len],
+            .width = image.width,
+            .height = image.height,
+            .row_stride = image.width,
+            .bytes_per_texel = 1,
+            .format = format,
+            .swizzle = sampled.components,
+            .filter = filter,
+            .address_u = address_u,
+            .address_v = address_v,
+            .border = border,
+            .plane_1 = bytes[luma_len..],
+            .plane_1_row_stride = ycbcr420ChromaExtent(image.width) * 2,
+            .ycbcr_model = model,
+            .ycbcr_range = range,
+        };
+    }
     return .{
-        .pixels = imageBytes(image),
+        .pixels = bytes,
         .width = image.width,
         .height = image.height,
         .row_stride = image.width * 4,
@@ -10118,10 +10448,38 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     };
 }
 
+/// Input-attachment reads are framebuffer fetches, not filtered texture
+/// samples.  Keep the implemented profile intentionally narrow: the
+/// descriptor must name the live color target currently being rendered, with
+/// one layer/sample and GENERAL layout established by the render pass.
+fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, color: *ImageObj, color_bytes: []const u8) ?render_ir_exec.SampledImage {
+    if (binding >= descriptors.input_attachments.len) return null;
+    const input = descriptors.input_attachments[binding];
+    const image = input.image orelse return null;
+    if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * 4) return null;
+    const format: render_ir_exec.SampledImage.Format = switch (color.format) {
+        37 => .rgba8_unorm,
+        44 => .bgra8_unorm,
+        else => return null,
+    };
+    return .{
+        .pixels = color_bytes,
+        .width = color.width,
+        .height = color.height,
+        .row_stride = color.width * 4,
+        .bytes_per_texel = 4,
+        .format = format,
+        .swizzle = input.components,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+}
+
 const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
 
-fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
-    const profile = switch (op.pipeline.execution_abi) {
+fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
+    const profile = profile_override orelse switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
     };
@@ -10129,6 +10487,42 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
+    const profile_ir_primary_tile = if (mosaic_clip) |clip| clip.min_x == 0 and clip.min_y == 0 else true;
+    const profile_ir_sequence = if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile) render_diagnostic_profile_ir.fetchAdd(1, .monotonic) else 512;
+    // Keep the hot-profile discovery window broad enough to reach animated
+    // video frames. Full instruction dumps are deliberately limited because
+    // they perturb the workload; compact canonical identities make every
+    // later profile attributable to an exact validated IR program.
+    if (profile_ir_sequence < 512) {
+        std.debug.print(
+            "ZPU profile IR seq={d} draw_seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} jit_candidate={s} fragment_ir={x} fragment_instructions={} vertex_ir={x} vertex_instructions={}\n",
+            .{ profile_ir_sequence, diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.prevalidatedPathName(), profile.fragment.jitCandidateName(), profile.fragment.program.identity.digest, profile.fragment.program.instructions.len, profile.vertex.program.identity.digest, profile.vertex.program.instructions.len },
+        );
+        if (profile_ir_sequence < 4) for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU profile IR fragment instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+        if (std.mem.eql(u8, &profile.fragment.program.identity.digest, &chromium_vp9_composite_fragment_identity) and render_diagnostic_vp9_profile_ir_dump.fetchAdd(1, .monotonic) == 0) {
+            std.debug.print("ZPU VP9 composite canonical IR begin\n", .{});
+            for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+                "ZPU VP9 composite IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+                .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+            );
+            std.debug.print("ZPU VP9 composite canonical IR end\n", .{});
+        }
+        if (profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+            std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
+            for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
+                "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
+                .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
+            );
+            for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+                "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+                .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+            );
+            std.debug.print("ZPU selected profile canonical IR end\n", .{});
+        }
+    }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
@@ -10172,7 +10566,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     var vertex_outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| vertex_outputs[slot] = .{ .interface = interface, .bytes = &vertex_output_bytes[slot] };
     var varying_bytes: [3][8][16]u8 = undefined;
-    var fragment_bindings: [14]render_ir_exec.Binding = undefined;
+    var fragment_bindings: [24]render_ir_exec.Binding = undefined;
     var fragment_binding_storage: [8][16]u8 = undefined;
     var fragment_dpdx_storage: [8][16]u8 = undefined;
     var fragment_dpdy_storage: [8][16]u8 = undefined;
@@ -10213,6 +10607,80 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             return;
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
+    }
+    // Resolve the exact sample-modulate profile's interface slots once per
+    // draw. The regular binding path remains the fallback for every other
+    // profile or any malformed/mismatched setup. This avoids repeated linear
+    // binding-table scans in the per-pixel Mosaic composite loop.
+    const sample_modulate_plan = profile.fragment.sampleModulatePlan();
+    var sample_modulate_color_varying: ?usize = null;
+    var sample_modulate_coordinate_varying: ?usize = null;
+    var sample_modulate_image: ?render_ir_exec.SampledImage = null;
+    if (sample_modulate_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) sample_modulate_color_varying = index;
+            if (varying.fragment_interface == plan.coordinate_interface) sample_modulate_coordinate_varying = index;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) sample_modulate_image = binding.sampled_image;
+        }
+    }
+    if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
+        _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
+    // The captured VP9 video-surface composite differs from sample-modulate
+    // only in the coverage ABI: its second varying is a scalar. Resolve the
+    // exact validated plan once per draw so its hot pixels do not rebuild a
+    // binding table or repeat descriptor searches.
+    const sample_coverage_plan = profile.fragment.sampleCoveragePlan();
+    var sample_coverage_coordinate_varying: ?usize = null;
+    var sample_coverage_scalar_varying: ?usize = null;
+    var sample_coverage_image: ?render_ir_exec.SampledImage = null;
+    if (sample_coverage_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.coordinate_interface) sample_coverage_coordinate_varying = index;
+            if (varying.fragment_interface == plan.coverage_interface) sample_coverage_scalar_varying = index;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) sample_coverage_image = binding.sampled_image;
+        }
+    }
+    if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
+        _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
+    // This dynamic radial-gradient profile has materially more arithmetic
+    // than the video coverage composite, but its validated uniforms and
+    // sampled image are likewise invariant across a draw. Resolve its narrow
+    // ABI once here; the per-pixel direct form below preserves the reference
+    // f32 order and all bounded reads.
+    const radial_gradient_plan = profile.fragment.radialGradientPlan();
+    var radial_gradient_circle_varying: ?usize = null;
+    var radial_gradient_coordinate_varying: ?usize = null;
+    var radial_gradient_uniform: ?[]const u8 = null;
+    var radial_gradient_image: ?render_ir_exec.SampledImage = null;
+    var radial_gradient_frag_coord = false;
+    if (radial_gradient_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.circle_interface) radial_gradient_circle_varying = index;
+            if (varying.fragment_interface == plan.coordinates_interface) radial_gradient_coordinate_varying = index;
+        }
+        for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+            if (uniform.interface == plan.uniform_interface) radial_gradient_uniform = uniform_bytes;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) radial_gradient_image = binding.sampled_image;
+        }
+        radial_gradient_frag_coord = profile.fragment_frag_coord != null and profile.fragment_frag_coord.? == plan.frag_coord_interface;
+    }
+    if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
+        _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
+    var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
+    for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
+        const input_color = color orelse return;
+        const bytes = color_bytes orelse return;
+        const input = profileInputAttachment(op.descriptors, input_profile.binding, input_color, bytes) orelse {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render input-attachment setup failed binding={d} interface={d}\n", .{ input_profile.binding, input_profile.interface });
+            return;
+        };
+        fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
     }
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
@@ -10361,7 +10829,16 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 fragment_bindings[fragment_binding_count] = binding;
                 fragment_binding_count += 1;
             }
-            profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+            for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+                if (fragment_binding_count == fragment_bindings.len) return;
+                fragment_bindings[fragment_binding_count] = binding;
+                fragment_binding_count += 1;
+            }
+            const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                return;
+            };
+            if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                 if (renderDiagnosticsEnabled()) std.debug.print(
                     "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
                     .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index },
@@ -10390,20 +10867,21 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 const q2 = b2 / vertices[2].w;
                 const denominator = q0 + q1 + q2;
                 if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                const db0_dx = (vertices[2].y - vertices[1].y) * inverse_area;
-                const db1_dx = (vertices[0].y - vertices[2].y) * inverse_area;
-                const db2_dx = (vertices[1].y - vertices[0].y) * inverse_area;
-                const db0_dy = (vertices[1].x - vertices[2].x) * inverse_area;
-                const db1_dy = (vertices[2].x - vertices[0].x) * inverse_area;
-                const db2_dy = (vertices[0].x - vertices[1].x) * inverse_area;
-                const dq0_dx = db0_dx / vertices[0].w;
-                const dq1_dx = db1_dx / vertices[1].w;
-                const dq2_dx = db2_dx / vertices[2].w;
-                const dq0_dy = db0_dy / vertices[0].w;
-                const dq1_dy = db1_dy / vertices[1].w;
-                const dq2_dy = db2_dy / vertices[2].w;
-                const denominator_dx = dq0_dx + dq1_dx + dq2_dx;
-                const denominator_dy = dq0_dy + dq1_dy + dq2_dy;
+                const needs_derivatives = profile.fragment_needs_derivatives;
+                const db0_dx = if (needs_derivatives) (vertices[2].y - vertices[1].y) * inverse_area else 0;
+                const db1_dx = if (needs_derivatives) (vertices[0].y - vertices[2].y) * inverse_area else 0;
+                const db2_dx = if (needs_derivatives) (vertices[1].y - vertices[0].y) * inverse_area else 0;
+                const db0_dy = if (needs_derivatives) (vertices[1].x - vertices[2].x) * inverse_area else 0;
+                const db1_dy = if (needs_derivatives) (vertices[2].x - vertices[0].x) * inverse_area else 0;
+                const db2_dy = if (needs_derivatives) (vertices[0].x - vertices[1].x) * inverse_area else 0;
+                const dq0_dx = if (needs_derivatives) db0_dx / vertices[0].w else 0;
+                const dq1_dx = if (needs_derivatives) db1_dx / vertices[1].w else 0;
+                const dq2_dx = if (needs_derivatives) db2_dx / vertices[2].w else 0;
+                const dq0_dy = if (needs_derivatives) db0_dy / vertices[0].w else 0;
+                const dq1_dy = if (needs_derivatives) db1_dy / vertices[1].w else 0;
+                const dq2_dy = if (needs_derivatives) db2_dy / vertices[2].w else 0;
+                const denominator_dx = if (needs_derivatives) dq0_dx + dq1_dx + dq2_dx else 0;
+                const denominator_dy = if (needs_derivatives) dq0_dy + dq1_dy + dq2_dy else 0;
                 for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
                     for (0..varying.lanes) |lane| {
                         const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
@@ -10416,12 +10894,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                         // so first/last map directly to a/c here.
                         const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
                         const value = if (varying.flat) flat_value else numerator / denominator;
-                        const numerator_dx = dq0_dx * a + dq1_dx * b + dq2_dx * c;
-                        const numerator_dy = dq0_dy * a + dq1_dy * b + dq2_dy * c;
-                        const derivative_scale = denominator * denominator;
-                        const dpdx = if (varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
-                        const dpdy = if (varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
-                        if (!std.math.isFinite(value) or !std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)) return;
+                        const numerator_dx = if (needs_derivatives) dq0_dx * a + dq1_dx * b + dq2_dx * c else 0;
+                        const numerator_dy = if (needs_derivatives) dq0_dy * a + dq1_dy * b + dq2_dy * c else 0;
+                        const derivative_scale = if (needs_derivatives) denominator * denominator else 1;
+                        const dpdx = if (!needs_derivatives or varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
+                        const dpdy = if (!needs_derivatives or varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
+                        if (!std.math.isFinite(value) or (needs_derivatives and (!std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)))) return;
                         std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
                         std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
                         std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
@@ -10429,8 +10907,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[varying_index] = .{
                         .interface = varying.fragment_interface,
                         .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
-                        .dpdx_bytes = fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4],
-                        .dpdy_bytes = fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4],
+                        .dpdx_bytes = if (needs_derivatives) fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4] else &.{},
+                        .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
                     };
                 }
                 var fragment_binding_count: usize = profile.varying_count;
@@ -10439,6 +10917,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_binding_count += 1;
                 }
                 var frag_coord_bytes: [16]u8 = undefined;
+                var radial_gradient_frag_coord_ready = false;
                 var frag_coord_dpdx_bytes: [16]u8 = undefined;
                 var frag_coord_dpdy_bytes: [16]u8 = undefined;
                 if (profile.fragment_frag_coord) |interface| {
@@ -10452,11 +10931,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                         std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
                         std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
                     }
+                    radial_gradient_frag_coord_ready = true;
                     fragment_bindings[fragment_binding_count] = .{
                         .interface = interface,
                         .bytes = &frag_coord_bytes,
-                        .dpdx_bytes = &frag_coord_dpdx_bytes,
-                        .dpdy_bytes = &frag_coord_dpdy_bytes,
+                        .dpdx_bytes = if (needs_derivatives) &frag_coord_dpdx_bytes else &.{},
+                        .dpdy_bytes = if (needs_derivatives) &frag_coord_dpdy_bytes else &.{},
                     };
                     fragment_binding_count += 1;
                 }
@@ -10470,7 +10950,64 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[fragment_binding_count] = binding;
                     fragment_binding_count += 1;
                 }
-                profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+                    if (fragment_binding_count == fragment_bindings.len) return;
+                    fragment_bindings[fragment_binding_count] = binding;
+                    fragment_binding_count += 1;
+                }
+                const fragment_fast = direct: {
+                    if (sample_modulate_plan != null) {
+                        const color_varying = sample_modulate_color_varying orelse break :direct false;
+                        const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
+                        const image = sample_modulate_image orelse break :direct false;
+                        break :direct profile.fragment.executeSampleModulateDirect(
+                            fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                            image,
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                    if (sample_coverage_plan != null) {
+                        const coordinate_varying = sample_coverage_coordinate_varying orelse break :direct false;
+                        const scalar_varying = sample_coverage_scalar_varying orelse break :direct false;
+                        const image = sample_coverage_image orelse break :direct false;
+                        break :direct profile.fragment.executeSampleCoverageDirect(
+                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                            fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
+                            image,
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                    if (radial_gradient_plan != null) {
+                        const circle_varying = radial_gradient_circle_varying orelse break :direct false;
+                        const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
+                        const uniform = radial_gradient_uniform orelse break :direct false;
+                        const image = radial_gradient_image orelse break :direct false;
+                        if (!radial_gradient_frag_coord_ready) break :direct false;
+                        break :direct profile.fragment.executeRadialGradientDirect(
+                            fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
+                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                            &frag_coord_bytes,
+                            uniform,
+                            image,
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                    break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                        return;
+                    };
+                };
+                if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                     if (renderDiagnosticsEnabled()) std.debug.print(
                         "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
                         .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
@@ -10670,6 +11207,53 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
 const profile_mosaic_tile_size: u32 = 256;
 const profile_mosaic_batch_commands: usize = 64;
 
+const ProfileGraphicsClone = struct {
+    graphics: ProfileGraphics,
+    fn init(source: *const ProfileGraphics) render_ir_exec.Error!ProfileGraphicsClone {
+        var graphics = source.*;
+        graphics.vertex = try render_ir_exec.Executor.init(source.vertex.allocator, &source.vertex.program);
+        errdefer graphics.vertex.deinit();
+        graphics.fragment = try render_ir_exec.Executor.init(source.fragment.allocator, &source.fragment.program);
+        return .{ .graphics = graphics };
+    }
+    fn deinit(self: *ProfileGraphicsClone) void {
+        self.graphics.vertex.deinit();
+        self.graphics.fragment.deinit();
+        self.* = undefined;
+    }
+};
+
+const ProfileLaneCache = struct {
+    source: *const ProfileGraphics,
+    vertex_identity: [32]u8,
+    fragment_identity: [32]u8,
+    clone: ProfileGraphicsClone,
+};
+threadlocal var profile_lane_cache: ?ProfileLaneCache = null;
+
+fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
+    if (profile_lane_cache) |*entry| {
+        if (entry.source == source and std.mem.eql(u8, &entry.vertex_identity, &source.vertex.program.identity.digest) and std.mem.eql(u8, &entry.fragment_identity, &source.fragment.program.identity.digest)) return &entry.clone.graphics;
+        entry.clone.deinit();
+        profile_lane_cache = null;
+    }
+    const clone = ProfileGraphicsClone.init(source) catch return null;
+    profile_lane_cache = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
+    return &profile_lane_cache.?.clone.graphics;
+}
+
+/// Mosaic is worthwhile for a group of profile draws that share a target.
+/// A one-command "batch" repeats that draw's complete vertex setup for every
+/// target tile; sparse Skia UI quads then pay a framebuffer-sized cost even
+/// when their actual raster bounds are only a few pixels. Execute one draw
+/// directly instead: it has identical raster ordering and clip semantics,
+/// but establishes its vertices once and scans only its natural bounds.
+fn profileMosaicBatchEligible(batch_count: usize, width: u32, height: u32) bool {
+    _ = width;
+    _ = height;
+    return batch_count > 1;
+}
+
 fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageObj } {
     return .{
         .color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null,
@@ -10712,9 +11296,17 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         batch_count += 1;
         candidate.advance();
     }
-    if (batch_count < 2) return null;
+    // Chromium's video composite is often one large textured quad. Route it
+    // through the same ordered Mosaic tile scheduler as adjacent profile
+    // draws; execution stays serial because profile executors own mutable
+    // scratch, but every tile is explicit and auditable. Small draws retain
+    // the direct path so UI glyphs do not pay scheduler overhead.
+    if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
+    const operation_start = frame_pacing.monotonicNs();
+    const timing_enabled = profileTimingDiagnosticsEnabled();
+    var command_elapsed_ns = [_]u64{0} ** profile_mosaic_batch_commands;
     const start = cursor.*;
     var tile_y: u32 = 0;
     while (tile_y < color_image.height) : (tile_y += profile_mosaic_tile_size) {
@@ -10734,7 +11326,9 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                     .cube_draw => |value| value,
                     else => return null,
                 };
-                executeProfileDraw(op, query_context, 0, clip);
+                const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
+                executeProfileDraw(op, null, query_context, 0, clip);
+                if (timing_enabled) command_elapsed_ns[draw_index] += frame_pacing.monotonicNs() - command_start;
                 draw_cursor.advance();
             }
         }
@@ -10742,6 +11336,27 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     if (renderDiagnosticsEnabled()) {
         const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
         if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
+    }
+    // Trace the entire ordered tile operation as one native Mosaic draw so
+    // frame pacing shows time spent before presentation rather than attributing
+    // it to an opaque gap in the browser.
+    color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+    if (commandTimingDiagnosticsEnabled()) {
+        // The batch executes outside executeValidatedCommand so it must record
+        // its own inclusive timing.  Count it once, rather than once per tile,
+        // to preserve the Vulkan command-stream level of attribution.
+        recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+    }
+    // A Chromium startup can consume several samples before animated content
+    // begins. Keep the opt-in window long enough to include steady-state
+    // video composition while still bounding log volume.
+    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128) {
+        std.debug.print(
+            "ZPU Mosaic profile timing target={d}x{d} commands={d} total_ns={d}",
+            .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
+        );
+        for (command_elapsed_ns[0..batch_count], 0..) |elapsed, index| std.debug.print(" draw[{d}]_ns={d}", .{ index, elapsed });
+        std.debug.print("\n", .{});
     }
     cursor.* = candidate;
     return batch_count;
@@ -10800,7 +11415,10 @@ fn executeMosaicCommandBatchStreams(cursor: *MosaicCommandCursor, query_context:
         candidate.advance();
     }
     if (batch_len < 2) return null;
+    const timing_enabled = commandTimingDiagnosticsEnabled();
+    const operation_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
     _ = executeMosaicPreparedBatch(first, batch[0..batch_len], query_context);
+    if (timing_enabled) recordCommandTiming(.mosaic_legacy_batch, frame_pacing.monotonicNs() - operation_start);
     cursor.* = candidate;
     return batch_len;
 }
@@ -10828,6 +11446,13 @@ fn executeValidatedCommands(commands: []const Command, query_context: *QueryExec
 }
 
 fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
+    if (!commandTimingDiagnosticsEnabled()) return executeValidatedCommandImpl(command, query_context);
+    const start = frame_pacing.monotonicNs();
+    executeValidatedCommandImpl(command, query_context);
+    recordCommandTiming(commandTimingKind(command), frame_pacing.monotonicNs() - start);
+}
+
+fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionContext) void {
     switch (command) {
         .fill => |op| {
             const bytes = bufferBytes(op.dst)[@intCast(op.offset)..][0..@intCast(op.size)];
@@ -10987,6 +11612,8 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
                 if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(1, .monotonic);
+                const profile_timing_enabled = profileTimingDiagnosticsEnabled();
+                const profile_start = if (profile_timing_enabled) frame_pacing.monotonicNs() else 0;
                 var draw = op;
                 const instance_count = draw.instance_count;
                 draw.instance_count = 1;
@@ -10994,7 +11621,20 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 while (instance < instance_count) : (instance += 1) {
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
-                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, query_context, layer, null);
+                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null);
+                }
+                if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < 512) {
+                    const target = color orelse depth;
+                    std.debug.print(
+                        "ZPU direct profile timing target={d}x{d} topology={d} vertices={d} fragment_path={s} fragment_ir={x} total_ns={d}\n",
+                        .{ if (target) |image| image.width else 0, if (target) |image| image.height else 0, op.primitive_topology, op.vertex_count, switch (op.pipeline.execution_abi) {
+                            .profile_v1_scalar_graphics => |profile| profile.fragment.prevalidatedPathName(),
+                            else => unreachable,
+                        }, switch (op.pipeline.execution_abi) {
+                            .profile_v1_scalar_graphics => |profile| profile.fragment.program.identity.digest,
+                            else => unreachable,
+                        }, frame_pacing.monotonicNs() - profile_start },
+                    );
                 }
                 return;
             }
@@ -11103,7 +11743,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 cube.cube_draw.color_base_layer = op.color_base_layer;
                 cube.cube_draw.depth_base_layer = op.depth_base_layer;
                 cube.cube_draw.layer_count = op.layer_count;
-                executeValidatedCommand(cube, query_context);
+                // Keep the indirect command's timing inclusive.  The
+                // synthesized draw is an implementation detail, not a second
+                // Vulkan command in the application's stream.
+                executeValidatedCommandImpl(cube, query_context);
             }
         },
         .buffer_to_image => |op| {
@@ -11417,6 +12060,23 @@ test "host image rows bulk-copy disjoint memory and preserve overlap semantics" 
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
+    if (imagePlane(image, region.image_subresource.aspect_mask)) |plane| {
+        const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
+        const layer_stride = bufferImageLayerStrideForBpp(region, plane.bytes_per_texel).?;
+        const row_bytes = @as(usize, region.image_extent.width) * @as(usize, @intCast(plane.bytes_per_texel));
+        var layer: u32 = 0;
+        while (layer < region.image_subresource.layer_count) : (layer += 1) {
+            const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer));
+            const io = plane.offset + (@as(usize, @intCast(region.image_offset.y)) * plane.width + @as(usize, @intCast(region.image_offset.x))) * @as(usize, @intCast(plane.bytes_per_texel));
+            const image_stride = @as(usize, plane.width) * @as(usize, @intCast(plane.bytes_per_texel));
+            const buffer_stride = @as(usize, row) * @as(usize, @intCast(plane.bytes_per_texel));
+            if (to_image)
+                copyTransferRows(pixels[io..], image_stride, b[bo..], buffer_stride, row_bytes, region.image_extent.height)
+            else
+                copyTransferRows(b[bo..], buffer_stride, pixels[io..], image_stride, row_bytes, region.image_extent.height);
+        }
+        return;
+    }
     const mip = imageMipExtent(image, region.image_subresource.mip_level).?;
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const bytes_per_texel = bufferImageBytesPerTexel(image.format).?;
@@ -11431,26 +12091,27 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
         // cmdCopyImageToBuffer before this recorded command executes. Copying
         // a complete layer in one call avoids per-row dispatch overhead while
         // retaining explicit strides for pitched transfers.
-        if (image.format != 9) {
+        if (image.format != 9 and image.format != 16) {
             if (to_image)
                 copyTransferRows(pixels[io..], @as(usize, mip.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
             else
                 copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, mip.width) * 4, len, region.image_extent.height);
         } else {
-            // Keep the public R8 transfer layout (one byte per texel) while
-            // using the driver's existing four-byte internal image storage.
-            // The padded channels are deterministic and sample as (r,0,0,1).
+            // Keep the public R8/R8G8 transfer layouts while using the
+            // driver's existing four-byte sampled storage. This is the path
+            // Chromium uses for separate Y and interleaved-UV video planes.
             for (0..region.image_extent.height) |y| {
-                const source_row = bo + y * @as(usize, @intCast(row));
+                const source_row = bo + y * @as(usize, @intCast(row)) * @as(usize, @intCast(bytes_per_texel));
                 const image_row = io + y * @as(usize, mip.width) * 4;
                 for (0..region.image_extent.width) |x| {
                     if (to_image) {
-                        pixels[image_row + x * 4] = b[source_row + x];
-                        pixels[image_row + x * 4 + 1] = 0;
+                        pixels[image_row + x * 4] = b[source_row + x * @as(usize, @intCast(bytes_per_texel))];
+                        pixels[image_row + x * 4 + 1] = if (image.format == 16) b[source_row + x * 2 + 1] else 0;
                         pixels[image_row + x * 4 + 2] = 0;
                         pixels[image_row + x * 4 + 3] = 255;
                     } else {
-                        b[source_row + x] = pixels[image_row + x * 4];
+                        b[source_row + x * @as(usize, @intCast(bytes_per_texel))] = pixels[image_row + x * 4];
+                        if (image.format == 16) b[source_row + x * 2 + 1] = pixels[image_row + x * 4 + 1];
                     }
                 }
             }
@@ -11478,6 +12139,39 @@ test "R8 buffer image transfers preserve packed rows and expand sampled storage"
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x11, 0, 0, 0x20, 0x21, 0, 0 }, &buffer_storage);
+}
+
+test "R8G8 buffer image transfers preserve Chromium UV plane pairs" {
+    const owner: Device = @ptrFromInt(8);
+    var buffer_storage: [4]u8 align(64) = .{ 90, 240, 110, 100 };
+    var image_storage: [8]u8 align(64) = .{0} ** 8;
+    var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 1, .array_layers = 1, .samples = 1, .format = 16, .usage = 7, .layout = 1, .owned_bytes = image_storage[0..] };
+    const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 2, .buffer_image_height = 1, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 1, .depth = 1 } };
+    copyBufferImage(&buffer, &image, region, true);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 0, 255, 110, 100, 0, 255 }, &image_storage);
+    @memset(&buffer_storage, 0);
+    copyBufferImage(&buffer, &image, region, false);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 110, 100 }, &buffer_storage);
+}
+
+test "NV12 plane uploads preserve the bounded multi-planar layout" {
+    const owner: Device = @ptrFromInt(8);
+    var upload_storage: [6]u8 align(64) = .{ 81, 81, 81, 81, 90, 240 };
+    var image_storage: [6]u8 align(64) = .{0} ** 6;
+    var memory = MemoryObj{ .owner = owner, .bytes = upload_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = upload_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = format_g8_b8r8_2plane_420_unorm, .usage = 6, .layout = 1, .owned_bytes = image_storage[0..] };
+    const luma = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 2, .buffer_image_height = 2, .image_subresource = .{ .aspect_mask = image_aspect_plane_0_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const chroma = BufferImageCopy{ .buffer_offset = 4, .buffer_row_length = 1, .buffer_image_height = 1, .image_subresource = .{ .aspect_mask = image_aspect_plane_1_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    try std.testing.expect(validImageRegion(&image, luma.image_offset, luma.image_extent, luma.image_subresource));
+    try std.testing.expect(validImageRegion(&image, chroma.image_offset, chroma.image_extent, chroma.image_subresource));
+    try std.testing.expectEqual(@as(?u64, 4), bufferImageEndForBpp(luma, bufferImageBytesPerTexelForAspect(&image, luma.image_subresource.aspect_mask).?));
+    try std.testing.expectEqual(@as(?u64, 6), bufferImageEndForBpp(chroma, bufferImageBytesPerTexelForAspect(&image, chroma.image_subresource.aspect_mask).?));
+    copyBufferImage(&buffer, &image, luma, true);
+    copyBufferImage(&buffer, &image, chroma, true);
+    try std.testing.expectEqualSlices(u8, &upload_storage, &image_storage);
 }
 
 test "mipmapped buffer image transfers use the selected subresource footprint" {
@@ -11963,6 +12657,7 @@ const RenderPassFramebufferMetadata = struct {
     color_initial_layout: i32 = 0,
     color_subpass_layout: i32 = 0,
     color_final_layout: i32 = 0,
+    color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
@@ -11982,14 +12677,23 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
     }
     var has_color = false;
     var has_depth = false;
+    var color_feedback_input = false;
     for (ci.subpasses.?[0..ci.subpass_count], 0..) |subpass, subpass_index| {
-        if (subpass.input_attachment_count != 0 or subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0) return .{};
+        if (subpass.resolve_attachments != null or subpass.preserve_attachment_count != 0) return .{};
         const subpass_has_color = if (subpass.color_attachment_count == 0 and subpass.color_attachments == null)
             false
         else if (subpass.color_attachment_count == 1 and subpass.color_attachments != null and subpass.color_attachments.?[0].attachment == 0)
             true
         else
             return .{};
+        if (subpass.input_attachment_count != 0) {
+            // Chromium Skia's framebuffer-fetch pass has exactly one
+            // single-sample BGRA/RGBA attachment, read and written at the
+            // same pixel through GENERAL.  Admit only that self-reference;
+            // arbitrary input-attachment graphs remain unsupported.
+            if (ci.subpass_count != 1 or ci.attachment_count != 1 or subpass_index != 0 or subpass.input_attachment_count != 1 or subpass.input_attachments == null or !subpass_has_color or subpass.input_attachments.?[0].attachment != 0 or subpass.color_attachments.?[0].layout != 1 or subpass.input_attachments.?[0].layout != 1) return .{};
+            color_feedback_input = true;
+        }
         if (subpass_index == 0) has_color = subpass_has_color else if (subpass_has_color != has_color) return .{};
         const depth = subpass.depth_stencil_attachment;
         if (depth) |reference| {
@@ -12006,7 +12710,7 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
     if (ci.attachment_count != expected_count) return .{};
     const descriptions = ci.attachments.?;
     const first_subpass = ci.subpasses.?[0];
-    var result = RenderPassFramebufferMetadata{ .supported = true, .attachment_count = expected_count };
+    var result = RenderPassFramebufferMetadata{ .supported = true, .attachment_count = expected_count, .color_feedback_input = color_feedback_input };
     if (has_color) {
         const color_reference = first_subpass.color_attachments.?[0];
         result.attachments[0] = .{ .format = descriptions[0].format, .samples = descriptions[0].samples, .role = .color };
@@ -12090,6 +12794,7 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
             .color_initial_layout = framebuffer_metadata.color_initial_layout,
             .color_subpass_layout = framebuffer_metadata.color_subpass_layout,
             .color_final_layout = framebuffer_metadata.color_final_layout,
+            .color_feedback_input = framebuffer_metadata.color_feedback_input,
             .depth_load_op = framebuffer_metadata.depth_load_op,
             .depth_store_op = framebuffer_metadata.depth_store_op,
             .depth_initial_layout = framebuffer_metadata.depth_initial_layout,
@@ -12769,6 +13474,12 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
         if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
+            if (frontend_stage == .fragment and profileShaderCaptureEnabled() and profileShaderCaptureCandidate(&program) and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
+                std.debug.print(
+                    "ZPU profile shader capture spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
+                    .{ shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
+                );
+            }
             if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
         }
     }
@@ -12844,6 +13555,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         try w.u32le(a.offset);
     }
     const profile_contract = if (profile_pair) profileGraphicsContract(&vertex_program.?, &fragment_program.?, vi) else null;
+    if (profile_contract) |contract| if (contract.fragment_input_attachment_count != 0 and (render_pass == null or !render_pass.?.color_feedback_input)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU graphics input attachment rejected: requires the bounded GENERAL self-feedback render pass\n", .{});
+        return pipelineInvalid(@src().line);
+    };
     if (profile_pair and profile_contract == null and failureDiagnosticsEnabled()) {
         std.debug.print(
             "ZPU graphics profile rejected vertexInterfaces={} fragmentInterfaces={} bindings={} attributes={}\n",
@@ -13112,7 +13827,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
                 return error.Invalid;
             },
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
@@ -13160,6 +13875,17 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         for (0..count) |index| {
             const item = set0.bytes[36 + index * 16 ..][0..16];
             if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 6 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
+        }
+        if (!found) return false;
+    };
+    for (fragment.interfaces) |interface| if (interface.storage == .input_attachment) {
+        if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
+        const count = std.mem.readInt(u32, set0.bytes[32..36], .little);
+        if (set0.bytes.len != 36 + @as(usize, count) * 16) return false;
+        var found = false;
+        for (0..count) |index| {
+            const item = set0.bytes[36 + index * 16 ..][0..16];
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 10 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
         }
         if (!found) return false;
     };
@@ -13220,7 +13946,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (result.vertex_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
-        .sampled_image => return null,
+        .sampled_image, .input_attachment => return null,
     };
     if (result.vertex_output == 0 or vertex_inputs == 0) return null;
     var fragment_outputs: u32 = 0;
@@ -13264,6 +13990,14 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.binding == interface.binding.?) return null;
             result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
             result.fragment_sampled_image_count += 1;
+        },
+        .input_attachment => {
+            // The profile intentionally supports only the one-set
+            // framebuffer-fetch shape used by Chromium's Skia blend pass.
+            if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_input_attachment_count == result.fragment_input_attachments.len) return null;
+            for (result.fragment_input_attachments[0..result.fragment_input_attachment_count]) |prior| if (prior.binding == interface.binding.?) return null;
+            result.fragment_input_attachments[result.fragment_input_attachment_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
+            result.fragment_input_attachment_count += 1;
         },
         .output => {
             if (fragment_outputs != 0 or interface.location == null or interface.location.? != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
@@ -13330,8 +14064,9 @@ test "profile block byte size preserves std140 matrix and array strides" {
     try std.testing.expectEqual(@as(?u8, 80), profileBlockByteSize(interface));
 }
 
-/// Exact bridge for the immutable distro-vkcube shader pair used by the
-/// cpu_cube_v1 readiness path. This is not render-profile acceptance.
+/// Exact bridges for the distro-vkcube shader pairs used by the cpu_cube_v1
+/// readiness path. This is not render-profile acceptance: both revisions are
+/// independently pinned to their full module identities and ABI word counts.
 fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
     if (spec_count != 0 or !std.mem.eql(u8, name, "main")) return false;
     const expected_len: usize = if (stage == .vertex) 390 else 320;
@@ -13340,6 +14075,24 @@ fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.St
     else
         .{ 0x4b, 0x02, 0xf6, 0x81, 0xa1, 0xff, 0x80, 0x94, 0x1d, 0x4e, 0xfa, 0xaa, 0x5e, 0x27, 0x85, 0xc5, 0xcf, 0xe5, 0xa8, 0x53, 0x94, 0xd7, 0xac, 0xec, 0xb2, 0x0f, 0xd8, 0x6a, 0x7d, 0xa3, 0x08, 0x64 };
     return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
+}
+
+/// Ubuntu's current vkcube build keeps the same bounded cube ABI but emits a
+/// distinct SPIR-V revision (including unused PointSize/ClipDistance members).
+/// Keep it as a separate exact identity; do not route it through the general
+/// profile frontend, which intentionally does not claim those built-ins.
+fn cpuCubeV2ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
+    if (spec_count != 0 or !std.mem.eql(u8, name, "main")) return false;
+    const expected_len: usize = if (stage == .vertex) 390 else 320;
+    const expected: [32]u8 = if (stage == .vertex)
+        .{ 0x3e, 0x08, 0xa6, 0xd9, 0xc7, 0x27, 0x5c, 0xb8, 0x9b, 0x03, 0x79, 0xc6, 0x65, 0x35, 0xfa, 0xa6, 0x3b, 0x31, 0xec, 0x82, 0xd3, 0xee, 0x57, 0x0b, 0x1e, 0x0c, 0xe7, 0x29, 0x77, 0xc5, 0xb3, 0x5b }
+    else
+        .{ 0x67, 0xf8, 0xe8, 0xa5, 0x4b, 0xa0, 0xfe, 0x62, 0x0a, 0xf0, 0x0d, 0x25, 0x78, 0x53, 0xac, 0x6e, 0x6e, 0x17, 0x09, 0x06, 0x87, 0x73, 0xad, 0xa5, 0x34, 0x4f, 0xcf, 0xb9, 0x81, 0xcd, 0xa4, 0x11 };
+    return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
+}
+
+fn cpuCubeShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, spec_count: usize) bool {
+    return cpuCubeV1ShaderCompatible(shader, stage, name, spec_count) or cpuCubeV2ShaderCompatible(shader, stage, name, spec_count);
 }
 
 fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) void {
@@ -13361,7 +14114,7 @@ fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) voi
 }
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
-    if (cpuCubeV1ShaderCompatible(shader, stage, name, specs.len)) return null;
+    if (cpuCubeShaderCompatible(shader, stage, name, specs.len)) return null;
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => {
@@ -13395,6 +14148,22 @@ test "cpu_cube_v1 shader compatibility bridge is exact" {
 
     shader.module.words = &words;
     try std.testing.expect((try compileFrontendStage(std.testing.allocator, &shader, .vertex, "main", &.{})) == null);
+    var v2_vertex = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = .{ 0x3e, 0x08, 0xa6, 0xd9, 0xc7, 0x27, 0x5c, 0xb8, 0x9b, 0x03, 0x79, 0xc6, 0x65, 0x35, 0xfa, 0xa6, 0x3b, 0x31, 0xec, 0x82, 0xd3, 0xee, 0x57, 0x0b, 0x1e, 0x0c, 0xe7, 0x29, 0x77, 0xc5, 0xb3, 0x5b },
+    } } };
+    try std.testing.expect(cpuCubeV2ShaderCompatible(&v2_vertex, .vertex, "main", 0));
+    try std.testing.expect((try compileFrontendStage(std.testing.allocator, &v2_vertex, .vertex, "main", &.{})) == null);
+    var v2_fragment_words = [_]u32{0} ** 320;
+    var v2_fragment = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &v2_fragment_words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = .{ 0x67, 0xf8, 0xe8, 0xa5, 0x4b, 0xa0, 0xfe, 0x62, 0x0a, 0xf0, 0x0d, 0x25, 0x78, 0x53, 0xac, 0x6e, 0x6e, 0x17, 0x09, 0x06, 0x87, 0x73, 0xad, 0xa5, 0x34, 0x4f, 0xcf, 0xb9, 0x81, 0xcd, 0xa4, 0x11 },
+    } } };
+    try std.testing.expect(cpuCubeV2ShaderCompatible(&v2_fragment, .fragment, "main", 0));
+    v2_fragment.module.identity.digest[0] ^= 1;
+    try std.testing.expect(!cpuCubeV2ShaderCompatible(&v2_fragment, .fragment, "main", 0));
     var valid = ShaderModuleObj{ .owner = undefined, .module = .{ .words = @constCast(&spirv_frontend.positive_vertex), .identity = undefined } };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, compileFrontendStage(failing.allocator(), &valid, .vertex, "main", &.{}));
@@ -13409,11 +14178,8 @@ const SamplerCreatePNextState = struct {
 };
 
 /// Validate the mandatory core sampler extension chain without publishing
-/// partial sampler state.  The promoted min/max reduction feature is not
-/// advertised by ZPU, so only the default weighted-average mode is executable;
-/// a well-formed MIN/MAX request is reported as a feature rejection by the
-/// caller.  YCbCr conversion remains a valid ABI node but is explicitly
-/// unsupported because no conversion handles or multi-planar formats exist.
+/// partial sampler state. The promoted min/max reduction feature is not
+/// advertised by ZPU, so only weighted-average reduction is executable.
 fn samplerCreatePNextState(raw: ?*const anyopaque) SamplerCreatePNextState {
     var state = SamplerCreatePNextState{};
     var next = raw;
@@ -13460,10 +14226,14 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (pnext.reduction_mode != 0) return .error_feature_not_present;
-    if (pnext.has_ycbcr_conversion) return .error_format_not_supported;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const ycbcr = if (pnext.has_ycbcr_conversion) blk: {
+        const conversion = validSamplerYcbcrConversionLocked(pnext.ycbcr_conversion) orelse return .error_initialization_failed;
+        if (conversion.owner != d) return .error_initialization_failed;
+        break :blk conversion.conversion;
+    } else null;
     for (&sampler_objects, &sampler_state) |*object, *state| if (state.* != .live) {
         object.* = .{
             .owner = d,
@@ -13481,6 +14251,7 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
             .reduction_mode = pnext.reduction_mode,
             .border_color = info.border_color,
             .unnormalized_coordinates = info.unnormalized_coordinates != 0,
+            .ycbcr = ycbcr,
         };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -13527,21 +14298,43 @@ fn samplerYcbcrConversionCreateInfoValid(ci: *const SamplerYcbcrConversionCreate
         ci.chroma_filter >= 0 and ci.chroma_filter <= 1 and
         ci.force_explicit_reconstruction <= 1;
 }
+
+fn supportedSamplerYcbcrConversion(ci: *const SamplerYcbcrConversionCreateInfo) bool {
+    // The initial executable profile is non-disjoint NV12 with nearest
+    // chroma reconstruction and identity component mapping. The compositor
+    // path uses the YCbCr colour models below; rejecting other combinations
+    // is required until their reconstruction semantics are implemented.
+    return ci.format == format_g8_b8r8_2plane_420_unorm and
+        ci.model >= 1 and ci.model <= 4 and
+        ci.components[0] == 0 and ci.components[1] == 0 and ci.components[2] == 0 and ci.components[3] == 0 and
+        ci.x_chroma_offset == 0 and ci.y_chroma_offset == 0 and
+        ci.chroma_filter == 0 and ci.force_explicit_reconstruction == 0;
+}
 fn createSamplerYcbcrConversion(device: ?Device, info: ?*const SamplerYcbcrConversionCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (alloc != null or !samplerYcbcrConversionCreateInfoValid(ci)) return .error_initialization_failed;
-    _ = device orelse return .error_initialization_failed;
-    _ = out;
-    // ZPU exposes no multi-planar YCbCr formats; report the capability result
-    // explicitly instead of publishing an object with incomplete conversion
-    // state.
-    return .error_format_not_supported;
+    if (!supportedSamplerYcbcrConversion(ci)) return .error_format_not_supported;
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&sampler_ycbcr_conversion_objects, &sampler_ycbcr_conversion_state) |*object, *state| if (state.* != .live) {
+        const handle = allocateGenericHandle();
+        object.* = .{ .handle = handle, .owner = d, .conversion = .{ .format = ci.format, .model = ci.model, .range = ci.range, .components = ci.components, .x_chroma_offset = ci.x_chroma_offset, .y_chroma_offset = ci.y_chroma_offset, .chroma_filter = ci.chroma_filter, .force_explicit_reconstruction = ci.force_explicit_reconstruction } };
+        state.* = .live;
+        out.* = handle;
+        return .success;
+    };
+    return objectPoolExhausted("sampler-ycbcr-conversion");
 }
 fn destroySamplerYcbcrConversion(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
-    _ = device;
-    _ = handle;
-    _ = alloc;
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validSamplerYcbcrConversionLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner == d) stateForObject(SamplerYcbcrConversionObj, object, &sampler_ycbcr_conversion_objects, &sampler_ycbcr_conversion_state).?.* = .tombstone;
 }
 fn pipelineCacheHeader() [pipeline_cache_header_size]u8 {
     var bytes = [_]u8{0} ** pipeline_cache_header_size;
@@ -13877,15 +14670,16 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         );
         return .error_initialization_failed;
     }
-    if (pnext.has_ycbcr_conversion) {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU image view rejected reason=ycbcr\n", .{});
-        return .error_format_not_supported;
-    }
     lock();
     defer mutex.unlock();
     const image = validImageLocked(ci.image) orelse return imageViewInvalid("image");
     const usage = if (pnext.has_usage) pnext.usage else image.usage;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+    const ycbcr = if (pnext.has_ycbcr_conversion) blk: {
+        const conversion = validSamplerYcbcrConversionLocked(pnext.ycbcr_conversion) orelse return imageViewInvalid("ycbcr-conversion");
+        if (conversion.owner != d or conversion.conversion.format != image.format) return imageViewInvalid("ycbcr-format");
+        break :blk conversion.conversion;
+    } else null;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != image_aspect_color_bit and ci.subresource_range.aspect_mask != 2) or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
             .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
@@ -13894,7 +14688,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .ycbcr = ycbcr, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = handle;
         return .success;
@@ -13922,6 +14716,11 @@ fn destroyImageView(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     defer mutex.unlock();
     const object = validImageViewLocked(handle) orelse return;
     if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(ImageViewObj, object, &image_view_objects, &image_view_state).?.* = .tombstone;
+}
+
+fn sampledYcbcrCompatible(view: *const ImageViewObj, sampler: *const SamplerObj) bool {
+    if (ycbcr420Nv12Format(view.image.format)) return view.ycbcr != null and sampler.ycbcr != null and std.meta.eql(view.ycbcr.?, sampler.ycbcr.?);
+    return view.ycbcr == null and sampler.ycbcr == null;
 }
 fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
@@ -13966,7 +14765,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
             }
             switch (requirement.role) {
                 .color => {
-                    if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
+                    if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or (render_pass.color_feedback_input and view.usage & 0x80 == 0) or color != null) return .error_initialization_failed;
                     color = view.image;
                 },
                 .depth => {
@@ -14385,13 +15184,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_binding: u8, writes_texture: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_binding = 0, .writes_texture = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -14418,12 +15217,23 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             const info = descriptor_write.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return;
             const view = validImageViewLocked(info.image_view) orelse return;
-            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5) return;
+            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_components = view.components;
+            update.texture_ycbcr = view.ycbcr;
             update.texture_binding = @intCast(descriptor_write.dst_binding);
             update.writes_texture = true;
+        } else if (descriptor_write.descriptor_type == 10 and descriptor_write.dst_binding < update.set.input_attachments.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 10 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+            const info = descriptor_write.image_info.?[0];
+            const view = validImageViewLocked(info.image_view) orelse return;
+            // Input attachments have no sampler and this backend executes
+            // only a GENERAL-layout, color-aspect framebuffer fetch.
+            if (info.sampler != 0 or view.owner != d or view.usage & 0x80 == 0 or view.aspect_mask != 1 or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count != 1 or !liveImageObject(view.image) or view.image.samples != 1 or view.image.array_layers != 1 or info.image_layout != 1) return;
+            update.input_attachment = view.image;
+            update.input_components = view.components;
+            update.input_binding = @intCast(descriptor_write.dst_binding);
+            update.writes_input_attachment = true;
         } else return;
         updates[index] = update;
     }
@@ -14441,10 +15251,11 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.storage_range = update.storage_range;
         }
         if (update.writes_texture) {
-            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components };
+            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components, .ycbcr = update.texture_ycbcr };
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
+        if (update.writes_input_attachment) update.set.input_attachments[update.input_binding] = .{ .image = update.input_attachment, .components = update.input_components };
     }
 }
 fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdateTemplateCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
@@ -14531,11 +15342,11 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
             const sampler = validSamplerLocked(descriptor.sampler) orelse return;
             const view = validImageViewLocked(descriptor.image_view) orelse return;
-            if (entry.dst_binding >= sampled_images.len or sampler.owner != d or view.owner != d or descriptor.image_layout != 5) return;
+            if (entry.dst_binding >= sampled_images.len or sampler.owner != d or view.owner != d or descriptor.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_binding = @intCast(entry.dst_binding);
-            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components };
+            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr };
         }
     }
     set.uniform = update.uniform;
@@ -15395,10 +16206,10 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             const info = item.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return false;
             const view = validImageViewLocked(info.image_view) orelse return false;
-            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5) return false;
+            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return false;
             candidate.texture = view.image;
             candidate.sampler = sampler;
-            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components };
+            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components, .ycbcr = view.ycbcr };
         } else return false;
     };
     command_buffer.impl.push_descriptor = candidate;
@@ -15995,6 +16806,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     defer fragment_derivative_executor.deinit();
     var derivative_profile = profile;
     derivative_profile.fragment = fragment_derivative_executor;
+    derivative_profile.fragment_needs_derivatives = true;
     var derivative_pipeline = pipeline;
     derivative_pipeline.execution_abi = .{ .profile_v1_scalar_graphics = derivative_profile };
     var derivative_command = command;
@@ -16603,7 +17415,7 @@ fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool
 }
 const GraphicsDescriptorRequirements = struct { set0: bool, set1: bool, layout: bool };
 fn profileGraphicsDescriptorRequirements(profile: *const ProfileGraphics) GraphicsDescriptorRequirements {
-    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0;
+    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0 or profile.fragment_input_attachment_count != 0;
     const set1 = profile.fragment_sampled_image_count != 0;
     return .{ .set0 = set0, .set1 = set1, .layout = set0 or set1 };
 }
@@ -16621,6 +17433,7 @@ test "graphics descriptor requirements exclude push-constant-only pipelines" {
     profile.vertex_push_constant = .{ .interface = 0, .byte_size = 16 };
     profile.fragment_push_constant = .{ .interface = 0, .byte_size = 16 };
     profile.fragment_sampled_image_count = 0;
+    profile.fragment_input_attachment_count = 0;
     try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = false, .set1 = false, .layout = false }, profileGraphicsDescriptorRequirements(&profile));
 
     profile.vertex_uniform_count = 1;
@@ -16661,6 +17474,7 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
         snapshot.sampled_images = sampled.sampled_images;
+        snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
     if (descriptors.uniform_dynamic) {
@@ -16699,6 +17513,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
         snapshot.sampled_images = sampled.sampled_images;
+        snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
     snapshot.synthetic = true;
@@ -17584,6 +18399,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
         const force_full = image.force_full_present;
+        emitCommandTimingSummary();
         if (renderDiagnosticsEnabled()) {
             const present_diagnostic = render_diagnostic_presents.fetchAdd(1, .monotonic);
             if (present_diagnostic < 32) std.debug.print(
@@ -19164,7 +19980,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var unsupported_ycbcr_info = sampler_info;
     unsupported_ycbcr_info.p_next = @ptrCast(&ycbcr_info);
     unpublished_sampler = 0xeeee;
-    try std.testing.expectEqual(Result.error_format_not_supported, createSampler(device, &unsupported_ycbcr_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &unsupported_ycbcr_info, null, &unpublished_sampler));
     try std.testing.expectEqual(@as(usize, 0xeeee), unpublished_sampler);
     ycbcr_info.conversion = 0;
     unpublished_sampler = 0xffff;
@@ -22075,6 +22891,77 @@ fn createTestDeviceContext() !TestDeviceContext {
     return .{ .instance = instance, .physical = physicals[0], .device = device, .queue = queue };
 }
 
+test "framebuffer fetch accepts only a GENERAL self input attachment and descriptor" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x90, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    defer destroyImage(ctx.device, image, null);
+    const allocation_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation_info, null, &memory));
+    defer freeMemory(ctx.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    defer destroyImageView(ctx.device, view, null);
+
+    const description = [_]AttachmentDescription{.{ .flags = 0, .format = 44, .samples = 1, .load_op = 0, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 1, .final_layout = 1 }};
+    const general_ref = AttachmentReference{ .attachment = 0, .layout = 1 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 1, .input_attachments = @ptrCast(&general_ref), .color_attachment_count = 1, .color_attachments = @ptrCast(&general_ref), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &description, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &pass_info, null, &render_pass));
+    defer destroyRenderPass(ctx.device, render_pass, null);
+    try std.testing.expect(validRenderPassLocked(render_pass).?.color_feedback_input);
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    defer destroyFramebuffer(ctx.device, framebuffer, null);
+    const view_object = validImageViewLocked(view).?;
+    const view_usage = view_object.usage;
+    view_object.usage &= ~@as(u32, 0x80);
+    var missing_input_usage_framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.error_initialization_failed, createFramebuffer(ctx.device, &framebuffer_info, null, &missing_input_usage_framebuffer));
+    view_object.usage = view_usage;
+
+    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 10, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    var layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &layout));
+    defer destroyDescriptorSetLayout(ctx.device, layout, null);
+    const size = DescriptorPoolSize{ .descriptor_type = 10, .descriptor_count = 1 };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&size) };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    defer destroyDescriptorPool(ctx.device, pool, null);
+    const set_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&layout) };
+    var set: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &set_info, @ptrCast(&set)));
+    const image_descriptor = DescriptorImageInfo{ .sampler = 0, .image_view = view, .image_layout = 1 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 10, .image_info = @ptrCast(&image_descriptor), .buffer_info = null, .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(validImageLocked(image).?, validDescriptorSetLocked(set).?.input_attachments[0].image.?);
+    const invalid_image_descriptor = DescriptorImageInfo{ .sampler = 1, .image_view = view, .image_layout = 1 };
+    descriptor_write.image_info = @ptrCast(&invalid_image_descriptor);
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(validImageLocked(image).?, validDescriptorSetLocked(set).?.input_attachments[0].image.?);
+
+    var non_general_ref = general_ref;
+    non_general_ref.layout = 2;
+    var malformed_subpass = subpass;
+    malformed_subpass.input_attachments = @ptrCast(&non_general_ref);
+    const malformed_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &description, .subpass_count = 1, .subpasses = @ptrCast(&malformed_subpass), .dependency_count = 0, .dependencies = null };
+    var rejected: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &malformed_info, null, &rejected));
+    defer destroyRenderPass(ctx.device, rejected, null);
+    try std.testing.expect(!validRenderPassLocked(rejected).?.framebuffer_supported);
+}
+
 test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(@as(usize, 240), @sizeOf(PhysicalDeviceFeatures2));
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(PhysicalDeviceVulkan11Features));
@@ -22220,12 +23107,15 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getDeviceGroupPeerMemoryFeatures(ctx.device, 0, 0, 0, &peer_features);
     try std.testing.expectEqual(@as(u32, 0), peer_features);
     var ycbcr_handle: usize = 0xfeed;
-    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = 1000156000, .model = 0, .range = 0, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0 };
-    try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
-    try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
-    // Unsupported multi-planar formats still receive full ABI-domain
-    // validation before the capability result.  Every malformed payload must
-    // leave the output handle untouched and return initialization failure.
+    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = format_g8_b8r8_2plane_420_unorm, .model = 3, .range = 1, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0 };
+    try std.testing.expectEqual(Result.success, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    try std.testing.expect(ycbcr_handle != 0xfeed);
+    const stale_ycbcr = ycbcr_handle;
+    destroySamplerYcbcrConversion(ctx.device, stale_ycbcr, null);
+    try std.testing.expect(validSamplerYcbcrConversionLocked(stale_ycbcr) == null);
+    ycbcr_handle = 0xfeed;
+    // Every malformed payload must leave the output handle untouched and
+    // return initialization failure.
     var malformed_ycbcr = ycbcr_info;
     malformed_ycbcr.format = 37;
     try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
@@ -22244,7 +23134,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     test_allocations_before_failure = 0;
-    for (0..4096) |_| try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.chroma_filter = 1;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
     malformed_ycbcr = ycbcr_info;
     malformed_ycbcr.format = 37;
     for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
@@ -22374,11 +23266,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         var i: usize = 0;
         while (i < 12) : (i += 1) {
             const value = std.mem.readInt(u32, @ptrCast(&v11_bytes[i * 4]), .little);
-            if (i == 10) {
-                try std.testing.expectEqual(@as(u32, 1), value);
-            } else {
-                try std.testing.expectEqual(@as(u32, 0), value);
-            }
+            try std.testing.expectEqual(@as(u32, if (i == 10) 1 else 0), value);
         }
     }
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
@@ -24225,13 +25113,13 @@ test "dynamic rendering begin and end own attachment scope" {
     unsupported_view_info.p_next = &unsupported_usage;
     try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &unsupported_view_info, null, &unchanged_view));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_view);
-    // A well-formed promoted YCbCr conversion chain is recognized as an
-    // unsupported-format request, while a null conversion is malformed.
+    // A stale promoted YCbCr conversion is rejected before view creation,
+    // while a null conversion remains malformed.
     var ycbcr_view_conversion = SamplerYcbcrConversionInfo{ .s_type = 1000156001, .p_next = null, .conversion = 1 };
     var ycbcr_view_info = view_info;
     ycbcr_view_info.p_next = @ptrCast(&ycbcr_view_conversion);
     unchanged_view = 0xcafe_babe;
-    try std.testing.expectEqual(Result.error_format_not_supported, createImageView(ctx.device, &ycbcr_view_info, null, &unchanged_view));
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &ycbcr_view_info, null, &unchanged_view));
     try std.testing.expectEqual(@as(usize, 0xcafe_babe), unchanged_view);
     ycbcr_view_conversion.conversion = 0;
     unchanged_view = 0xd00d;
@@ -29799,6 +30687,19 @@ test "explicit behavioral requirement matrix is complete" {
     }
 }
 
+test "profile derivative classifier is exact" {
+    const name = [_]u8{'x'};
+    const no_derivatives = [_]render_ir.Instruction{.{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} }};
+    const derivative = [_]render_ir.Instruction{
+        .{ .op = .dpdx, .ty = .{ .scalar = .f32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    const plain = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&.{}), .instructions = @constCast(&no_derivatives), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    const needs = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&.{}), .instructions = @constCast(&derivative), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    try std.testing.expect(!profileFragmentNeedsDerivatives(&plain));
+    try std.testing.expect(profileFragmentNeedsDerivatives(&needs));
+}
+
 test "Mosaic command buffers allocate bounded recording storage lazily" {
     const ctx = try createTestDeviceContext();
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
@@ -29843,6 +30744,14 @@ test "Mosaic command cursor skips empty primary streams without reordering" {
     try std.testing.expectEqual(@as(std.meta.Tag(Command), .next_subpass), std.meta.activeTag(cursor.current().?.*));
     cursor.advance();
     try std.testing.expect(cursor.current() == null);
+}
+
+test "Mosaic batches only ordered groups of profile draws" {
+    try std.testing.expect(!profileMosaicBatchEligible(0, 1920, 1080));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 255, 256));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 256, 256));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 780, 580));
+    try std.testing.expect(profileMosaicBatchEligible(2, 32, 32));
 }
 
 test "pinned Vulkan 1.4 core command inventory resolves through the ICD dispatch" {

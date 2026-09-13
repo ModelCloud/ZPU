@@ -95,6 +95,15 @@ exists, if ZPU appears in a guest-global Vulkan directory, if loader output
 contains a second device, or if it names Venus, virtio, virgl, ANGLE, software
 translation ICDs, or OpenGL-family APIs.
 
+## Guest CPU tier
+
+The default guest artifact is the portable x86-64 baseline. On a fixed,
+measured guest, `ZPU_GUEST_CPU_TIER=native tools/smolvm-zpu.sh build` creates a
+guest-local native-codegen artifact after checking that the guest CPUID mask
+contains AVX2. This option must not be used for a redistributable ICD or as a
+substitute for a runtime-dispatched Mosaic SIMD kernel: it is only an explicit
+benchmarking tier for that exact guest CPU and OS vector-state contract.
+
 ## Omarchy host preparation
 
 Keep Xwayland enabled in Omarchy. From a terminal in the logged-in graphical

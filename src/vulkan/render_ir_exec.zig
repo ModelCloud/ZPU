@@ -54,9 +54,11 @@ pub const Value = struct {
 };
 
 pub const SampledImage = struct {
-    pub const Format = enum { r8_unorm, rgba8_unorm, bgra8_unorm };
+    pub const Format = enum { r8_unorm, rg8_unorm, rgba8_unorm, bgra8_unorm, ycbcr_420_2plane, ycbcr_420_3plane };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
+    pub const YcbcrModel = enum { identity, bt601, bt709, bt2020 };
+    pub const YcbcrRange = enum { full, narrow };
 
     pixels: []const u8,
     width: u32,
@@ -73,6 +75,16 @@ pub const SampledImage = struct {
     border: [4]f32 = .{ 0, 0, 0, 0 },
     // Vulkan image-view component mapping. The zero value is IDENTITY.
     swizzle: [4]i32 = .{ 0, 0, 0, 0 },
+    // Multi-planar 4:2:0 storage is deliberately explicit. `pixels` holds
+    // the full-resolution Y plane; plane_1 is U for I420 or interleaved UV
+    // for NV12, and plane_2 is V for I420. The driver wires these fields only
+    // after it has validated a Vulkan YCbCr conversion object.
+    plane_1: []const u8 = &.{},
+    plane_2: []const u8 = &.{},
+    plane_1_row_stride: u32 = 0,
+    plane_2_row_stride: u32 = 0,
+    ycbcr_model: YcbcrModel = .bt601,
+    ycbcr_range: YcbcrRange = .narrow,
 };
 
 pub const Binding = struct {
@@ -81,6 +93,7 @@ pub const Binding = struct {
     dpdx_bytes: []const u8 = &.{},
     dpdy_bytes: []const u8 = &.{},
     sampled_image: ?SampledImage = null,
+    input_attachment: ?SampledImage = null,
 };
 pub const Output = struct { interface: u32, bytes: []u8 };
 
@@ -329,6 +342,15 @@ fn findSampledImage(bindings: []const Binding, index: u32) Error!SampledImage {
     };
     return found orelse error.MissingInput;
 }
+
+fn findInputAttachment(bindings: []const Binding, index: u32) Error!SampledImage {
+    var found: ?SampledImage = null;
+    for (bindings) |binding| if (binding.interface == index) {
+        if (found != null or binding.input_attachment == null) return error.InvalidOperand;
+        found = binding.input_attachment;
+    };
+    return found orelse error.MissingInput;
+}
 fn addressCoordinate(value: i32, size: u32, mode: SampledImage.AddressMode) ?u32 {
     const signed_size: i32 = @intCast(size);
     return switch (mode) {
@@ -372,9 +394,67 @@ fn applySwizzle(image: SampledImage, source: [4]f32) Error![4]f32 {
     }
     return result;
 }
+
+fn ycbcrChannel(plane: []const u8, row_stride: u32, x: u32, y: u32, components: u32, lane: u32) Error!f32 {
+    const row = std.math.mul(usize, y, row_stride) catch return error.Bounds;
+    const column = std.math.mul(usize, x, components) catch return error.Bounds;
+    const offset = std.math.add(usize, row, column) catch return error.Bounds;
+    const index = std.math.add(usize, offset, lane) catch return error.Bounds;
+    if (index >= plane.len) return error.Bounds;
+    return @as(f32, @floatFromInt(plane[index])) / 255;
+}
+
+fn ycbcrToRgb(image: SampledImage, y_sample: f32, cb_sample: f32, cr_sample: f32) [4]f32 {
+    if (image.ycbcr_model == .identity) return .{ y_sample, cb_sample, cr_sample, 1 };
+    const y = if (image.ycbcr_range == .narrow) std.math.clamp((y_sample * 255 - 16) / 219, 0, 1) else y_sample;
+    const cb = if (image.ycbcr_range == .narrow) (cb_sample * 255 - 128) / 224 else cb_sample - 0.5;
+    const cr = if (image.ycbcr_range == .narrow) (cr_sample * 255 - 128) / 224 else cr_sample - 0.5;
+    const coefficients: [3]f32 = switch (image.ycbcr_model) {
+        .bt601 => .{ 1.402, 0.344136, 0.714136 },
+        .bt709 => .{ 1.5748, 0.187324, 0.468124 },
+        .bt2020 => .{ 1.4746, 0.164553, 0.571353 },
+        .identity => unreachable,
+    };
+    const blue: f32 = switch (image.ycbcr_model) {
+        .bt601 => 1.772,
+        .bt709 => 1.8556,
+        .bt2020 => 1.8814,
+        .identity => unreachable,
+    };
+    return .{
+        std.math.clamp(y + coefficients[0] * cr, 0, 1),
+        std.math.clamp(y - coefficients[1] * cb - coefficients[2] * cr, 0, 1),
+        std.math.clamp(y + blue * cb, 0, 1),
+        1,
+    };
+}
+
+fn ycbcrTexel(image: SampledImage, x: u32, y: u32) Error![4]f32 {
+    const chroma_width = (image.width + 1) / 2;
+    const chroma_height = (image.height + 1) / 2;
+    if (chroma_width == 0 or chroma_height == 0 or image.row_stride < image.width or image.plane_1_row_stride == 0) return error.Bounds;
+    const y_sample = try ycbcrChannel(image.pixels, image.row_stride, x, y, 1, 0);
+    const chroma_x = x / 2;
+    const chroma_y = y / 2;
+    if (chroma_x >= chroma_width or chroma_y >= chroma_height) return error.Bounds;
+    const cb_sample, const cr_sample = switch (image.format) {
+        .ycbcr_420_2plane => .{
+            try ycbcrChannel(image.plane_1, image.plane_1_row_stride, chroma_x, chroma_y, 2, 0),
+            try ycbcrChannel(image.plane_1, image.plane_1_row_stride, chroma_x, chroma_y, 2, 1),
+        },
+        .ycbcr_420_3plane => .{
+            try ycbcrChannel(image.plane_1, image.plane_1_row_stride, chroma_x, chroma_y, 1, 0),
+            try ycbcrChannel(image.plane_2, image.plane_2_row_stride, chroma_x, chroma_y, 1, 0),
+        },
+        else => return error.InvalidType,
+    };
+    return ycbcrToRgb(image, y_sample, cb_sample, cr_sample);
+}
+
 fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return applySwizzle(image, image.border);
     const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return applySwizzle(image, image.border);
+    if (image.format == .ycbcr_420_2plane or image.format == .ycbcr_420_3plane) return applySwizzle(image, try ycbcrTexel(image, addressed_x, addressed_y));
     const offset = std.math.add(
         usize,
         std.math.mul(usize, addressed_y, image.row_stride) catch return error.Bounds,
@@ -382,6 +462,10 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     ) catch return error.Bounds;
     if (image.bytes_per_texel == 0 or offset > image.pixels.len or image.pixels.len - offset < image.bytes_per_texel) return error.Bounds;
     if (image.format == .r8_unorm) return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, 0, 0, 1 });
+    if (image.format == .rg8_unorm) {
+        if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
+        return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, @as(f32, @floatFromInt(image.pixels[offset + 1])) / 255, 0, 1 });
+    }
     if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
     const pixel = image.pixels[offset..][0..4];
     const r = if (image.format == .rgba8_unorm) pixel[0] else pixel[2];
@@ -392,6 +476,20 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
         @as(f32, @floatFromInt(b)) / 255,
         @as(f32, @floatFromInt(pixel[3])) / 255,
     });
+}
+
+fn inputAttachmentLoad(image: SampledImage, coordinates: Value) Error!Value {
+    if (coordinates.ty.scalar != .i32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1) return error.InvalidType;
+    const x: i32 = @bitCast(coordinates.bits[0]);
+    const y: i32 = @bitCast(coordinates.bits[1]);
+    // SPIR-V input-attachment reads address a concrete pixel; they are not
+    // sampler operations with address-mode behavior. Invalid coordinates are
+    // outside the supported profile rather than silently clamped.
+    if (image.width == 0 or image.height == 0 or x < 0 or y < 0 or x >= image.width or y >= image.height) return error.Bounds;
+    const rgba = try texel(image, x, y);
+    var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
+    for (rgba, 0..) |channel, index| result.bits[index] = @bitCast(channel);
+    return result;
 }
 fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
@@ -490,6 +588,95 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
 }
 
+test "sample decodes Chromium packed RG8 chroma inputs" {
+    const pixels = [_]u8{ 90, 240 };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 2,
+        .bytes_per_texel = 2,
+        .format = .rg8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectEqual(@as(f32, 90.0 / 255.0), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 240.0 / 255.0), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample converts bounded NV12 BT.601 limited-range video to RGB" {
+    // BT.601 limited-range Y=81, Cb=90, Cr=240 is the standard red test
+    // vector. Both luma rows deliberately share one 4:2:0 chroma sample.
+    const luma = [_]u8{ 81, 81, 81, 81 };
+    const chroma = [_]u8{ 90, 240 };
+    const image = SampledImage{
+        .pixels = &luma,
+        .width = 2,
+        .height = 2,
+        .row_stride = 2,
+        .bytes_per_texel = 1,
+        .format = .ycbcr_420_2plane,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .plane_1 = &chroma,
+        .plane_1_row_stride = 2,
+        .ycbcr_model = .bt601,
+        .ycbcr_range = .narrow,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.75));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.75));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.998), @as(f32, @bitCast(result.bits[0])), 0.004);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(result.bits[1])), 0.004);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(result.bits[2])), 0.004);
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample converts bounded I420 planes and rejects an underfilled plane" {
+    const luma = [_]u8{ 81, 81, 81, 81 };
+    const cb = [_]u8{90};
+    const cr = [_]u8{240};
+    const image = SampledImage{
+        .pixels = &luma,
+        .width = 2,
+        .height = 2,
+        .row_stride = 2,
+        .bytes_per_texel = 1,
+        .format = .ycbcr_420_3plane,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .plane_1 = &cb,
+        .plane_2 = &cr,
+        .plane_1_row_stride = 1,
+        .plane_2_row_stride = 1,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.25));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.25));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.998), @as(f32, @bitCast(result.bits[0])), 0.004);
+
+    var truncated = image;
+    truncated.plane_2 = &.{};
+    try std.testing.expectError(error.Bounds, sample(truncated, coordinates, bias));
+}
+
 test "sample applies Vulkan image-view component swizzle" {
     const pixels = [_]u8{ 10, 20, 30, 40 };
     const image = SampledImage{
@@ -526,12 +713,312 @@ fn branchTarget(program: *const ir.Program, label_id: u32) Error!usize {
     return error.InvalidOperand;
 }
 
+/// An exact, validated lowering for Chromium's common final-composite
+/// fragment program: sample one image and modulate it by a vec4 varying. It
+/// is deliberately structural rather than heuristic; any extra operation,
+/// interface, or differing data flow remains on the general interpreter.
+const ConvolutionFastPath = struct {
+    coordinate_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+/// Exact layout and interface map for the captured Chromium radial-gradient
+/// fragment.  It is deliberately admitted only after the whole canonical IR
+/// identity has matched; this reference lowering is also the differential
+/// oracle for the optional ORC implementation.
+/// Exact resolved ABI for Chromium's captured dynamic radial-gradient
+/// compositor. The values remain draw-time inputs, but its interface lookup
+/// is fixed by canonical Render IR and may therefore be resolved once before
+/// Mosaic enters the pixel loop.
+pub const RadialGradientPlan = struct {
+    circle_interface: u32,
+    coordinates_interface: u32,
+    frag_coord_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+};
+
+/// Fully validated interface map for Chromium's simple final-composite
+/// shader.  The driver may resolve these interfaces once per triangle and
+/// invoke the direct form for every covered pixel, avoiding repeated generic
+/// binding-table searches in Mosaic's hottest video-compositor path.
+pub const SampleModulatePlan = struct {
+    color_interface: u32,
+    coordinate_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+const TextureCopyFastPath = struct {
+    coordinate_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+/// Exact Chromium VP9 video-surface composite: sample a texture at the local
+/// coordinate and multiply every channel by scalar coverage.  This differs
+/// from sample_modulate only in the coverage ABI (scalar rather than vec4).
+pub const SampleCoverageFastPath = struct {
+    coordinate_interface: u32,
+    coverage_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+const FastPath = union(enum) {
+    sample_modulate: SampleModulatePlan,
+    texture_copy: TextureCopyFastPath,
+    sample_coverage: SampleCoverageFastPath,
+    /// Exact validated lowering of the Skia eight-tap convolution program
+    /// currently emitted by Chromium.  The discriminator is the canonical
+    /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
+    /// that IR before this path is installed.  This is the tier-zero form of
+    /// a JIT specialization: values that are live at draw time remain inputs,
+    /// while the IR control flow, layout, and arithmetic graph are compiled
+    /// into a bounded native loop. It is deliberately a precompiled
+    /// specialization, not a claim that arbitrary shader input is JITed;
+    /// every other program uses the interpreter.
+    convolution_8tap: ConvolutionFastPath,
+    /// Semantics-first direct lowering for the current Chromium radial
+    /// gradient. This remains normal ZPU code, not a JIT claim: it is the
+    /// stable oracle the ORC path must match before runtime selection.
+    radial_gradient_2004: RadialGradientPlan,
+};
+
+fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operands: []const u32) bool {
+    return instruction.op == op and same(instruction.ty, ty) and std.mem.eql(u32, instruction.operands, operands) and instruction.literal.len == 0;
+}
+
+fn detectFastPath(program: *const ir.Program) ?FastPath {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (detectChromiumTextureCopy(program)) |path| return .{ .texture_copy = path };
+    if (detectChromiumVp9SampleCoverage(program)) |path| return .{ .sample_coverage = path };
+    if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
+    if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
+    const instructions = program.instructions;
+    if (instructions.len != 13 or instructions[0].literal.len != 4 or instructions[3].literal.len != 4) return null;
+    if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or
+        instructions[3].op != .label or !same(instructions[3].ty, .{ .scalar = .u32 }) or instructions[3].operands.len != 0 or
+        !exactInstruction(instructions[1], .local, f32x2, &.{}) or
+        !exactInstruction(instructions[2], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[4], .input, f32x4, &.{0}) or
+        !exactInstruction(instructions[5], .local_store, f32x4, &.{ 2, 4 }) or
+        !exactInstruction(instructions[6], .input, f32x2, &.{1}) or
+        !exactInstruction(instructions[7], .local_store, f32x2, &.{ 1, 6 }) or
+        !exactInstruction(instructions[8], .image_sample_implicit_lod, f32x4, &.{ 4, 6, 0 }) or
+        !exactInstruction(instructions[9], .fmul, f32x4, &.{ 8, 4 }) or
+        !exactInstruction(instructions[10], .local_store, f32x4, &.{ 2, 9 }) or
+        !exactInstruction(instructions[11], .output, f32x4, &.{ 3, 9 }) or
+        !exactInstruction(instructions[12], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    if (program.interfaces.len <= 4 or program.interfaces[0].storage != .input or !same(program.interfaces[0].ty, f32x4) or
+        program.interfaces[1].storage != .input or !same(program.interfaces[1].ty, f32x2) or
+        program.interfaces[3].storage != .output or !same(program.interfaces[3].ty, f32x4) or
+        program.interfaces[4].storage != .sampled_image or !same(program.interfaces[4].ty, f32x4)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{ .sample_modulate = .{
+        .color_interface = 0,
+        .coordinate_interface = 1,
+        .image_interface = 4,
+        .output_interface = 3,
+        .bias_literal = instructions[0].literal[0..4].*,
+    } };
+}
+
+const chromium_texture_copy_identity = [_]u8{ 0x7c, 0x59, 0xf3, 0xc8, 0xe2, 0x40, 0xd5, 0x24, 0xee, 0xa2, 0xe0, 0x83, 0x5c, 0x86, 0xf2, 0x62, 0x3b, 0xf3, 0x05, 0xcb, 0x81, 0x88, 0xba, 0x25, 0x3d, 0x20, 0x6c, 0x09, 0xcf, 0x89, 0xbf, 0x9c };
+const chromium_vp9_sample_coverage_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
+
+fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyFastPath {
+    if (program.stage != .fragment or program.instructions.len != 13 or !std.mem.eql(u8, &program.identity.digest, &chromium_texture_copy_identity)) return null;
+    const instructions = program.instructions;
+    if (instructions[1].op != .constant or instructions[1].literal.len != 4 or instructions[7].op != .input or instructions[7].operands.len != 1 or instructions[9].op != .image_sample_implicit_lod or instructions[9].operands.len != 3 or instructions[11].op != .output or instructions[11].operands.len != 2) return null;
+    return .{ .coordinate_interface = instructions[7].operands[0], .image_interface = instructions[9].operands[0], .output_interface = instructions[11].operands[0], .bias_literal = instructions[1].literal[0..4].* };
+}
+
+fn detectChromiumVp9SampleCoverage(program: *const ir.Program) ?SampleCoverageFastPath {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    // Chromium's emitted source has locals for both the sampled color and
+    // scalar coverage, but the canonical Render IR uses the SSA input values
+    // directly in the final multiply.  Match the complete lowered program,
+    // including that dead local-store scaffolding, rather than guessing from
+    // a partial data-flow pattern.  The digest is the primary guard; these
+    // checks make the runtime ABI explicit and reject malformed test inputs.
+    if (program.stage != .fragment or program.instructions.len != 20 or program.interfaces.len != 5 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_vp9_sample_coverage_identity)) return null;
+    const instructions = program.instructions;
+    if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or instructions[0].literal.len != 4 or
+        instructions[1].op != .constant or !same(instructions[1].ty, f32_scalar) or instructions[1].operands.len != 0 or instructions[1].literal.len != 4 or
+        !exactInstruction(instructions[2], .local, f32_scalar, &.{}) or
+        !exactInstruction(instructions[3], .local, f32x2, &.{}) or
+        !exactInstruction(instructions[4], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[5], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[6], .constant_composite, f32x4, &.{ 0, 0, 0, 0 }) or
+        instructions[7].op != .label or !same(instructions[7].ty, .{ .scalar = .u32 }) or instructions[7].operands.len != 0 or instructions[7].literal.len != 4 or
+        !exactInstruction(instructions[8], .local_store, f32x4, &.{ 4, 6 }) or
+        !exactInstruction(instructions[9], .input, f32x2, &.{0}) or
+        !exactInstruction(instructions[10], .local_store, f32x2, &.{ 3, 9 }) or
+        !exactInstruction(instructions[11], .image_sample_implicit_lod, f32x4, &.{ 4, 9, 1 }) or
+        !exactInstruction(instructions[12], .local_store, f32x4, &.{ 4, 11 }) or
+        !exactInstruction(instructions[13], .input, f32_scalar, &.{1}) or
+        !exactInstruction(instructions[14], .local_store, f32_scalar, &.{ 2, 13 }) or
+        !exactInstruction(instructions[15], .composite, f32x4, &.{ 13, 13, 13, 13 }) or
+        !exactInstruction(instructions[16], .local_store, f32x4, &.{ 5, 15 }) or
+        !exactInstruction(instructions[17], .fmul, f32x4, &.{ 11, 15 }) or
+        !exactInstruction(instructions[18], .output, f32x4, &.{ 3, 17 }) or
+        !exactInstruction(instructions[19], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    if (program.interfaces[0].storage != .input or !same(program.interfaces[0].ty, f32x2) or
+        program.interfaces[1].storage != .input or !same(program.interfaces[1].ty, f32_scalar) or
+        program.interfaces[3].storage != .output or !same(program.interfaces[3].ty, f32x4) or
+        program.interfaces[4].storage != .sampled_image or !same(program.interfaces[4].ty, f32x4) or
+        program.interfaces[4].descriptor_set == null or program.interfaces[4].descriptor_set.? != 1 or
+        program.interfaces[4].binding == null or program.interfaces[4].binding.? != 0) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{
+        .coordinate_interface = 0,
+        .coverage_interface = 1,
+        .image_interface = 4,
+        .output_interface = 3,
+        .bias_literal = instructions[1].literal[0..4].*,
+    };
+}
+
+/// Canonical identity of `chromium_skia_fragment_839.spv` after the supported
+/// frontend has lowered and serialized it. This captures the complete shader
+/// instruction graph, not just the selected SPIR-V module name or word count.
+const chromium_convolution_identity = [_]u8{
+    0xba, 0x87, 0x16, 0xd6, 0x15, 0x51, 0x19, 0x08,
+    0x55, 0xfc, 0x48, 0x97, 0x2c, 0xd0, 0x5e, 0xb7,
+    0x26, 0xdd, 0xe0, 0x34, 0x5c, 0xbe, 0x4d, 0x8a,
+    0xa1, 0x05, 0xdc, 0xdc, 0x16, 0xaa, 0xaf, 0xc7,
+};
+
+/// Canonical identity of the 2,004-word Chromium fragment program captured
+/// from the VP9 Mosaic workload.  A runtime compiler must select by this
+/// post-validation Render-IR identity, never by an untrusted SPIR-V module
+/// name, word count, or a partial instruction prefix.
+const chromium_radial_gradient_identity = [_]u8{
+    0xee, 0x41, 0x2f, 0xa1, 0xcc, 0xd0, 0x0a, 0xe3,
+    0x4e, 0x59, 0xf2, 0x24, 0x1a, 0x1f, 0x03, 0x0c,
+    0x13, 0x57, 0xcb, 0x2f, 0x94, 0xc8, 0xfc, 0x21,
+    0xed, 0xad, 0x76, 0x0e, 0x37, 0xc3, 0x5d, 0x41,
+};
+
+/// Candidate classes which are permitted to cross the experimental
+/// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
+/// interpreter remains authoritative until the C ABI has independently
+/// validated every binding, output, and f32 edge case.
+pub const JitCandidate = enum {
+    chromium_radial_gradient_2004,
+};
+
+fn detectJitCandidate(program: *const ir.Program) ?JitCandidate {
+    // The exact instruction count is redundant with the canonical digest but
+    // makes accidental future broadening obvious during review. `init` has
+    // already cloned and validated the whole program before this point.
+    if (program.stage != .fragment or program.instructions.len != 251 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_radial_gradient_identity)) return null;
+    // The digest covers the serialized interface records produced by the
+    // frontend, but callers can construct an `ir.Program` directly. Keep the
+    // prospective ORC ABI behind the same complete interface validation as
+    // the reference lowering. This is intentionally a second, cheap check at
+    // executor creation time: a stale identity paired with altered live
+    // interface metadata must remain interpreter-only.
+    _ = detectChromiumRadialGradient(program) orelse return null;
+    return .chromium_radial_gradient_2004;
+}
+
+fn convolutionMemberMatches(member: ir.UniformMember, ty: ir.Type, offset: u32, count: u32, stride: u32) bool {
+    return same(member.ty, ty) and member.offset == offset and member.array_count == count and member.array_stride == stride;
+}
+
+fn detectChromiumConvolution(program: *const ir.Program) ?ConvolutionFastPath {
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 90 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_convolution_identity) or program.interfaces.len != 6) return null;
+    const coordinate = program.interfaces[1];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (coordinate.storage != .input or !same(coordinate.ty, f32x2) or coordinate.location == null or coordinate.location.? != 1 or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .uniform or !uniform.block or uniform.descriptor_set == null or uniform.descriptor_set.? != 0 or uniform.binding == null or uniform.binding.? != 0 or uniform.member_count != 4 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x4, 64, 14, 16) or
+        !convolutionMemberMatches(uniform.members[2], f32x2, 288, 1, 0)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{
+        .coordinate_interface = 1,
+        .uniform_interface = 4,
+        .image_interface = 5,
+        .output_interface = 3,
+        .bias_literal = .{ 51, 51, 243, 190 },
+    };
+}
+
+fn detectChromiumRadialGradient(program: *const ir.Program) ?RadialGradientPlan {
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 251 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_radial_gradient_identity)) return null;
+    var result: RadialGradientPlan = undefined;
+    var circle_found = false;
+    var coordinates_found = false;
+    var frag_coord_found = false;
+    var uniform_found = false;
+    var image_found = false;
+    var output_found = false;
+    for (program.interfaces, 0..) |interface, index| {
+        const interface_index: u32 = @intCast(index);
+        if (interface.storage == .input and interface.location != null and interface.location.? == 0 and same(interface.ty, f32x4)) {
+            if (circle_found) return null;
+            result.circle_interface = interface_index;
+            circle_found = true;
+        } else if (interface.storage == .input and interface.location != null and interface.location.? == 2 and same(interface.ty, f32x2)) {
+            if (coordinates_found) return null;
+            result.coordinates_interface = interface_index;
+            coordinates_found = true;
+        } else if (interface.storage == .input and interface.builtin_frag_coord and same(interface.ty, f32x4)) {
+            if (frag_coord_found) return null;
+            result.frag_coord_interface = interface_index;
+            frag_coord_found = true;
+        } else if (interface.storage == .uniform and interface.block and interface.descriptor_set != null and interface.descriptor_set.? == 0 and interface.binding != null and interface.binding.? == 0 and interface.member_count == 11) {
+            if (uniform_found) return null;
+            result.uniform_interface = interface_index;
+            uniform_found = true;
+        } else if (interface.storage == .sampled_image and same(interface.ty, f32x4) and interface.descriptor_set != null and interface.descriptor_set.? == 1 and interface.binding != null and interface.binding.? == 0) {
+            if (image_found) return null;
+            result.image_interface = interface_index;
+            image_found = true;
+        } else if (interface.storage == .output and same(interface.ty, f32x4) and interface.location != null and interface.location.? == 0) {
+            if (output_found) return null;
+            result.output_interface = interface_index;
+            output_found = true;
+        }
+    }
+    return if (circle_found and coordinates_found and frag_coord_found and uniform_found and image_found and output_found) result else null;
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
     values: []Value,
     locals: []Value,
     output_scratch: []u8,
+    fast_path: ?FastPath,
+    jit_candidate: ?JitCandidate,
 
     pub fn init(allocator: std.mem.Allocator, source: *const ir.Program) Error!Executor {
         if (source.instructions.len > ir.max_instructions or source.bytes.len > max_key_ir_bytes) return error.LimitExceeded;
@@ -547,7 +1034,15 @@ pub const Executor = struct {
             total = std.math.add(usize, total, try byteSize(interface.ty)) catch return error.LimitExceeded;
         };
         const scratch = allocator.alloc(u8, total) catch return error.OutOfMemory;
-        return .{ .allocator = allocator, .program = program, .values = values, .locals = locals, .output_scratch = scratch };
+        return .{
+            .allocator = allocator,
+            .program = program,
+            .values = values,
+            .locals = locals,
+            .output_scratch = scratch,
+            .fast_path = detectFastPath(&program),
+            .jit_candidate = detectJitCandidate(&program),
+        };
     }
     pub fn deinit(self: *Executor) void {
         self.allocator.free(self.output_scratch);
@@ -555,6 +1050,363 @@ pub const Executor = struct {
         self.allocator.free(self.values);
         self.program.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Human-readable execution selection for opt-in driver profiling. This
+    /// exposes no shader data and does not alter dispatch; it lets a live
+    /// Chromium trace distinguish a proven native specialization from the
+    /// interpreter before any performance conclusion is drawn.
+    pub fn prevalidatedPathName(self: *const Executor) []const u8 {
+        return switch (self.fast_path orelse return "interpreter") {
+            .sample_modulate => "sample_modulate",
+            .texture_copy => "chromium_texture_copy",
+            .sample_coverage => "chromium_vp9_sample_coverage",
+            .convolution_8tap => "convolution_8tap",
+            .radial_gradient_2004 => "radial_gradient_2004_reference",
+        };
+    }
+
+    /// Name the only validated IR identity the optional ORC backend may
+    /// compile. This is diagnostic/selection metadata, not an execution-path
+    /// claim; `prevalidatedPathName` continues to describe the code actually
+    /// running on this executor.
+    pub fn jitCandidateName(self: *const Executor) []const u8 {
+        return switch (self.jit_candidate orelse return "none") {
+            .chromium_radial_gradient_2004 => "chromium_radial_gradient_2004",
+        };
+    }
+
+    /// Return the interface plan only for the exact prevalidated compositor
+    /// program.  This is deliberately not a general shader shortcut: a
+    /// program which differs by even one canonical instruction remains on the
+    /// normal executor path.
+    pub fn sampleModulatePlan(self: *const Executor) ?SampleModulatePlan {
+        return switch (self.fast_path orelse return null) {
+            .sample_modulate => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the resolved ABI for Chromium's exact VP9 scalar-coverage
+    /// compositor. This stays unavailable for every non-identical program.
+    pub fn sampleCoveragePlan(self: *const Executor) ?SampleCoverageFastPath {
+        return switch (self.fast_path orelse return null) {
+            .sample_coverage => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the exact ABI of the captured Chromium radial-gradient profile.
+    /// This is a fixed canonical program, not a pattern match over arbitrary
+    /// user shaders.
+    pub fn radialGradientPlan(self: *const Executor) ?RadialGradientPlan {
+        return switch (self.fast_path orelse return null) {
+            .radial_gradient_2004 => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// These exact paths use no mutable executor values, locals, or
+    /// derivative scratch after setup. A driver may execute disjoint pixel
+    /// regions concurrently while retaining submission order within each
+    /// region. Every other profile remains serial by construction.
+    pub fn tileParallelSafe(self: *const Executor) bool {
+        return switch (self.fast_path orelse return false) {
+            .sample_modulate, .texture_copy => true,
+            else => false,
+        };
+    }
+
+    fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
+        const end = std.math.add(usize, offset, 4) catch return error.Bounds;
+        if (end > bytes.len) return error.Bounds;
+        return @bitCast(canonicalFloat(std.mem.readInt(u32, bytes[offset..][0..4], .little)));
+    }
+
+    fn canonicalF32(value: f32) f32 {
+        return @bitCast(canonicalFloat(@bitCast(value)));
+    }
+
+    fn radialClamp(value: f32, minimum: f32, maximum: f32) Error!f32 {
+        if (minimum > maximum) return error.NumericDomain;
+        const lower = if (value < minimum) minimum else value;
+        return canonicalF32(if (maximum < lower) maximum else lower);
+    }
+
+    fn convolutionCoordinate(matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32) Value {
+        const scaled_x: f32 = @bitCast(canonicalFloat(@bitCast(direction[0] * offset)));
+        const scaled_y: f32 = @bitCast(canonicalFloat(@bitCast(direction[1] * offset)));
+        const coordinate_x: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(coordinates.bits[0])) + scaled_x)));
+        const coordinate_y: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(coordinates.bits[1])) + scaled_y)));
+        // Keep the generic interpreter's column-major multiplication and
+        // accumulation order. Deliberately do not reassociate this into a
+        // precomputed affine matrix: that can alter the Vulkan f32 result.
+        var x: f32 = 0;
+        x += matrix[0][0] * coordinate_x;
+        x += matrix[1][0] * coordinate_y;
+        x += matrix[2][0];
+        var y: f32 = 0;
+        y += matrix[0][1] * coordinate_x;
+        y += matrix[1][1] * coordinate_y;
+        y += matrix[2][1];
+        var result = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        result.bits[0] = canonicalFloat(@bitCast(x));
+        result.bits[1] = canonicalFloat(@bitCast(y));
+        return result;
+    }
+
+    fn convolutionAccumulate(sum: *[4]f32, image: SampledImage, matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32, weight: f32, bias: Value) Error!void {
+        const sampled = try sample(image, convolutionCoordinate(matrix, coordinates, direction, offset), bias);
+        for (0..4) |lane| {
+            const weighted: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(sampled.bits[lane])) * weight)));
+            sum[lane] = @bitCast(canonicalFloat(@bitCast(sum[lane] + weighted)));
+        }
+    }
+
+    fn executeConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        // The path accesses matrix[0] at byte 16, kernel[0..7] at byte 64
+        // with std140 stride 16, and direction at byte 288. Check all three
+        // independently so malformed descriptor ranges still fail closed.
+        if (uniform.bytes.len < 64 or uniform.bytes.len < 192 or uniform.bytes.len < 296) return error.Bounds;
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| for (0..3) |row| {
+            matrix[column][row] = try uniformF32(uniform.bytes, 16 + column * 16 + row * 4);
+        };
+        const direction = [_]f32{ try uniformF32(uniform.bytes, 288), try uniformF32(uniform.bytes, 292) };
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        var sum = [_]f32{ 0, 0, 0, 0 };
+        inline for (0..8) |tap| {
+            const base = 64 + tap * 16;
+            const first_offset = try uniformF32(uniform.bytes, base);
+            const first_weight = try uniformF32(uniform.bytes, base + 4);
+            const second_offset = try uniformF32(uniform.bytes, base + 8);
+            const second_weight = try uniformF32(uniform.bytes, base + 12);
+            try convolutionAccumulate(&sum, image, matrix, coordinates, direction, first_offset, first_weight, bias);
+            try convolutionAccumulate(&sum, image, matrix, coordinates, direction, second_offset, second_weight, bias);
+        }
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
+    }
+
+    fn executeRadialGradientResolved(circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, uniform_bytes: []const u8, image: SampledImage, bytes: []u8) Error!void {
+        const circle = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = circle_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = coordinate_bytes });
+        const frag_coord = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = frag_coord_bytes });
+        if (uniform_bytes.len < 480) return error.Bounds;
+        if (bytes.len < 16) return error.InvalidOutput;
+
+        const uniform = uniform_bytes;
+        const circle_x: f32 = @bitCast(circle.bits[0]);
+        const circle_y: f32 = @bitCast(circle.bits[1]);
+        const circle_z: f32 = @bitCast(circle.bits[2]);
+        var length_squared = canonicalF32(circle_x * circle_x);
+        length_squared = canonicalF32(length_squared + canonicalF32(circle_y * circle_y));
+        const distance = canonicalF32(std.math.sqrt(length_squared));
+        const edge_distance = canonicalF32(circle_z * canonicalF32(1 - distance));
+        const edge_alpha = try radialClamp(edge_distance, 0, 1);
+
+        const coordinate_x: f32 = @bitCast(coordinates.bits[0]);
+        const coordinate_y: f32 = @bitCast(coordinates.bits[1]);
+        const angle = if (coordinate_x != 0)
+            canonicalF32(std.math.atan2(-coordinate_y, -coordinate_x))
+        else blk: {
+            const sign: f32 = if (std.math.isNan(coordinate_y)) 0 else if (coordinate_y > 0) 1 else if (coordinate_y < 0) -1 else @bitCast(coordinates.bits[1] & 0x80000000);
+            break :blk canonicalF32(sign * -1.57079637);
+        };
+        const phase_bias = try uniformF32(uniform, 320);
+        const phase_scale = try uniformF32(uniform, 324);
+        var t = canonicalF32(angle * 0.159154937);
+        t = canonicalF32(t + 0.5);
+        t = canonicalF32(t + phase_bias);
+        t = canonicalF32(t * phase_scale);
+
+        var color: [4]f32 = undefined;
+        if (t < 0) {
+            for (0..4) |lane| color[lane] = try uniformF32(uniform, 384 + lane * 4);
+        } else if (t > 1) {
+            for (0..4) |lane| color[lane] = try uniformF32(uniform, 400 + lane * 4);
+        } else {
+            const threshold_x = try uniformF32(uniform, 32);
+            const threshold_y = try uniformF32(uniform, 36);
+            const threshold_z = try uniformF32(uniform, 40);
+            const position: usize = if (t < threshold_y)
+                if (t < threshold_x) 0 else 1
+            else if (t < threshold_z) 2 else 3;
+            for (0..4) |lane| {
+                const scale = try uniformF32(uniform, 64 + position * 16 + lane * 4);
+                const bias = try uniformF32(uniform, 192 + position * 16 + lane * 4);
+                color[lane] = canonicalF32(canonicalF32(scale * t) + bias);
+            }
+        }
+
+        const range_x = try uniformF32(uniform, 472);
+        const range_y = try uniformF32(uniform, 476);
+        const fragment_x: f32 = @bitCast(frag_coord.bits[0]);
+        const fragment_y: f32 = @bitCast(frag_coord.bits[1]);
+        const transformed_y = canonicalF32(range_x + canonicalF32(range_y * fragment_y));
+        const sample_x = canonicalF32(canonicalF32((try uniformF32(uniform, 416)) * fragment_x) + canonicalF32((try uniformF32(uniform, 432)) * transformed_y) + (try uniformF32(uniform, 448)));
+        const sample_y = canonicalF32(canonicalF32((try uniformF32(uniform, 420)) * fragment_x) + canonicalF32((try uniformF32(uniform, 436)) * transformed_y) + (try uniformF32(uniform, 452)));
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(sample_x);
+        sample_coordinates.bits[1] = @bitCast(sample_y);
+        const sample_bias = Value{ .ty = .{ .scalar = .f32 }, .bits = .{0xbef33333} ++ .{0} ** 15 };
+        const sampled = try sample(image, sample_coordinates, sample_bias);
+        const sampled_red: f32 = @bitCast(sampled.bits[0]);
+        const contrast = try uniformF32(uniform, 464);
+        const sample_value = canonicalF32(sampled_red - 0.5);
+        const alpha = color[3];
+        var result: [4]f32 = undefined;
+        for (0..3) |lane| {
+            const adjusted = canonicalF32(color[lane] + canonicalF32(sample_value * contrast));
+            result[lane] = try radialClamp(adjusted, 0, alpha);
+        }
+        result[3] = alpha;
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(result[lane] * edge_alpha))), .little);
+    }
+
+    fn executeRadialGradientReference(path: RadialGradientPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const circle = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.circle_interface));
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinates_interface));
+        const frag_coord = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.frag_coord_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 480) return error.Bounds;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        var circle_storage: [16]u8 = undefined;
+        var coordinate_storage: [8]u8 = undefined;
+        var frag_coord_storage: [16]u8 = undefined;
+        for (0..4) |lane| std.mem.writeInt(u32, circle_storage[lane * 4 ..][0..4], circle.bits[lane], .little);
+        for (0..2) |lane| std.mem.writeInt(u32, coordinate_storage[lane * 4 ..][0..4], coordinates.bits[lane], .little);
+        for (0..4) |lane| std.mem.writeInt(u32, frag_coord_storage[lane * 4 ..][0..4], frag_coord.bits[lane], .little);
+        try executeRadialGradientResolved(&circle_storage, &coordinate_storage, &frag_coord_storage, uniform.bytes, image, bytes);
+    }
+
+    fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        switch (fast_path) {
+            .sample_modulate => |path| {
+                const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| {
+                    if (candidate.interface == path.output_interface) output = candidate.bytes;
+                }
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                for (0..4) |lane| {
+                    const sample_value: f32 = @bitCast(sampled.bits[lane]);
+                    const color_value: f32 = @bitCast(color.bits[lane]);
+                    std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
+                }
+            },
+            .texture_copy => |path| {
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| {
+                    if (candidate.interface == path.output_interface) output = candidate.bytes;
+                }
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(sampled.bits[lane]), .little);
+            },
+            .sample_coverage => |path| {
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const coverage = try readInputValue(.{ .scalar = .f32 }, try findBindingRecord(bindings, path.coverage_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| {
+                    if (candidate.interface == path.output_interface) output = candidate.bytes;
+                }
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                const coverage_value: f32 = @bitCast(coverage.bits[0]);
+                for (0..4) |lane| {
+                    const sample_value: f32 = @bitCast(sampled.bits[lane]);
+                    std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * coverage_value)), .little);
+                }
+            },
+            .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
+            .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
+        }
+    }
+
+    /// Execute the exact sampled-color compositor profile after its inputs
+    /// have been resolved by the rasterizer.  It preserves the ordinary
+    /// executor's byte decoding, sampling, canonical-NaN policy, and output
+    /// layout, but avoids re-discovering the three bindings and output for
+    /// every pixel.  This direct ABI is also the narrow contract a future ORC
+    /// kernel must match.
+    pub fn executeSampleModulateDirect(self: *const Executor, color_bytes: []const u8, coordinate_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.sampleModulatePlan() orelse return false;
+        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| {
+            const sample_value: f32 = @bitCast(sampled.bits[lane]);
+            const color_value: f32 = @bitCast(color.bits[lane]);
+            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
+        }
+        return true;
+    }
+
+    /// Direct resolved-input form of the exact VP9 scalar-coverage compositor.
+    /// It deliberately retains the normal decoder, sampler, canonical-float,
+    /// and bounded-output semantics while avoiding per-pixel binding-table
+    /// construction in the driver raster loop.
+    pub fn executeSampleCoverageDirect(self: *const Executor, coordinate_bytes: []const u8, coverage_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.sampleCoveragePlan() orelse return false;
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const coverage = try readInputValue(.{ .scalar = .f32 }, .{ .interface = path.coverage_interface, .bytes = coverage_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        const coverage_value: f32 = @bitCast(coverage.bits[0]);
+        for (0..4) |lane| {
+            const sample_value: f32 = @bitCast(sampled.bits[lane]);
+            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * coverage_value)), .little);
+        }
+        return true;
+    }
+
+    /// Direct resolved-input form of the captured dynamic Chromium radial
+    /// gradient. It retains the reference path's scalar operation order,
+    /// canonical-float behavior, sampler, and bounded descriptor checks; it
+    /// only removes binding-table and output-table discovery from each pixel.
+    pub fn executeRadialGradientDirect(self: *const Executor, circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, uniform_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        _ = self.radialGradientPlan() orelse return false;
+        try executeRadialGradientResolved(circle_bytes, coordinate_bytes, frag_coord_bytes, uniform_bytes, image, output);
+        return true;
+    }
+
+    /// Execute an exact prevalidated specialization for the driver's hot
+    /// fragment loop. Public `execute` intentionally keeps its full alias,
+    /// binding, and output validation contract; callers that have already
+    /// established those invariants can avoid repeating it per pixel.
+    pub fn executePrevalidated(self: *const Executor, bindings: []const Binding, outputs: []const Output) Error!bool {
+        const fast_path = self.fast_path orelse return false;
+        try executeFastPath(fast_path, bindings, outputs);
+        return true;
     }
 
     pub fn execute(self: *Executor, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -572,8 +1424,9 @@ pub const Executor = struct {
         for (bindings, 0..) |binding, i| {
             if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
             const storage = self.program.interfaces[binding.interface].storage;
-            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image) return error.InvalidStorage;
+            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image and storage != .input_attachment) return error.InvalidStorage;
             if ((storage == .sampled_image) != (binding.sampled_image != null) or (storage == .sampled_image and binding.bytes.len != 0)) return error.InvalidStorage;
+            if ((storage == .input_attachment) != (binding.input_attachment != null) or (storage == .input_attachment and binding.bytes.len != 0)) return error.InvalidStorage;
             for (bindings[0..i]) |prior| if (prior.interface == binding.interface) return error.InvalidOperand;
         }
         var out_offset: usize = 0;
@@ -730,6 +1583,10 @@ pub const Executor = struct {
                     try findSampledImage(bindings, instruction.operands[0]),
                     try valueRef(self.values, pc, instruction.operands[1]),
                     try valueRef(self.values, pc, instruction.operands[2]),
+                ),
+                .image_read_input_attachment => result = try inputAttachmentLoad(
+                    try findInputAttachment(bindings, instruction.operands[0]),
+                    try valueRef(self.values, pc, instruction.operands[1]),
                 ),
                 .access => {
                     const interface_index = instruction.operands[0];
@@ -1727,7 +2584,7 @@ fn validate(program: *const ir.Program) Error!void {
                     return error.InvalidStorage;
                 }
             }
-        } else if (interface.storage == .sampled_image) {
+        } else if (interface.storage == .sampled_image or interface.storage == .input_attachment) {
             if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) {
                 if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid sampled image interface={} type={any} set={any} binding={any} block={} members={}\n", .{ interface_index, interface.ty, interface.descriptor_set, interface.binding, interface.block, interface.member_count });
                 return error.InvalidStorage;
@@ -1747,6 +2604,7 @@ fn validate(program: *const ir.Program) Error!void {
             .constant_composite, .composite => n > 0,
             .input, .uniform, .storage => n == 1,
             .image_sample_implicit_lod => n == 3,
+            .image_read_input_attachment => n == 2,
             .access => n >= 2 and n <= 3,
             .extract => n == 1 or n == 2,
             .vector_extract_dynamic => n == 2,
@@ -1805,6 +2663,11 @@ fn validate(program: *const ir.Program) Error!void {
             }
             if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
         }
+        if (instruction.op == .image_read_input_attachment) {
+            const x = instruction.operands[0];
+            if (x >= program.interfaces.len or program.interfaces[x].storage != .input_attachment) return error.InvalidStorage;
+            if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
+        }
         if (instruction.op == .output) {
             const x = instruction.operands[0];
             if (x >= program.interfaces.len or program.interfaces[x].storage != .output) return error.InvalidOutput;
@@ -1819,6 +2682,9 @@ fn validate(program: *const ir.Program) Error!void {
                 .image_sample_implicit_lod => if (oi == 1) {
                     if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
                 } else if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
+                .image_read_input_attachment => if (oi == 1) {
+                    if (source_ty.scalar != .i32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
+                },
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose, .dpdx, .dpdy, .fwidth => if (!same(source_ty, instruction.ty)) return error.InvalidType,
@@ -2225,7 +3091,7 @@ fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void 
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
         .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
-        .image_sample_implicit_lod => i != 0,
+        .image_sample_implicit_lod, .image_read_input_attachment => i != 0,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => i == 0,
         .access => i != 0,
@@ -2248,6 +3114,139 @@ fn f32bytes(x: f32) [4]u8 {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, @bitCast(x), .little);
     return b;
+}
+
+test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
+    const bias = f32bytes(-0.475);
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = f32x2, .location = 1 },
+        .{ .storage = .input, .ty = f32_scalar, .location = 2 }, // unused by this exact program
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    const label = [_]u8{ 25, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32x2, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .input, .ty = f32x4, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 4 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32x2, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x2, .operands = &.{ 1, 6 }, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 4, 6, 0 }, .literal = &.{} },
+        .{ .op = .fmul, .ty = f32x4, .operands = &.{ 8, 4 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 9 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expect(executor.fast_path != null);
+    var color: [16]u8 = undefined;
+    const color_values = [_]f32{ 0.5, 0.25, 1, 1 };
+    for (color_values, 0..) |value, lane| std.mem.writeInt(u32, color[lane * 4 ..][0..4], @bitCast(value), .little);
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    const pixel = [_]u8{ 64, 128, 192, 255 };
+    var output: [16]u8 = undefined;
+    const bindings = [_]Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 4, .sampled_image = .{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } },
+    };
+    const outputs = [_]Output{.{ .interface = 3, .bytes = &output }};
+    try std.testing.expect(try executor.executePrevalidated(&bindings, &outputs));
+    for (color_values, 0..) |value, lane| {
+        const sampled: f32 = @as(f32, @floatFromInt(pixel[lane])) / 255;
+        try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * value)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    }
+    const generic_output = output;
+    @memset(&output, 0);
+    try std.testing.expect(try executor.executeSampleModulateDirect(&color, &coordinates, bindings[2].sampled_image.?, &output));
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    // The direct ABI remains fail-closed on malformed resolved inputs and
+    // must not be mistaken for a broad fast path.
+    try std.testing.expectError(error.Bounds, executor.executeSampleModulateDirect(color[0..12], &coordinates, bindings[2].sampled_image.?, &output));
+    @memset(&output, 0);
+    try executor.execute(&bindings, &outputs);
+    for (color_values, 0..) |value, lane| {
+        const sampled: f32 = @as(f32, @floatFromInt(pixel[lane])) / 255;
+        try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * value)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    }
+}
+
+test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
+    const one = f32bytes(1);
+    const bias = f32bytes(-0.475);
+    const label = [_]u8{ 25, 0, 0, 0 };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x2, .location = 0 },
+        .{ .storage = .input, .ty = f32_scalar, .location = 1 },
+        .{ .storage = .input, .ty = f32x4, .location = 2 },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &one },
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32_scalar, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x2, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = f32x4, .operands = &.{ 0, 0, 0, 0 }, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 4, 6 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32x2, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x2, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 4, 9, 1 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 4, 11 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32_scalar, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32_scalar, .operands = &.{ 2, 13 }, .literal = &.{} },
+        .{ .op = .composite, .ty = f32x4, .operands = &.{ 13, 13, 13, 13 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 5, 15 }, .literal = &.{} },
+        .{ .op = .fmul, .ty = f32x4, .operands = &.{ 11, 15 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 17 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_vp9_sample_coverage_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_vp9_sample_coverage", executor.prevalidatedPathName());
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    var coverage: [4]u8 = undefined;
+    std.mem.writeInt(u32, &coverage, @bitCast(@as(f32, 0.25)), .little);
+    const pixel = [_]u8{ 64, 128, 192, 255 };
+    var output: [16]u8 = undefined;
+    const bindings = [_]Binding{
+        .{ .interface = 0, .bytes = &coordinates },
+        .{ .interface = 1, .bytes = &coverage },
+        .{ .interface = 4, .sampled_image = .{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } },
+    };
+    const outputs = [_]Output{.{ .interface = 3, .bytes = &output }};
+    try std.testing.expect(try executor.executePrevalidated(&bindings, &outputs));
+    for (pixel, 0..) |channel, lane| {
+        const sampled: f32 = @as(f32, @floatFromInt(channel)) / 255;
+        try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * 0.25)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    }
+    const generic_output = output;
+    @memset(&output, 0);
+    try std.testing.expect(try executor.executeSampleCoverageDirect(&coordinates, &coverage, bindings[2].sampled_image.?, &output));
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    try std.testing.expectError(error.Bounds, executor.executeSampleCoverageDirect(coordinates[0..4], &coverage, bindings[2].sampled_image.?, &output));
 }
 
 test "forward branches execute local stores and select phi predecessors" {
@@ -4662,6 +5661,15 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             const bias = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, bias }, &.{});
         },
+        .image_read_input_attachment => {
+            interfaces[0] = .{ .storage = .input_attachment, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0 };
+            interface_count = 1;
+            @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
+            bindings[0] = .{ .interface = 0, .input_attachment = .{ .pixels = input_bytes[0..4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } };
+            binding_count = 1;
+            const coordinate = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .i32, .columns = 2 }, &.{}, &.{ 0, 0, 0, 0, 0, 0, 0, 0 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate }, &.{});
+        },
         .access => {
             interfaces[0] = .{ .storage = .uniform, .ty = result_ty, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 };
             interfaces[0].members[0] = .{ .ty = result_ty, .offset = 0 };
@@ -5231,18 +6239,20 @@ test "generated bounded operation by type-family property matrix is complete" {
     }
     try runPropertyCase(.image_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.image_sample_implicit_lod)] += 1;
+    try runPropertyCase(.image_read_input_attachment, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_read_input_attachment)] += 1;
     inline for ([_]ir.Op{ .local, .local_access, .local_load, .local_store, .label, .branch, .branch_conditional, .phi, .return_ }) |op|
         totals[@intFromEnum(op)] = 1;
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4 };
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 710), total);
-    std.debug.print("generated property matrix: operations=183 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 711), total);
+    std.debug.print("generated property matrix: operations=184 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -5387,13 +6397,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 183), malformed);
+    try std.testing.expectEqual(@as(usize, 184), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=183 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=184 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {
