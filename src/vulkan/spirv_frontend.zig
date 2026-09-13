@@ -5609,6 +5609,21 @@ test "Chromium Skia convolution shaders execute local state and uniform arrays" 
     const expected = [_]f32{ 64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1 };
     for (expected, 0..) |channel, index|
         try std.testing.expectEqual(channel, @as(f32, @bitCast(std.mem.readInt(u32, fragment_backing[fragment_outputs[0].interface][index * 4 ..][0..4], .little))));
+    const generic_output = fragment_backing[fragment_outputs[0].interface][0..16].*;
+    @memset(fragment_backing[fragment_outputs[0].interface][0..16], 0xa5);
+    try std.testing.expect(try fragment_executor.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]));
+    try std.testing.expectEqualSlices(u8, &generic_output, fragment_backing[fragment_outputs[0].interface][0..16]);
+
+    // The specialization keeps the interpreter's bounded descriptor-range
+    // contract. It must not turn a truncated live uniform buffer into a
+    // silent sample or a partial output write.
+    var short_bindings = fragment_bindings;
+    for (short_bindings[0..fragment_binding_count]) |*binding| {
+        if (binding.interface == 4) binding.bytes = binding.bytes[0..295];
+    }
+    @memset(fragment_backing[fragment_outputs[0].interface][0..16], 0xa5);
+    try std.testing.expectError(error.Bounds, fragment_executor.executePrevalidated(short_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), fragment_backing[fragment_outputs[0].interface][0..16]);
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {

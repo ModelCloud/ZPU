@@ -717,6 +717,14 @@ fn branchTarget(program: *const ir.Program, label_id: u32) Error!usize {
 /// fragment program: sample one image and modulate it by a vec4 varying. It
 /// is deliberately structural rather than heuristic; any extra operation,
 /// interface, or differing data flow remains on the general interpreter.
+const ConvolutionFastPath = struct {
+    coordinate_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
 const FastPath = union(enum) {
     sample_modulate: struct {
         color_interface: u32,
@@ -725,6 +733,16 @@ const FastPath = union(enum) {
         output_interface: u32,
         bias_literal: [4]u8,
     },
+    /// Exact validated lowering of the Skia eight-tap convolution program
+    /// currently emitted by Chromium.  The discriminator is the canonical
+    /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
+    /// that IR before this path is installed.  This is the tier-zero form of
+    /// a JIT specialization: values that are live at draw time remain inputs,
+    /// while the IR control flow, layout, and arithmetic graph are compiled
+    /// into a bounded native loop. It is deliberately a precompiled
+    /// specialization, not a claim that arbitrary shader input is JITed;
+    /// every other program uses the interpreter.
+    convolution_8tap: ConvolutionFastPath,
 };
 
 fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operands: []const u32) bool {
@@ -735,6 +753,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     const instructions = program.instructions;
     if (instructions.len != 13 or instructions[0].literal.len != 4 or instructions[3].literal.len != 4) return null;
     if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or
@@ -762,6 +781,47 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
         .output_interface = 3,
         .bias_literal = instructions[0].literal[0..4].*,
     } };
+}
+
+/// Canonical identity of `chromium_skia_fragment_839.spv` after the supported
+/// frontend has lowered and serialized it. This captures the complete shader
+/// instruction graph, not just the selected SPIR-V module name or word count.
+const chromium_convolution_identity = [_]u8{
+    0xba, 0x87, 0x16, 0xd6, 0x15, 0x51, 0x19, 0x08,
+    0x55, 0xfc, 0x48, 0x97, 0x2c, 0xd0, 0x5e, 0xb7,
+    0x26, 0xdd, 0xe0, 0x34, 0x5c, 0xbe, 0x4d, 0x8a,
+    0xa1, 0x05, 0xdc, 0xdc, 0x16, 0xaa, 0xaf, 0xc7,
+};
+
+fn convolutionMemberMatches(member: ir.UniformMember, ty: ir.Type, offset: u32, count: u32, stride: u32) bool {
+    return same(member.ty, ty) and member.offset == offset and member.array_count == count and member.array_stride == stride;
+}
+
+fn detectChromiumConvolution(program: *const ir.Program) ?ConvolutionFastPath {
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 90 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_convolution_identity) or program.interfaces.len != 6) return null;
+    const coordinate = program.interfaces[1];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (coordinate.storage != .input or !same(coordinate.ty, f32x2) or coordinate.location == null or coordinate.location.? != 1 or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .uniform or !uniform.block or uniform.descriptor_set == null or uniform.descriptor_set.? != 0 or uniform.binding == null or uniform.binding.? != 0 or uniform.member_count != 4 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x4, 64, 14, 16) or
+        !convolutionMemberMatches(uniform.members[2], f32x2, 288, 1, 0)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{
+        .coordinate_interface = 1,
+        .uniform_interface = 4,
+        .image_interface = 5,
+        .output_interface = 3,
+        .bias_literal = .{ 51, 51, 243, 190 },
+    };
 }
 
 pub const Executor = struct {
@@ -796,6 +856,77 @@ pub const Executor = struct {
         self.* = undefined;
     }
 
+    fn convolutionF32(bytes: []const u8, offset: usize) Error!f32 {
+        const end = std.math.add(usize, offset, 4) catch return error.Bounds;
+        if (end > bytes.len) return error.Bounds;
+        return @bitCast(canonicalFloat(std.mem.readInt(u32, bytes[offset..][0..4], .little)));
+    }
+
+    fn convolutionCoordinate(matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32) Value {
+        const scaled_x: f32 = @bitCast(canonicalFloat(@bitCast(direction[0] * offset)));
+        const scaled_y: f32 = @bitCast(canonicalFloat(@bitCast(direction[1] * offset)));
+        const coordinate_x: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(coordinates.bits[0])) + scaled_x)));
+        const coordinate_y: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(coordinates.bits[1])) + scaled_y)));
+        // Keep the generic interpreter's column-major multiplication and
+        // accumulation order. Deliberately do not reassociate this into a
+        // precomputed affine matrix: that can alter the Vulkan f32 result.
+        var x: f32 = 0;
+        x += matrix[0][0] * coordinate_x;
+        x += matrix[1][0] * coordinate_y;
+        x += matrix[2][0];
+        var y: f32 = 0;
+        y += matrix[0][1] * coordinate_x;
+        y += matrix[1][1] * coordinate_y;
+        y += matrix[2][1];
+        var result = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        result.bits[0] = canonicalFloat(@bitCast(x));
+        result.bits[1] = canonicalFloat(@bitCast(y));
+        return result;
+    }
+
+    fn convolutionAccumulate(sum: *[4]f32, image: SampledImage, matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32, weight: f32, bias: Value) Error!void {
+        const sampled = try sample(image, convolutionCoordinate(matrix, coordinates, direction, offset), bias);
+        for (0..4) |lane| {
+            const weighted: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(sampled.bits[lane])) * weight)));
+            sum[lane] = @bitCast(canonicalFloat(@bitCast(sum[lane] + weighted)));
+        }
+    }
+
+    fn executeConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        // The path accesses matrix[0] at byte 16, kernel[0..7] at byte 64
+        // with std140 stride 16, and direction at byte 288. Check all three
+        // independently so malformed descriptor ranges still fail closed.
+        if (uniform.bytes.len < 64 or uniform.bytes.len < 192 or uniform.bytes.len < 296) return error.Bounds;
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| for (0..3) |row| {
+            matrix[column][row] = try convolutionF32(uniform.bytes, 16 + column * 16 + row * 4);
+        };
+        const direction = [_]f32{ try convolutionF32(uniform.bytes, 288), try convolutionF32(uniform.bytes, 292) };
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        var sum = [_]f32{ 0, 0, 0, 0 };
+        inline for (0..8) |tap| {
+            const base = 64 + tap * 16;
+            const first_offset = try convolutionF32(uniform.bytes, base);
+            const first_weight = try convolutionF32(uniform.bytes, base + 4);
+            const second_offset = try convolutionF32(uniform.bytes, base + 8);
+            const second_weight = try convolutionF32(uniform.bytes, base + 12);
+            try convolutionAccumulate(&sum, image, matrix, coordinates, direction, first_offset, first_weight, bias);
+            try convolutionAccumulate(&sum, image, matrix, coordinates, direction, second_offset, second_weight, bias);
+        }
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
+    }
+
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
             .sample_modulate => |path| {
@@ -815,6 +946,7 @@ pub const Executor = struct {
                     std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
                 }
             },
+            .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
         }
     }
 
