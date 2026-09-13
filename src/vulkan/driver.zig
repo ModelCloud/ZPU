@@ -1244,6 +1244,7 @@ const SamplerObj = struct {
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
+const max_profile_sampled_bindings = 8;
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
 const DescriptorSetObj = struct {
@@ -1251,7 +1252,7 @@ const DescriptorSetObj = struct {
     pool: *DescriptorPoolObj = undefined,
     counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count,
     layout: Canonical = .{},
-    binding_types: [2]i32 = .{ -1, -1 },
+    binding_types: [max_profile_sampled_bindings]i32 = [_]i32{-1} ** max_profile_sampled_bindings,
     uniform: ?*BufferObj = null,
     uniform_offset: u64 = 0,
     uniform_range: u64 = 0,
@@ -1262,11 +1263,9 @@ const DescriptorSetObj = struct {
     storage_range: u64 = 0,
     texture: ?*ImageObj = null,
     sampler: ?*SamplerObj = null,
-    // Chromium's Skia fragment programs commonly bind two independent
-    // combined image samplers in set 1.  Keep the historical binding-0
-    // aliases above for the cpu_cube ABI, but retain every bounded sampled
-    // binding for the native profile ABI.
-    sampled_images: [2]DescriptorSampledImage = .{ .{}, .{} },
+    // Keep a bounded sampled-image table for the native profile ABI while
+    // retaining the historical binding-0 aliases used by the cpu_cube ABI.
+    sampled_images: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
     // A command-local snapshot keeps the source descriptor-set pointer so
     // queue submission can defer its canonical storage through destruction.
     source_set: ?*DescriptorSetObj = null,
@@ -1317,7 +1316,7 @@ const Canonical = struct {
         self.bytes = &.{};
     }
 };
-const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, counts: DescriptorCounts, flags: u32 = 0, binding_types: [2]i32 = .{ -1, -1 } };
+const DescriptorSetLayoutObj = struct { owner: DeviceIdentity, canonical: Canonical, counts: DescriptorCounts, flags: u32 = 0, binding_types: [max_profile_sampled_bindings]i32 = [_]i32{-1} ** max_profile_sampled_bindings };
 const core_shader_stage_bits = [_]u32{ 1, 2, 4, 8, 16, 32 };
 const PushConstantState = struct {
     values: [core_shader_stage_bits.len][128]u8 = [_][128]u8{[_]u8{0} ** 128} ** core_shader_stage_bits.len,
@@ -4818,7 +4817,7 @@ fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     set.storage = null;
     set.texture = null;
     set.sampler = null;
-    set.sampled_images = .{ .{}, .{} };
+    set.sampled_images = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
     set.source_set = null;
     set.sampled_source_set = null;
     set.layout_source = null;
@@ -11341,8 +11340,8 @@ fn descriptorCounts(ci: *const DescriptorSetLayoutCreateInfo) CanonicalError!Des
     }
     return counts;
 }
-fn descriptorBindingTypes(ci: *const DescriptorSetLayoutCreateInfo) [2]i32 {
-    var result = [2]i32{ -1, -1 };
+fn descriptorBindingTypes(ci: *const DescriptorSetLayoutCreateInfo) [max_profile_sampled_bindings]i32 {
+    var result = [_]i32{-1} ** max_profile_sampled_bindings;
     const bindings = if (ci.bindings) |p| p[0..ci.binding_count] else &.{};
     for (bindings) |binding| {
         if (binding.binding < result.len) result[binding.binding] = binding.descriptor_type;
@@ -12862,17 +12861,19 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
                 continue;
             }
             if (interface.location == null or interface.ty.scalar != .f32 or (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 4) or interface.ty.rows != 1 or result.varying_count == 8) return null;
-            var matched = false;
+            var matched_vertex_interface: ?u32 = null;
+            var matched_vertex_slot: u8 = 0;
             for (result.vertex_outputs[0..result.vertex_output_count], 0..) |vertex_interface_index, vertex_slot| {
                 const vertex_interface = vertex.interfaces[vertex_interface_index];
                 if (!vertex_interface.builtin_position and vertex_interface.location == interface.location and vertex_interface.ty.scalar == interface.ty.scalar and vertex_interface.ty.columns == interface.ty.columns and vertex_interface.ty.rows == interface.ty.rows and vertex_interface.flat == interface.flat) {
-                    if (matched) return null;
-                    result.varyings[result.varying_count] = .{ .vertex_interface = vertex_interface_index, .fragment_interface = @intCast(index), .vertex_slot = @intCast(vertex_slot), .lanes = interface.ty.columns, .flat = interface.flat };
-                    result.varying_count += 1;
-                    matched = true;
+                    if (matched_vertex_interface != null and matched_vertex_interface.? != vertex_interface_index) return null;
+                    matched_vertex_interface = vertex_interface_index;
+                    matched_vertex_slot = @intCast(vertex_slot);
                 }
             }
-            if (!matched) return null;
+            if (matched_vertex_interface == null) return null;
+            result.varyings[result.varying_count] = .{ .vertex_interface = matched_vertex_interface.?, .fragment_interface = @intCast(index), .vertex_slot = matched_vertex_slot, .lanes = interface.ty.columns, .flat = interface.flat };
+            result.varying_count += 1;
         },
         .uniform => {
             if (result.fragment_uniform_count != 0 or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? != 0 or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
@@ -12884,7 +12885,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.fragment_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
         .sampled_image => {
-            if (interface.descriptor_set != 1 or interface.binding == null or interface.binding.? >= 2 or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
+            if (interface.descriptor_set != 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
             for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.binding == interface.binding.?) return null;
             result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
             result.fragment_sampled_image_count += 1;
@@ -14009,7 +14010,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding >= 2 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -15797,6 +15798,34 @@ test "scalar graphics profile contract is explicit and allocation free" {
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &vi) != null);
+}
+
+test "scalar graphics profile admits bounded sampled bindings and aliases" {
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .input, .ty = vec4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 1 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 2 },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = @constCast(&vertex_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 16, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 109, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 2), contract.varying_count);
+    try std.testing.expectEqual(@as(u8, 3), contract.fragment_sampled_image_count);
+    try std.testing.expectEqual(@as(u32, 2), contract.fragment_sampled_images[2].binding);
 }
 
 test "scalar graphics profile decodes normalized vertex inputs" {
