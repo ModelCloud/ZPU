@@ -12975,12 +12975,18 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     if (profile_contract) |contract| {
         var vertex_executor = render_ir_exec.Executor.init(allocator, &vertex_program.?) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            else => error.Invalid,
+            else => {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU graphics vertex executor rejected error={s}\n", .{@errorName(err)});
+                return error.Invalid;
+            },
         };
         errdefer vertex_executor.deinit();
         const fragment_executor = render_ir_exec.Executor.init(allocator, &fragment_program.?) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            else => error.Invalid,
+            else => {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU graphics fragment executor rejected error={s}\n", .{@errorName(err)});
+                return error.Invalid;
+            },
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
