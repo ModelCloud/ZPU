@@ -15811,6 +15811,13 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         return;
     };
     if (pipeline != pipeline_pointer or !pipeline.owner.eql(command_buffer.impl.owner) or !graphicsDescriptorStateValid(command_buffer, pipeline) or !graphicsDrawExecutionAllowed(pipeline.execution_abi) or pipeline.subpass != command_buffer.impl.active_subpass or (!dynamic_rendering and !pipeline.render_compatibility.eql(&render_pass.?.compatibility)) or (dynamic_rendering and !dynamicPipelineRenderingCompatible(command_buffer.impl, pipeline))) {
+        if (failureDiagnosticsEnabled()) {
+            const requirements = graphicsDescriptorRequirements(pipeline);
+            std.debug.print(
+                "ZPU draw rejected abi={s} pipeline={} owner={} descriptors={} requirements={}/{}/{} subpass={} render={} execution={} topology={d} vertices={d}\n",
+                .{ @tagName(pipeline.execution_abi), pipeline == pipeline_pointer, pipeline.owner.eql(command_buffer.impl.owner), graphicsDescriptorStateValid(command_buffer, pipeline), requirements.set0, requirements.set1, requirements.layout, pipeline.subpass == command_buffer.impl.active_subpass, dynamic_rendering or pipeline.render_compatibility.eql(&render_pass.?.compatibility), graphicsDrawExecutionAllowed(pipeline.execution_abi), pipeline.primitive_topology, vertex_count },
+            );
+        }
         command_buffer.impl.invalid = true;
         return;
     }
