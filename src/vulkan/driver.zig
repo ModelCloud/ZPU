@@ -4978,10 +4978,19 @@ fn pinMemoryLocked(memory: *MemoryObj, owner: Device, pinned: *PinnedResources) 
 }
 
 fn pinImageLocked(image: *ImageObj, owner: Device, pinned: *PinnedResources) bool {
-    if (!liveImageObject(image) or image.retire_pending or image.owner != owner) return false;
+    if (!liveImageObject(image) or image.retire_pending or image.owner != owner) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU pin image rejected image=0x{x} live={} retiring={} owner={}\n", .{ @intFromPtr(image), liveImageObject(image), image.retire_pending, image.owner == owner });
+        return false;
+    }
     for (pinned.images[0..pinned.image_count]) |existing| if (existing == image) return true;
-    if (pinned.image_count == pinned.images.len) return false;
-    if (image.memory) |memory| if (!pinMemoryLocked(memory, owner, pinned)) return false;
+    if (pinned.image_count == pinned.images.len) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU pin image rejected capacity image=0x{x} count={} capacity={}\n", .{ @intFromPtr(image), pinned.image_count, pinned.images.len });
+        return false;
+    }
+    if (image.memory) |memory| if (!pinMemoryLocked(memory, owner, pinned)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU pin image rejected memory image=0x{x} memory=0x{x}\n", .{ @intFromPtr(image), @intFromPtr(memory) });
+        return false;
+    };
     _ = image.active_users.fetchAdd(1, .acq_rel);
     pinned.images[pinned.image_count] = image;
     pinned.image_count += 1;
