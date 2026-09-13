@@ -378,14 +378,14 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     }
     var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
     for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
-    if (renderDiagnosticsEnabled() and image.width == 1024 and image.height == 512) {
-        if (diagnostic_samples.fetchAdd(1, .monotonic) < 64) {
-            const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
-            if (sequence < 64) std.debug.print(
-                "ZPU IR sample seq={d} uv={d:.4},{d:.4} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
-                .{ sequence, u, v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
-            );
-        }
+    if (renderDiagnosticsEnabled() and image.width == 1024 and image.height == 512 and
+        u > 0.30 and u < 0.40 and v > 0.0 and v < 0.02)
+    {
+        const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
+        if (sequence < 64) std.debug.print(
+            "ZPU IR sample seq={d} uv={d:.4},{d:.4} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
+            .{ sequence, u, v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
+        );
     }
     return result;
 }
