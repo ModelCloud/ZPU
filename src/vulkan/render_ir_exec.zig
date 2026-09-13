@@ -856,6 +856,17 @@ pub const Executor = struct {
         self.* = undefined;
     }
 
+    /// Human-readable execution selection for opt-in driver profiling. This
+    /// exposes no shader data and does not alter dispatch; it lets a live
+    /// Chromium trace distinguish a proven native specialization from the
+    /// interpreter before any performance conclusion is drawn.
+    pub fn prevalidatedPathName(self: *const Executor) []const u8 {
+        return switch (self.fast_path orelse return "interpreter") {
+            .sample_modulate => "sample_modulate",
+            .convolution_8tap => "convolution_8tap",
+        };
+    }
+
     fn convolutionF32(bytes: []const u8, offset: usize) Error!f32 {
         const end = std.math.add(usize, offset, 4) catch return error.Bounds;
         if (end > bytes.len) return error.Bounds;
