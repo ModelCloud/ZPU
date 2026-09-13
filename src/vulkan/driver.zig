@@ -10345,12 +10345,17 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
     const profile_ir_primary_tile = if (mosaic_clip) |clip| clip.min_x == 0 and clip.min_y == 0 else true;
-    if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile and render_diagnostic_profile_ir.fetchAdd(1, .monotonic) < 128) {
+    const profile_ir_sequence = if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile) render_diagnostic_profile_ir.fetchAdd(1, .monotonic) else 512;
+    // Keep the hot-profile discovery window broad enough to reach animated
+    // video frames. Full instruction dumps are deliberately limited because
+    // they perturb the workload; compact canonical identities make every
+    // later profile attributable to an exact validated IR program.
+    if (profile_ir_sequence < 512) {
         std.debug.print(
-            "ZPU profile IR seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} jit_candidate={s} fragment_instructions={} vertex_instructions={}\n",
-            .{ diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.prevalidatedPathName(), profile.fragment.jitCandidateName(), profile.fragment.program.instructions.len, profile.vertex.program.instructions.len },
+            "ZPU profile IR seq={d} draw_seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} jit_candidate={s} fragment_ir={s} fragment_instructions={} vertex_ir={s} vertex_instructions={}\n",
+            .{ profile_ir_sequence, diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.prevalidatedPathName(), profile.fragment.jitCandidateName(), profile.fragment.program.identity.digest, profile.fragment.program.instructions.len, profile.vertex.program.identity.digest, profile.vertex.program.instructions.len },
         );
-        for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+        if (profile_ir_sequence < 4) for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
             "ZPU profile IR fragment instruction={} op={s} type={any} operands={any} literal={any}\n",
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
