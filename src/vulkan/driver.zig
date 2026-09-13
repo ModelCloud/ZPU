@@ -1858,10 +1858,17 @@ fn renderDiagnosticSessionId() u64 {
     return candidate;
 }
 
+fn shouldEmitRenderDiagnosticSession(sequence: u32) bool {
+    // Keep startup detail for bring-up, then continue with inexpensive
+    // cumulative checkpoints. A hard stop at 64 presents hid the counters
+    // needed to correlate later page interactions and screenshots.
+    return sequence < 64 or sequence % 8 == 0;
+}
+
 fn emitRenderDiagnosticSession(presents: u64) void {
     if (!renderDiagnosticsEnabled()) return;
     const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
-    if (sequence >= 64) return;
+    if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
         "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
         .{
@@ -1875,6 +1882,15 @@ fn emitRenderDiagnosticSession(presents: u64) void {
             presents,
         },
     );
+}
+
+test "native render diagnostic summaries remain periodic after startup" {
+    try std.testing.expect(shouldEmitRenderDiagnosticSession(0));
+    try std.testing.expect(shouldEmitRenderDiagnosticSession(63));
+    try std.testing.expect(shouldEmitRenderDiagnosticSession(64));
+    try std.testing.expect(!shouldEmitRenderDiagnosticSession(65));
+    try std.testing.expect(!shouldEmitRenderDiagnosticSession(71));
+    try std.testing.expect(shouldEmitRenderDiagnosticSession(72));
 }
 
 fn pageTargetDumpMatch() u32 {
