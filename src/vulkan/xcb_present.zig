@@ -13,7 +13,6 @@ const GenericError = extern struct { response_type: u8, error_code: u8, sequence
 const GetImageCookie = extern struct { sequence: u32 };
 const GetImageReply = opaque {};
 var verification_done = false;
-var present_dump_done = false;
 var previous_metric_present_ns: u64 = 0;
 const max_frame_metrics = 7_200;
 var frame_metrics: [max_frame_metrics]u64 = undefined;
@@ -133,9 +132,7 @@ fn recordFrameMetric(now: u64) void {
 }
 
 fn dumpPresentPixels(pixels: []const u8) void {
-    if (present_dump_done) return;
     const path = std.c.getenv("ZPU_PRESENT_DUMP") orelse return;
-    present_dump_done = true;
     const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
     if (fd < 0) return;
     var offset: usize = 0;
