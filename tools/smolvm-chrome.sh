@@ -36,6 +36,10 @@ present_dump=${ZPU_PRESENT_DUMP:-}
 
 socket_root=/tmp/.X11-unix
 host_socket=$socket_root/X${display#:}
+# A pre-existing X server may use a private authority file rather than the
+# invoking user's default ~/.Xauthority.  Keep the default conventional while
+# allowing reproducible headless hosts to name the file explicitly.
+host_xauthority=${ZPU_HOST_XAUTHORITY:-${XAUTHORITY:-$HOME/.Xauthority}}
 
 host_auth=
 xvfb_pid=
@@ -182,10 +186,15 @@ prepare_host_auth() {
         host_auth=$(mktemp /tmp/zpu-xauth.XXXXXX)
         chmod 600 "$host_auth"
     fi
+    local source_auth=$host_xauthority
+    # If this invocation created Xvfb, its authority is the source of truth;
+    # otherwise use the configured authority for the pre-existing display.
+    if [[ -n ${xvfb_pid:-} ]]; then source_auth=$host_auth; fi
+    [[ -f $source_auth && ! -L $source_auth && -r $source_auth ]] || die "host X authority is not a readable regular file: $source_auth"
     # Normalize the host cookie to FamilyWild (0xffff) so the SmolVM guest can
     # use it regardless of its own hostname. Keep exactly one entry to avoid
     # ambiguous authorization lookups inside the guest.
-    xauth nlist "$display" | awk 'NF' | sed -e 's/^..../ffff/' | head -n1 | xauth -f "$host_auth" nmerge -
+    xauth -f "$source_auth" nlist "$display" | awk 'NF' | sed -e 's/^..../ffff/' | head -n1 | xauth -f "$host_auth" nmerge -
     local entries
     entries=$(xauth -f "$host_auth" nlist | awk 'NF { count++ } END { print count + 0 }')
     [[ $entries -ge 1 ]] || die "no X authority entry found for $display"
@@ -201,7 +210,7 @@ ensure_desktop() {
         return 0
     fi
     rm -f /tmp/zpu-twm.log
-    twm -f "$repo/test/twmrc" -display "$display" >/tmp/zpu-twm.log 2>&1 &
+    XAUTHORITY="$host_auth" twm -f "$repo/test/twmrc" -display "$display" >/tmp/zpu-twm.log 2>&1 &
     twm_pid=$!
     sleep 0.2
     if ! kill -0 "$twm_pid" 2>/dev/null; then
