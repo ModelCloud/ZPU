@@ -10925,10 +10925,6 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
 const profile_mosaic_tile_size: u32 = 256;
 const profile_mosaic_batch_commands: usize = 64;
 const profile_parallel_lanes: usize = 8;
-// Chromium commonly cycles through several final-composite pipelines in one
-// frame. Keep enough executor pairs for that working set per worker, but keep
-// the memory bound independent of command-buffer churn.
-const profile_parallel_cache_capacity: usize = 16;
 
 /// Per-lane executor ownership for the prevalidated final-composite path.
 /// Generic Render IR keeps mutable values/locals and remains serial; only an
@@ -10958,37 +10954,28 @@ const ProfileParallelCache = struct {
     clone: ProfileGraphicsClone,
 };
 
-// Every Mosaic worker retains a small, bounded set of independently-owned
-// profile pairs. The cache is intentionally thread-local: its mutable
-// interpreter storage never crosses a lane boundary, while canonical
-// identities prevent a reused pipeline address from selecting stale executable
-// state. Round-robin replacement avoids an unbounded profile/lifetime cache.
-threadlocal var profile_parallel_cache = [_]?ProfileParallelCache{null} ** profile_parallel_cache_capacity;
-threadlocal var profile_parallel_cache_next: usize = 0;
+// Every Mosaic worker retains at most one independently-owned profile pair.
+// The cache is intentionally thread-local: its mutable interpreter storage
+// never crosses a lane boundary, while canonical identities prevent a reused
+// pipeline address from selecting stale executable state.
+threadlocal var profile_parallel_cache: ?ProfileParallelCache = null;
 
 fn cachedParallelProfile(source: *const ProfileGraphics) ?*ProfileGraphics {
-    var vacant: ?*?ProfileParallelCache = null;
-    for (&profile_parallel_cache) |*entry| {
-        if (entry.*) |*cache| {
-            if (cache.source == source and
-                std.mem.eql(u8, &cache.vertex_identity, &source.vertex.program.identity.digest) and
-                std.mem.eql(u8, &cache.fragment_identity, &source.fragment.program.identity.digest)) return &cache.clone.graphics;
-        } else if (vacant == null) {
-            vacant = entry;
-        }
+    if (profile_parallel_cache) |*cache| {
+        if (cache.source == source and
+            std.mem.eql(u8, &cache.vertex_identity, &source.vertex.program.identity.digest) and
+            std.mem.eql(u8, &cache.fragment_identity, &source.fragment.program.identity.digest)) return &cache.clone.graphics;
+        cache.clone.deinit();
+        profile_parallel_cache = null;
     }
-
     const clone = ProfileGraphicsClone.init(source) catch return null;
-    const slot = vacant orelse &profile_parallel_cache[profile_parallel_cache_next];
-    profile_parallel_cache_next = (profile_parallel_cache_next + 1) % profile_parallel_cache_capacity;
-    if (slot.*) |*evicted| evicted.clone.deinit();
-    slot.* = .{
+    profile_parallel_cache = .{
         .source = source,
         .vertex_identity = source.vertex.program.identity.digest,
         .fragment_identity = source.fragment.program.identity.digest,
         .clone = clone,
     };
-    return &slot.*.?.clone.graphics;
+    return &profile_parallel_cache.?.clone.graphics;
 }
 
 fn profileParallelSampleModulateEligible(op: anytype) bool {
