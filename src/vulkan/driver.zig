@@ -2039,7 +2039,7 @@ var overlap_entered = std.atomic.Value(bool).init(false);
 fn hit(comptime requirement: Requirement) void {
     if (@import("builtin").is_test) {
         requirement_hits |= @as(u64, 1) << @intFromEnum(requirement);
-    } else if (failureDiagnosticsEnabled()) {
+    } else if (failureDiagnosticsEnabled() and requirement != .barrier_transition) {
         std.debug.print("ZPU requirement rejected: {s}\n", .{@tagName(requirement)});
     }
 }
@@ -11117,6 +11117,8 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         .transition => |op| {
             op.image.layout = op.new_layout;
             if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_transitions.fetchAdd(1, .monotonic);
+            // This coverage marker proves a successfully executed transition,
+            // so hit() intentionally suppresses its rejection-only log line.
             hit(.barrier_transition);
         },
         .event_set => |operation| {
