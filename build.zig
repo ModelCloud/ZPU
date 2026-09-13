@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
     // `-Dv3-kernels=false` produces fully kernel-free baseline artifacts for
     // the ISA disassembly evidence gates.
     const v3_kernels_enabled = b.option(bool, "v3-kernels", "Link the separately compiled x86-64-v3 eight-lane kernel objects") orelse true;
+    const llvm_jit_enabled = b.option(bool, "llvm-jit", "Build the experimental pinned-LLVM ORC shader-JIT smoke target") orelse false;
     const core_only = b.option(bool, "core-only", "Run only dependency-free render foundation compiler/tests") orelse false;
     const enable_xcb = b.option(bool, "xcb", "Build the xcb-dependent artifacts (ICD, demo)") orelse !core_only;
     const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .baseline } });
@@ -24,6 +25,19 @@ pub fn build(b: *std.Build) void {
     const v3_tier_applicable = target.result.cpu.arch == .x86_64;
     const v3_available = v3_kernels_enabled and v3_tier_applicable;
     const host_test_xcb = enable_xcb and target.result.cpu.arch == b.graph.host.result.cpu.arch and target.result.os.tag == b.graph.host.result.os.tag;
+
+    if (llvm_jit_enabled) {
+        const llvm_orc_smoke = b.addExecutable(.{
+            .name = "zpu-llvm-orc-smoke",
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize }),
+        });
+        llvm_orc_smoke.root_module.link_libc = true;
+        llvm_orc_smoke.root_module.addCSourceFile(.{ .file = b.path("test/llvm_orc_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        llvm_orc_smoke.root_module.linkSystemLibrary("LLVM", .{});
+        const run_llvm_orc_smoke = b.addRunArtifact(llvm_orc_smoke);
+        const llvm_orc_smoke_step = b.step("llvm-jit-smoke", "Require the pinned LLVM 22 ORC API to compile and execute native code");
+        llvm_orc_smoke_step.dependOn(&run_llvm_orc_smoke.step);
+    }
 
     const build_config = b.addOptions();
     build_config.addOption(bool, "v3_kernels", v3_available);
