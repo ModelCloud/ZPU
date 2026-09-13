@@ -5224,6 +5224,7 @@ fn createBuffer(device: ?Device, info: ?*const BufferCreateInfo, alloc: ?*const 
     // (VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) remains unsupported.
     if (!pnext.valid or usage == 0 or usage & ~@as(u32, 0x1f7) != 0) {
         hit(.invalid_buffer_usage);
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU createBuffer usage rejected s_type={d} size={d} usage=0x{x} pnext_valid={} has_usage={} pnext_usage=0x{x}\n", .{ ci.s_type, ci.size, usage, pnext.valid, pnext.has_usage, pnext.usage });
         return .error_initialization_failed;
     }
     if (alloc != null or ci.s_type != 12 or ci.flags != 0 or ci.size == 0 or ci.size > heap_size or ci.sharing_mode != 0 or ci.queue_family_index_count != 0) return .error_initialization_failed;
