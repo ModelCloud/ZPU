@@ -16,6 +16,7 @@ runtime=
 runtime_base=
 runtime_is_temporary=0
 guest_manifest=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json
+required_smolvm_version=1.15.0
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 [[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
@@ -78,11 +79,11 @@ cleanup_runtime() {
 }
 require_smolvm_cli() {
     local version version_output create_help start_help stop_help update_help exec_help cp_help ls_help
-    command -v smolvm >/dev/null || die 'smolvm not found (requires smol-machines/smolvm >= 1.7.0)'
+    command -v smolvm >/dev/null || die "smolvm not found (requires smol-machines/smolvm $required_smolvm_version)"
     version_output=$(smolvm --version)
     [[ $version_output =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] || die 'could not parse smolvm --version'
     version=${BASH_REMATCH[1]}
-    [[ $(printf '%s\n' 1.7.0 "$version" | sort -V | head -1) == 1.7.0 ]] || die "smolvm $version is too old; require >= 1.7.0 for --mount-socket"
+    [[ $version == "$required_smolvm_version" ]] || die "smolvm $version is unsupported; require exactly $required_smolvm_version"
     create_help=$(smolvm machine create --help) || die 'failed to capture smolvm machine create --help'
     start_help=$(smolvm machine start --help) || die 'failed to capture smolvm machine start --help'
     stop_help=$(smolvm machine stop --help) || die 'failed to capture smolvm machine stop --help'

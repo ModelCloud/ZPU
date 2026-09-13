@@ -106,9 +106,9 @@ grep -F 'must contain a test-owned X0 Unix socket' "$tmp/err"
 "$repo/tools/smolvm-zpu.sh" cli-check
 ln -sfn "$repo/test/fixtures/smolvm/v1.6.9/smolvm" "$tmp/bin/smolvm"
 if "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
-    echo 'SmolVM 1.6.9 unexpectedly satisfied the minimum' >&2; exit 1
+    echo 'SmolVM 1.6.9 unexpectedly satisfied the exact version pin' >&2; exit 1
 fi
-grep -F 'require >= 1.7.0 for --mount-socket' "$tmp/err"
+grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.15.0' "$tmp/err"
 for capability in missing-mount-socket missing-smolfile missing-cp missing-stop-name missing-update-no-net; do
     ln -sfn "$repo/test/fixtures/smolvm/negative/$capability" "$tmp/bin/smolvm"
     if "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
