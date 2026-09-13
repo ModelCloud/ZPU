@@ -1759,6 +1759,8 @@ var render_diagnostic_copies = std.atomic.Value(u32).init(0);
 var render_diagnostic_page_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_page_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_text_texture_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
 
 const max_present_entries = 24;
 
@@ -10098,6 +10100,13 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
         .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
+    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+        op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
+        target.width == 1280 and target.height == 256)
+    {
+        dumpDiagnosticImage(op.descriptors.texture.?, "ZPU_TEXT_TEXTURE_DUMP", &render_diagnostic_text_texture_dump);
+        dumpDiagnosticImage(target, "ZPU_TEXT_TARGET_DUMP", &render_diagnostic_text_target_dump);
+    }
     if (diagnostic_draw == 305) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
     if (diagnostic_draw == 270) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
 }
