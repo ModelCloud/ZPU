@@ -7308,15 +7308,22 @@ fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_
     return false;
 }
 fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImageCopy, image: *const ImageObj, image_region: BufferImageCopy) bool {
+    // Buffer addressing follows the format's public texel size, while ZPU's
+    // sampled R8 image representation expands each texel to four internal
+    // bytes.  Keeping those two strides separate is essential when resources
+    // suballocate the same VkDeviceMemory: treating an R8 upload buffer as
+    // RGBA invents a source range four times too large and rejects disjoint
+    // Chromium uploads as aliased.
+    const buffer_bytes_per_texel = bufferImageBytesPerTexel(image.format) orelse return true;
     const buffer_row = if (buffer_region.buffer_row_length == 0) buffer_region.image_extent.width else buffer_region.buffer_row_length;
-    const buffer_layer_stride = bufferImageLayerStride(buffer_region) orelse return true;
+    const buffer_layer_stride = bufferImageLayerStrideForBpp(buffer_region, buffer_bytes_per_texel) orelse return true;
     const mip = imageMipExtent(image, image_region.image_subresource.mip_level) orelse return true;
     const image_row_texels = checkedBufferImageMul(@as(u64, @intCast(image_region.image_offset.y)), mip.width) orelse return true;
     const image_row_start = checkedBufferImageAdd(image_row_texels, @as(u64, @intCast(image_region.image_offset.x))) orelse return true;
     const image_row_offset = checkedBufferImageMul(image_row_start, 4) orelse return true;
     const buffer_base = checkedBufferImageAdd(buffer.offset, buffer_region.buffer_offset) orelse return true;
-    const buffer_stride = checkedBufferImageMul(buffer_row, 4) orelse return true;
-    const buffer_width = checkedBufferImageMul(buffer_region.image_extent.width, 4) orelse return true;
+    const buffer_stride = checkedBufferImageMul(buffer_row, buffer_bytes_per_texel) orelse return true;
+    const buffer_width = checkedBufferImageMul(buffer_region.image_extent.width, buffer_bytes_per_texel) orelse return true;
     const image_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
     const image_width = checkedBufferImageMul(image_region.image_extent.width, 4) orelse return true;
     for (0..buffer_region.image_subresource.layer_count) |buffer_layer| {
@@ -11235,6 +11242,22 @@ test "buffer and image overlap checks reject wrapping address arithmetic" {
         try std.testing.expect(imageCopyMemoryOverlap(&image, copy, &image, copy));
     }
     test_allocations_before_failure = null;
+}
+
+test "R8 buffer image overlap uses packed source bytes and expanded image storage" {
+    const owner: Device = @ptrFromInt(8);
+    // The buffer's public R8 upload stream occupies bytes [16, 20).  ZPU
+    // expands the destination image to four bytes per sampled texel, so its
+    // internal storage occupies [20, 36).  Those ranges are adjacent, not
+    // overlapping.  A four-byte source-stride calculation would incorrectly
+    // extend the buffer range to byte 32 and reject this valid upload.
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .offset = 20 };
+    var buffer = BufferObj{ .owner = owner, .size = 4, .usage = 3, .offset = 16 };
+    const transfer = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+
+    try std.testing.expect(!bufferImageMemoryOverlap(&buffer, transfer, &image, transfer));
+    buffer.offset = 19;
+    try std.testing.expect(bufferImageMemoryOverlap(&buffer, transfer, &image, transfer));
 }
 
 test "indirect draws honor the disabled first-instance feature at submission" {
