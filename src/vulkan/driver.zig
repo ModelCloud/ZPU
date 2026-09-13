@@ -1642,6 +1642,11 @@ const max_command_pool_objects = 4096;
 const max_buffer_objects = 4096;
 const max_image_view_objects = 4096;
 const max_shader_modules = 4000;
+// Chromium's Skia pipeline cache can keep more than the generic child-object
+// budget live while old layouts are waiting for submitted work to retire.
+// Keep the registry bounded, but give this compositor-scale object its own
+// capacity rather than returning VK_ERROR_OUT_OF_HOST_MEMORY at 64 layouts.
+const max_pipeline_layout_objects = 4096;
 // A primary command buffer may contain a long ordered draw stream.  Allocate
 // this storage lazily on first begin so command-buffer creation stays cheap,
 // while keeping the Mosaic batch bound and descriptor snapshot capacity in
@@ -1742,8 +1747,8 @@ var shader_module_objects: [max_shader_modules]ShaderModuleObj = undefined;
 var shader_module_state = [_]SlotState{.never} ** max_shader_modules;
 var descriptor_set_layout_objects: [max_child_objects]DescriptorSetLayoutObj = undefined;
 var descriptor_set_layout_state = [_]SlotState{.never} ** max_child_objects;
-var pipeline_layout_objects: [max_child_objects]PipelineLayoutObj = undefined;
-var pipeline_layout_state = [_]SlotState{.never} ** max_child_objects;
+var pipeline_layout_objects: [max_pipeline_layout_objects]PipelineLayoutObj = undefined;
+var pipeline_layout_state = [_]SlotState{.never} ** max_pipeline_layout_objects;
 var render_pass_objects: [max_child_objects]RenderPassObj = undefined;
 var render_pass_state = [_]SlotState{.never} ** max_child_objects;
 var graphics_pipeline_objects: [max_child_objects]GraphicsPipelineObj = undefined;
@@ -11584,6 +11589,13 @@ fn createPipelineLayout(device: ?Device, info: ?*const PipelineLayoutCreateInfo,
         out.* = @intFromPtr(object);
         return .success;
     };
+    if (failureDiagnosticsEnabled()) {
+        var live_count: usize = 0;
+        for (pipeline_layout_state) |state| {
+            if (state == .live) live_count += 1;
+        }
+        std.debug.print("ZPU pipeline layout pool exhausted live={} capacity={}\n", .{ live_count, max_pipeline_layout_objects });
+    }
     canonical.deinit();
     set0.deinit();
     set1.deinit();
@@ -25353,6 +25365,22 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
 
     destroyDevice(ctx.device, null);
     try std.testing.expectEqual(Result.error_memory_map_failed, mapMemory(ctx.device, memory_b, 0, 1, 0, &mapped));
+    destroyInstance(ctx.instance, null);
+}
+
+test "pipeline layout registry admits compositor bursts" {
+    const ctx = try createTestDeviceContext();
+    const descriptor_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null };
+    var descriptor_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &descriptor_layout_info, null, &descriptor_layout));
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&descriptor_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    var layouts: [65]usize = undefined;
+    for (&layouts) |*layout| {
+        try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, layout));
+    }
+    for (layouts) |layout| destroyPipelineLayout(ctx.device, layout, null);
+    destroyDescriptorSetLayout(ctx.device, descriptor_layout, null);
+    destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
 }
 
