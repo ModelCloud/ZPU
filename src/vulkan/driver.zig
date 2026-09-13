@@ -11011,7 +11011,10 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     // frame pacing shows time spent before presentation rather than attributing
     // it to an opaque gap in the browser.
     color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
-    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 32) {
+    // A Chromium startup can consume several samples before animated content
+    // begins. Keep the opt-in window long enough to include steady-state
+    // video composition while still bounding log volume.
+    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128) {
         std.debug.print(
             "ZPU Mosaic profile timing target={d}x{d} commands={d} total_ns={d}",
             .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
