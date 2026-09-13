@@ -9319,6 +9319,26 @@ fn diagnosticDarkPixelCount(image: *ImageObj) usize {
     return count;
 }
 
+fn diagnosticAlphaPixelCount(image: *ImageObj) usize {
+    var count: usize = 0;
+    const bytes = imageBytes(image);
+    var offset: usize = 0;
+    while (offset + 4 <= bytes.len) : (offset += 4) {
+        if (bytes[offset + 3] != 0) count += 1;
+    }
+    return count;
+}
+
+fn diagnosticDarkAlphaPixelCount(image: *ImageObj) usize {
+    var count: usize = 0;
+    const bytes = imageBytes(image);
+    var offset: usize = 0;
+    while (offset + 4 <= bytes.len) : (offset += 4) {
+        if (bytes[offset + 3] != 0 and (bytes[offset] < 200 or bytes[offset + 1] < 200 or bytes[offset + 2] < 200)) count += 1;
+    }
+    return count;
+}
+
 fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
@@ -9618,8 +9638,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
     if (renderDiagnosticsEnabled() and diagnostic_draw < 96) std.debug.print(
-        "ZPU profile draw seq={d} target={d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d}\n",
-        .{ diagnostic_draw, target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image != null, profile.varying_count },
+        "ZPU profile draw seq={d} target={d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} tex={d}x{d}/format={d}/alpha={d}/darkalpha={d}\n",
+        .{ diagnostic_draw, target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image != null, profile.varying_count, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0 },
     );
     const color_bytes = if (color) |color_image| imageLayerBytes(color_image, op.color_base_layer + layer) else null;
     const depth_bytes = if (depth) |depth_image| imageLayerBytes(depth_image, op.depth_base_layer + layer) else null;
@@ -9917,8 +9937,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     }
     if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
     if (renderDiagnosticsEnabled() and diagnostic_draw < 96) std.debug.print(
-        "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={}\n",
-        .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target) },
+        "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
+        .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
 }
 fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
