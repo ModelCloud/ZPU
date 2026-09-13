@@ -1752,6 +1752,7 @@ var render_diagnostic_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_presents = std.atomic.Value(u32).init(0);
 var render_diagnostic_clears = std.atomic.Value(u32).init(0);
 var render_diagnostic_begins = std.atomic.Value(u32).init(0);
+var render_diagnostic_geometry = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -9782,6 +9783,18 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return;
             vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
             for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], vertex_output_bytes[varying.vertex_slot][0 .. varying.lanes * 4]);
+            if (renderDiagnosticsEnabled() and target.width == 512 and target.height == 256) {
+                const geometry_sequence = render_diagnostic_geometry.fetchAdd(1, .monotonic);
+                if (geometry_sequence < 12) {
+                    std.debug.print(
+                        "ZPU profile geometry seq={d} corner={d} clip={d:.5},{d:.5},{d:.5},{d:.5} screen={d:.2},{d:.2} varying0={d:.5},{d:.5},{d:.5},{d:.5} varying1={d:.5},{d:.5},{d:.5},{d:.5}\n",
+                        .{
+                            geometry_sequence,                                                                                                                                   corner,                                                                                                                                                                                clip[0],                                                                                                                                                                                clip[1],                                                                                                                                                                                 clip[2],                                                                                                                                             clip[3],                                                                                                                                                                               x,                                                                                                                                                                                      y,
+                            if (profile.varying_count > 0) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][0..4], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 1) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][4..8], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 2) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][8..12], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 3) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][12..16], .little))) else 0, if (profile.varying_count > 1) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[1].vertex_slot][0..4], .little))) else 0, if (profile.varying_count > 1 and profile.varyings[1].lanes > 1) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[1].vertex_slot][4..8], .little))) else 0, if (profile.varying_count > 1 and profile.varyings[1].lanes > 2) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[1].vertex_slot][8..12], .little))) else 0, if (profile.varying_count > 1 and profile.varyings[1].lanes > 3) @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[1].vertex_slot][12..16], .little))) else 0,
+                        },
+                    );
+                }
+            }
         }
         const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
         if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
