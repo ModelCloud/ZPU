@@ -9650,8 +9650,9 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
-    if (renderDiagnosticsEnabled() and render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0 and
-        op.descriptors.texture != null and op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512)
+    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+        op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512 and
+        render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
         std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
         for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
