@@ -1761,6 +1761,7 @@ var render_diagnostic_profile_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_page_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_texture_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -10448,6 +10449,15 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             // keep partial writes fail-closed until that backend is upgraded.
             if (op.pipeline.color_write_mask != 0xf or op.pipeline.color_blend_enable != 0) return;
             if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0) return;
+            const diagnostic_cube_draw = if (renderDiagnosticsEnabled()) render_diagnostic_cube_draws.fetchAdd(1, .monotonic) else 256;
+            if (diagnostic_cube_draw < 256) {
+                const diagnostic_target = color orelse depth;
+                const diagnostic_texture = op.descriptors.texture;
+                std.debug.print(
+                    "ZPU legacy draw seq={d} target={x} {d}x{d} texture={x} {d}x{d}/format={d} vertices={d} instances={d} indexed={} abi={s}\n",
+                    .{ diagnostic_cube_draw, if (diagnostic_target) |image| @intFromPtr(image) else 0, if (diagnostic_target) |image| image.width else 0, if (diagnostic_target) |image| image.height else 0, if (diagnostic_texture) |image| @intFromPtr(image) else 0, if (diagnostic_texture) |image| image.width else 0, if (diagnostic_texture) |image| image.height else 0, if (diagnostic_texture) |image| image.format else 0, op.vertex_count, op.instance_count, op.indexed != null, @tagName(op.pipeline.execution_abi) },
+                );
+            }
             const operation_start = frame_pacing.monotonicNs();
             const uniform_buffer = op.descriptors.uniform.?;
             const uniform_start: usize = @intCast(uniform_buffer.offset + op.descriptors.uniform_offset);
@@ -10492,6 +10502,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
             color_image.complex_3d_content = true;
             color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (diagnostic_cube_draw < 256) std.debug.print(
+                "ZPU legacy draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} target-dark={} target-alpha={}\n",
+                .{ diagnostic_cube_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(color_image), diagnosticAlphaPixelCount(color_image) },
+            );
         },
         .indirect_draw => |op| {
             const bytes = bufferBytes(op.indirect_buffer);
