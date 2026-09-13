@@ -7384,6 +7384,10 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
     for (list[0..count]) |region| {
         const end = bufferImageEndForBpp(region, bufferImageBytesPerTexel(dst.format) orelse 0);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 7) or !validImageRegion(dst, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > src.size) {
+            if (failureDiagnosticsEnabled()) std.debug.print(
+                "ZPU copy buffer image rejected src_owner={} dst_owner={} src_usage=0x{x} dst_usage=0x{x} src_memory={} dst_memory={} layout={} region_valid={} end={any} src_size={} format={} mip={} layer={}+{} offset={d},{d},{d} extent={}x{}x{}\n",
+                .{ src.owner == c.impl.owner, dst.owner == c.impl.owner, src.usage, dst.usage, src.memory != null, dst.memory != null, layout, validImageRegion(dst, region.image_offset, region.image_extent, region.image_subresource), end, src.size, dst.format, region.image_subresource.mip_level, region.image_subresource.base_array_layer, region.image_subresource.layer_count, region.image_offset.x, region.image_offset.y, region.image_offset.z, region.image_extent.width, region.image_extent.height, region.image_extent.depth },
+            );
             c.impl.invalid = true;
             return;
         }
