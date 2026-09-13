@@ -6801,13 +6801,46 @@ fn validBarrierRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) b
     return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
-    return validLayers(layers) and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
+    return layers.aspect_mask == 1 and layers.mip_level < image.mip_levels and layers.layer_count != 0 and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
 }
 fn imageLayerOffset(image: *const ImageObj, layer: u32) ?usize {
     if (layer >= image.array_layers) return null;
     const stride = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
     const offset = std.math.mul(u64, stride, layer) catch return null;
     return @intCast(offset);
+}
+
+const ImageMipExtent = struct { width: u32, height: u32 };
+
+fn imageMipExtent(image: *const ImageObj, mip_level: u32) ?ImageMipExtent {
+    if (mip_level >= image.mip_levels) return null;
+    var width = image.width;
+    var height = image.height;
+    var mip: u32 = 0;
+    while (mip < mip_level) : (mip += 1) {
+        width = @max(@as(u32, 1), width / 2);
+        height = @max(@as(u32, 1), height / 2);
+    }
+    return .{ .width = width, .height = height };
+}
+
+fn imageMipOffsetInLayer(image: *const ImageObj, mip_level: u32) ?usize {
+    if (mip_level >= image.mip_levels) return null;
+    var offset: u64 = 0;
+    var width = image.width;
+    var height = image.height;
+    var mip: u32 = 0;
+    while (mip < mip_level) : (mip += 1) {
+        const pixels = std.math.mul(u64, width, height) catch return null;
+        offset = std.math.add(u64, offset, std.math.mul(u64, pixels, 4) catch return null) catch return null;
+        width = @max(@as(u32, 1), width / 2);
+        height = @max(@as(u32, 1), height / 2);
+    }
+    return @intCast(offset);
+}
+
+fn imageSubresourceOffset(image: *const ImageObj, mip_level: u32, layer: u32) ?usize {
+    return std.math.add(usize, imageLayerOffset(image, layer) orelse return null, imageMipOffsetInLayer(image, mip_level) orelse return null) catch null;
 }
 fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, color: ?*const ClearColorValue, count: u32, ranges: ?[*]const ImageSubresourceRange) callconv(.c) void {
     lock();
@@ -7114,7 +7147,9 @@ fn blitSpan(a: i32, b: i32, limit: u32) ?u32 {
 }
 fn validBlitRegion(src: *const ImageObj, dst: *const ImageObj, region: ImageBlit) bool {
     if (!validLayersForImage(src, region.src_subresource) or !validLayersForImage(dst, region.dst_subresource) or region.src_subresource.layer_count != region.dst_subresource.layer_count) return false;
-    if (blitSpan(region.src_offsets[0].x, region.src_offsets[1].x, src.width) == null or blitSpan(region.src_offsets[0].y, region.src_offsets[1].y, src.height) == null or blitSpan(region.dst_offsets[0].x, region.dst_offsets[1].x, dst.width) == null or blitSpan(region.dst_offsets[0].y, region.dst_offsets[1].y, dst.height) == null) return false;
+    const src_mip = imageMipExtent(src, region.src_subresource.mip_level) orelse return false;
+    const dst_mip = imageMipExtent(dst, region.dst_subresource.mip_level) orelse return false;
+    if (blitSpan(region.src_offsets[0].x, region.src_offsets[1].x, src_mip.width) == null or blitSpan(region.src_offsets[0].y, region.src_offsets[1].y, src_mip.height) == null or blitSpan(region.dst_offsets[0].x, region.dst_offsets[1].x, dst_mip.width) == null or blitSpan(region.dst_offsets[0].y, region.dst_offsets[1].y, dst_mip.height) == null) return false;
     return region.src_offsets[0].z == 0 and region.src_offsets[1].z == 1 and region.dst_offsets[0].z == 0 and region.dst_offsets[1].z == 1;
 }
 fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_handle: usize, dst_layout: i32, count: u32, regions: ?[*]const ImageBlit, filter: i32) callconv(.c) void {
@@ -7171,9 +7206,10 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
 }
 fn validImageRegion(image: *const ImageObj, offset: Offset3D, extent: Extent3D, layers: ImageSubresourceLayers) bool {
     if (!validLayersForImage(image, layers) or offset.x < 0 or offset.y < 0 or offset.z != 0 or extent.width == 0 or extent.height == 0 or extent.depth != 1) return false;
+    const mip = imageMipExtent(image, layers.mip_level) orelse return false;
     const end_x = std.math.add(u64, @intCast(offset.x), extent.width) catch return false;
     const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
-    return end_x <= image.width and end_y <= image.height;
+    return end_x <= mip.width and end_y <= mip.height;
 }
 fn checkedBufferImageSub(a: u64, b: u64) ?u64 {
     return std.math.sub(u64, a, b) catch {
@@ -7235,22 +7271,21 @@ fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_
 fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImageCopy, image: *const ImageObj, image_region: BufferImageCopy) bool {
     const buffer_row = if (buffer_region.buffer_row_length == 0) buffer_region.image_extent.width else buffer_region.buffer_row_length;
     const buffer_layer_stride = bufferImageLayerStride(buffer_region) orelse return true;
-    const image_layer = imageLayerByteSize(image) orelse return true;
-    const image_row_texels = checkedBufferImageMul(@as(u64, @intCast(image_region.image_offset.y)), image.width) orelse return true;
+    const mip = imageMipExtent(image, image_region.image_subresource.mip_level) orelse return true;
+    const image_row_texels = checkedBufferImageMul(@as(u64, @intCast(image_region.image_offset.y)), mip.width) orelse return true;
     const image_row_start = checkedBufferImageAdd(image_row_texels, @as(u64, @intCast(image_region.image_offset.x))) orelse return true;
     const image_row_offset = checkedBufferImageMul(image_row_start, 4) orelse return true;
     const buffer_base = checkedBufferImageAdd(buffer.offset, buffer_region.buffer_offset) orelse return true;
     const buffer_stride = checkedBufferImageMul(buffer_row, 4) orelse return true;
     const buffer_width = checkedBufferImageMul(buffer_region.image_extent.width, 4) orelse return true;
-    const image_stride = checkedBufferImageMul(image.width, 4) orelse return true;
+    const image_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
     const image_width = checkedBufferImageMul(image_region.image_extent.width, 4) orelse return true;
     for (0..buffer_region.image_subresource.layer_count) |buffer_layer| {
         const buffer_layer_offset = checkedBufferImageMul(buffer_layer_stride, buffer_layer) orelse return true;
         const buffer_layer_base = checkedBufferImageAdd(buffer_base, buffer_layer_offset) orelse return true;
         for (0..image_region.image_subresource.layer_count) |image_layer_index| {
             const image_layer_number = checkedBufferImageAdd(image_region.image_subresource.base_array_layer, image_layer_index) orelse return true;
-            const image_layer_offset = checkedBufferImageMul(image_layer, image_layer_number) orelse return true;
-            const image_base = checkedBufferImageAdd(image.offset, image_layer_offset) orelse return true;
+            const image_base = checkedBufferImageAdd(image.offset, imageSubresourceOffset(image, image_region.image_subresource.mip_level, @intCast(image_layer_number)) orelse return true) orelse return true;
             const image_row_base = checkedBufferImageAdd(image_base, image_row_offset) orelse return true;
             if (rowSequencesOverlap(buffer_layer_base, buffer_stride, buffer_region.image_extent.height, buffer_width, image_row_base, image_stride, image_region.image_extent.height, image_width)) return true;
         }
@@ -7278,25 +7313,24 @@ fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
     return false;
 }
 fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers, a_offset: Offset3D, a_extent: Extent3D, b_layers: ImageSubresourceLayers, b_offset: Offset3D, b_extent: Extent3D) bool {
-    const layer = imageLayerByteSize(image) orelse return true;
-    const a_row_texels = checkedBufferImageMul(@as(u64, @intCast(a_offset.y)), image.width) orelse return true;
-    const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), image.width) orelse return true;
+    if (a_layers.mip_level != b_layers.mip_level) return false;
+    const mip = imageMipExtent(image, a_layers.mip_level) orelse return true;
+    const a_row_texels = checkedBufferImageMul(@as(u64, @intCast(a_offset.y)), mip.width) orelse return true;
+    const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), mip.width) orelse return true;
     const a_row_start = checkedBufferImageAdd(a_row_texels, @as(u64, @intCast(a_offset.x))) orelse return true;
     const b_row_start = checkedBufferImageAdd(b_row_texels, @as(u64, @intCast(b_offset.x))) orelse return true;
     const a_row_offset = checkedBufferImageMul(a_row_start, 4) orelse return true;
     const b_row_offset = checkedBufferImageMul(b_row_start, 4) orelse return true;
-    const row_stride = checkedBufferImageMul(image.width, 4) orelse return true;
+    const row_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
     const a_width = checkedBufferImageMul(a_extent.width, 4) orelse return true;
     const b_width = checkedBufferImageMul(b_extent.width, 4) orelse return true;
     for (0..a_layers.layer_count) |a_layer| {
         const a_layer_number = checkedBufferImageAdd(a_layers.base_array_layer, a_layer) orelse return true;
-        const a_layer_offset = checkedBufferImageMul(layer, a_layer_number) orelse return true;
-        const a_base = checkedBufferImageAdd(image.offset, a_layer_offset) orelse return true;
+        const a_base = checkedBufferImageAdd(image.offset, imageSubresourceOffset(image, a_layers.mip_level, @intCast(a_layer_number)) orelse return true) orelse return true;
         const a_row_base = checkedBufferImageAdd(a_base, a_row_offset) orelse return true;
         for (0..b_layers.layer_count) |b_layer| {
             const b_layer_number = checkedBufferImageAdd(b_layers.base_array_layer, b_layer) orelse return true;
-            const b_layer_offset = checkedBufferImageMul(layer, b_layer_number) orelse return true;
-            const b_base = checkedBufferImageAdd(image.offset, b_layer_offset) orelse return true;
+            const b_base = checkedBufferImageAdd(image.offset, imageSubresourceOffset(image, b_layers.mip_level, @intCast(b_layer_number)) orelse return true) orelse return true;
             const b_row_base = checkedBufferImageAdd(b_base, b_row_offset) orelse return true;
             if (rowSequencesOverlap(a_row_base, row_stride, a_extent.height, a_width, b_row_base, row_stride, b_extent.height, b_width)) return true;
         }
@@ -7304,27 +7338,25 @@ fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers,
     return false;
 }
 fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const ImageObj, destination: ImageCopy) bool {
-    const source_layer = imageLayerByteSize(src) orelse return true;
-    const destination_layer = imageLayerByteSize(dst) orelse return true;
-    const source_row_texels = checkedBufferImageMul(@as(u64, @intCast(source.src_offset.y)), src.width) orelse return true;
-    const destination_row_texels = checkedBufferImageMul(@as(u64, @intCast(destination.dst_offset.y)), dst.width) orelse return true;
+    const source_mip = imageMipExtent(src, source.src_subresource.mip_level) orelse return true;
+    const destination_mip = imageMipExtent(dst, destination.dst_subresource.mip_level) orelse return true;
+    const source_row_texels = checkedBufferImageMul(@as(u64, @intCast(source.src_offset.y)), source_mip.width) orelse return true;
+    const destination_row_texels = checkedBufferImageMul(@as(u64, @intCast(destination.dst_offset.y)), destination_mip.width) orelse return true;
     const source_row_start = checkedBufferImageAdd(source_row_texels, @as(u64, @intCast(source.src_offset.x))) orelse return true;
     const destination_row_start = checkedBufferImageAdd(destination_row_texels, @as(u64, @intCast(destination.dst_offset.x))) orelse return true;
     const source_row_offset = checkedBufferImageMul(source_row_start, 4) orelse return true;
     const destination_row_offset = checkedBufferImageMul(destination_row_start, 4) orelse return true;
-    const source_stride = checkedBufferImageMul(src.width, 4) orelse return true;
-    const destination_stride = checkedBufferImageMul(dst.width, 4) orelse return true;
+    const source_stride = checkedBufferImageMul(source_mip.width, 4) orelse return true;
+    const destination_stride = checkedBufferImageMul(destination_mip.width, 4) orelse return true;
     const source_width = checkedBufferImageMul(source.extent.width, 4) orelse return true;
     const destination_width = checkedBufferImageMul(destination.extent.width, 4) orelse return true;
     for (0..source.src_subresource.layer_count) |source_index| {
         const source_layer_number = checkedBufferImageAdd(source.src_subresource.base_array_layer, source_index) orelse return true;
-        const source_layer_offset = checkedBufferImageMul(source_layer, source_layer_number) orelse return true;
-        const source_base = checkedBufferImageAdd(src.offset, source_layer_offset) orelse return true;
+        const source_base = checkedBufferImageAdd(src.offset, imageSubresourceOffset(src, source.src_subresource.mip_level, @intCast(source_layer_number)) orelse return true) orelse return true;
         const source_row_base = checkedBufferImageAdd(source_base, source_row_offset) orelse return true;
         for (0..destination.dst_subresource.layer_count) |destination_index| {
             const destination_layer_number = checkedBufferImageAdd(destination.dst_subresource.base_array_layer, destination_index) orelse return true;
-            const destination_layer_offset = checkedBufferImageMul(destination_layer, destination_layer_number) orelse return true;
-            const destination_base = checkedBufferImageAdd(dst.offset, destination_layer_offset) orelse return true;
+            const destination_base = checkedBufferImageAdd(dst.offset, imageSubresourceOffset(dst, destination.dst_subresource.mip_level, @intCast(destination_layer_number)) orelse return true) orelse return true;
             const destination_row_base = checkedBufferImageAdd(destination_base, destination_row_offset) orelse return true;
             if (rowSequencesOverlap(source_row_base, source_stride, source.extent.height, source_width, destination_row_base, destination_stride, destination.extent.height, destination_width)) return true;
         }
@@ -9491,15 +9523,18 @@ fn sampleLinear(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [4]u
 fn executeBlitImage(item: BlitImageCommand) void {
     const src = imageBytes(item.src);
     const dst = imageBytes(item.dst);
-    const src_layer_size: usize = @intCast(imageLayerByteSize(item.src).?);
-    const src_width = blitSpan(item.region.src_offsets[0].x, item.region.src_offsets[1].x, item.src.width).?;
-    const src_height = blitSpan(item.region.src_offsets[0].y, item.region.src_offsets[1].y, item.src.height).?;
-    const dst_width = blitSpan(item.region.dst_offsets[0].x, item.region.dst_offsets[1].x, item.dst.width).?;
-    const dst_height = blitSpan(item.region.dst_offsets[0].y, item.region.dst_offsets[1].y, item.dst.height).?;
+    const src_mip = imageMipExtent(item.src, item.region.src_subresource.mip_level).?;
+    const dst_mip = imageMipExtent(item.dst, item.region.dst_subresource.mip_level).?;
+    const src_pixels = std.math.mul(u64, src_mip.width, src_mip.height) catch unreachable;
+    const src_layer_size: usize = @intCast(std.math.mul(u64, src_pixels, 4) catch unreachable);
+    const src_width = blitSpan(item.region.src_offsets[0].x, item.region.src_offsets[1].x, src_mip.width).?;
+    const src_height = blitSpan(item.region.src_offsets[0].y, item.region.src_offsets[1].y, src_mip.height).?;
+    const dst_width = blitSpan(item.region.dst_offsets[0].x, item.region.dst_offsets[1].x, dst_mip.width).?;
+    const dst_height = blitSpan(item.region.dst_offsets[0].y, item.region.dst_offsets[1].y, dst_mip.height).?;
     var layer: u32 = 0;
     while (layer < item.region.src_subresource.layer_count) : (layer += 1) {
-        const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer + layer).?;
-        const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer + layer).?;
+        const src_layer_offset = imageSubresourceOffset(item.src, item.region.src_subresource.mip_level, item.region.src_subresource.base_array_layer + layer).?;
+        const dst_layer_offset = imageSubresourceOffset(item.dst, item.region.dst_subresource.mip_level, item.region.dst_subresource.base_array_layer + layer).?;
         var y: u32 = 0;
         while (y < dst_height) : (y += 1) {
             const sy = blitCoordinate(item.region.src_offsets[0].y, item.region.src_offsets[1].y, y, dst_height, src_height);
@@ -9507,7 +9542,7 @@ fn executeBlitImage(item: BlitImageCommand) void {
             var x: u32 = 0;
             while (x < dst_width) : (x += 1) {
                 const dx = if (item.region.dst_offsets[0].x < item.region.dst_offsets[1].x) @as(usize, @intCast(item.region.dst_offsets[0].x)) + x else @as(usize, @intCast(item.region.dst_offsets[0].x)) - x - 1;
-                const destination = dst_layer_offset + (dy * item.dst.width + dx) * 4;
+                const destination = dst_layer_offset + (dy * dst_mip.width + dx) * 4;
                 if (item.filter == 1) {
                     const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(dst_width));
                     const t = u * @as(f32, @floatFromInt(src_width)) - 0.5;
@@ -9515,11 +9550,11 @@ fn executeBlitImage(item: BlitImageCommand) void {
                     const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(dst_height));
                     const ty = v * @as(f32, @floatFromInt(src_height)) - 0.5;
                     const syf = if (item.region.src_offsets[0].y < item.region.src_offsets[1].y) @as(f32, @floatFromInt(item.region.src_offsets[0].y)) + ty else @as(f32, @floatFromInt(item.region.src_offsets[0].y - 1)) - ty;
-                    const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], item.src.width, item.src.height, sx, syf);
+                    const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], src_mip.width, src_mip.height, sx, syf);
                     @memcpy(dst[destination..][0..4], &sample);
                 } else {
                     const sx = blitCoordinate(item.region.src_offsets[0].x, item.region.src_offsets[1].x, x, dst_width, src_width);
-                    const source = src_layer_offset + (sy * item.src.width + sx) * 4;
+                    const source = src_layer_offset + (sy * src_mip.width + sx) * 4;
                     std.mem.copyForwards(u8, dst[destination..][0..4], src[source..][0..4]);
                 }
             }
@@ -9531,14 +9566,16 @@ fn executeBlitImage(item: BlitImageCommand) void {
 fn executeResolveImage(item: ResolveImageCommand) void {
     const src = imageBytes(item.src);
     const dst = imageBytes(item.dst);
+    const src_mip = imageMipExtent(item.src, item.region.src_subresource.mip_level).?;
+    const dst_mip = imageMipExtent(item.dst, item.region.dst_subresource.mip_level).?;
     var layer: u32 = 0;
     while (layer < item.region.src_subresource.layer_count) : (layer += 1) {
-        const src_layer_offset = imageLayerOffset(item.src, item.region.src_subresource.base_array_layer + layer).?;
-        const dst_layer_offset = imageLayerOffset(item.dst, item.region.dst_subresource.base_array_layer + layer).?;
+        const src_layer_offset = imageSubresourceOffset(item.src, item.region.src_subresource.mip_level, item.region.src_subresource.base_array_layer + layer).?;
+        const dst_layer_offset = imageSubresourceOffset(item.dst, item.region.dst_subresource.mip_level, item.region.dst_subresource.base_array_layer + layer).?;
         var y: u32 = 0;
         while (y < item.region.extent.height) : (y += 1) {
-            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * item.src.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
-            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * item.dst.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
+            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * src_mip.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
+            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * dst_mip.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
             const bytes = @as(usize, item.region.extent.width) * 4;
             std.mem.copyForwards(u8, dst[destination..][0..bytes], src[source..][0..bytes]);
         }
@@ -11012,18 +11049,20 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             diagnoseImageTransfer("copy_image", op.src, op.dst);
             const src = imageBytes(op.src);
             const dst = imageBytes(op.dst);
+            const src_mip = imageMipExtent(op.src, op.region.src_subresource.mip_level).?;
+            const dst_mip = imageMipExtent(op.dst, op.region.dst_subresource.mip_level).?;
             var layer: u32 = 0;
             while (layer < op.region.src_subresource.layer_count) : (layer += 1) {
-                const src_layer_offset = imageLayerOffset(op.src, op.region.src_subresource.base_array_layer + layer).?;
-                const dst_layer_offset = imageLayerOffset(op.dst, op.region.dst_subresource.base_array_layer + layer).?;
-                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * op.src.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
-                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * op.dst.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
+                const src_layer_offset = imageSubresourceOffset(op.src, op.region.src_subresource.mip_level, op.region.src_subresource.base_array_layer + layer).?;
+                const dst_layer_offset = imageSubresourceOffset(op.dst, op.region.dst_subresource.mip_level, op.region.dst_subresource.base_array_layer + layer).?;
+                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * src_mip.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
+                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * dst_mip.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
                 const len = @as(usize, op.region.extent.width) * 4;
                 // Command recording rejects overlapping image ranges, so the
                 // whole layer can use one non-overlap copy. Besides removing
                 // one helper call per row, this lets tight full-image copies
                 // collapse to one contiguous memcpy.
-                copyTransferRows(dst[do..], @as(usize, op.dst.width) * 4, src[so..], @as(usize, op.src.width) * 4, len, op.region.extent.height);
+                copyTransferRows(dst[do..], @as(usize, dst_mip.width) * 4, src[so..], @as(usize, src_mip.width) * 4, len, op.region.extent.height);
             }
             invalidateImageContents(op.dst);
         },
@@ -11277,31 +11316,32 @@ test "host image rows bulk-copy disjoint memory and preserve overlap semantics" 
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
+    const mip = imageMipExtent(image, region.image_subresource.mip_level).?;
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const bytes_per_texel = bufferImageBytesPerTexel(image.format).?;
     const layer_stride = bufferImageLayerStrideForBpp(region, bytes_per_texel).?;
     const len = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
     var layer: u32 = 0;
     while (layer < region.image_subresource.layer_count) : (layer += 1) {
-        const image_layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + layer).?;
+        const image_layer_offset = imageSubresourceOffset(image, region.image_subresource.mip_level, region.image_subresource.base_array_layer + layer).?;
         const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer));
-        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x)))) * 4;
+        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * mip.width + @as(usize, @intCast(region.image_offset.x)))) * 4;
         // Buffer/image overlap is rejected by cmdCopyBufferToImage and
         // cmdCopyImageToBuffer before this recorded command executes. Copying
         // a complete layer in one call avoids per-row dispatch overhead while
         // retaining explicit strides for pitched transfers.
         if (image.format != 9) {
             if (to_image)
-                copyTransferRows(pixels[io..], @as(usize, image.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
+                copyTransferRows(pixels[io..], @as(usize, mip.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
             else
-                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, image.width) * 4, len, region.image_extent.height);
+                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, mip.width) * 4, len, region.image_extent.height);
         } else {
             // Keep the public R8 transfer layout (one byte per texel) while
             // using the driver's existing four-byte internal image storage.
             // The padded channels are deterministic and sample as (r,0,0,1).
             for (0..region.image_extent.height) |y| {
                 const source_row = bo + y * @as(usize, @intCast(row));
-                const image_row = io + y * @as(usize, image.width) * 4;
+                const image_row = io + y * @as(usize, mip.width) * 4;
                 for (0..region.image_extent.width) |x| {
                     if (to_image) {
                         pixels[image_row + x * 4] = b[source_row + x];
@@ -11337,6 +11377,26 @@ test "R8 buffer image transfers preserve packed rows and expand sampled storage"
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x11, 0, 0, 0x20, 0x21, 0, 0 }, &buffer_storage);
+}
+
+test "mipmapped buffer image transfers use the selected subresource footprint" {
+    const owner: Device = @ptrFromInt(8);
+    var buffer_storage: [16]u8 align(64) = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    // A 4x4 RGBA level (64 bytes) followed by the 2x2 mip level (16 bytes).
+    var image_storage: [80]u8 align(64) = .{0} ** 80;
+    var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 4, .height = 4, .mip_levels = 2, .array_layers = 1, .samples = 1, .format = 37, .usage = 3, .layout = 1, .owned_bytes = image_storage[0..] };
+    const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 1, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+
+    try std.testing.expect(validImageRegion(&image, region.image_offset, region.image_extent, region.image_subresource));
+    copyBufferImage(&buffer, &image, region, true);
+    try std.testing.expectEqualSlices(u8, &buffer_storage, image_storage[64..]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0} ** 64, image_storage[0..64]);
+
+    @memset(&buffer_storage, 0);
+    copyBufferImage(&buffer, &image, region, false);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, &buffer_storage);
 }
 
 const max_canonical_bytes = 2 * spirv.max_code_bytes + 64 * 1024;
