@@ -9663,6 +9663,15 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             "ZPU profile fragment instruction={} op={s} type={any} operands={any} literal={any}\n",
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
+        std.debug.print("ZPU profile vertex IR interfaces={} instructions={}\n", .{ profile.vertex.program.interfaces.len, profile.vertex.program.instructions.len });
+        for (profile.vertex.program.interfaces, 0..) |interface, index| std.debug.print(
+            "ZPU profile vertex interface={} storage={s} type={any} location={any} position={}\n",
+            .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.builtin_position },
+        );
+        for (profile.vertex.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU profile vertex instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
     }
     if (renderDiagnosticsEnabled() and diagnostic_draw < 96) std.debug.print(
         "ZPU profile draw seq={d} target={d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
