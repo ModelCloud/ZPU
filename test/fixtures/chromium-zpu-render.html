@@ -41,6 +41,14 @@
   const context = canvas.getContext('2d');
   const label = document.querySelector('#frame-label');
   let frame = 0;
+  function scheduleDraw() {
+    // A CPU Vulkan implementation still needs a changing compositor workload,
+    // but a full-resolution canvas redraw on every display tick prevents the
+    // DevTools screenshot command from getting a turn on small guest CPUs.
+    // CSS animation remains continuous; this keeps the canvas changing at a
+    // deliberate, observable cadence as well.
+    window.setTimeout(() => requestAnimationFrame(draw), 120);
+  }
   function draw() {
     frame++;
     const { width, height } = canvas;
@@ -55,8 +63,8 @@
     }
     context.stroke();
     if (frame % 20 === 0) label.textContent = `Frame ${frame}`;
-    requestAnimationFrame(draw);
+    scheduleDraw();
   }
   document.querySelector('#interact').addEventListener('click', () => document.body.classList.toggle('active'));
-  requestAnimationFrame(draw);
+  scheduleDraw();
 </script>
