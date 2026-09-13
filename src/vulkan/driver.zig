@@ -4043,6 +4043,12 @@ fn getPhysicalDeviceToolProperties(physical: ?Physical, count: ?*u32, output: ?[
 // the caller's output.  Keep the accepted handle domain bounded to the
 // currently assigned Vulkan external-handle bits and reject reserved bits.
 const external_handle_type_mask: u32 = 0x0000_3fff;
+// Chromium's shared-image backing buffers request the complete core usage
+// mask, including storage-texel usage, even when no buffer view is created.
+// Buffer-view creation remains gated by the reported per-format buffer
+// features below, so accepting the create-time usage does not advertise a
+// storage-texel view implementation.
+const supported_buffer_usage: u32 = 0x1ff;
 fn validExternalHandleType(handle_type: u32) bool {
     return handle_type == 0 or (handle_type & ~external_handle_type_mask == 0 and (handle_type & (handle_type - 1)) == 0);
 }
@@ -4056,7 +4062,7 @@ fn getPhysicalDeviceExternalBufferProperties(physical: ?Physical, info: ?*const 
     const h = physical orelse return;
     const i = info orelse return;
     const out = output orelse return;
-    if (i.s_type != 1000071002 or i.p_next != null or i.flags != 0 or i.usage & ~@as(u32, 0x1f7) != 0 or !validExternalHandleType(i.handle_type) or out.s_type != 1000071003 or out.p_next != null) return;
+    if (i.s_type != 1000071002 or i.p_next != null or i.flags != 0 or i.usage & ~supported_buffer_usage != 0 or !validExternalHandleType(i.handle_type) or out.s_type != 1000071003 or out.p_next != null) return;
     lock();
     defer mutex.unlock();
     if (!validPhysicalLocked(h)) return;
@@ -5217,12 +5223,7 @@ fn createBuffer(device: ?Device, info: ?*const BufferCreateInfo, alloc: ?*const 
     const out = output orelse return .error_initialization_failed;
     const pnext = bufferCreatePNextState(ci.p_next);
     const usage: u32 = if (pnext.has_usage) std.math.cast(u32, pnext.usage) orelse 0 else ci.usage;
-    // This implementation advertises uniform-texel buffers but not
-    // storage-texel buffers (format properties report no buffer features).
-    // Keep the accepted usage mask in lockstep with that capability: storage
-    // buffers are supported by the bounded compute profile, while bit 3
-    // (VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT) remains unsupported.
-    if (!pnext.valid or usage == 0 or usage & ~@as(u32, 0x1f7) != 0) {
+    if (!pnext.valid or usage == 0 or usage & ~supported_buffer_usage != 0) {
         hit(.invalid_buffer_usage);
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createBuffer usage rejected s_type={d} size={d} usage=0x{x} pnext_valid={} has_usage={} pnext_usage=0x{x}\n", .{ ci.s_type, ci.size, usage, pnext.valid, pnext.has_usage, pnext.usage });
         return .error_initialization_failed;
@@ -5652,7 +5653,7 @@ fn getDeviceBufferMemoryRequirements(device: ?Device, info: ?*const DeviceBuffer
     const ci = query.create_info orelse return;
     const pnext = bufferCreatePNextState(ci.p_next);
     const usage: u32 = if (pnext.has_usage) std.math.cast(u32, pnext.usage) orelse 0 else ci.usage;
-    if (ci.s_type != 12 or !pnext.valid or ci.flags != 0 or ci.size == 0 or ci.size > heap_size or usage == 0 or usage & ~@as(u32, 0x1f7) != 0 or ci.sharing_mode != 0 or ci.queue_family_index_count != 0) return;
+    if (ci.s_type != 12 or !pnext.valid or ci.flags != 0 or ci.size == 0 or ci.size > heap_size or usage == 0 or usage & ~supported_buffer_usage != 0 or ci.sharing_mode != 0 or ci.queue_family_index_count != 0) return;
     lock();
     defer mutex.unlock();
     if (validDeviceLocked(d)) {
@@ -24827,9 +24828,12 @@ test "child lifetime budget arithmetic count usage and layout regressions" {
     invalid_info.usage = 0;
     var ignored: usize = 0;
     try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &invalid_info, null, &ignored));
-    // Storage-texel buffers are not advertised by the format properties.
+    // Storage-texel usage is legal at buffer creation time even though no
+    // storage-texel buffer-view format is advertised.
     invalid_info.usage = 0x8;
-    try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &invalid_info, null, &ignored));
+    var storage_texel_buffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createBuffer(ctx.device, &invalid_info, null, &storage_texel_buffer));
+    destroyBuffer(ctx.device, storage_texel_buffer, null);
     // Retain an actually unknown bit for the second rejection case.
     invalid_info.usage = 0x400;
     try std.testing.expectEqual(Result.error_initialization_failed, createBuffer(ctx.device, &invalid_info, null, &ignored));
