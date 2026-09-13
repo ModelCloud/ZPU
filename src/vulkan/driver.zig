@@ -10352,7 +10352,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     // later profile attributable to an exact validated IR program.
     if (profile_ir_sequence < 512) {
         std.debug.print(
-            "ZPU profile IR seq={d} draw_seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} jit_candidate={s} fragment_ir={s} fragment_instructions={} vertex_ir={s} vertex_instructions={}\n",
+            "ZPU profile IR seq={d} draw_seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} jit_candidate={s} fragment_ir={x} fragment_instructions={} vertex_ir={x} vertex_instructions={}\n",
             .{ profile_ir_sequence, diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.prevalidatedPathName(), profile.fragment.jitCandidateName(), profile.fragment.program.identity.digest, profile.fragment.program.instructions.len, profile.vertex.program.identity.digest, profile.vertex.program.instructions.len },
         );
         if (profile_ir_sequence < 4) for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
