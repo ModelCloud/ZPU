@@ -54,9 +54,11 @@ pub const Value = struct {
 };
 
 pub const SampledImage = struct {
-    pub const Format = enum { r8_unorm, rgba8_unorm, bgra8_unorm };
+    pub const Format = enum { r8_unorm, rgba8_unorm, bgra8_unorm, ycbcr_420_2plane, ycbcr_420_3plane };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
+    pub const YcbcrModel = enum { identity, bt601, bt709, bt2020 };
+    pub const YcbcrRange = enum { full, narrow };
 
     pixels: []const u8,
     width: u32,
@@ -73,6 +75,16 @@ pub const SampledImage = struct {
     border: [4]f32 = .{ 0, 0, 0, 0 },
     // Vulkan image-view component mapping. The zero value is IDENTITY.
     swizzle: [4]i32 = .{ 0, 0, 0, 0 },
+    // Multi-planar 4:2:0 storage is deliberately explicit. `pixels` holds
+    // the full-resolution Y plane; plane_1 is U for I420 or interleaved UV
+    // for NV12, and plane_2 is V for I420. The driver wires these fields only
+    // after it has validated a Vulkan YCbCr conversion object.
+    plane_1: []const u8 = &.{},
+    plane_2: []const u8 = &.{},
+    plane_1_row_stride: u32 = 0,
+    plane_2_row_stride: u32 = 0,
+    ycbcr_model: YcbcrModel = .bt601,
+    ycbcr_range: YcbcrRange = .narrow,
 };
 
 pub const Binding = struct {
@@ -382,9 +394,67 @@ fn applySwizzle(image: SampledImage, source: [4]f32) Error![4]f32 {
     }
     return result;
 }
+
+fn ycbcrChannel(plane: []const u8, row_stride: u32, x: u32, y: u32, components: u32, lane: u32) Error!f32 {
+    const row = std.math.mul(usize, y, row_stride) catch return error.Bounds;
+    const column = std.math.mul(usize, x, components) catch return error.Bounds;
+    const offset = std.math.add(usize, row, column) catch return error.Bounds;
+    const index = std.math.add(usize, offset, lane) catch return error.Bounds;
+    if (index >= plane.len) return error.Bounds;
+    return @as(f32, @floatFromInt(plane[index])) / 255;
+}
+
+fn ycbcrToRgb(image: SampledImage, y_sample: f32, cb_sample: f32, cr_sample: f32) [4]f32 {
+    if (image.ycbcr_model == .identity) return .{ y_sample, cb_sample, cr_sample, 1 };
+    const y = if (image.ycbcr_range == .narrow) std.math.clamp((y_sample * 255 - 16) / 219, 0, 1) else y_sample;
+    const cb = if (image.ycbcr_range == .narrow) (cb_sample * 255 - 128) / 224 else cb_sample - 0.5;
+    const cr = if (image.ycbcr_range == .narrow) (cr_sample * 255 - 128) / 224 else cr_sample - 0.5;
+    const coefficients: [3]f32 = switch (image.ycbcr_model) {
+        .bt601 => .{ 1.402, 0.344136, 0.714136 },
+        .bt709 => .{ 1.5748, 0.187324, 0.468124 },
+        .bt2020 => .{ 1.4746, 0.164553, 0.571353 },
+        .identity => unreachable,
+    };
+    const blue: f32 = switch (image.ycbcr_model) {
+        .bt601 => 1.772,
+        .bt709 => 1.8556,
+        .bt2020 => 1.8814,
+        .identity => unreachable,
+    };
+    return .{
+        std.math.clamp(y + coefficients[0] * cr, 0, 1),
+        std.math.clamp(y - coefficients[1] * cb - coefficients[2] * cr, 0, 1),
+        std.math.clamp(y + blue * cb, 0, 1),
+        1,
+    };
+}
+
+fn ycbcrTexel(image: SampledImage, x: u32, y: u32) Error![4]f32 {
+    const chroma_width = (image.width + 1) / 2;
+    const chroma_height = (image.height + 1) / 2;
+    if (chroma_width == 0 or chroma_height == 0 or image.row_stride < image.width or image.plane_1_row_stride == 0) return error.Bounds;
+    const y_sample = try ycbcrChannel(image.pixels, image.row_stride, x, y, 1, 0);
+    const chroma_x = x / 2;
+    const chroma_y = y / 2;
+    if (chroma_x >= chroma_width or chroma_y >= chroma_height) return error.Bounds;
+    const cb_sample, const cr_sample = switch (image.format) {
+        .ycbcr_420_2plane => .{
+            try ycbcrChannel(image.plane_1, image.plane_1_row_stride, chroma_x, chroma_y, 2, 0),
+            try ycbcrChannel(image.plane_1, image.plane_1_row_stride, chroma_x, chroma_y, 2, 1),
+        },
+        .ycbcr_420_3plane => .{
+            try ycbcrChannel(image.plane_1, image.plane_1_row_stride, chroma_x, chroma_y, 1, 0),
+            try ycbcrChannel(image.plane_2, image.plane_2_row_stride, chroma_x, chroma_y, 1, 0),
+        },
+        else => return error.InvalidType,
+    };
+    return ycbcrToRgb(image, y_sample, cb_sample, cr_sample);
+}
+
 fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return applySwizzle(image, image.border);
     const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return applySwizzle(image, image.border);
+    if (image.format == .ycbcr_420_2plane or image.format == .ycbcr_420_3plane) return applySwizzle(image, try ycbcrTexel(image, addressed_x, addressed_y));
     const offset = std.math.add(
         usize,
         std.math.mul(usize, addressed_y, image.row_stride) catch return error.Bounds,
@@ -512,6 +582,70 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample converts bounded NV12 BT.601 limited-range video to RGB" {
+    // BT.601 limited-range Y=81, Cb=90, Cr=240 is the standard red test
+    // vector. Both luma rows deliberately share one 4:2:0 chroma sample.
+    const luma = [_]u8{ 81, 81, 81, 81 };
+    const chroma = [_]u8{ 90, 240 };
+    const image = SampledImage{
+        .pixels = &luma,
+        .width = 2,
+        .height = 2,
+        .row_stride = 2,
+        .bytes_per_texel = 1,
+        .format = .ycbcr_420_2plane,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .plane_1 = &chroma,
+        .plane_1_row_stride = 2,
+        .ycbcr_model = .bt601,
+        .ycbcr_range = .narrow,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.75));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.75));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.998), @as(f32, @bitCast(result.bits[0])), 0.004);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(result.bits[1])), 0.004);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(result.bits[2])), 0.004);
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample converts bounded I420 planes and rejects an underfilled plane" {
+    const luma = [_]u8{ 81, 81, 81, 81 };
+    const cb = [_]u8{90};
+    const cr = [_]u8{240};
+    const image = SampledImage{
+        .pixels = &luma,
+        .width = 2,
+        .height = 2,
+        .row_stride = 2,
+        .bytes_per_texel = 1,
+        .format = .ycbcr_420_3plane,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .plane_1 = &cb,
+        .plane_2 = &cr,
+        .plane_1_row_stride = 1,
+        .plane_2_row_stride = 1,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.25));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.25));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.998), @as(f32, @bitCast(result.bits[0])), 0.004);
+
+    var truncated = image;
+    truncated.plane_2 = &.{};
+    try std.testing.expectError(error.Bounds, sample(truncated, coordinates, bias));
 }
 
 test "sample applies Vulkan image-view component swizzle" {
