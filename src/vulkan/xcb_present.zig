@@ -13,6 +13,7 @@ const GenericError = extern struct { response_type: u8, error_code: u8, sequence
 const GetImageCookie = extern struct { sequence: u32 };
 const GetImageReply = opaque {};
 var verification_done = false;
+var present_dump_done = false;
 var previous_metric_present_ns: u64 = 0;
 const max_frame_metrics = 7_200;
 var frame_metrics: [max_frame_metrics]u64 = undefined;
@@ -129,6 +130,21 @@ fn recordFrameMetric(now: u64) void {
         }
     }
     previous_metric_present_ns = now;
+}
+
+fn dumpPresentPixels(pixels: []const u8) void {
+    if (present_dump_done) return;
+    const path = std.c.getenv("ZPU_PRESENT_DUMP") orelse return;
+    present_dump_done = true;
+    const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
+    if (fd < 0) return;
+    var offset: usize = 0;
+    while (offset < pixels.len) {
+        const amount = write(fd, pixels[offset..].ptr, pixels.len - offset);
+        if (amount <= 0) break;
+        offset += @intCast(amount);
+    }
+    _ = close(fd);
 }
 pub const Region = struct { x: u32 = 0, y: u32 = 0, width: u32 = 0, height: u32 = 0 };
 
@@ -310,6 +326,7 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
         recordFrameMetric(now);
         return true;
     }
+    dumpPresentPixels(pixels);
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
     const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
     if (pixels.len != expected) return false;
