@@ -1639,6 +1639,7 @@ pub const CommandBuffer = *CommandBufferObj;
 
 const max_objects = 64;
 const max_child_objects = 64;
+const max_command_pool_objects = 4096;
 const max_buffer_objects = 4096;
 const max_image_view_objects = 4096;
 const max_shader_modules = 4000;
@@ -1717,8 +1718,8 @@ var query_pool_objects: [max_child_objects]QueryPoolObj = undefined;
 var query_pool_state = [_]SlotState{.never} ** max_child_objects;
 var semaphore_objects: [max_child_objects]SemaphoreObj = undefined;
 var semaphore_state = [_]SlotState{.never} ** max_child_objects;
-var command_pool_objects: [max_child_objects]CommandPoolObj = undefined;
-var command_pool_state = [_]SlotState{.never} ** max_child_objects;
+var command_pool_objects: [max_command_pool_objects]CommandPoolObj = undefined;
+var command_pool_state = [_]SlotState{.never} ** max_command_pool_objects;
 var command_buffer_objects: [max_child_objects]CommandBufferObj = undefined;
 var command_buffer_impls: [max_child_objects]CommandBufferImpl = undefined;
 var command_buffer_state = [_]SlotState{.never} ** max_child_objects;
@@ -5392,6 +5393,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     const allowed_usage = imageFormatUsage(ci.format, ci.tiling);
     if (ci.usage == 0 or allowed_usage != 0 and ci.usage & ~allowed_usage != 0) {
         hit(.invalid_image_usage);
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage usage rejected format={d} tiling={d} usage=0x{x} allowed=0x{x}\n", .{ ci.format, ci.tiling, ci.usage, allowed_usage });
         return .error_initialization_failed;
     }
     if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
@@ -28152,7 +28154,7 @@ test "bounded child registries fail safely while buffer handles recycle slots" {
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &cb_info, &spare));
     freeCommandBuffers(ctx.device, pool, 1, &spare);
     var exhausted = false;
-    for (0..max_child_objects + 1) |_| {
+    for (0..max_command_pool_objects + 1) |_| {
         var handle: usize = 0;
         const result = createCommandPool(ctx.device, &pool_info, null, &handle);
         if (result == .error_out_of_host_memory) {
@@ -28475,7 +28477,6 @@ fn resetDeadChildSlotsForAbiTest() !void {
     const state_pairs = .{
         .{ "framebuffer", &framebuffer_state },
         .{ "render_pass", &render_pass_state },
-        .{ "command_pool", &command_pool_state },
         .{ "command_buffer", &command_buffer_state },
     };
     inline for (state_pairs) |pair| {
@@ -28487,6 +28488,11 @@ fn resetDeadChildSlotsForAbiTest() !void {
         }
         pair[1].* = [_]SlotState{.never} ** max_child_objects;
     }
+    for (command_pool_state, 0..) |state, i| {
+        if (state == .live) std.debug.print("resetDeadChildSlotsForAbiTest leak: command_pool[{d}]\n", .{i});
+        try std.testing.expect(state != .live);
+    }
+    command_pool_state = [_]SlotState{.never} ** max_command_pool_objects;
 }
 
 test "mapped-memory coherency ABI layout and behavior" {
