@@ -10345,8 +10345,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const profile_ir_primary_tile = if (mosaic_clip) |clip| clip.min_x == 0 and clip.min_y == 0 else true;
     if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile and render_diagnostic_profile_ir.fetchAdd(1, .monotonic) < 128) {
         std.debug.print(
-            "ZPU profile IR seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} fragment_instructions={} vertex_instructions={}\n",
-            .{ diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.prevalidatedPathName(), profile.fragment.program.instructions.len, profile.vertex.program.instructions.len },
+            "ZPU profile IR seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_path={s} jit_candidate={s} fragment_instructions={} vertex_instructions={}\n",
+            .{ diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.prevalidatedPathName(), profile.fragment.jitCandidateName(), profile.fragment.program.instructions.len, profile.vertex.program.instructions.len },
         );
         for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
             "ZPU profile IR fragment instruction={} op={s} type={any} operands={any} literal={any}\n",

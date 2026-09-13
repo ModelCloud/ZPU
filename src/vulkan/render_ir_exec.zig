@@ -793,6 +793,34 @@ const chromium_convolution_identity = [_]u8{
     0xa1, 0x05, 0xdc, 0xdc, 0x16, 0xaa, 0xaf, 0xc7,
 };
 
+/// Canonical identity of the 2,004-word Chromium fragment program captured
+/// from the VP9 Mosaic workload.  A runtime compiler must select by this
+/// post-validation Render-IR identity, never by an untrusted SPIR-V module
+/// name, word count, or a partial instruction prefix.
+const chromium_radial_gradient_identity = [_]u8{
+    0xee, 0x41, 0x2f, 0xa1, 0xcc, 0xd0, 0x0a, 0xe3,
+    0x4e, 0x59, 0xf2, 0x24, 0x1a, 0x1f, 0x03, 0x0c,
+    0x13, 0x57, 0xcb, 0x2f, 0x94, 0xc8, 0xfc, 0x21,
+    0xed, 0xad, 0x76, 0x0e, 0x37, 0xc3, 0x5d, 0x41,
+};
+
+/// Candidate classes which are permitted to cross the experimental
+/// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
+/// interpreter remains authoritative until the C ABI has independently
+/// validated every binding, output, and f32 edge case.
+pub const JitCandidate = enum {
+    chromium_radial_gradient_2004,
+};
+
+fn detectJitCandidate(program: *const ir.Program) ?JitCandidate {
+    // The exact instruction count is redundant with the canonical digest but
+    // makes accidental future broadening obvious during review. `init` has
+    // already cloned and validated the whole program before this point.
+    if (program.stage != .fragment or program.instructions.len != 251 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_radial_gradient_identity)) return null;
+    return .chromium_radial_gradient_2004;
+}
+
 fn convolutionMemberMatches(member: ir.UniformMember, ty: ir.Type, offset: u32, count: u32, stride: u32) bool {
     return same(member.ty, ty) and member.offset == offset and member.array_count == count and member.array_stride == stride;
 }
@@ -831,6 +859,7 @@ pub const Executor = struct {
     locals: []Value,
     output_scratch: []u8,
     fast_path: ?FastPath,
+    jit_candidate: ?JitCandidate,
 
     pub fn init(allocator: std.mem.Allocator, source: *const ir.Program) Error!Executor {
         if (source.instructions.len > ir.max_instructions or source.bytes.len > max_key_ir_bytes) return error.LimitExceeded;
@@ -846,7 +875,15 @@ pub const Executor = struct {
             total = std.math.add(usize, total, try byteSize(interface.ty)) catch return error.LimitExceeded;
         };
         const scratch = allocator.alloc(u8, total) catch return error.OutOfMemory;
-        return .{ .allocator = allocator, .program = program, .values = values, .locals = locals, .output_scratch = scratch, .fast_path = detectFastPath(&program) };
+        return .{
+            .allocator = allocator,
+            .program = program,
+            .values = values,
+            .locals = locals,
+            .output_scratch = scratch,
+            .fast_path = detectFastPath(&program),
+            .jit_candidate = detectJitCandidate(&program),
+        };
     }
     pub fn deinit(self: *Executor) void {
         self.allocator.free(self.output_scratch);
@@ -864,6 +901,16 @@ pub const Executor = struct {
         return switch (self.fast_path orelse return "interpreter") {
             .sample_modulate => "sample_modulate",
             .convolution_8tap => "convolution_8tap",
+        };
+    }
+
+    /// Name the only validated IR identity the optional ORC backend may
+    /// compile. This is diagnostic/selection metadata, not an execution-path
+    /// claim; `prevalidatedPathName` continues to describe the code actually
+    /// running on this executor.
+    pub fn jitCandidateName(self: *const Executor) []const u8 {
+        return switch (self.jit_candidate orelse return "none") {
+            .chromium_radial_gradient_2004 => "chromium_radial_gradient_2004",
         };
     }
 

@@ -5560,6 +5560,7 @@ test "Chromium Skia convolution shaders execute local state and uniform arrays" 
     defer fragment_program.deinit(std.testing.allocator);
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
+    try std.testing.expectEqualStrings("none", fragment_executor.jitCandidateName());
     var fragment_backing = [_][512]u8{.{0} ** 512} ** max_interfaces;
     var fragment_bindings: [max_interfaces]render_ir_exec.Binding = undefined;
     var fragment_outputs: [max_interfaces]render_ir_exec.Output = undefined;
@@ -5644,6 +5645,7 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     var executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer executor.deinit();
     try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+    try std.testing.expectEqualStrings("chromium_radial_gradient_2004", executor.jitCandidateName());
 
     // Exercise the captured profile with every live interface populated.  The
     // values intentionally select the dynamic gradient lookup and texture
