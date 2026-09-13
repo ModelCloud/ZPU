@@ -14479,7 +14479,13 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
 fn markCommandBufferInvalid(cb: ?CommandBuffer) void {
     lock();
     defer mutex.unlock();
-    if (validCommandBufferLocked(cb)) |c| c.impl.invalid = true;
+    if (validCommandBufferLocked(cb)) |c| {
+        if (failureDiagnosticsEnabled() and !c.impl.invalid) std.debug.print(
+            "ZPU command buffer invalidated caller=0x{x} state={d} count={} render_pass={} dynamic={}\n",
+            .{ @returnAddress(), c.impl.state, c.impl.count, c.impl.active_render_pass != null, c.impl.dynamic_rendering },
+        );
+        c.impl.invalid = true;
+    }
 }
 fn cmdBeginRenderPass2(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, subpass: ?*const SubpassBeginInfo) callconv(.c) void {
     const begin = subpass orelse {
