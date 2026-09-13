@@ -760,7 +760,7 @@ const TextureCopyFastPath = struct {
 /// Exact Chromium VP9 video-surface composite: sample a texture at the local
 /// coordinate and multiply every channel by scalar coverage.  This differs
 /// from sample_modulate only in the coverage ABI (scalar rather than vec4).
-const SampleCoverageFastPath = struct {
+pub const SampleCoverageFastPath = struct {
     coordinate_interface: u32,
     coverage_interface: u32,
     image_interface: u32,
@@ -1076,6 +1076,15 @@ pub const Executor = struct {
         };
     }
 
+    /// Return the resolved ABI for Chromium's exact VP9 scalar-coverage
+    /// compositor. This stays unavailable for every non-identical program.
+    pub fn sampleCoveragePlan(self: *const Executor) ?SampleCoverageFastPath {
+        return switch (self.fast_path orelse return null) {
+            .sample_coverage => |plan| plan,
+            else => null,
+        };
+    }
+
     /// These exact paths use no mutable executor values, locals, or
     /// derivative scratch after setup. A driver may execute disjoint pixel
     /// regions concurrently while retaining submission order within each
@@ -1325,6 +1334,25 @@ pub const Executor = struct {
             const sample_value: f32 = @bitCast(sampled.bits[lane]);
             const color_value: f32 = @bitCast(color.bits[lane]);
             std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
+        }
+        return true;
+    }
+
+    /// Direct resolved-input form of the exact VP9 scalar-coverage compositor.
+    /// It deliberately retains the normal decoder, sampler, canonical-float,
+    /// and bounded-output semantics while avoiding per-pixel binding-table
+    /// construction in the driver raster loop.
+    pub fn executeSampleCoverageDirect(self: *const Executor, coordinate_bytes: []const u8, coverage_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.sampleCoveragePlan() orelse return false;
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const coverage = try readInputValue(.{ .scalar = .f32 }, .{ .interface = path.coverage_interface, .bytes = coverage_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        const coverage_value: f32 = @bitCast(coverage.bits[0]);
+        for (0..4) |lane| {
+            const sample_value: f32 = @bitCast(sampled.bits[lane]);
+            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * coverage_value)), .little);
         }
         return true;
     }
@@ -3172,6 +3200,11 @@ test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
         const sampled: f32 = @as(f32, @floatFromInt(channel)) / 255;
         try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * 0.25)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
     }
+    const generic_output = output;
+    @memset(&output, 0);
+    try std.testing.expect(try executor.executeSampleCoverageDirect(&coordinates, &coverage, bindings[2].sampled_image.?, &output));
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    try std.testing.expectError(error.Bounds, executor.executeSampleCoverageDirect(coordinates[0..4], &coverage, bindings[2].sampled_image.?, &output));
 }
 
 test "forward branches execute local stores and select phi predecessors" {
