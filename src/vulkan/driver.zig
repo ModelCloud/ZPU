@@ -1762,6 +1762,7 @@ var render_diagnostic_page_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_texture_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_glyph_target_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
@@ -9691,10 +9692,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
-    if (renderDiagnosticsEnabled() and
-        ((op.descriptors.texture != null and op.descriptors.texture.?.width == 256 and
-            op.descriptors.texture.?.height == 64 and target.width == 1280 and target.height == 256) or
-            (op.descriptors.texture == null and op.vertex_count == 54 and target.width == 1536 and target.height == 128)) and
+    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 54 and
+        target.width == 1536 and target.height == 128 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
         std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
@@ -10048,6 +10047,17 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 };
             }
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+            if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 54 and
+                target.width == 1536 and target.height == 128 and x == 10 and y == 10 and
+                render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
+            {
+                var diagnostic_source: [4]f32 = undefined;
+                for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                std.debug.print(
+                    "ZPU glyph fragment xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
+                    .{ x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                );
+            }
             if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
                 op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
                 target.width == 1280 and target.height == 256 and x == 30 and y == 10)
