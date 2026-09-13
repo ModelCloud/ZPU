@@ -1836,6 +1836,7 @@ var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
 // the normal Vulkan path pays one cached disabled-mode branch and no clock
@@ -10470,6 +10471,14 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             "ZPU profile IR fragment instruction={} op={s} type={any} operands={any} literal={any}\n",
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
+        if (std.mem.eql(u8, &profile.fragment.program.identity.digest, &chromium_vp9_composite_fragment_identity) and render_diagnostic_vp9_profile_ir_dump.fetchAdd(1, .monotonic) == 0) {
+            std.debug.print("ZPU VP9 composite canonical IR begin\n", .{});
+            for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+                "ZPU VP9 composite IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+                .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+            );
+            std.debug.print("ZPU VP9 composite canonical IR end\n", .{});
+        }
     }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
