@@ -750,8 +750,16 @@ pub const SampleModulatePlan = struct {
     bias_literal: [4]u8,
 };
 
+const TextureCopyFastPath = struct {
+    coordinate_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
 const FastPath = union(enum) {
     sample_modulate: SampleModulatePlan,
+    texture_copy: TextureCopyFastPath,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -776,6 +784,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (detectChromiumTextureCopy(program)) |path| return .{ .texture_copy = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     const instructions = program.instructions;
@@ -805,6 +814,15 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
         .output_interface = 3,
         .bias_literal = instructions[0].literal[0..4].*,
     } };
+}
+
+const chromium_texture_copy_identity = [_]u8{ 0x7c, 0x59, 0xf3, 0xc8, 0xe2, 0x40, 0xd5, 0x24, 0xee, 0xa2, 0xe0, 0x83, 0x5c, 0x86, 0xf2, 0x62, 0x3b, 0xf3, 0x05, 0xcb, 0x81, 0x88, 0xba, 0x25, 0x3d, 0x20, 0x6c, 0x09, 0xcf, 0x89, 0xbf, 0x9c };
+
+fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyFastPath {
+    if (program.stage != .fragment or program.instructions.len != 13 or !std.mem.eql(u8, &program.identity.digest, &chromium_texture_copy_identity)) return null;
+    const instructions = program.instructions;
+    if (instructions[1].op != .constant or instructions[1].literal.len != 4 or instructions[7].op != .input or instructions[7].operands.len != 1 or instructions[9].op != .image_sample_implicit_lod or instructions[9].operands.len != 3 or instructions[11].op != .output or instructions[11].operands.len != 2) return null;
+    return .{ .coordinate_interface = instructions[7].operands[0], .image_interface = instructions[9].operands[0], .output_interface = instructions[11].operands[0], .bias_literal = instructions[1].literal[0..4].* };
 }
 
 /// Canonical identity of `chromium_skia_fragment_839.spv` after the supported
@@ -967,6 +985,7 @@ pub const Executor = struct {
     pub fn prevalidatedPathName(self: *const Executor) []const u8 {
         return switch (self.fast_path orelse return "interpreter") {
             .sample_modulate => "sample_modulate",
+            .texture_copy => "chromium_texture_copy",
             .convolution_8tap => "convolution_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
         };
@@ -1179,6 +1198,18 @@ pub const Executor = struct {
                     const color_value: f32 = @bitCast(color.bits[lane]);
                     std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
                 }
+            },
+            .texture_copy => |path| {
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| {
+                    if (candidate.interface == path.output_interface) output = candidate.bytes;
+                }
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(sampled.bits[lane]), .little);
             },
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
