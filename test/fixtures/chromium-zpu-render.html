@@ -2,16 +2,61 @@
 <meta charset="utf-8">
 <title>ZPU Chromium Vulkan render fixture</title>
 <style>
-  body { margin: 0; width: 1280px; min-height: 720px; background: #f7f9fc; color: #172033; font: 20px/1.5 sans-serif; }
+  :root { color-scheme: light; }
+  body { margin: 0; min-width: 320px; min-height: 2200px; background: #f7f9fc; color: #172033; font: 20px/1.5 sans-serif; }
   main { padding: 72px 96px; }
   h1 { margin: 0 0 20px; font-size: 56px; letter-spacing: -1px; }
   p { max-width: 760px; }
   button { margin-top: 24px; padding: 14px 24px; border: 0; border-radius: 8px; background: #1769e0; color: white; font: inherit; }
-  .card { margin-top: 52px; padding: 28px; width: 520px; border-radius: 14px; background: white; box-shadow: 0 8px 28px #17203322; }
+  .card { margin-top: 52px; padding: 28px; max-width: 520px; border-radius: 14px; background: white; box-shadow: 0 8px 28px #17203322; }
+  .scene { position: relative; isolation: isolate; min-height: 520px; margin: 72px 0; overflow: hidden; border-radius: 28px; background: linear-gradient(125deg, #0c2d62, #1769e0 46%, #72c8ff); box-shadow: 0 16px 42px #17203333; }
+  .scene::before { content: ""; position: absolute; inset: 15% 10%; border-radius: 50%; background: radial-gradient(circle, #fff8 0 12%, #fff0 55%); filter: blur(18px); }
+  .orbit { position: absolute; width: 108px; height: 108px; border-radius: 50%; background: conic-gradient(#fff, #80f1ff, #355de8, #fff); box-shadow: 0 0 42px #fff9; animation: orbit 2.8s ease-in-out infinite alternate; }
+  .orbit.a { left: 12%; top: 16%; }
+  .orbit.b { right: 15%; bottom: 18%; width: 74px; height: 74px; animation-delay: -1.2s; }
+  .scene-copy { position: relative; z-index: 1; max-width: 580px; padding: 92px 12%; color: white; text-shadow: 0 2px 10px #00255b; }
+  .scene-copy strong { display: block; font-size: clamp(28px, 5vw, 56px); letter-spacing: -1px; animation: breathe 1.8s ease-in-out infinite alternate; }
+  canvas { display: block; width: min(100%, 720px); height: 180px; margin-top: 44px; border-radius: 14px; background: #0d1b33; box-shadow: inset 0 0 0 1px #fff3; }
+  .scroll-marker { margin-top: 780px; padding: 34px; border-radius: 14px; background: #172033; color: white; }
+  .active .card { animation: pulse 650ms ease-in-out 3 alternate; }
+  @keyframes orbit { from { transform: translate3d(-16px, -10px, 0) scale(.8); opacity: .55; } to { transform: translate3d(64px, 42px, 0) scale(1.22); opacity: 1; } }
+  @keyframes breathe { from { transform: translateY(-3px); opacity: .68; } to { transform: translateY(4px); opacity: 1; } }
+  @keyframes pulse { from { transform: scale(1); } to { transform: scale(1.035); box-shadow: 0 16px 38px #1769e055; } }
+  @media (max-width: 640px) { main { padding: 42px 24px; } h1 { font-size: 40px; } }
 </style>
 <main>
   <h1>ZPU Vulkan rendering</h1>
   <p>This page exercises Chromium text, sampled images, rounded geometry, and compositing through the native ZPU Vulkan driver.</p>
-  <button>Interact with the compositor</button>
+  <button id="interact">Interact with the compositor</button>
   <section class="card"><strong>Native Skia Ganesh Vulkan</strong><br>Raster and presentation stay inside the ZPU CPU implementation.</section>
+  <section class="scene" aria-label="Animated compositor scene">
+    <i class="orbit a"></i><i class="orbit b"></i>
+    <div class="scene-copy"><strong id="frame-label">Frame 0</strong><span>Animated transforms, opacity, gradients, text, and a changing canvas.</span></div>
+  </section>
+  <canvas id="wave" width="1440" height="360" aria-label="Animated canvas"></canvas>
+  <section class="scroll-marker"><strong>Scrolled compositor content</strong><br>This marker verifies a second viewport of text and layered content after scrolling.</section>
 </main>
+<script>
+  const canvas = document.querySelector('#wave');
+  const context = canvas.getContext('2d');
+  const label = document.querySelector('#frame-label');
+  let frame = 0;
+  function draw() {
+    frame++;
+    const { width, height } = canvas;
+    context.clearRect(0, 0, width, height);
+    const gradient = context.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, '#1a8dff'); gradient.addColorStop(.55, '#9df5ff'); gradient.addColorStop(1, '#735cff');
+    context.strokeStyle = gradient; context.lineWidth = 14; context.lineCap = 'round';
+    context.beginPath();
+    for (let x = 0; x <= width; x += 12) {
+      const y = height / 2 + Math.sin(x / 85 + frame / 18) * 92 + Math.cos(x / 39 - frame / 24) * 22;
+      if (x === 0) context.moveTo(x, y); else context.lineTo(x, y);
+    }
+    context.stroke();
+    if (frame % 20 === 0) label.textContent = `Frame ${frame}`;
+    requestAnimationFrame(draw);
+  }
+  document.querySelector('#interact').addEventListener('click', () => document.body.classList.toggle('active'));
+  requestAnimationFrame(draw);
+</script>
