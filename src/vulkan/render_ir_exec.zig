@@ -257,14 +257,27 @@ fn readValue(ty: ir.Type, bytes: []const u8) Error!Value {
 }
 fn readUniformValue(ty: ir.Type, bytes: []const u8) Error!Value {
     if (ty.rows == 1) return readValue(ty, bytes);
-    const size = @as(usize, ty.columns) * 16;
+    const std140_stride: usize = 16;
+    const compact_stride: usize = @as(usize, ty.rows) * 4;
+    const std140_size = @as(usize, ty.columns) * std140_stride;
+    const stride = if (bytes.len >= std140_size) std140_stride else compact_stride;
+    const size = @as(usize, ty.columns) * stride;
     if (bytes.len < size) return error.Bounds;
     var result = Value{ .ty = ty };
     for (0..ty.columns) |column| for (0..ty.rows) |row| {
-        const offset = column * 16 + row * 4;
+        const offset = column * stride + row * 4;
         result.bits[column * ty.rows + row] = canonicalFloat(std.mem.readInt(u32, bytes[offset..][0..4], .little));
     };
     return result;
+}
+
+fn uniformValueByteSize(ty: ir.Type, available: usize) Error!usize {
+    if (ty.rows == 1) return byteSize(ty);
+    const std140_size = @as(usize, ty.columns) * 16;
+    if (available >= std140_size) return std140_size;
+    const compact_size = @as(usize, ty.columns) * @as(usize, ty.rows) * 4;
+    if (available < compact_size) return error.Bounds;
+    return compact_size;
 }
 fn readInputValue(ty: ir.Type, binding: Binding) Error!Value {
     var result = try readValue(ty, binding.bytes);
@@ -608,14 +621,21 @@ pub const Executor = struct {
                         if (index >= member.array_count) return error.Bounds;
                         offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
                     }
-                    const size = if (member_ty.rows == 1) try byteSize(member_ty) else @as(usize, member_ty.columns) * 16;
-                    if (offset > bytes.len or size > bytes.len - offset) {
+                    if (offset > bytes.len) {
                         if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access bytes out of bounds interface={} member={} offset={} size={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
-                            .{ interface_index, member_index, offset, size, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
+                            "ZPU render access offset out of bounds interface={} member={} offset={} bytes={}\n",
+                            .{ interface_index, member_index, offset, bytes.len },
                         );
                         return error.Bounds;
                     }
+                    const size = uniformValueByteSize(member_ty, bytes.len - offset) catch {
+                        if (renderDiagnosticsEnabled()) std.debug.print(
+                            "ZPU render access bytes out of bounds interface={} member={} offset={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
+                            .{ interface_index, member_index, offset, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
+                        );
+                        return error.Bounds;
+                    };
+                    if (size > bytes.len - offset) return error.Bounds;
                     const loaded = try readUniformValue(member_ty, bytes[offset..]);
                     if (instruction.operands.len == 2 or member.array_stride != 0) {
                         if (!same(member_ty, instruction.ty)) return error.InvalidType;
