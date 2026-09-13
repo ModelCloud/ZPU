@@ -1966,6 +1966,26 @@ fn profileShaderCaptureEnabled() bool {
 // the exact live SPIR-V before any specialization or ORC lowering is written.
 const chromium_vp9_composite_fragment_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
 
+// Chromium 152's VP9 color-transform fragment uses two one-parameter helper
+// functions.  Profile v1 deliberately does not claim arbitrary function-call
+// execution.  This exact raw-module identity is instead paired with the
+// deterministic output of `spirv-opt --inline-entry-points-exhaustive
+// --eliminate-dead-functions`: it is a semantics-preserving, call-free module
+// which the bounded frontend already validates and executes.  Do not broaden
+// this bridge by word count, name, or a partial interface match.
+const chromium_vp9_color_transform_raw_identity = [_]u8{ 0x93, 0x60, 0x74, 0x77, 0x7d, 0x15, 0xc2, 0x06, 0x3e, 0x00, 0x85, 0x68, 0x42, 0xef, 0xa1, 0x65, 0xea, 0xa8, 0xc7, 0xb7, 0x69, 0xac, 0x48, 0xb9, 0x2c, 0x5e, 0x9e, 0xc7, 0xdf, 0xd1, 0x59, 0xd8 };
+const chromium_vp9_color_transform_inline_bytes: [9_648]u8 align(4) = decodeChromiumVp9ColorTransformInline();
+
+fn decodeChromiumVp9ColorTransformInline() [9_648]u8 {
+    @setEvalBranchQuota(100_000);
+    const encoded = std.mem.trimEnd(u8, @embedFile("fixtures/chromium_vp9_color_transform_inline.spv.b64"), "\n");
+    var bytes: [9_648]u8 = undefined;
+    const decoded_size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch @compileError("invalid Chromium VP9 inline shader base64");
+    if (decoded_size != bytes.len) @compileError("unexpected Chromium VP9 inline shader size");
+    std.base64.standard.Decoder.decode(&bytes, encoded) catch @compileError("could not decode Chromium VP9 inline shader");
+    return bytes;
+}
+
 fn profileShaderCaptureCandidate(program: *const render_ir.Program) bool {
     return program.instructions.len >= 200 or std.mem.eql(u8, &program.identity.digest, &chromium_vp9_composite_fragment_identity);
 }
@@ -14115,6 +14135,12 @@ fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) voi
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
     if (cpuCubeShaderCompatible(shader, stage, name, specs.len)) return null;
+    if (stage == .fragment and specs.len == 0 and std.mem.eql(u8, name, "main") and std.mem.eql(u8, &shader.module.identity.digest, &chromium_vp9_color_transform_raw_identity)) {
+        return spirv_frontend.compile(stage_allocator, std.mem.bytesAsSlice(u32, &chromium_vp9_color_transform_inline_bytes), stage, name, specs) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Invalid,
+        };
+    }
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => {
@@ -14127,6 +14153,26 @@ fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const Shade
             return error.Invalid;
         },
     };
+}
+
+test "current Chromium VP9 color transform bridge is exact and call-free" {
+    var transformed_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&chromium_vp9_color_transform_inline_bytes, &transformed_digest, .{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x07, 0x5e, 0xb9, 0x34, 0x7c, 0x44, 0x62, 0xd7, 0x26, 0x1c, 0x9d, 0x9f, 0x28, 0x65, 0x70, 0x98, 0x51, 0x9c, 0xe0, 0x96, 0xcf, 0x72, 0x6f, 0x77, 0xb7, 0xad, 0x9d, 0xdf, 0x9f, 0x64, 0xad, 0xe9 }, &transformed_digest);
+    var words: [2_412]u32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&words), &chromium_vp9_color_transform_inline_bytes);
+    var shader = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = chromium_vp9_color_transform_raw_identity,
+    } } };
+    var program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(render_ir.Stage.fragment, program.stage);
+    try std.testing.expect(program.instructions.len > 100);
+    shader.module.identity.digest[0] ^= 1;
+    var generic_program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
+    defer generic_program.deinit(std.testing.allocator);
 }
 
 test "cpu_cube_v1 shader compatibility bridge is exact" {

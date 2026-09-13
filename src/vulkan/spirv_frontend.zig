@@ -89,7 +89,11 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 28, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 30, .operands = .{ .min = 1, .max = 17 } },
     .{ .opcode = 32, .operands = .{ .min = 3, .max = 3 } },
-    .{ .opcode = 33, .operands = .{ .min = 2, .max = 2 } },
+    // Function signatures may retain pointer parameters after an upstream
+    // optimizer inlines every call.  They are declarations, not executable
+    // function support, but rejecting their valid parameter list prevents a
+    // profile from reaching the now call-free entry point.
+    .{ .opcode = 33, .operands = .{ .min = 2, .max = 17 } },
     .{ .opcode = 41, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 42, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 43, .operands = .{ .min = 3, .max = 6 } },
@@ -934,8 +938,10 @@ pub fn compile(allocator: std.mem.Allocator, words: []const u32, requested_stage
                 try define(nodes, w[0], .{ .kind = .pointer, .a = w[1], .b = w[2] });
             },
             33 => {
-                if (w.len < 2 or w.len > 2) return error.Unsupported;
-                try define(nodes, w[0], .{ .kind = .function, .a = w[1] });
+                if (w.len < 2 or w.len > 17) return error.Malformed;
+                _ = try id(nodes, w[1]);
+                for (w[2..]) |parameter_type| _ = try id(nodes, parameter_type);
+                try define(nodes, w[0], .{ .kind = .function, .a = w[1], .words = w[2..] });
             },
             41, 42 => {
                 if (w.len != 2) return error.Malformed;
