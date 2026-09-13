@@ -8262,6 +8262,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     }
     for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
     for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
+    if (failureDiagnosticsEnabled() and c.impl.invalid) std.debug.print("ZPU pipeline barrier became invalid after recording cb=0x{x} count={d}\n", .{ @intFromPtr(c), c.impl.count });
 }
 fn validPipelineStageMask(stage_mask: u32) bool {
     // The only queue family advertises graphics, compute, and transfer.
@@ -16899,6 +16900,7 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     if (depth) |depth_image| if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth_image, .layer_count = framebuffer.?.layers } });
     if (image) |color_image| if (color_transition) record(command_buffer, .{ .transition = .{ .image = color_image, .old_layout = color_subpass_layout, .new_layout = render_pass.?.color_final_layout } });
     if (depth) |depth_image| if (depth_transition) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_subpass_layout, .new_layout = render_pass.?.depth_final_layout } });
+    if (failureDiagnosticsEnabled() and command_buffer.impl.invalid) std.debug.print("ZPU end render pass became invalid after recording cb=0x{x} count={d}\n", .{ @intFromPtr(command_buffer), command_buffer.impl.count });
     command_buffer.impl.active_framebuffer = null;
     command_buffer.impl.active_render_pass = null;
     command_buffer.impl.active_subpass = 0;
