@@ -1755,6 +1755,7 @@ var render_diagnostic_begins = std.atomic.Value(u32).init(0);
 var render_diagnostic_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_ir = std.atomic.Value(u32).init(0);
 var render_diagnostic_vertex_inputs = std.atomic.Value(u32).init(0);
+var render_diagnostic_copies = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -9353,6 +9354,18 @@ fn diagnosticDarkBounds(image: *ImageObj) cpu_cube.Rect {
     return bounds;
 }
 
+fn diagnoseImageTransfer(kind: []const u8, src: ?*ImageObj, dst: *ImageObj) void {
+    if (!renderDiagnosticsEnabled()) return;
+    const sequence = render_diagnostic_copies.fetchAdd(1, .monotonic);
+    if (sequence >= 256) return;
+    const source = if (src) |image| image else null;
+    if ((dst.width < 256 and dst.height < 64) or (source != null and source.?.width < 256 and source.?.height < 64)) return;
+    std.debug.print(
+        "ZPU image transfer seq={d} op={s} src={d}x{d}/dark={d} dst-before={d}x{d}/dark={d}\n",
+        .{ sequence, kind, if (source) |image| image.width else 0, if (source) |image| image.height else 0, if (source) |image| diagnosticDarkPixelCount(image) else 0, dst.width, dst.height, diagnosticDarkPixelCount(dst) },
+    );
+}
+
 fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
@@ -10434,13 +10447,19 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             }
         },
         .buffer_to_image => |op| {
+            diagnoseImageTransfer("buffer_to_image", null, op.dst);
             copyBufferImage(op.src, op.dst, op.region, true);
             invalidateImageContents(op.dst);
         },
         .image_to_buffer => |op| {
+            if (renderDiagnosticsEnabled() and render_diagnostic_copies.load(.monotonic) < 256) {
+                const sequence = render_diagnostic_copies.fetchAdd(1, .monotonic);
+                std.debug.print("ZPU image transfer seq={d} op=image_to_buffer src={d}x{d}/dark={d} dst-buffer={d}\n", .{ sequence, op.src.width, op.src.height, diagnosticDarkPixelCount(op.src), op.dst.size });
+            }
             copyBufferImage(op.dst, op.src, op.region, false);
         },
         .copy_image => |op| {
+            diagnoseImageTransfer("copy_image", op.src, op.dst);
             const src = imageBytes(op.src);
             const dst = imageBytes(op.dst);
             var layer: u32 = 0;
@@ -10458,8 +10477,14 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             }
             invalidateImageContents(op.dst);
         },
-        .blit_image => |op| executeBlitImage(op),
-        .resolve_image => |op| executeResolveImage(op),
+        .blit_image => |op| {
+            diagnoseImageTransfer("blit_image", op.src, op.dst);
+            executeBlitImage(op);
+        },
+        .resolve_image => |op| {
+            diagnoseImageTransfer("resolve_image", op.src, op.dst);
+            executeResolveImage(op);
+        },
         .transition => |op| {
             op.image.layout = op.new_layout;
             hit(.barrier_transition);
