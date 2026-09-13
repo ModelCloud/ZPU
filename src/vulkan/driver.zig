@@ -3807,9 +3807,9 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
     out.* = switch (format) {
-        37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x200 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x200 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
-        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x200 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x200 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
@@ -17532,7 +17532,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u64, heap_size), memory_properties.memory_heaps[0].size);
         var format_properties: FormatProperties = undefined;
         getFormatProperties(physical[0], 44, &format_properties);
-        try std.testing.expectEqual(@as(u32, 0xd381), format_properties.optimal_tiling_features);
+        try std.testing.expectEqual(@as(u32, 0xd181), format_properties.optimal_tiling_features);
         var image_format_properties: ImageFormatProperties = undefined;
         try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 44, 1, 0, 0x13, 0, &image_format_properties));
         try std.testing.expectEqual(@as(u32, 1), image_format_properties.sample_counts);
@@ -20665,9 +20665,9 @@ test "all physical queries cover success boundaries and invalid handles" {
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
     const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
-        .{ .format = 37, .linear = 0xd381, .optimal = 0xd381, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .linear_usage = 0x4, .optimal_usage = 0x4 },
-        .{ .format = 44, .linear = 0xd381, .optimal = 0xd381, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
     };
     for (format_cases) |case| {
@@ -21524,13 +21524,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     properties.p_next = null;
     var format = PhysicalDeviceFormatProperties2{ .s_type = 1000059002, .p_next = null, .format_properties = std.mem.zeroes(FormatProperties) };
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u32, 0xd381), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u32, 0xd181), format.format_properties.optimal_tiling_features);
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(FormatProperties3));
     var format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xffff_ffff_ffff_ffff, .optimal_tiling_features = 0xffff_ffff_ffff_ffff, .buffer_features = 0xffff_ffff_ffff_ffff };
     format.p_next = @ptrCast(&format3);
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u64, 0xd381), format3.optimal_tiling_features);
-    try std.testing.expectEqual(@as(u64, 0xd381), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xd181), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xd181), format3.linear_tiling_features);
     var duplicate_format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xaaaa, .optimal_tiling_features = 0xbbbb, .buffer_features = 0xcccc };
     format3.p_next = @ptrCast(&duplicate_format3);
     format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
