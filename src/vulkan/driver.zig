@@ -1836,6 +1836,28 @@ var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
+// Command-family timing is intentionally independent of the verbose render
+// diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
+// the normal Vulkan path pays one cached disabled-mode branch and no clock
+// reads or counter traffic.
+const CommandTimingKind = enum(u8) {
+    buffer,
+    clear,
+    compute,
+    transfer,
+    profile_draw,
+    legacy_draw,
+    indirect_draw,
+    mosaic_profile_batch,
+    mosaic_legacy_batch,
+    synchronization,
+    other,
+};
+const command_timing_kind_count = 11;
+var command_timing_mode = std.atomic.Value(u8).init(0);
+var command_timing_counts = [_]std.atomic.Value(u64){std.atomic.Value(u64).init(0)} ** command_timing_kind_count;
+var command_timing_elapsed_ns = [_]std.atomic.Value(u64){std.atomic.Value(u64).init(0)} ** command_timing_kind_count;
+var command_timing_summaries = std.atomic.Value(u32).init(0);
 // These counters deliberately describe accepted native work rather than API
 // attempts.  They make a Chromium run auditable even when its per-draw trace
 // is capped: every line is scoped to this ICD process and is emitted only by
@@ -1915,6 +1937,71 @@ fn profileShaderCaptureEnabled() bool {
 fn profileTimingDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_TIMING") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Cache this process-wide diagnostic choice on first use. Chromium supplies
+/// its environment before it loads the ICD, and caching avoids a getenv for
+/// every accepted command in the normal disabled configuration.
+fn commandTimingDiagnosticsEnabled() bool {
+    const current = command_timing_mode.load(.acquire);
+    if (current != 0) return current == 2;
+    const raw = std.c.getenv("ZPU_DIAGNOSE_COMMAND_TIMING");
+    const candidate: u8 = if (raw != null and std.mem.eql(u8, std.mem.span(raw.?), "1")) 2 else 1;
+    if (command_timing_mode.cmpxchgStrong(0, candidate, .acq_rel, .acquire)) |winner| return winner == 2;
+    return candidate == 2;
+}
+
+fn commandTimingKind(command: Command) CommandTimingKind {
+    return switch (command) {
+        .fill, .update_buffer, .copy_buffer => .buffer,
+        .clear, .clear_depth, .render_clear, .clear_attachments, .clear_attachments_deferred, .discard_image => .clear,
+        .dispatch, .dispatch_indirect => .compute,
+        .buffer_to_image, .image_to_buffer, .copy_image, .blit_image, .resolve_image => .transfer,
+        .cube_draw => |op| if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) .profile_draw else .legacy_draw,
+        .indirect_draw => .indirect_draw,
+        .transition, .event_set, .event_reset, .event_wait, .buffer_barrier, .query_reset, .query_begin, .query_end, .query_timestamp, .query_copy => .synchronization,
+        .next_subpass => .other,
+    };
+}
+
+fn recordCommandTiming(kind: CommandTimingKind, elapsed_ns: u64) void {
+    const index: usize = @intFromEnum(kind);
+    _ = command_timing_counts[index].fetchAdd(1, .monotonic);
+    _ = command_timing_elapsed_ns[index].fetchAdd(elapsed_ns, .monotonic);
+}
+
+fn emitCommandTimingSummary() void {
+    if (!commandTimingDiagnosticsEnabled()) return;
+    const sequence = command_timing_summaries.fetchAdd(1, .monotonic);
+    if (!shouldEmitRenderDiagnosticSession(sequence)) return;
+    std.debug.print(
+        "ZPU command timing present={d} buffer={d}/{d} clear={d}/{d} compute={d}/{d} transfer={d}/{d} profile_draw={d}/{d} legacy_draw={d}/{d} indirect={d}/{d} mosaic_profile={d}/{d} mosaic_legacy={d}/{d} sync={d}/{d} other={d}/{d}\\n",
+        .{
+            sequence,
+            command_timing_counts[@intFromEnum(CommandTimingKind.buffer)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.buffer)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.clear)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.clear)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.compute)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.compute)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.transfer)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.transfer)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.profile_draw)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.profile_draw)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.legacy_draw)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.legacy_draw)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.indirect_draw)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.indirect_draw)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.mosaic_profile_batch)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.mosaic_profile_batch)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.mosaic_legacy_batch)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.mosaic_legacy_batch)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.synchronization)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.synchronization)].load(.acquire),
+            command_timing_counts[@intFromEnum(CommandTimingKind.other)].load(.acquire),
+            command_timing_elapsed_ns[@intFromEnum(CommandTimingKind.other)].load(.acquire),
+        },
+    );
 }
 
 fn renderDiagnosticSessionId() u64 {
@@ -11098,6 +11185,12 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     // frame pacing shows time spent before presentation rather than attributing
     // it to an opaque gap in the browser.
     color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+    if (commandTimingDiagnosticsEnabled()) {
+        // The batch executes outside executeValidatedCommand so it must record
+        // its own inclusive timing.  Count it once, rather than once per tile,
+        // to preserve the Vulkan command-stream level of attribution.
+        recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+    }
     // A Chromium startup can consume several samples before animated content
     // begins. Keep the opt-in window long enough to include steady-state
     // video composition while still bounding log volume.
@@ -11166,7 +11259,10 @@ fn executeMosaicCommandBatchStreams(cursor: *MosaicCommandCursor, query_context:
         candidate.advance();
     }
     if (batch_len < 2) return null;
+    const timing_enabled = commandTimingDiagnosticsEnabled();
+    const operation_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
     _ = executeMosaicPreparedBatch(first, batch[0..batch_len], query_context);
+    if (timing_enabled) recordCommandTiming(.mosaic_legacy_batch, frame_pacing.monotonicNs() - operation_start);
     cursor.* = candidate;
     return batch_len;
 }
@@ -11194,6 +11290,13 @@ fn executeValidatedCommands(commands: []const Command, query_context: *QueryExec
 }
 
 fn executeValidatedCommand(command: Command, query_context: *QueryExecutionContext) void {
+    if (!commandTimingDiagnosticsEnabled()) return executeValidatedCommandImpl(command, query_context);
+    const start = frame_pacing.monotonicNs();
+    executeValidatedCommandImpl(command, query_context);
+    recordCommandTiming(commandTimingKind(command), frame_pacing.monotonicNs() - start);
+}
+
+fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionContext) void {
     switch (command) {
         .fill => |op| {
             const bytes = bufferBytes(op.dst)[@intCast(op.offset)..][0..@intCast(op.size)];
@@ -11469,7 +11572,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 cube.cube_draw.color_base_layer = op.color_base_layer;
                 cube.cube_draw.depth_base_layer = op.depth_base_layer;
                 cube.cube_draw.layer_count = op.layer_count;
-                executeValidatedCommand(cube, query_context);
+                // Keep the indirect command's timing inclusive.  The
+                // synthesized draw is an implementation detail, not a second
+                // Vulkan command in the application's stream.
+                executeValidatedCommandImpl(cube, query_context);
             }
         },
         .buffer_to_image => |op| {
@@ -18087,6 +18193,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         const content = xcb_present.Region{ .x = @intCast(@max(image.content_bounds.x, 0)), .y = @intCast(@max(image.content_bounds.y, 0)), .width = image.content_bounds.width, .height = image.content_bounds.height };
         const force_full = image.force_full_present;
+        emitCommandTimingSummary();
         if (renderDiagnosticsEnabled()) {
             const present_diagnostic = render_diagnostic_presents.fetchAdd(1, .monotonic);
             if (present_diagnostic < 32) std.debug.print(
