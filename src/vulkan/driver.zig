@@ -9867,12 +9867,13 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     );
                     return;
                 };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
+                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and (op.vertex_count == 102 or op.vertex_count == 474)) {
                     const geometry_sequence = render_diagnostic_page_geometry.fetchAdd(1, .monotonic);
                     if (geometry_sequence < 24) std.debug.print(
-                        "ZPU page geometry input seq={d} triangle={d} corner={d} location={d} binding={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
+                        "ZPU page geometry input seq={d} vertices={d} triangle={d} corner={d} location={d} binding={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
                         .{
                             geometry_sequence,
+                            op.vertex_count,
                             triangle_index,
                             corner,
                             input.location,
@@ -10089,8 +10090,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     );
                     return;
                 };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
-                    ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
+                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and (op.vertex_count == 102 or op.vertex_count == 474) and
+                    ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175) or (op.vertex_count == 474 and x == 100 and y == 100)))
                 {
                     var diagnostic_output: [4]f32 = undefined;
                     for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
