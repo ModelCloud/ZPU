@@ -1764,6 +1764,7 @@ var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_glyph_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
+var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -10194,6 +10195,15 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
     const first_depth = first.depth_image orelse if (first.framebuffer) |fb| fb.depth_image else null;
     const color_image = first_color orelse return 0;
     const depth_image = first_depth orelse return 0;
+    if (renderDiagnosticsEnabled()) {
+        const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+        if (diagnostic_batch < 64) {
+            std.debug.print(
+                "ZPU Mosaic batch seq={d} commands={d} target={x} {d}x{d} first_texture={x} {d}x{d}/bytes={} vertices={d}\n",
+                .{ diagnostic_batch, batch.len, @intFromPtr(color_image), color_image.width, color_image.height, @intFromPtr(first.descriptors.texture.?), first.descriptors.texture.?.width, first.descriptors.texture.?.height, if (first.descriptors.texture.?.owned_bytes) |bytes| bytes.len else imageBytes(first.descriptors.texture.?).len, first.vertex_count },
+            );
+        }
+    }
     const color_bytes = imageLayerBytes(color_image, first.color_base_layer);
     const depth_bytes = imageLayerBytes(depth_image, first.depth_base_layer);
     const operation_start = frame_pacing.monotonicNs();
