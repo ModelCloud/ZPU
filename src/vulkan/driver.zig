@@ -1821,6 +1821,7 @@ var render_diagnostic_clears = std.atomic.Value(u32).init(0);
 var render_diagnostic_begins = std.atomic.Value(u32).init(0);
 var render_diagnostic_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_ir = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_shader_capture = std.atomic.Value(u32).init(0);
 var render_diagnostic_vertex_inputs = std.atomic.Value(u32).init(0);
 var render_diagnostic_copies = std.atomic.Value(u32).init(0);
 var render_diagnostic_page_geometry = std.atomic.Value(u32).init(0);
@@ -1894,6 +1895,15 @@ fn renderDiagnosticsEnabled() bool {
 /// every raster operation.
 fn profileIrDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Emit a bounded raw shader capture only when the operator explicitly asks
+/// for it. The log record is for turning an already accepted live profile into
+/// a deterministic regression/JIT fixture; it never writes an attacker-chosen
+/// filesystem path from inside Chromium's GPU process.
+fn profileShaderCaptureEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_SHADER_BYTES") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
@@ -13110,6 +13120,12 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
         if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
+            if (frontend_stage == .fragment and profileShaderCaptureEnabled() and program.instructions.len >= 200 and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
+                std.debug.print(
+                    "ZPU profile shader capture spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
+                    .{ shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
+                );
+            }
             if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
         }
     }
