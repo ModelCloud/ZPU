@@ -205,6 +205,12 @@ fn monotonicNs() u64 {
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
+fn diagnoseFailure(comptime reason: []const u8) void {
+    if (builtin.is_test) return;
+    const enabled = std.c.getenv("ZPU_DIAGNOSE_FAILURES") orelse return;
+    if (enabled[0] == '1') std.debug.print("ZPU XCB present rejected: {s}\n", .{reason});
+}
+
 /// Creates persistent X resources once per swapchain. Frames are uploaded to
 /// an off-screen pixmap and made visible by one CopyArea, so strip boundaries
 /// can never become partially exposed window contents.
@@ -267,10 +273,19 @@ pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_
         return pixels.len == @as(usize, width) * height * 4;
     }
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
-    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
-    if (pixels.len != expected or pixels.len > std.math.maxInt(u32)) return false;
+    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch {
+        diagnoseFailure("upload size overflow");
+        return false;
+    };
+    if (pixels.len != expected or pixels.len > std.math.maxInt(u32)) {
+        diagnoseFailure("upload pixel envelope");
+        return false;
+    }
     const connection = transport.connection;
-    if (xcb_connection_has_error(connection) != 0) return false;
+    if (xcb_connection_has_error(connection) != 0) {
+        diagnoseFailure("upload XCB connection");
+        return false;
+    }
     const row_bytes = @as(usize, width) * 4;
     const request_bytes = @as(usize, xcb_get_maximum_request_length(connection)) * 4;
     const payload_bytes = if (request_bytes > 64) request_bytes - 64 else 0;
@@ -286,12 +301,18 @@ pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_
     if (transport.shared_upload) |shared| {
         const shared_start = @intFromPtr(shared.address.ptr);
         const pixel_start = @intFromPtr(pixels.ptr);
-        if (pixels.len > shared.address.len or pixel_start < shared_start or pixel_start - shared_start > shared.address.len - pixels.len) return false;
+        if (pixels.len > shared.address.len or pixel_start < shared_start or pixel_start - shared_start > shared.address.len - pixels.len) {
+            diagnoseFailure("upload shared-memory range");
+            return false;
+        }
         if (damage.width != 0 and damage.height != 0) {
             const offset: u32 = @intCast(pixel_start - shared_start);
             _ = shared.api.put_image(connection, transport.pixmap, transport.gc, @intCast(width), @intCast(height), @intCast(damage.x), @intCast(damage.y), @intCast(damage.width), @intCast(damage.height), @intCast(damage.x), @intCast(damage.y), 24, 2, 0, shared.segment, offset);
             transport.last.upload_requests = 1;
-            const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse return false;
+            const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse {
+                diagnoseFailure("upload XCB round trip");
+                return false;
+            };
             std.c.free(reply);
         }
     } else {
@@ -326,8 +347,14 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     }
     dumpPresentPixels(pixels);
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
-    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
-    if (pixels.len != expected) return false;
+    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch {
+        diagnoseFailure("commit size overflow");
+        return false;
+    };
+    if (pixels.len != expected) {
+        diagnoseFailure("commit pixel envelope");
+        return false;
+    }
     const connection = transport.connection;
     const copy_start = monotonicNs();
     transport.last.copy_start_ns = copy_start;
@@ -336,7 +363,10 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     transport.last.copy_end_ns = monotonicNs();
     transport.last.copy_ns = transport.last.copy_end_ns - copy_start;
     const flush_start = monotonicNs();
-    if (xcb_flush(connection) <= 0) return false;
+    if (xcb_flush(connection) <= 0) {
+        diagnoseFailure("commit XCB flush");
+        return false;
+    }
     transport.last.flush_end_ns = monotonicNs();
     transport.last.flush_ns = transport.last.flush_end_ns - flush_start;
     transport.last.transport_total_ns = transport.last.flush_end_ns - transport.last.present_start_ns;
