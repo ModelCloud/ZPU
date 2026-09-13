@@ -14351,6 +14351,23 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     try executor.executeVp9ColorTransformPrepared(prepared, &coordinates, &coordinates, &prepared_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
+
+    const filtered_luma_pixels = [_]u8{ 0, 64, 192, 255 };
+    const filtered_chroma_pixels = [_]u8{ 12, 222, 48, 176, 96, 128, 240, 16 };
+    const filtered_luma = render_ir_exec.SampledImage{ .pixels = &filtered_luma_pixels, .width = 2, .height = 2, .row_stride = 2, .bytes_per_texel = 1, .format = .r8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    const filtered_chroma = render_ir_exec.SampledImage{ .pixels = &filtered_chroma_pixels, .width = 2, .height = 2, .row_stride = 4, .bytes_per_texel = 2, .format = .rg8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    writeF32(&coordinates, 0, 0.37);
+    writeF32(&coordinates, 4, 0.62);
+    const filtered_bindings = [_]render_ir_exec.Binding{
+        .{ .interface = 0, .bytes = &color }, .{ .interface = 1, .bytes = &coordinates }, .{ .interface = 2, .bytes = &coordinates }, .{ .interface = 3, .bytes = &facing }, .{ .interface = 5, .bytes = &uniform }, .{ .interface = 6, .sampled_image = filtered_luma }, .{ .interface = 7, .sampled_image = filtered_chroma },
+    };
+    var filtered_generic_output = [_]u8{0} ** 16;
+    var filtered_prepared_output = [_]u8{0} ** 16;
+    const filtered_outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &filtered_generic_output }};
+    try executor.execute(&filtered_bindings, &filtered_outputs);
+    const filtered_prepared = (try executor.prepareVp9ColorTransform(&uniform, filtered_luma, filtered_chroma)).?;
+    try executor.executeVp9ColorTransformPrepared(filtered_prepared, &coordinates, &coordinates, &filtered_prepared_output);
+    try std.testing.expectEqualSlices(u8, &filtered_generic_output, &filtered_prepared_output);
     try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
     try std.testing.expectError(error.Bounds, executor.prepareVp9ColorTransform(uniform[0..483], luma_image, chroma_image));
 }

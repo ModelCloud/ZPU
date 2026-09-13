@@ -1424,6 +1424,42 @@ pub const Executor = struct {
         return matrix;
     }
 
+    fn validateVp9SampledImage(image: SampledImage) Error!void {
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+    }
+
+    fn sampleVp9ColorTransformImage(image: SampledImage, u: f32, v: f32) Error![4]f32 {
+        // The VP9 shader's fixed implicit bias is finite, so preparation has
+        // already validated the sampler's draw-invariant geometry. Preserve
+        // `sample`'s coordinate, filtering, address, texel, and NaN rules
+        // while avoiding Value packing for every video pixel.
+        if (!std.math.isFinite(u) or !std.math.isFinite(v)) return error.NumericDomain;
+        const normalized_u = normalizedCoordinate(u, image.address_u);
+        const normalized_v = normalizedCoordinate(v, image.address_v);
+        var rgba = image.border;
+        if (normalized_u) |sample_u| if (normalized_v) |sample_v| {
+            const fx = sample_u * @as(f32, @floatFromInt(image.width)) - 0.5;
+            const fy = sample_v * @as(f32, @floatFromInt(image.height)) - 0.5;
+            if (image.filter == .nearest) {
+                rgba = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+            } else {
+                const x0: i32 = @intFromFloat(@floor(fx));
+                const y0: i32 = @intFromFloat(@floor(fy));
+                const tx = fx - @floor(fx);
+                const ty = fy - @floor(fy);
+                const p00 = try texel(image, x0, y0);
+                const p10 = try texel(image, x0 + 1, y0);
+                const p01 = try texel(image, x0, y0 + 1);
+                const p11 = try texel(image, x0 + 1, y0 + 1);
+                for (0..4) |lane| rgba[lane] =
+                    (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+                    (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+            }
+        };
+        for (&rgba) |*channel| channel.* = canonicalF32(channel.*);
+        return rgba;
+    }
+
     fn vectorTimesColorTransformMatrix(vector: [3]f32, matrix: [3][3]f32) [3]f32 {
         var result: [3]f32 = undefined;
         for (0..3) |column| {
@@ -1464,12 +1500,10 @@ pub const Executor = struct {
 
     fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
         if (bytes.len < 16) return error.Bounds;
-        const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
-        const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
-        const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
-        const luma = try sample(prepared.luma_image, luma_coordinates, bias);
-        const chroma = try sample(prepared.chroma_image, chroma_coordinates, bias);
-        var source = [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
+        if (luma_coordinate_bytes.len < 8 or chroma_coordinate_bytes.len < 8) return error.Bounds;
+        const luma = try sampleVp9ColorTransformImage(prepared.luma_image, @bitCast(std.mem.readInt(u32, luma_coordinate_bytes[0..4], .little)), @bitCast(std.mem.readInt(u32, luma_coordinate_bytes[4..8], .little)));
+        const chroma = try sampleVp9ColorTransformImage(prepared.chroma_image, @bitCast(std.mem.readInt(u32, chroma_coordinate_bytes[0..4], .little)), @bitCast(std.mem.readInt(u32, chroma_coordinate_bytes[4..8], .little)));
+        var source = [_]f32{ luma[0], chroma[0], chroma[1] };
         source = vectorTimesColorTransformMatrix(source, prepared.source_matrix);
         for (0..3) |lane| source[lane] = colorTransformClamp(canonicalF32(source[lane] + prepared.source_offset[lane]));
         for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);
@@ -1612,6 +1646,8 @@ pub const Executor = struct {
     pub fn prepareVp9ColorTransform(self: *const Executor, uniform: []const u8, luma_image: SampledImage, chroma_image: SampledImage) Error!?Vp9ColorTransformPrepared {
         _ = self.vp9ColorTransformPlan() orelse return null;
         if (uniform.len < 484) return error.Bounds;
+        try validateVp9SampledImage(luma_image);
+        try validateVp9SampledImage(chroma_image);
         var source_offset: [3]f32 = undefined;
         for (0..source_offset.len) |lane| source_offset[lane] = try uniformF32(uniform, 160 + lane * 4);
         return .{
