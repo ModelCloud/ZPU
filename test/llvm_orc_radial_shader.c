@@ -143,7 +143,19 @@ int main(void) {
     LLVMDisposeMessage(cpu_name);
     LLVMDisposeMessage(features);
     LLVMOrcLLJITRef jit = NULL;
-    if (consume_error(LLVMOrcCreateLLJIT(&jit, NULL))) return 5;
+    LLVMOrcJITTargetMachineBuilderRef target_machine = NULL;
+    if (consume_error(LLVMOrcJITTargetMachineBuilderDetectHost(&target_machine))) return 5;
+    LLVMOrcLLJITBuilderRef jit_builder = LLVMOrcCreateLLJITBuilder();
+    if (jit_builder == NULL) {
+        LLVMOrcDisposeJITTargetMachineBuilder(target_machine);
+        return 5;
+    }
+    // DetectHost reads the process's actual CPUID/XCR0-enabled feature set.
+    // Passing it explicitly keeps this test from silently targeting the
+    // baseline build CPU and is the same gate the eventual Mosaic dispatcher
+    // must use before selecting generated AVX-family code.
+    LLVMOrcLLJITBuilderSetJITTargetMachineBuilder(jit_builder, target_machine);
+    if (consume_error(LLVMOrcCreateLLJIT(&jit, jit_builder))) return 5;
     LLVMContextRef context = LLVMContextCreate();
     if (context == NULL) {
         (void)consume_error(LLVMOrcDisposeLLJIT(jit));
