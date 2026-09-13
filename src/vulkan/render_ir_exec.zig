@@ -785,6 +785,20 @@ pub const Vp9ColorTransformPlan = struct {
     bias_literal: [4]u8,
 };
 
+/// Draw-invariant state for the exact validated Chromium VP9 transform.  It
+/// is constructed only after the executor has selected that canonical IR
+/// identity, so caching it cannot broaden the specialization to another
+/// color-management shader.
+pub const Vp9ColorTransformPrepared = struct {
+    luma_image: SampledImage,
+    chroma_image: SampledImage,
+    source_matrix: [3][3]f32,
+    source_offset: [3]f32,
+    source_transfer: [7]f32,
+    destination_matrix: [3][3]f32,
+    destination_transfer: [7]f32,
+};
+
 const FastPath = union(enum) {
     sample_modulate: SampleModulatePlan,
     texture_copy: TextureCopyFastPath,
@@ -1369,6 +1383,34 @@ pub const Executor = struct {
         return canonicalF32(sign * transformed);
     }
 
+    fn loadColorTransformTransfer(uniform: []const u8, base: usize) Error![7]f32 {
+        var parameters: [7]f32 = undefined;
+        for (0..parameters.len) |index| parameters[index] = try uniformF32(uniform, base + index * 16);
+        return parameters;
+    }
+
+    fn colorTransformTransferPrepared(value: f32, parameters: [7]f32) Error!f32 {
+        // Keep the same scalar program order as colorTransformTransfer. The
+        // sole difference is that std140 reads were performed once per draw.
+        const sign: f32 = if (std.math.isNan(value)) 0 else if (value > 0) 1 else if (value < 0) -1 else @bitCast(@as(u32, @bitCast(value)) & 0x80000000);
+        const absolute = canonicalF32(@abs(value));
+        const exponent = parameters[0];
+        const nonlinear_scale = parameters[1];
+        const nonlinear_bias = parameters[2];
+        const linear_scale = parameters[3];
+        const threshold = parameters[4];
+        const nonlinear_offset = parameters[5];
+        const linear_offset = parameters[6];
+        const transformed = if (absolute < threshold)
+            canonicalF32(canonicalF32(linear_scale * absolute) + linear_offset)
+        else blk: {
+            const pow_base = canonicalF32(canonicalF32(nonlinear_scale * absolute) + nonlinear_bias);
+            if (pow_base < 0 or (pow_base == 0 and exponent <= 0)) return error.NumericDomain;
+            break :blk canonicalF32(canonicalF32(std.math.pow(f32, pow_base, exponent)) + nonlinear_offset);
+        };
+        return canonicalF32(sign * transformed);
+    }
+
     fn colorTransformClamp(value: f32) f32 {
         const lower = if (value < 0) @as(f32, 0) else value;
         return canonicalF32(if (1 < lower) @as(f32, 1) else lower);
@@ -1416,6 +1458,23 @@ pub const Executor = struct {
         for (0..3) |lane| source[lane] = try colorTransformTransfer(source[lane], uniform, 224);
         source = colorTransformMatrixTimesVector(try loadColorTransformMatrix(uniform, 336), source);
         for (0..3) |lane| source[lane] = try colorTransformTransfer(source[lane], uniform, 384);
+        for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
+        std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+    }
+
+    fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.Bounds;
+        const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
+        const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
+        const luma = try sample(prepared.luma_image, luma_coordinates, bias);
+        const chroma = try sample(prepared.chroma_image, chroma_coordinates, bias);
+        var source = [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
+        source = vectorTimesColorTransformMatrix(source, prepared.source_matrix);
+        for (0..3) |lane| source[lane] = colorTransformClamp(canonicalF32(source[lane] + prepared.source_offset[lane]));
+        for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);
+        source = colorTransformMatrixTimesVector(prepared.destination_matrix, source);
+        for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
         for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
     }
@@ -1547,13 +1606,37 @@ pub const Executor = struct {
         return true;
     }
 
-    /// Direct resolved-input form of Chromium's exact VP9 Y/UV color
-    /// transform. It is intentionally unavailable for all other IR, and
-    /// retains the normal sampler, descriptor-range, and canonical-float
-    /// contracts while avoiding generic executor setup per pixel.
+    /// Resolve the invariant descriptor and std140 state of Chromium's exact
+    /// VP9 Y/UV color transform. A null result keeps callers on their normal
+    /// path for every other canonical program.
+    pub fn prepareVp9ColorTransform(self: *const Executor, uniform: []const u8, luma_image: SampledImage, chroma_image: SampledImage) Error!?Vp9ColorTransformPrepared {
+        _ = self.vp9ColorTransformPlan() orelse return null;
+        if (uniform.len < 484) return error.Bounds;
+        var source_offset: [3]f32 = undefined;
+        for (0..source_offset.len) |lane| source_offset[lane] = try uniformF32(uniform, 160 + lane * 4);
+        return .{
+            .luma_image = luma_image,
+            .chroma_image = chroma_image,
+            .source_matrix = try loadColorTransformMatrix(uniform, 112),
+            .source_offset = source_offset,
+            .source_transfer = try loadColorTransformTransfer(uniform, 224),
+            .destination_matrix = try loadColorTransformMatrix(uniform, 336),
+            .destination_transfer = try loadColorTransformTransfer(uniform, 384),
+        };
+    }
+
+    /// Execute prepared state for the exact VP9 specialization. Preparation
+    /// retains all descriptor-range and uniform-layout validation; this hot
+    /// method only removes repeated immutable std140 reads from each pixel.
+    pub fn executeVp9ColorTransformPrepared(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, output: []u8) Error!void {
+        try executeVp9ColorTransformPreparedResolved(prepared, luma_coordinate_bytes, chroma_coordinate_bytes, output);
+    }
+
+    /// Direct resolved-input compatibility form. It remains useful to tests
+    /// and non-raster callers; rasterization should prepare once per draw.
     pub fn executeVp9ColorTransformDirect(self: *const Executor, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, uniform_bytes: []const u8, luma_image: SampledImage, chroma_image: SampledImage, output: []u8) Error!bool {
-        _ = self.vp9ColorTransformPlan() orelse return false;
-        try executeVp9ColorTransformResolved(luma_coordinate_bytes, chroma_coordinate_bytes, uniform_bytes, luma_image, chroma_image, output);
+        const prepared = try self.prepareVp9ColorTransform(uniform_bytes, luma_image, chroma_image) orelse return false;
+        try self.executeVp9ColorTransformPrepared(prepared, luma_coordinate_bytes, chroma_coordinate_bytes, output);
         return true;
     }
 

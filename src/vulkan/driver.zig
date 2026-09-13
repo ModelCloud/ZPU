@@ -10689,6 +10689,13 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.chroma_image_interface) vp9_chroma_image = binding.sampled_image;
         }
     }
+    var vp9_color_transform_prepared: ?render_ir_exec.Vp9ColorTransformPrepared = null;
+    if (vp9_color_transform_plan != null and vp9_uniform != null and vp9_luma_image != null and vp9_chroma_image != null) {
+        vp9_color_transform_prepared = profile.fragment.prepareVp9ColorTransform(vp9_uniform.?, vp9_luma_image.?, vp9_chroma_image.?) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
+    }
     // This dynamic radial-gradient profile has materially more arithmetic
     // than the video coverage composite, but its validated uniforms and
     // sampled image are likewise invariant across a draw. Resolve its narrow
@@ -11030,20 +11037,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     if (vp9_color_transform_plan != null) {
                         const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
                         const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
-                        const uniform = vp9_uniform orelse break :direct false;
-                        const luma_image = vp9_luma_image orelse break :direct false;
-                        const chroma_image = vp9_chroma_image orelse break :direct false;
-                        break :direct profile.fragment.executeVp9ColorTransformDirect(
+                        const prepared = vp9_color_transform_prepared orelse break :direct false;
+                        profile.fragment.executeVp9ColorTransformPrepared(
+                            prepared,
                             fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
                             fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
-                            uniform,
-                            luma_image,
-                            chroma_image,
                             &fragment_output_bytes,
                         ) catch |err| {
                             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
+                        break :direct true;
                     }
                     if (radial_gradient_plan != null) {
                         const circle_varying = radial_gradient_circle_varying orelse break :direct false;
@@ -14339,11 +14343,16 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     };
     var generic_output = [_]u8{0} ** 16;
     var direct_output = [_]u8{0} ** 16;
+    var prepared_output = [_]u8{0} ** 16;
     const outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &generic_output }};
     try executor.execute(&bindings, &outputs);
     try std.testing.expect(try executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, &uniform, luma_image, chroma_image, &direct_output));
+    const prepared = (try executor.prepareVp9ColorTransform(&uniform, luma_image, chroma_image)).?;
+    try executor.executeVp9ColorTransformPrepared(prepared, &coordinates, &coordinates, &prepared_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
     try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
+    try std.testing.expectError(error.Bounds, executor.prepareVp9ColorTransform(uniform[0..483], luma_image, chroma_image));
 }
 
 test "cpu_cube_v1 shader compatibility bridge is exact" {
