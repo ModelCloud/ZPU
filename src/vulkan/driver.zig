@@ -10510,6 +10510,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         }
         if (profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
             std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
+            for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
+                "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
+                .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
+            );
             for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
                 "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
                 .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
