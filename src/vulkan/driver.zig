@@ -6756,6 +6756,7 @@ fn cmdCopyBuffer(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, count
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     if (count == 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU copy buffer image rejected zero regions cb=0x{x}\n", .{@intFromPtr(c)});
         c.impl.invalid = true;
         return;
     }
@@ -7436,18 +7437,25 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         return;
     }
     const src = validBufferLocked(src_handle) orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU copy buffer image rejected stale source cb=0x{x} buffer=0x{x}\n", .{ @intFromPtr(c), src_handle });
         c.impl.invalid = true;
         return;
     };
     const dst = validImageLocked(dst_handle) orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU copy buffer image rejected stale destination cb=0x{x} image=0x{x}\n", .{ @intFromPtr(c), dst_handle });
         c.impl.invalid = true;
         return;
     };
     const list = regions orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU copy buffer image rejected null regions cb=0x{x} count={}\n", .{ @intFromPtr(c), count });
         c.impl.invalid = true;
         return;
     };
     if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count > c.impl.commands.len or count > c.impl.commands.len - c.impl.count) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU copy buffer image rejected command state cb=0x{x} state={} invalid={} render_pass={} dynamic={} commands={}/{} regions={}\n",
+            .{ @intFromPtr(c), c.impl.state, c.impl.invalid, c.impl.active_render_pass != null, c.impl.dynamic_rendering, c.impl.count, c.impl.commands.len, count },
+        );
         c.impl.invalid = true;
         return;
     }
@@ -7463,10 +7471,15 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         }
     }
     for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (imageRegionsOverlap(dst, a.image_subresource, a.image_offset, a.image_extent, b.image_subresource, b.image_offset, b.image_extent)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU copy buffer image rejected overlapping destination regions cb=0x{x} first={} second={}\n", .{ @intFromPtr(c), i, i + 1 });
         c.impl.invalid = true;
         return;
     };
     if (src.memory.? == dst.memory.?) for (list[0..count]) |buffer_region| for (list[0..count]) |image_region| if (bufferImageMemoryOverlap(src, buffer_region, dst, image_region)) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU copy buffer image rejected overlapping aliased memory cb=0x{x} sourceOffset={} sourceSize={} image={}x{} format={} bufferOffset={} rowLength={} imageHeight={} extent={}x{}x{}\n",
+            .{ @intFromPtr(c), src.offset, src.size, dst.width, dst.height, dst.format, buffer_region.buffer_offset, buffer_region.buffer_row_length, buffer_region.buffer_image_height, buffer_region.image_extent.width, buffer_region.image_extent.height, buffer_region.image_extent.depth },
+        );
         c.impl.invalid = true;
         return;
     };
