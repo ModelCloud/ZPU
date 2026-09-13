@@ -9674,7 +9674,13 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         for (0..3) |corner| {
             var binding_count: usize = 0;
             for (profile.inputs[0..profile.input_count]) |input| {
-                const buffer = op.vertex_bindings.buffers[input.binding] orelse return;
+                const buffer = op.vertex_bindings.buffers[input.binding] orelse {
+                    if (renderDiagnosticsEnabled()) std.debug.print(
+                        "ZPU render vertex input missing buffer binding={d} vertex={d} triangle={d}\n",
+                        .{ input.binding, corner, triangle_index },
+                    );
+                    return;
+                };
                 const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
                 const emitted = profileTriangleVertex(
                     op.primitive_topology,
@@ -9686,8 +9692,20 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return) catch return;
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
                 const source = bufferBytes(buffer);
-                if (start > source.len or source.len - start < input.source_byte_size or binding_count == vertex_bindings.len) return;
-                const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &vertex_binding_storage[binding_count]) orelse return;
+                if (start > source.len or source.len - start < input.source_byte_size or binding_count == vertex_bindings.len) {
+                    if (renderDiagnosticsEnabled()) std.debug.print(
+                        "ZPU render vertex input bounds binding={d} format={d} source_len={} start={} bytes={} stride={} offset={} vertex_index={} vertex={d} triangle={d}\n",
+                        .{ input.binding, input.format, source.len, start, input.source_byte_size, stride, input.offset, vertex_index, corner, triangle_index },
+                    );
+                    return;
+                }
+                const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &vertex_binding_storage[binding_count]) orelse {
+                    if (renderDiagnosticsEnabled()) std.debug.print(
+                        "ZPU render vertex input format rejected binding={d} format={d} bytes={} vertex={d} triangle={d}\n",
+                        .{ input.binding, input.format, input.source_byte_size, corner, triangle_index },
+                    );
+                    return;
+                };
                 vertex_bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
                 binding_count += 1;
             }
