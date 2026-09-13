@@ -10947,6 +10947,37 @@ const ProfileGraphicsClone = struct {
     }
 };
 
+const ProfileParallelCache = struct {
+    source: *const ProfileGraphics,
+    vertex_identity: [32]u8,
+    fragment_identity: [32]u8,
+    clone: ProfileGraphicsClone,
+};
+
+// Every Mosaic worker retains at most one independently-owned profile pair.
+// The cache is intentionally thread-local: its mutable interpreter storage
+// never crosses a lane boundary, while canonical identities prevent a reused
+// pipeline address from selecting stale executable state.
+threadlocal var profile_parallel_cache: ?ProfileParallelCache = null;
+
+fn cachedParallelProfile(source: *const ProfileGraphics) ?*ProfileGraphics {
+    if (profile_parallel_cache) |*cache| {
+        if (cache.source == source and
+            std.mem.eql(u8, &cache.vertex_identity, &source.vertex.program.identity.digest) and
+            std.mem.eql(u8, &cache.fragment_identity, &source.fragment.program.identity.digest)) return &cache.clone.graphics;
+        cache.clone.deinit();
+        profile_parallel_cache = null;
+    }
+    const clone = ProfileGraphicsClone.init(source) catch return null;
+    profile_parallel_cache = .{
+        .source = source,
+        .vertex_identity = source.vertex.program.identity.digest,
+        .fragment_identity = source.fragment.program.identity.digest,
+        .clone = clone,
+    };
+    return &profile_parallel_cache.?.clone.graphics;
+}
+
 fn profileParallelSampleModulateEligible(op: anytype) bool {
     // Clone construction is currently per draw. Keep this experimental path
     // explicitly opt-in while persistent per-pipeline lane executors are
@@ -10973,29 +11004,31 @@ fn executeMosaicProfileDrawParallel(op: anytype, query_context: *QueryExecutionC
     };
     const target_state = profileMosaicTarget(op);
     const target = target_state.color orelse target_state.depth orelse return false;
-    var clones: [profile_parallel_lanes]ProfileGraphicsClone = undefined;
-    var initialized: usize = 0;
-    while (initialized < clones.len) : (initialized += 1) clones[initialized] = ProfileGraphicsClone.init(source) catch {
-        for (clones[0..initialized]) |*clone| clone.deinit();
-        return false;
-    };
-    defer for (&clones) |*clone| clone.deinit();
-
     const Op = @TypeOf(op);
     const Context = struct {
         op: Op,
+        source: *const ProfileGraphics,
         query_context: *QueryExecutionContext,
         target_width: u32,
         target_height: u32,
-        clones: *[profile_parallel_lanes]ProfileGraphicsClone,
+        ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+        render: bool = false,
 
         fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
             const context: *@This() = @ptrCast(@alignCast(raw));
-            if (lane_count == 0 or lane_count > context.clones.len) return;
+            if (lane_count == 0 or lane_count > profile_parallel_lanes) {
+                context.ready.store(false, .release);
+                return;
+            }
+            const profile = cachedParallelProfile(context.source) orelse {
+                context.ready.store(false, .release);
+                return;
+            };
+            if (!context.render) return;
             const min_y: u32 = @intCast(@as(u64, context.target_height) * lane_index / lane_count);
             const max_y: u32 = @intCast(@as(u64, context.target_height) * (lane_index + 1) / lane_count);
             if (min_y >= max_y) return;
-            executeProfileDraw(context.op, &context.clones[lane_index].graphics, context.query_context, 0, .{
+            executeProfileDraw(context.op, profile, context.query_context, 0, .{
                 .min_x = 0,
                 .min_y = min_y,
                 .max_x = context.target_width,
@@ -11005,11 +11038,16 @@ fn executeMosaicProfileDrawParallel(op: anytype, query_context: *QueryExecutionC
     };
     var context = Context{
         .op = op,
+        .source = source,
         .query_context = query_context,
         .target_width = target.width,
         .target_height = target.height,
-        .clones = &clones,
     };
+    // Populate all lane-local caches before any lane mutates the attachment.
+    // If allocation fails, no draw has started and the serial fallback below
+    // preserves the original execution contract.
+    if (!cpu_cube.dispatchParallelLanes(&context, Context.run) or !context.ready.load(.acquire)) return false;
+    context.render = true;
     if (!cpu_cube.dispatchParallelLanes(&context, Context.run)) return false;
     // Parallel lanes do not mutate attachment bookkeeping. Publish a single
     // conservative full-target damage region after all writes complete.
