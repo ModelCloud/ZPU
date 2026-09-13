@@ -26,6 +26,32 @@ pub const DrawCommand = struct {
     geometry_revision: u64 = 0,
     texture_revision: u64 = 0,
 };
+
+/// The bounded Vulkan color-blend subset used by the legacy Chromium bridge.
+/// The renderer keeps this state thread-local so existing public entry points
+/// remain ABI-compatible while a command is executed.
+pub const BlendState = struct {
+    enable: u32 = 0,
+    src_color_factor: i32 = 1,
+    dst_color_factor: i32 = 0,
+    color_op: i32 = 0,
+    src_alpha_factor: i32 = 1,
+    dst_alpha_factor: i32 = 0,
+    alpha_op: i32 = 0,
+    constants: [4]f32 = .{ 0, 0, 0, 0 },
+};
+
+threadlocal var active_blend: BlendState = .{};
+
+pub fn pushBlendState(state: BlendState) BlendState {
+    const previous = active_blend;
+    active_blend = state;
+    return previous;
+}
+
+pub fn blendEnabled() bool {
+    return active_blend.enable != 0;
+}
 pub const dirty_tile_size: usize = 32;
 pub const max_dirty_tile_bytes: usize = 8192;
 
@@ -1359,6 +1385,58 @@ fn prepareDrawCached(uniform: []const u8, texture: []const u8, texture_width: u3
     return .{ .hit = false, .cacheable = cacheable, .promote = cacheable and key_matches };
 }
 
+fn blendFactor(factor: i32, source: [4]f32, destination: [4]f32, channel: usize, alpha: bool) ?f32 {
+    return switch (factor) {
+        0 => 0,
+        1 => 1,
+        2 => source[channel],
+        3 => 1 - source[channel],
+        4 => destination[channel],
+        5 => 1 - destination[channel],
+        6 => source[3],
+        7 => 1 - source[3],
+        8 => destination[3],
+        9 => 1 - destination[3],
+        10 => active_blend.constants[channel],
+        11 => 1 - active_blend.constants[channel],
+        12 => active_blend.constants[3],
+        13 => 1 - active_blend.constants[3],
+        14 => if (alpha) 1 else @min(source[3], 1 - destination[3]),
+        else => null,
+    };
+}
+
+fn blendColor(source_word: u32, destination_bytes: []const u8) ?u32 {
+    if (!blendEnabled()) return source_word;
+    if (destination_bytes.len < 4) return null;
+    var source: [4]f32 = undefined;
+    var destination: [4]f32 = undefined;
+    for (0..4) |channel| {
+        source[channel] = @as(f32, @floatFromInt(@as(u8, @truncate(source_word >> @intCast(channel * 8))))) / 255.0;
+        destination[channel] = @as(f32, @floatFromInt(destination_bytes[channel])) / 255.0;
+    }
+    var result = source;
+    for (0..4) |channel| {
+        const alpha = channel == 3;
+        const source_factor = blendFactor(if (alpha) active_blend.src_alpha_factor else active_blend.src_color_factor, source, destination, channel, alpha) orelse return null;
+        const destination_factor = blendFactor(if (alpha) active_blend.dst_alpha_factor else active_blend.dst_color_factor, source, destination, channel, alpha) orelse return null;
+        const equation = if (alpha) active_blend.alpha_op else active_blend.color_op;
+        result[channel] = switch (equation) {
+            0 => source[channel] * source_factor + destination[channel] * destination_factor,
+            1 => source[channel] * source_factor - destination[channel] * destination_factor,
+            2 => destination[channel] * destination_factor - source[channel] * source_factor,
+            3 => @min(source[channel] * source_factor, destination[channel] * destination_factor),
+            4 => @max(source[channel] * source_factor, destination[channel] * destination_factor),
+            else => return null,
+        };
+        if (!std.math.isFinite(result[channel])) return null;
+        result[channel] = std.math.clamp(result[channel], 0, 1);
+    }
+    var word: u32 = 0;
+    for (result, 0..) |value, channel| word |= @as(u32, @intFromFloat(value * 255.0)) << @intCast(channel * 8);
+    return word;
+}
+
 fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_depth_bits: ?u32, inverse_w: f32, flat_reciprocal_w: ?f32, u_over_w: f32, v_over_w: f32, texture: []const u8, texture_width: u32, texture_height: u32, lighting: *const [256]u8, unit_uv: bool, prelit_texture: ?*const [16]u32, flat_color: ?u32, counters: *Counters, comptime count_work: bool) bool {
     const depth_pass = if (depth) |depth_bytes| blk: {
         const depth_offset = pixel_index * 4;
@@ -1377,7 +1455,9 @@ fn writeFragment(target: ?[]u8, depth: ?[]u8, pixel_index: usize, z: f32, flat_d
             const v = v_over_w * reciprocal_w;
             break :blk if (prelit_texture) |prelit| shadeUnitTexture4x4(u, v, prelit) else shade(texture, texture_width, texture_height, u, v, lighting, unit_uv);
         };
-        std.mem.writeInt(u32, color_bytes[pixel_index * 4 ..][0..4], color, .little);
+        const destination = color_bytes[pixel_index * 4 ..][0..4];
+        const output = blendColor(color, destination) orelse return false;
+        std.mem.writeInt(u32, destination, output, .little);
         if (count_work) counters.color_writes += 1;
     }
     return true;
@@ -1495,7 +1575,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
         const lane_max_y: i32 = if (fixed_two_lane) @intCast(@as(usize, height) * (lane_index + 1) / 2) else max_y;
         const raster_min_y = @max(min_y, lane_min_y);
         const raster_max_y = @min(max_y, lane_max_y);
-        if (!count_work and optimized and (flat_color != null or prelit_texture != null or prelit_texture_16x16 != null) and flat_depth_bits != null and flat_reciprocal_w != null and typed_target != null and typed_depth != null) {
+        if (!blendEnabled() and !count_work and optimized and (flat_color != null or prelit_texture != null or prelit_texture_16x16 != null) and flat_depth_bits != null and flat_reciprocal_w != null and typed_target != null and typed_depth != null) {
             pixels_written += rasterFlatSpanTriangle(true, typed_target.?, typed_depth.?, width, height, stripe_count, lane_index, p0, p1, p2, inverse_area, min_x, min_y, max_x, max_y, raster_min_y, raster_max_y, cached_spans, flat_depth_bits.?, flat_color, prelit_texture, prelit_texture_16x16, tile_min, tile_max, tile_columns, tile_count, flat_reciprocal_w.?, u_over_w0, u_over_w1, u_over_w2, v_over_w0, v_over_w1, v_over_w2, u_over_w_dx, v_over_w_dx);
             continue;
         }
@@ -1530,7 +1610,7 @@ fn drawInternal(target: ?[]u8, depth: ?[]u8, width: u32, height: u32, uniform: [
                     const classification = classifyQuad(p0, p1, p2, inverse_area, .{ x0, x1, x0, x1 }, .{ y0, y0, y1, y1 });
                     if (optimized and classification.reject) continue;
                     const fully_covered = classification.fully_covered;
-                    const tile_fast_flat = optimized and fully_covered and flat_w and flat_z and flat_depth_bits != null and flat_reciprocal_w != null;
+                    const tile_fast_flat = !blendEnabled() and optimized and fully_covered and flat_w and flat_z and flat_depth_bits != null and flat_reciprocal_w != null;
                     var y = tile_y;
                     while (y < tile_max_y) : (y += 1) {
                         if (lane_count != 1 and !fixed_two_lane and !stripe_partitioned and row_lanes[@intCast(y)] != lane_index) continue;

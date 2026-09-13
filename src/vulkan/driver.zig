@@ -10847,7 +10847,18 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
             }
             // The legacy vkcube bridge has no color-mask execution contract;
             // keep partial writes fail-closed until that backend is upgraded.
-            if (op.pipeline.color_write_mask != 0xf or op.pipeline.color_blend_enable != 0) return;
+            if (op.pipeline.color_write_mask != 0xf) return;
+            const previous_blend = cpu_cube.pushBlendState(.{
+                .enable = op.pipeline.color_blend_enable,
+                .src_color_factor = op.pipeline.src_color_blend_factor,
+                .dst_color_factor = op.pipeline.dst_color_blend_factor,
+                .color_op = op.pipeline.color_blend_op,
+                .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+                .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+                .alpha_op = op.pipeline.alpha_blend_op,
+                .constants = op.blend_constants,
+            });
+            defer _ = cpu_cube.pushBlendState(previous_blend);
             if (op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0) return;
             const diagnostic_cube_draw = if (renderDiagnosticsEnabled()) render_diagnostic_cube_draws.fetchAdd(1, .monotonic) else 256;
             if (diagnostic_cube_draw < 256) {
@@ -12812,8 +12823,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const blend_enable = try bool32(attachment.blend_enable);
         if (attachment.src_color_blend_factor < 0 or attachment.src_color_blend_factor > 18 or attachment.dst_color_blend_factor < 0 or attachment.dst_color_blend_factor > 18 or attachment.color_blend_op < 0 or attachment.color_blend_op > 4 or attachment.src_alpha_blend_factor < 0 or attachment.src_alpha_blend_factor > 18 or attachment.dst_alpha_blend_factor < 0 or attachment.dst_alpha_blend_factor > 18 or attachment.alpha_blend_op < 0 or attachment.alpha_blend_op > 4 or attachment.color_write_mask & ~@as(u32, 0xf) != 0) return pipelineInvalid(@src().line);
         if (blend_enable != 0 and
-            (profile_contract == null or
-                attachment.src_color_blend_factor > 14 or
+            (attachment.src_color_blend_factor > 14 or
                 attachment.dst_color_blend_factor > 14 or
                 attachment.src_alpha_blend_factor > 14 or
                 attachment.dst_alpha_blend_factor > 14))
@@ -13624,18 +13634,27 @@ fn waitSemaphores(device: ?Device, info: ?*const SemaphoreWaitInfo, timeout_ns: 
     }
 }
 fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
-    if (alloc != null) return .error_initialization_failed;
-    const d = device orelse return .error_initialization_failed;
-    const ci = info orelse return .error_initialization_failed;
-    const out = output orelse return .error_initialization_failed;
+    if (alloc != null) return imageViewInvalid("allocator");
+    const d = device orelse return imageViewInvalid("device");
+    const ci = info orelse return imageViewInvalid("create-info");
+    const out = output orelse return imageViewInvalid("output");
     const pnext = imageViewCreatePNextState(ci.p_next);
-    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return .error_initialization_failed;
-    if (pnext.has_ycbcr_conversion) return .error_format_not_supported;
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) return imageViewInvalid("structure");
+    if (pnext.has_ycbcr_conversion) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU image view rejected reason=ycbcr\n", .{});
+        return .error_format_not_supported;
+    }
     lock();
     defer mutex.unlock();
-    const image = validImageLocked(ci.image) orelse return .error_initialization_failed;
+    const image = validImageLocked(ci.image) orelse return imageViewInvalid("image");
     const usage = if (pnext.has_usage) pnext.usage else image.usage;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
+            .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
+        );
+        return .error_initialization_failed;
+    }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
         object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
@@ -13644,6 +13663,11 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         return .success;
     };
     return objectPoolExhausted("image view");
+}
+
+fn imageViewInvalid(reason: []const u8) Result {
+    if (failureDiagnosticsEnabled()) std.debug.print("ZPU image view rejected reason={s}\n", .{reason});
+    return .error_initialization_failed;
 }
 fn destroyImageView(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
     if (alloc != null) return;
@@ -13792,6 +13816,10 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*
     var built_count: usize = 0;
     for (0..count) |index| {
         built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
+            if (failureDiagnosticsEnabled()) std.debug.print(
+                "ZPU graphics pipeline build failed index={} error={s}\n",
+                .{ index, @errorName(err) },
+            );
             for (built[0..built_count]) |*prior| {
                 prior.execution_abi.deinit();
                 prior.canonical.deinit();
@@ -19430,7 +19458,10 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_blend.attachments = @ptrCast(&bad_blend_attachment);
     invalid_pipeline = pipeline_info;
     invalid_pipeline.color_blend = &bad_blend;
-    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    var enabled_blend_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &enabled_blend_pipeline));
+    try std.testing.expectEqual(@as(u32, 1), validGraphicsPipelineLocked(enabled_blend_pipeline[0]).?.color_blend_enable);
+    destroyPipeline(device, enabled_blend_pipeline[0], null);
     inline for (.{ "src_color_blend_factor", "dst_color_blend_factor", "color_blend_op", "src_alpha_blend_factor", "dst_alpha_blend_factor", "alpha_blend_op" }) |field| {
         bad_blend_attachment = blend_attachment;
         @field(bad_blend_attachment, field) += 1;
