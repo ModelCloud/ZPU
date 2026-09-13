@@ -1012,6 +1012,17 @@ pub const Executor = struct {
         };
     }
 
+    /// These exact paths use no mutable executor values, locals, or
+    /// derivative scratch after setup. A driver may execute disjoint pixel
+    /// regions concurrently while retaining submission order within each
+    /// region. Every other profile remains serial by construction.
+    pub fn tileParallelSafe(self: *const Executor) bool {
+        return switch (self.fast_path orelse return false) {
+            .sample_modulate, .texture_copy => true,
+            else => false,
+        };
+    }
+
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
         const end = std.math.add(usize, offset, 4) catch return error.Bounds;
         if (end > bytes.len) return error.Bounds;
