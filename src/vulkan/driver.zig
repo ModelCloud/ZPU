@@ -11000,6 +11000,58 @@ fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
     return &profile_lane_cache.?.clone.graphics;
 }
 
+fn profileLaneEligible(op: anytype) bool {
+    const requested = std.c.getenv("ZPU_EXPERIMENTAL_PROFILE_PARALLEL") orelse return false;
+    if (!std.mem.eql(u8, std.mem.span(requested), "1") or !profileMosaicEligible(op)) return false;
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    return profile.fragment.tileParallelSafe();
+}
+
+fn executeMosaicProfileLaneDraw(op: anytype, query_context: *QueryExecutionContext) bool {
+    const source = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    const target_state = profileMosaicTarget(op);
+    const target = target_state.color orelse target_state.depth orelse return false;
+    const Op = @TypeOf(op);
+    const Context = struct {
+        op: Op,
+        source: *const ProfileGraphics,
+        query: *QueryExecutionContext,
+        width: u32,
+        height: u32,
+        ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+        render: bool = false,
+        fn run(raw: *anyopaque, lane: usize, lane_count: usize) void {
+            const context: *@This() = @ptrCast(@alignCast(raw));
+            const profile = cachedProfileLane(context.source) orelse {
+                context.ready.store(false, .release);
+                return;
+            };
+            if (!context.render or lane_count == 0) return;
+            const min_y: u32 = @intCast(@as(u64, context.height) * lane / lane_count);
+            const max_y: u32 = @intCast(@as(u64, context.height) * (lane + 1) / lane_count);
+            if (min_y < max_y) executeProfileDraw(context.op, profile, context.query, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y });
+        }
+    };
+    var context = Context{ .op = op, .source = source, .query = query_context, .width = target.width, .height = target.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, Context.run) or !context.ready.load(.acquire)) return false;
+    context.render = true;
+    if (!cpu_cube.dispatchParallelLanes(&context, Context.run)) return false;
+    const bounds = cpu_cube.Rect{ .x = 0, .y = 0, .width = target.width, .height = target.height };
+    if (target_state.color) |color| {
+        color.content_bounds = unionRect(color.content_bounds, bounds);
+        color.complex_3d_content = true;
+        color.force_full_present = true;
+    }
+    if (target_state.depth) |depth| depth.content_bounds = unionRect(depth.content_bounds, bounds);
+    return true;
+}
+
 /// Mosaic is worthwhile either for a group of profile draws or for one
 /// framebuffer-sized composite. Chromium's video compositor produces the
 /// latter: a single textured quad over a large target. Keep smaller UI work
@@ -11062,6 +11114,14 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
     const operation_start = frame_pacing.monotonicNs();
+    // A single immutable full-target video composite can divide the image
+    // into disjoint lane stripes without changing command order. Mixed
+    // streams remain on the ordered serial tile path below.
+    if (batch_count == 1 and profileLaneEligible(first) and executeMosaicProfileLaneDraw(first, query_context)) {
+        color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+        cursor.* = candidate;
+        return batch_count;
+    }
     const timing_enabled = profileTimingDiagnosticsEnabled();
     var command_elapsed_ns = [_]u64{0} ** profile_mosaic_batch_commands;
     const start = cursor.*;
