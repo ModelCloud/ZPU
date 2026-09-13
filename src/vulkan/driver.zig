@@ -9757,7 +9757,7 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
                 std.mem.writeInt(u32, storage[index * 4 ..][0..4], value, .little);
             }
         },
-        100, 103, 109 => {
+        100, 103, 106, 109 => {
             if (input.source_byte_size != input.byte_size) return null;
             @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
         },
@@ -13064,14 +13064,14 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         .input => {
             if (vertex_inputs == 16 or interface.location == null or
                 (interface.ty.scalar != .f32 and !(interface.ty.scalar == .u32 and interface.ty.columns == 2)) or
-                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
+                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
             result.inputs[vertex_inputs].interface = @intCast(index);
             result.inputs[vertex_inputs].location = interface.location.?;
             result.inputs[vertex_inputs].byte_size = @as(u8, interface.ty.columns) * 4;
             vertex_inputs += 1;
         },
         .output => {
-            if (interface.ty.scalar != .f32 or (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 4) or interface.ty.rows != 1 or result.vertex_output_count == 16) return null;
+            if (interface.ty.scalar != .f32 or (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4) or interface.ty.rows != 1 or result.vertex_output_count == 16) return null;
             const slot = result.vertex_output_count;
             result.vertex_outputs[slot] = @intCast(index);
             result.vertex_output_count += 1;
@@ -13105,7 +13105,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
                 result.fragment_front_facing = @intCast(index);
                 continue;
             }
-            if (interface.location == null or interface.ty.scalar != .f32 or (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 4) or interface.ty.rows != 1 or result.varying_count == 8) return null;
+            if (interface.location == null or interface.ty.scalar != .f32 or (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4) or interface.ty.rows != 1 or result.varying_count == 8) return null;
             var matched_vertex_interface: ?u32 = null;
             var matched_vertex_slot: u8 = 0;
             for (result.vertex_outputs[0..result.vertex_output_count], 0..) |vertex_interface_index, vertex_slot| {
@@ -13154,6 +13154,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
                 81 => if (vertex.interfaces[result.inputs[input_index].interface].ty.scalar == .u32 and result.inputs[input_index].byte_size == 8) 4 else return null,
                 100 => if (result.inputs[input_index].byte_size == 4) 4 else return null,
                 103 => if (result.inputs[input_index].byte_size == 8) 8 else return null,
+                106 => if (result.inputs[input_index].byte_size == 12) 12 else return null,
                 109 => if (result.inputs[input_index].byte_size == 16) 16 else return null,
                 else => return null,
             };
@@ -16173,6 +16174,33 @@ test "scalar graphics profile admits Chromium packed vertex inputs" {
     try std.testing.expectEqual(@as(u8, 3), contract.input_count);
     try std.testing.expectEqual(@as(u8, 4), contract.inputs[1].source_byte_size);
     try std.testing.expectEqual(@as(i32, 100), contract.inputs[1].format);
+}
+
+test "scalar graphics profile admits Chromium vec3 vertex inputs and varyings" {
+    const vec3 = render_ir.Type{ .scalar = .f32, .columns = 3 };
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec3, .location = 0 },
+        .{ .storage = .output, .ty = vec3, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+    };
+    const fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = vec3, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = @constCast(&vertex_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 12, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 106, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 12), contract.inputs[0].source_byte_size);
+    try std.testing.expectEqual(@as(i32, 106), contract.inputs[0].format);
+    try std.testing.expectEqual(@as(u8, 3), contract.varyings[0].lanes);
+    var decoded: [16]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &decoded).?);
 }
 
 test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
