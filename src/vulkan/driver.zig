@@ -8176,8 +8176,8 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     const c = validCommandBufferLocked(cb) orelse return;
     if (failureDiagnosticsEnabled() and !c.impl.invalid) {
         std.debug.print(
-            "ZPU pipeline barrier command srcStages=0x{x} dstStages=0x{x} dependencyFlags=0x{x} memory={d} buffers={d} images={d}\n",
-            .{ src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, buffer_barrier_count, image_barrier_count },
+            "ZPU pipeline barrier cb=0x{x} srcStages=0x{x} dstStages=0x{x} dependencyFlags=0x{x} memory={d} buffers={d} images={d}\n",
+            .{ @intFromPtr(c), src_stage_mask, dst_stage_mask, dependency_flags, memory_barrier_count, buffer_barrier_count, image_barrier_count },
         );
         if (image_barrier_count <= max_api_items) if (image_barriers) |barriers| for (barriers[0..image_barrier_count], 0..) |barrier, index| {
             std.debug.print(
@@ -8188,7 +8188,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     }
     const stages_valid = validPipelineStageMask(src_stage_mask) and validPipelineStageMask(dst_stage_mask);
     if (c.impl.state != 1 or c.impl.invalid or dependency_flags & ~@as(u32, 1) != 0 or !stages_valid or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU barrier rejected envelope state={d} invalid={} dependency=0x{x} stages={} counts={d}/{d}/{d} command_count={d} command_capacity={d}\n", .{ c.impl.state, c.impl.invalid, dependency_flags, stages_valid, memory_barrier_count, buffer_barrier_count, image_barrier_count, c.impl.count, c.impl.commands.len });
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU barrier rejected envelope cb=0x{x} state={d} invalid={} dependency=0x{x} stages={} counts={d}/{d}/{d} command_count={d} command_capacity={d}\n", .{ @intFromPtr(c), c.impl.state, c.impl.invalid, dependency_flags, stages_valid, memory_barrier_count, buffer_barrier_count, image_barrier_count, c.impl.count, c.impl.commands.len });
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
@@ -14288,8 +14288,8 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     if (failureDiagnosticsEnabled()) std.debug.print(
-        "ZPU begin render pass invalid={} commands={d} contents={d}\n",
-        .{ command_buffer.impl.invalid, command_buffer.impl.count, contents },
+        "ZPU begin render pass cb=0x{x} invalid={} commands={d} contents={d}\n",
+        .{ @intFromPtr(command_buffer), command_buffer.impl.invalid, command_buffer.impl.count, contents },
     );
     if (command_buffer.impl.dynamic_rendering) {
         command_buffer.impl.invalid = true;
@@ -16857,8 +16857,8 @@ fn cmdEndRenderPass(cb: ?CommandBuffer) callconv(.c) void {
     defer mutex.unlock();
     const command_buffer = validCommandBufferLocked(cb) orelse return;
     if (failureDiagnosticsEnabled()) std.debug.print(
-        "ZPU end render pass invalid={} commands={d} active={} framebuffer={} subpass={d} subpass_count={d}\n",
-        .{ command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.active_framebuffer != null, command_buffer.impl.active_subpass, if (command_buffer.impl.active_render_pass) |pass| pass.subpass_count else 0 },
+        "ZPU end render pass cb=0x{x} invalid={} commands={d} active={} framebuffer={} subpass={d} subpass_count={d}\n",
+        .{ @intFromPtr(command_buffer), command_buffer.impl.invalid, command_buffer.impl.count, command_buffer.impl.active_render_pass != null, command_buffer.impl.active_framebuffer != null, command_buffer.impl.active_subpass, if (command_buffer.impl.active_render_pass) |pass| pass.subpass_count else 0 },
     );
     const render_pass = command_buffer.impl.active_render_pass;
     const framebuffer = command_buffer.impl.active_framebuffer;
