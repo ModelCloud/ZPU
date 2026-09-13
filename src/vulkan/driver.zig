@@ -10335,8 +10335,8 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
 
 const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
 
-fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
-    const profile = switch (op.pipeline.execution_abi) {
+fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
+    const profile = profile_override orelse switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
     };
@@ -11049,7 +11049,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                     else => return null,
                 };
                 const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
-                executeProfileDraw(op, query_context, 0, clip);
+                executeProfileDraw(op, null, query_context, 0, clip);
                 if (timing_enabled) command_elapsed_ns[draw_index] += frame_pacing.monotonicNs() - command_start;
                 draw_cursor.advance();
             }
@@ -11325,7 +11325,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 while (instance < instance_count) : (instance += 1) {
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
-                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, query_context, layer, null);
+                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null);
                 }
                 return;
             }
