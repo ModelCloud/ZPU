@@ -9919,6 +9919,22 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 );
                 return;
             };
+            if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 474 and triangle_index == 0) {
+                std.debug.print("ZPU glyph vertex output corner={d} position={d:.5},{d:.5},{d:.5},{d:.5} vary0={d:.5},{d:.5} vary1={d:.5} color={d:.5},{d:.5},{d:.5},{d:.5}\n", .{
+                    corner,
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][0..4], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][4..8], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][8..12], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][12..16], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][0..4], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][4..8], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[1].vertex_slot][0..4], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][0..4], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][4..8], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][8..12], .little))),
+                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][12..16], .little))),
+                });
+            }
             const clip = profileReadClip(&vertex_output_bytes[profile.vertex_position_slot]) orelse return;
             if (@abs(clip[3]) < 0.000001) return;
             const inverse_w = 1.0 / clip[3];
