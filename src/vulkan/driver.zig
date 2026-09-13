@@ -9688,7 +9688,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
     if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
-        op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512 and
+        op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
+        target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
         std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
