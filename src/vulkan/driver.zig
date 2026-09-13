@@ -4620,7 +4620,13 @@ fn stateForObject(comptime T: type, object: *T, objects: []T, states: []SlotStat
     return null;
 }
 fn liveMemoryObject(object: *MemoryObj) bool {
-    return (stateForObject(MemoryObj, object, &memory_objects, &memory_state) orelse return false).* == .live;
+    const state = stateForObject(MemoryObj, object, &memory_objects, &memory_state) orelse return false;
+    // A recorded command may legitimately outlive the API handle.  The
+    // recording pin keeps the allocation bytes and registry slot stable until
+    // the command buffer is reset or freed, so execution must continue to
+    // accept this retained tombstone while ordinary handle validation remains
+    // live-only in validMemoryLocked.
+    return state.* == .live or (state.* == .tombstone and object.active_users.load(.acquire) != 0 and !object.storage_released);
 }
 fn liveEventObject(object: *EventObj) bool {
     return (stateForObject(EventObj, object, &event_objects, &event_state) orelse return false).* == .live;
@@ -4767,6 +4773,15 @@ const PinnedDescriptorSets = struct {
     sets: [max_resource_pins]*DescriptorSetObj = undefined,
     set_count: usize = 0,
 };
+
+// Command records retain raw pointers into the fixed object registries.  A
+// submission-time pin is too late: Chromium may retire an image/allocation
+// after recording and before queue submission.  Keep the same bounded pin
+// sets attached to the command buffer for its entire recorded lifetime.
+var command_buffer_recorded_resources = [_]PinnedResources{.{}} ** max_child_objects;
+var command_buffer_recorded_pipelines = [_]PinnedPipelines{.{}} ** max_child_objects;
+var command_buffer_recorded_descriptor_sets = [_]PinnedDescriptorSets{.{}} ** max_child_objects;
+var command_buffer_recorded_pipeline_layouts = [_]PinnedPipelineLayouts{.{}} ** max_child_objects;
 
 fn retirePipelineLayoutLocked(layout: *PipelineLayoutObj) void {
     if (!layout.retire_pending or layout.active_users.load(.acquire) != 0) return;
@@ -6132,6 +6147,11 @@ fn freeCommandBuffers(device: ?Device, pool_handle: usize, count: u32, buffers: 
     }
 }
 fn deinitRecordedCommands(c: *CommandBufferObj) void {
+    const slot = commandBufferSlot(c);
+    releasePinnedResourcesLocked(&command_buffer_recorded_resources[slot]);
+    releasePinnedPipelinesLocked(&command_buffer_recorded_pipelines[slot]);
+    releasePinnedDescriptorSetsLocked(&command_buffer_recorded_descriptor_sets[slot]);
+    releasePinnedPipelineLayoutsLocked(&command_buffer_recorded_pipeline_layouts[slot]);
     for (c.impl.owned_updates[0..c.impl.owned_update_count]) |bytes| allocator.free(bytes);
     for (c.impl.secondaries[0..c.impl.secondary_count]) |secondary| secondary.impl.primary_ref_count -= 1;
     c.impl.owned_update_count = 0;
@@ -6419,7 +6439,7 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
     return .success;
 }
 fn record(cb: CommandBuffer, command: Command) void {
-    if (cb.impl.state != 1 or cb.impl.count == cb.impl.commands.len) {
+    if (cb.impl.state != 1 or cb.impl.invalid or cb.impl.count == cb.impl.commands.len) {
         cb.impl.invalid = true;
         return;
     }
@@ -6451,6 +6471,21 @@ fn record(cb: CommandBuffer, command: Command) void {
             .indirect_draw => |*draw| draw.layer_count = framebuffer.layers,
             else => {},
         }
+    }
+    const slot = commandBufferSlot(cb);
+    // Retain the resources at recording time.  Submission-time validation
+    // still runs, but cannot be the first lifetime protection because the
+    // application may destroy an image or free its memory between these two
+    // API calls.
+    if (!pinCommandResourcesLocked(owned, cb.impl.owner, &command_buffer_recorded_resources[slot], &command_buffer_recorded_descriptor_sets[slot], &command_buffer_recorded_pipeline_layouts[slot]) or
+        !pinCommandPipelinesLocked(owned, cb.impl.owner, &command_buffer_recorded_pipelines[slot]))
+    {
+        releasePinnedResourcesLocked(&command_buffer_recorded_resources[slot]);
+        releasePinnedPipelinesLocked(&command_buffer_recorded_pipelines[slot]);
+        releasePinnedDescriptorSetsLocked(&command_buffer_recorded_descriptor_sets[slot]);
+        releasePinnedPipelineLayoutsLocked(&command_buffer_recorded_pipeline_layouts[slot]);
+        cb.impl.invalid = true;
+        return;
     }
     cb.impl.commands[cb.impl.count] = owned;
     cb.impl.count += 1;
@@ -27670,7 +27705,10 @@ fn computeStorageProfileTest() !void {
 
     // Pipeline execution state is also retained outside the registry lock.
     // A destroy racing that window tombstones the handle but defers executor
-    // teardown until the final submission pin is released.
+    // teardown until the final submission pin is released.  The prior
+    // dispatch has completed; reset its command buffer so this focused test
+    // does not also hold the new recording-lifetime pin.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     var pipeline_pins = PinnedPipelines{};
     lock();
     const pipeline_object = validComputePipelineLocked(pipeline).?;
