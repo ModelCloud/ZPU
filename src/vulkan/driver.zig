@@ -9748,10 +9748,9 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
-    if (renderDiagnosticsEnabled() and ((op.descriptors.texture == null and op.vertex_count == 90) or
-        (target.width == 1280 and target.height == 256 and op.vertex_count == 474)) and
+    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
-        (op.vertex_count == 474 or render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0))
+        render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
         std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
         for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
@@ -9771,10 +9770,6 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             "ZPU profile vertex instruction={} op={s} type={any} operands={any} literal={any}\n",
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
-    }
-    if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 474) {
-        std.debug.print("ZPU glyph draw profile inputs={} outputs={} varyings={} sampled={} uniforms={}/{}\n", .{ profile.input_count, profile.vertex_output_count, profile.varying_count, profile.fragment_sampled_image != null, profile.vertex_uniform_count, profile.fragment_uniform_count });
-        for (profile.inputs[0..profile.input_count], 0..) |input, index| std.debug.print("ZPU glyph input {} interface={} location={} binding={} offset={} stride={} format={} bytes={} source={} rate={}\n", .{ index, input.interface, input.location, input.binding, input.offset, input.stride, input.format, input.byte_size, input.source_byte_size, input.input_rate });
     }
     if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw seq={d} target={x} {d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={x} {d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
@@ -9884,13 +9879,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     );
                     return;
                 };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and (op.vertex_count == 102 or op.vertex_count == 474)) {
+                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
                     const geometry_sequence = render_diagnostic_page_geometry.fetchAdd(1, .monotonic);
                     if (geometry_sequence < 24) std.debug.print(
-                        "ZPU page geometry input seq={d} vertices={d} triangle={d} corner={d} location={d} binding={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
+                        "ZPU page geometry input seq={d} triangle={d} corner={d} location={d} binding={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
                         .{
                             geometry_sequence,
-                            op.vertex_count,
                             triangle_index,
                             corner,
                             input.location,
@@ -9931,25 +9925,6 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 );
                 return;
             };
-            if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 474 and triangle_index == 0) {
-                std.debug.print("ZPU glyph vertex output corner={d} slots={d},{d},{d} position={d:.5},{d:.5},{d:.5},{d:.5} vary0={d:.5},{d:.5} vary1={d:.5} color={d:.5},{d:.5},{d:.5},{d:.5}\n", .{
-                    corner,
-                    profile.varyings[0].vertex_slot,
-                    profile.varyings[1].vertex_slot,
-                    profile.varyings[2].vertex_slot,
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][0..4], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][4..8], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][8..12], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.vertex_position_slot][12..16], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][0..4], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[0].vertex_slot][4..8], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[1].vertex_slot][0..4], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][0..4], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][4..8], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][8..12], .little))),
-                    @as(f32, @bitCast(std.mem.readInt(u32, vertex_output_bytes[profile.varyings[2].vertex_slot][12..16], .little))),
-                });
-            }
             const clip = profileReadClip(&vertex_output_bytes[profile.vertex_position_slot]) orelse return;
             if (@abs(clip[3]) < 0.000001) return;
             const inverse_w = 1.0 / clip[3];
@@ -10126,8 +10101,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     );
                     return;
                 };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and (op.vertex_count == 102 or op.vertex_count == 474) and
-                    ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175) or (op.vertex_count == 474 and x == 100 and y == 100)))
+                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
+                    ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
                 {
                     var diagnostic_output: [4]f32 = undefined;
                     for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
