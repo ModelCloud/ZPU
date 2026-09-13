@@ -10666,6 +10666,29 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
+    // The VP9 decoder supplies separate Y and UV planes. Chromium's exact
+    // color-transform fragment combines them through its validated transfer
+    // functions and matrices; resolve its bounded ABI once per draw so Mosaic
+    // does not enter the general IR executor for every output pixel.
+    const vp9_color_transform_plan = profile.fragment.vp9ColorTransformPlan();
+    var vp9_luma_coordinate_varying: ?usize = null;
+    var vp9_chroma_coordinate_varying: ?usize = null;
+    var vp9_uniform: ?[]const u8 = null;
+    var vp9_luma_image: ?render_ir_exec.SampledImage = null;
+    var vp9_chroma_image: ?render_ir_exec.SampledImage = null;
+    if (vp9_color_transform_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.luma_coordinate_interface) vp9_luma_coordinate_varying = index;
+            if (varying.fragment_interface == plan.chroma_coordinate_interface) vp9_chroma_coordinate_varying = index;
+        }
+        for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+            if (uniform.interface == plan.uniform_interface) vp9_uniform = uniform_bytes;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.luma_image_interface) vp9_luma_image = binding.sampled_image;
+            if (binding.interface == plan.chroma_image_interface) vp9_chroma_image = binding.sampled_image;
+        }
+    }
     // This dynamic radial-gradient profile has materially more arithmetic
     // than the video coverage composite, but its validated uniforms and
     // sampled image are likewise invariant across a draw. Resolve its narrow
@@ -11001,6 +11024,24 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             &fragment_output_bytes,
                         ) catch |err| {
                             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                    if (vp9_color_transform_plan != null) {
+                        const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
+                        const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
+                        const uniform = vp9_uniform orelse break :direct false;
+                        const luma_image = vp9_luma_image orelse break :direct false;
+                        const chroma_image = vp9_chroma_image orelse break :direct false;
+                        break :direct profile.fragment.executeVp9ColorTransformDirect(
+                            fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
+                            fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
+                            uniform,
+                            luma_image,
+                            chroma_image,
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
                     }
@@ -14173,6 +14214,63 @@ test "current Chromium VP9 color transform bridge is exact and call-free" {
     shader.module.identity.digest[0] ^= 1;
     var generic_program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
     defer generic_program.deinit(std.testing.allocator);
+}
+
+test "current Chromium VP9 color transform native path matches validated IR" {
+    var words: [2_412]u32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&words), &chromium_vp9_color_transform_inline_bytes);
+    const shader = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = chromium_vp9_color_transform_raw_identity,
+    } } };
+    var program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
+    defer program.deinit(std.testing.allocator);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_vp9_color_transform", executor.prevalidatedPathName());
+
+    var uniform = [_]u8{0} ** 484;
+    const writeF32 = struct {
+        fn at(bytes: []u8, offset: usize, value: f32) void {
+            std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
+        }
+    }.at;
+    for ([_]usize{ 112, 336 }) |base| for (0..3) |column| for (0..3) |row| {
+        writeF32(&uniform, base + column * 16 + row * 4, if (column == row) 1 else 0);
+    };
+    for ([_]usize{ 224, 384 }) |base| {
+        writeF32(&uniform, base, 1); // exponent
+        writeF32(&uniform, base + 16, 1); // nonlinear scale
+        writeF32(&uniform, base + 48, 1); // linear scale
+        writeF32(&uniform, base + 64, 2); // linear branch for normalized samples
+    }
+    var coordinates = [_]u8{0} ** 8;
+    writeF32(&coordinates, 0, 0.5);
+    writeF32(&coordinates, 4, 0.5);
+    const luma_pixels = [_]u8{ 64, 0, 0, 255 };
+    const chroma_pixels = [_]u8{ 128, 192, 0, 255 };
+    const image_common = .{ .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = render_ir_exec.SampledImage.Format.rgba8_unorm, .filter = render_ir_exec.SampledImage.Filter.nearest, .address_u = render_ir_exec.SampledImage.AddressMode.clamp_to_edge, .address_v = render_ir_exec.SampledImage.AddressMode.clamp_to_edge };
+    const luma_image = render_ir_exec.SampledImage{ .pixels = &luma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
+    const chroma_image = render_ir_exec.SampledImage{ .pixels = &chroma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
+    var color = [_]u8{0} ** 16;
+    var facing = [_]u8{1};
+    const bindings = [_]render_ir_exec.Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 2, .bytes = &coordinates },
+        .{ .interface = 3, .bytes = &facing },
+        .{ .interface = 5, .bytes = &uniform },
+        .{ .interface = 6, .sampled_image = luma_image },
+        .{ .interface = 7, .sampled_image = chroma_image },
+    };
+    var generic_output = [_]u8{0} ** 16;
+    var direct_output = [_]u8{0} ** 16;
+    const outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &generic_output }};
+    try executor.execute(&bindings, &outputs);
+    try std.testing.expect(try executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, &uniform, luma_image, chroma_image, &direct_output));
+    try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
+    try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
 }
 
 test "cpu_cube_v1 shader compatibility bridge is exact" {
