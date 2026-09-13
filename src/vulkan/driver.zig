@@ -12929,6 +12929,24 @@ fn cpuCubeV1ShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.St
     return shader.module.words.len == expected_len and std.mem.eql(u8, &shader.module.identity.digest, &expected);
 }
 
+fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) void {
+    const path = std.c.getenv("ZPU_DUMP_REJECTED_SPIRV") orelse return;
+    const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
+    if (fd < 0) {
+        std.debug.print("ZPU rejected SPIR-V dump open failed path={s}\n", .{std.mem.span(path)});
+        return;
+    }
+    const bytes = std.mem.sliceAsBytes(shader.module.words);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const amount = write(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (amount <= 0) break;
+        offset += @intCast(amount);
+    }
+    _ = close(fd);
+    std.debug.print("ZPU rejected SPIR-V dump path={s} stage={s} words={d} complete={}\n", .{ std.mem.span(path), @tagName(stage), shader.module.words.len, offset == bytes.len });
+}
+
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
     if (cpuCubeV1ShaderCompatible(shader, stage, name, specs.len)) return null;
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
@@ -12938,6 +12956,7 @@ fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const Shade
                 "ZPU SPIR-V frontend rejected stage={s} entry={s} specs={d} error={s} words={d} digest={x}\n",
                 .{ @tagName(stage), name, specs.len, @errorName(err), shader.module.words.len, shader.module.identity.digest },
             );
+            dumpRejectedSpirv(shader, stage);
             if (failureDiagnosticsEnabled()) if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
             return error.Invalid;
         },
