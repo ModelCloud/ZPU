@@ -1871,6 +1871,7 @@ var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_modulate_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_coverage_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_radial_gradient_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
 var render_diagnostic_submissions = std.atomic.Value(u64).init(0);
 var render_diagnostic_session_summaries = std.atomic.Value(u32).init(0);
@@ -2077,7 +2078,7 @@ fn emitRenderDiagnosticSession(presents: u64) void {
     const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
     if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
-        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_sample_coverage_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
+        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_sample_coverage_draws={d} direct_radial_gradient_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
         .{
             renderDiagnosticSessionId(),
             render_diagnostic_pipeline_creations.load(.acquire),
@@ -2085,6 +2086,7 @@ fn emitRenderDiagnosticSession(presents: u64) void {
             render_diagnostic_executed_profile_draws.load(.acquire),
             render_diagnostic_direct_sample_modulate_draws.load(.acquire),
             render_diagnostic_direct_sample_coverage_draws.load(.acquire),
+            render_diagnostic_direct_radial_gradient_draws.load(.acquire),
             render_diagnostic_executed_transitions.load(.acquire),
             render_diagnostic_submissions.load(.acquire),
             render_diagnostic_mosaic_batches.load(.acquire),
@@ -10644,6 +10646,32 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
+    // This dynamic radial-gradient profile has materially more arithmetic
+    // than the video coverage composite, but its validated uniforms and
+    // sampled image are likewise invariant across a draw. Resolve its narrow
+    // ABI once here; the per-pixel direct form below preserves the reference
+    // f32 order and all bounded reads.
+    const radial_gradient_plan = profile.fragment.radialGradientPlan();
+    var radial_gradient_circle_varying: ?usize = null;
+    var radial_gradient_coordinate_varying: ?usize = null;
+    var radial_gradient_uniform: ?[]const u8 = null;
+    var radial_gradient_image: ?render_ir_exec.SampledImage = null;
+    var radial_gradient_frag_coord = false;
+    if (radial_gradient_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.circle_interface) radial_gradient_circle_varying = index;
+            if (varying.fragment_interface == plan.coordinates_interface) radial_gradient_coordinate_varying = index;
+        }
+        for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+            if (uniform.interface == plan.uniform_interface) radial_gradient_uniform = uniform_bytes;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) radial_gradient_image = binding.sampled_image;
+        }
+        radial_gradient_frag_coord = profile.fragment_frag_coord != null and profile.fragment_frag_coord.? == plan.frag_coord_interface;
+    }
+    if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
+        _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
@@ -10889,6 +10917,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     fragment_binding_count += 1;
                 }
                 var frag_coord_bytes: [16]u8 = undefined;
+                var radial_gradient_frag_coord_ready = false;
                 var frag_coord_dpdx_bytes: [16]u8 = undefined;
                 var frag_coord_dpdy_bytes: [16]u8 = undefined;
                 if (profile.fragment_frag_coord) |interface| {
@@ -10902,6 +10931,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
                         std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
                     }
+                    radial_gradient_frag_coord_ready = true;
                     fragment_bindings[fragment_binding_count] = .{
                         .interface = interface,
                         .bytes = &frag_coord_bytes,
@@ -10951,6 +10981,24 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             &fragment_output_bytes,
                         ) catch |err| {
                             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                    if (radial_gradient_plan != null) {
+                        const circle_varying = radial_gradient_circle_varying orelse break :direct false;
+                        const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
+                        const uniform = radial_gradient_uniform orelse break :direct false;
+                        const image = radial_gradient_image orelse break :direct false;
+                        if (!radial_gradient_frag_coord_ready) break :direct false;
+                        break :direct profile.fragment.executeRadialGradientDirect(
+                            fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
+                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                            &frag_coord_bytes,
+                            uniform,
+                            image,
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
                     }

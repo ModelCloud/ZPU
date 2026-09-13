@@ -5741,6 +5741,44 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     try std.testing.expect(try executor.executePrevalidated(bindings[0..binding_count], outputs[0..output_count]));
     try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
 
+    // The resolved ABI removes only per-pixel binding/output discovery. Its
+    // exact result remains byte-identical to the generic/reference path for
+    // the live Chromium profile, including the dynamic uniform-array lookup
+    // and sampled contribution.
+    const radial_plan = executor.radialGradientPlan() orelse return error.TestUnexpectedResult;
+    var circle_bytes: ?[]const u8 = null;
+    var coordinate_bytes: ?[]const u8 = null;
+    var frag_coord_bytes: ?[]const u8 = null;
+    var uniform_bytes: ?[]const u8 = null;
+    var image: ?render_ir_exec.SampledImage = null;
+    for (bindings[0..binding_count]) |binding| {
+        if (binding.interface == radial_plan.circle_interface) circle_bytes = binding.bytes;
+        if (binding.interface == radial_plan.coordinates_interface) coordinate_bytes = binding.bytes;
+        if (binding.interface == radial_plan.frag_coord_interface) frag_coord_bytes = binding.bytes;
+        if (binding.interface == radial_plan.uniform_interface) uniform_bytes = binding.bytes;
+        if (binding.interface == radial_plan.image_interface) image = binding.sampled_image;
+    }
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expect(try executor.executeRadialGradientDirect(
+        circle_bytes orelse return error.TestUnexpectedResult,
+        coordinate_bytes orelse return error.TestUnexpectedResult,
+        frag_coord_bytes orelse return error.TestUnexpectedResult,
+        uniform_bytes orelse return error.TestUnexpectedResult,
+        image orelse return error.TestUnexpectedResult,
+        backing[outputs[0].interface][0..16],
+    ));
+    try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expectError(error.Bounds, executor.executeRadialGradientDirect(
+        circle_bytes orelse return error.TestUnexpectedResult,
+        coordinate_bytes orelse return error.TestUnexpectedResult,
+        frag_coord_bytes orelse return error.TestUnexpectedResult,
+        (uniform_bytes orelse return error.TestUnexpectedResult)[0..479],
+        image orelse return error.TestUnexpectedResult,
+        backing[outputs[0].interface][0..16],
+    ));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), backing[outputs[0].interface][0..16]);
+
     // Exercise both border exits and every data-dependent scale/bias array
     // index. The generic interpreter is deliberately retained as oracle for
     // each case, so a future ORC lowering inherits this branch coverage.
