@@ -1436,6 +1436,16 @@ pub const Executor = struct {
                             result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
                         }
                     }
+                    if (renderDiagnosticsEnabled() and self.program.instructions.len == 54 and pc == 18 and result.ty.columns == 2) {
+                        std.debug.print("ZPU glyph fmul operands={d:.5},{d:.5} * {d:.5},{d:.5} result={d:.5},{d:.5}\n", .{
+                            @as(f32, @bitCast(a.bits[0])),
+                            @as(f32, @bitCast(a.bits[1])),
+                            @as(f32, @bitCast(b.bits[0])),
+                            @as(f32, @bitCast(b.bits[1])),
+                            @as(f32, @bitCast(result.bits[0])),
+                            @as(f32, @bitCast(result.bits[1])),
+                        });
+                    }
                 },
                 .u_min, .i_min, .u_max, .i_max => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
