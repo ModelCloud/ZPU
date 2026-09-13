@@ -6460,6 +6460,10 @@ fn resetCommandBuffer(cb: ?CommandBuffer, flags: u32) callconv(.c) Result {
 }
 fn record(cb: CommandBuffer, command: Command) void {
     if (cb.impl.state != 1 or cb.impl.invalid or cb.impl.count == cb.impl.commands.len) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU record precondition rejected kind={s} state={d} invalid={} count={d}/{d}\n",
+            .{ @tagName(command), cb.impl.state, cb.impl.invalid, cb.impl.count, cb.impl.commands.len },
+        );
         cb.impl.invalid = true;
         return;
     }
