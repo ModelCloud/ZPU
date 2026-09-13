@@ -757,9 +757,21 @@ const TextureCopyFastPath = struct {
     bias_literal: [4]u8,
 };
 
+/// Exact Chromium VP9 video-surface composite: sample a texture at the local
+/// coordinate and multiply every channel by scalar coverage.  This differs
+/// from sample_modulate only in the coverage ABI (scalar rather than vec4).
+const SampleCoverageFastPath = struct {
+    coordinate_interface: u32,
+    coverage_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
 const FastPath = union(enum) {
     sample_modulate: SampleModulatePlan,
     texture_copy: TextureCopyFastPath,
+    sample_coverage: SampleCoverageFastPath,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -785,6 +797,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
     if (detectChromiumTextureCopy(program)) |path| return .{ .texture_copy = path };
+    if (detectChromiumVp9SampleCoverage(program)) |path| return .{ .sample_coverage = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     const instructions = program.instructions;
@@ -817,12 +830,67 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
 }
 
 const chromium_texture_copy_identity = [_]u8{ 0x7c, 0x59, 0xf3, 0xc8, 0xe2, 0x40, 0xd5, 0x24, 0xee, 0xa2, 0xe0, 0x83, 0x5c, 0x86, 0xf2, 0x62, 0x3b, 0xf3, 0x05, 0xcb, 0x81, 0x88, 0xba, 0x25, 0x3d, 0x20, 0x6c, 0x09, 0xcf, 0x89, 0xbf, 0x9c };
+const chromium_vp9_sample_coverage_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
 
 fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyFastPath {
     if (program.stage != .fragment or program.instructions.len != 13 or !std.mem.eql(u8, &program.identity.digest, &chromium_texture_copy_identity)) return null;
     const instructions = program.instructions;
     if (instructions[1].op != .constant or instructions[1].literal.len != 4 or instructions[7].op != .input or instructions[7].operands.len != 1 or instructions[9].op != .image_sample_implicit_lod or instructions[9].operands.len != 3 or instructions[11].op != .output or instructions[11].operands.len != 2) return null;
     return .{ .coordinate_interface = instructions[7].operands[0], .image_interface = instructions[9].operands[0], .output_interface = instructions[11].operands[0], .bias_literal = instructions[1].literal[0..4].* };
+}
+
+fn detectChromiumVp9SampleCoverage(program: *const ir.Program) ?SampleCoverageFastPath {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or !std.mem.eql(u8, &program.identity.digest, &chromium_vp9_sample_coverage_identity)) return null;
+    var coordinate_interface: ?u32 = null;
+    var coverage_interface: ?u32 = null;
+    var image_interface: ?u32 = null;
+    var output_interface: ?u32 = null;
+    var sampled_value: ?u32 = null;
+    var sample_bias_value: ?u32 = null;
+    var coverage_value: ?u32 = null;
+    for (program.instructions, 0..) |instruction, index| {
+        const value: u32 = @intCast(index);
+        switch (instruction.op) {
+            .input => if (instruction.operands.len == 1) {
+                if (same(instruction.ty, f32x2)) coordinate_interface = instruction.operands[0];
+                if (same(instruction.ty, f32_scalar)) {
+                    coverage_interface = instruction.operands[0];
+                    coverage_value = value;
+                }
+            },
+            .image_sample_implicit_lod => {
+                if (same(instruction.ty, f32x4) and instruction.operands.len == 3) {
+                    image_interface = instruction.operands[0];
+                    sampled_value = value;
+                    sample_bias_value = instruction.operands[2];
+                }
+            },
+            .output => {
+                if (same(instruction.ty, f32x4) and instruction.operands.len == 2) output_interface = instruction.operands[0];
+            },
+            else => {},
+        }
+    }
+    const sampled_instruction = sampled_value orelse return null;
+    const coverage = coverage_value orelse return null;
+    var multiplied = false;
+    for (program.instructions) |instruction| {
+        if (instruction.op == .vector_times_scalar and same(instruction.ty, f32x4) and instruction.operands.len == 2 and
+            ((instruction.operands[0] == sampled_instruction and instruction.operands[1] == coverage) or (instruction.operands[0] == coverage and instruction.operands[1] == sampled_instruction))) multiplied = true;
+    }
+    if (!multiplied) return null;
+    const bias_index: usize = @intCast(sample_bias_value orelse return null);
+    if (bias_index >= program.instructions.len or !same(program.instructions[bias_index].ty, f32_scalar) or program.instructions[bias_index].literal.len != 4) return null;
+    return .{
+        .coordinate_interface = coordinate_interface orelse return null,
+        .coverage_interface = coverage_interface orelse return null,
+        .image_interface = image_interface orelse return null,
+        .output_interface = output_interface orelse return null,
+        .bias_literal = program.instructions[bias_index].literal[0..4].*,
+    };
 }
 
 /// Canonical identity of `chromium_skia_fragment_839.spv` after the supported
@@ -986,6 +1054,7 @@ pub const Executor = struct {
         return switch (self.fast_path orelse return "interpreter") {
             .sample_modulate => "sample_modulate",
             .texture_copy => "chromium_texture_copy",
+            .sample_coverage => "chromium_vp9_sample_coverage",
             .convolution_8tap => "convolution_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
         };
@@ -1221,6 +1290,23 @@ pub const Executor = struct {
                 const bytes = output orelse return error.InvalidOutput;
                 if (bytes.len < 16) return error.InvalidOutput;
                 for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(sampled.bits[lane]), .little);
+            },
+            .sample_coverage => |path| {
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const coverage = try readInputValue(.{ .scalar = .f32 }, try findBindingRecord(bindings, path.coverage_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| {
+                    if (candidate.interface == path.output_interface) output = candidate.bytes;
+                }
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                const coverage_value: f32 = @bitCast(coverage.bits[0]);
+                for (0..4) |lane| {
+                    const sample_value: f32 = @bitCast(sampled.bits[lane]);
+                    std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * coverage_value)), .little);
+                }
             },
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
@@ -3028,6 +3114,52 @@ test "exact sampled-color modulation fast path preserves Chromium compositing se
     for (color_values, 0..) |value, lane| {
         const sampled: f32 = @as(f32, @floatFromInt(pixel[lane])) / 255;
         try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * value)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    }
+}
+
+test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
+    const bias = f32bytes(-0.475);
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x2, .location = 0 },
+        .{ .storage = .input, .ty = f32_scalar, .location = 1 },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .input, .ty = f32x2, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .input, .ty = f32_scalar, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 3, 1, 0 }, .literal = &.{} },
+        .{ .op = .vector_times_scalar, .ty = f32x4, .operands = &.{ 3, 2 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 2, 4 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_vp9_sample_coverage_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_vp9_sample_coverage", executor.prevalidatedPathName());
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    var coverage: [4]u8 = undefined;
+    std.mem.writeInt(u32, &coverage, @bitCast(@as(f32, 0.25)), .little);
+    const pixel = [_]u8{ 64, 128, 192, 255 };
+    var output: [16]u8 = undefined;
+    const bindings = [_]Binding{
+        .{ .interface = 0, .bytes = &coordinates },
+        .{ .interface = 1, .bytes = &coverage },
+        .{ .interface = 3, .sampled_image = .{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } },
+    };
+    const outputs = [_]Output{.{ .interface = 2, .bytes = &output }};
+    try std.testing.expect(try executor.executePrevalidated(&bindings, &outputs));
+    for (pixel, 0..) |channel, lane| {
+        const sampled: f32 = @as(f32, @floatFromInt(channel)) / 255;
+        try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * 0.25)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
     }
 }
 
