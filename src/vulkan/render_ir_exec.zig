@@ -22,6 +22,11 @@ fn renderDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+fn failureDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_FAILURES") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
 pub const Error = error{
     InvalidProgram,
     InvalidType,
@@ -1700,16 +1705,25 @@ fn convert(from: ir.Scalar, to: ir.Scalar, bits: u32) Error!u32 {
 }
 
 fn validate(program: *const ir.Program) Error!void {
-    for (program.interfaces) |interface| {
+    for (program.interfaces, 0..) |interface, interface_index| {
         try validateType(interface.ty);
         if (interface.storage == .uniform) {
-            if (!interface.block or interface.member_count == 0 or interface.member_count > ir.max_uniform_members) return error.InvalidStorage;
-            for (interface.members[0..interface.member_count]) |m| {
+            if (!interface.block or interface.member_count == 0 or interface.member_count > ir.max_uniform_members) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid uniform interface={} block={} members={}\n", .{ interface_index, interface.block, interface.member_count });
+                return error.InvalidStorage;
+            }
+            for (interface.members[0..interface.member_count], 0..) |m, member_index| {
                 try validateType(m.ty);
-                if (m.array_count == 0 or (m.array_stride == 0 and m.array_count != 1) or (m.array_stride != 0 and (m.array_stride % 16 != 0 or m.ty.rows != 1))) return error.InvalidStorage;
+                if (m.array_count == 0 or (m.array_stride == 0 and m.array_count != 1) or (m.array_stride != 0 and (m.array_stride % 16 != 0 or m.ty.rows != 1))) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid uniform member interface={} member={} array_count={} array_stride={} type={any}\n", .{ interface_index, member_index, m.array_count, m.array_stride, m.ty });
+                    return error.InvalidStorage;
+                }
             }
         } else if (interface.storage == .sampled_image) {
-            if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) return error.InvalidStorage;
+            if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid sampled image interface={} type={any} set={any} binding={any} block={} members={}\n", .{ interface_index, interface.ty, interface.descriptor_set, interface.binding, interface.block, interface.member_count });
+                return error.InvalidStorage;
+            }
         }
     }
     var outputs_seen: [ir.max_values]bool = .{false} ** ir.max_values;
@@ -1763,12 +1777,24 @@ fn validate(program: *const ir.Program) Error!void {
                 .storage => .output,
                 else => unreachable,
             };
-            if (x >= program.interfaces.len or (program.interfaces[x].storage != expected and !(instruction.op == .uniform and program.interfaces[x].storage == .push_constant))) return error.InvalidStorage;
+            if (x >= program.interfaces.len or (program.interfaces[x].storage != expected and !(instruction.op == .uniform and program.interfaces[x].storage == .push_constant))) {
+                if (failureDiagnosticsEnabled()) {
+                    const actual = if (x < program.interfaces.len) @tagName(program.interfaces[x].storage) else "out_of_bounds";
+                    std.debug.print("ZPU render executor invalid interface reference pc={} op={s} interface={} expected={s} actual={s}\n", .{ pc, @tagName(instruction.op), x, @tagName(expected), actual });
+                }
+                return error.InvalidStorage;
+            }
             if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
         if (instruction.op == .image_sample_implicit_lod) {
             const x = instruction.operands[0];
-            if (x >= program.interfaces.len or program.interfaces[x].storage != .sampled_image) return error.InvalidStorage;
+            if (x >= program.interfaces.len or program.interfaces[x].storage != .sampled_image) {
+                if (failureDiagnosticsEnabled()) {
+                    const actual = if (x < program.interfaces.len) @tagName(program.interfaces[x].storage) else "out_of_bounds";
+                    std.debug.print("ZPU render executor invalid sampled-image reference pc={} interface={} actual={s}\n", .{ pc, x, actual });
+                }
+                return error.InvalidStorage;
+            }
             if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
         }
         if (instruction.op == .output) {
@@ -1876,7 +1902,13 @@ fn validate(program: *const ir.Program) Error!void {
         switch (instruction.op) {
             .access => {
                 const interface_index = instruction.operands[0];
-                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .push_constant and program.interfaces[interface_index].storage != .output)) return error.InvalidStorage;
+                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .push_constant and program.interfaces[interface_index].storage != .output)) {
+                    if (failureDiagnosticsEnabled()) {
+                        const actual = if (interface_index < program.interfaces.len) @tagName(program.interfaces[interface_index].storage) else "out_of_bounds";
+                        std.debug.print("ZPU render executor invalid access storage pc={} interface={} actual={s}\n", .{ pc, interface_index, actual });
+                    }
+                    return error.InvalidStorage;
+                }
                 const interface = program.interfaces[interface_index];
                 for (instruction.operands[1..], 0..) |index_id, index_position| {
                     const index_ty = program.instructions[index_id].ty;
