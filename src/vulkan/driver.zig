@@ -10034,6 +10034,17 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 };
             }
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+            if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+                op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
+                target.width == 1280 and target.height == 256 and x == 30 and y == 10)
+            {
+                var diagnostic_source: [4]f32 = undefined;
+                for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                std.debug.print(
+                    "ZPU text fragment draw={d} xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
+                    .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                );
+            }
             if (renderDiagnosticsEnabled() and diagnostic_draw == 71 and x == 166 and y == 1) {
                 var diagnostic_source: [4]f32 = undefined;
                 var diagnostic_destination: [4]f32 = undefined;
