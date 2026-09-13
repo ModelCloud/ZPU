@@ -9929,9 +9929,9 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     const storage_index = colorStorageIndices(color.?.format).?[channel];
                     diagnostic_destination[channel] = @as(f32, @floatFromInt(color_bytes.?[offset + storage_index])) / 255;
                 }
-                if (diagnostic_source[3] != 0 and (diagnostic_source[0] < 0.8 or diagnostic_source[1] < 0.8 or diagnostic_source[2] < 0.8)) {
+                if (diagnostic_source[3] != 0) {
                     std.debug.print(
-                        "ZPU compositor dark fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
+                        "ZPU compositor nonzero fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
                         .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
                     );
                     diagnostic_fragments_logged += 1;

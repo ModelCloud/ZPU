@@ -15,6 +15,7 @@ pub const abi_version: u32 = 1;
 pub const backend_version: u32 = 1;
 pub const max_key_ir_bytes: usize = 256 * 1024;
 const max_execution_steps: usize = ir.max_instructions * 64;
+var diagnostic_samples = std.atomic.Value(u32).init(0);
 
 fn renderDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
@@ -377,6 +378,13 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     }
     var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
     for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    if (renderDiagnosticsEnabled()) {
+        const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
+        if (sequence < 64) std.debug.print(
+            "ZPU IR sample seq={d} uv={d:.4},{d:.4} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
+            .{ sequence, u, v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
+        );
+    }
     return result;
 }
 fn validateType(ty: ir.Type) Error!void {
