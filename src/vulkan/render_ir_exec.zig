@@ -66,6 +66,8 @@ pub const SampledImage = struct {
     address_u: AddressMode,
     address_v: AddressMode,
     border: [4]f32 = .{ 0, 0, 0, 0 },
+    // Vulkan image-view component mapping. The zero value is IDENTITY.
+    swizzle: [4]i32 = .{ 0, 0, 0, 0 },
 };
 
 pub const Binding = struct {
@@ -349,26 +351,42 @@ fn normalizedCoordinate(value: f32, mode: SampledImage.AddressMode) ?f32 {
         .mirror_clamp_to_edge => if (value < -1) 0 else if (value > 1) 1 else @abs(value),
     };
 }
+fn applySwizzle(image: SampledImage, source: [4]f32) Error![4]f32 {
+    var result: [4]f32 = undefined;
+    for (source, 0..) |_, lane| {
+        result[lane] = switch (image.swizzle[lane]) {
+            0 => source[lane], // VK_COMPONENT_SWIZZLE_IDENTITY
+            1 => 0, // VK_COMPONENT_SWIZZLE_ZERO
+            2 => 1, // VK_COMPONENT_SWIZZLE_ONE
+            3 => source[0], // VK_COMPONENT_SWIZZLE_R
+            4 => source[1], // VK_COMPONENT_SWIZZLE_G
+            5 => source[2], // VK_COMPONENT_SWIZZLE_B
+            6 => source[3], // VK_COMPONENT_SWIZZLE_A
+            else => return error.InvalidType,
+        };
+    }
+    return result;
+}
 fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
-    const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return image.border;
-    const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return image.border;
+    const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return applySwizzle(image, image.border);
+    const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return applySwizzle(image, image.border);
     const offset = std.math.add(
         usize,
         std.math.mul(usize, addressed_y, image.row_stride) catch return error.Bounds,
         std.math.mul(usize, addressed_x, image.bytes_per_texel) catch return error.Bounds,
     ) catch return error.Bounds;
     if (image.bytes_per_texel == 0 or offset > image.pixels.len or image.pixels.len - offset < image.bytes_per_texel) return error.Bounds;
-    if (image.format == .r8_unorm) return .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, 0, 0, 1 };
+    if (image.format == .r8_unorm) return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, 0, 0, 1 });
     if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
     const pixel = image.pixels[offset..][0..4];
     const r = if (image.format == .rgba8_unorm) pixel[0] else pixel[2];
     const b = if (image.format == .rgba8_unorm) pixel[2] else pixel[0];
-    return .{
+    return applySwizzle(image, .{
         @as(f32, @floatFromInt(r)) / 255,
         @as(f32, @floatFromInt(pixel[1])) / 255,
         @as(f32, @floatFromInt(b)) / 255,
         @as(f32, @floatFromInt(pixel[3])) / 255,
-    };
+    });
 }
 fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
@@ -465,6 +483,30 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample applies Vulkan image-view component swizzle" {
+    const pixels = [_]u8{ 10, 20, 30, 40 };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 4,
+        .format = .rgba8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .swizzle = .{ 3, 1, 2, 6 },
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    const bias = Value{ .ty = .{ .scalar = .f32 } };
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectEqual(@as(f32, 10.0 / 255.0), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[2])));
+    try std.testing.expectEqual(@as(f32, 40.0 / 255.0), @as(f32, @bitCast(result.bits[3])));
 }
 fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);

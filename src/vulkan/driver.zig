@@ -1223,7 +1223,7 @@ const QueryPoolObj = struct {
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
-const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -1276,7 +1276,7 @@ const DescriptorSetObj = struct {
     active_users: std.atomic.Value(u32) = .init(0),
     retire_pending: bool = false,
 };
-const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null };
+const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
     handle: Device,
@@ -9985,6 +9985,7 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
         .row_stride = image.width * 4,
         .bytes_per_texel = 4,
         .format = format,
+        .swizzle = sampled.components,
         .filter = filter,
         .address_u = address_u,
         .address_v = address_v,
@@ -13670,7 +13671,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const ci = info orelse return imageViewInvalid("create-info");
     const out = output orelse return imageViewInvalid("output");
     const pnext = imageViewCreatePNextState(ci.p_next);
-    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !validComponentSwizzles(ci.components) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=structure s_type={} pnext_valid={} flags=0x{x} view_type={} components={any} mip={} levels={} aspect=0x{x} base_layer={} layers={} usage_present={} usage=0x{x}\n",
             .{ ci.s_type, pnext.valid, ci.flags, ci.view_type, ci.components, ci.subresource_range.base_mip_level, ci.subresource_range.level_count, ci.subresource_range.aspect_mask, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, pnext.has_usage, pnext.usage },
@@ -13694,12 +13695,22 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = handle;
         return .success;
     };
     return objectPoolExhausted("image view");
+}
+
+fn validComponentSwizzle(swizzle: i32) bool {
+    // VK_COMPONENT_SWIZZLE_IDENTITY, ZERO, ONE, R, G, B, and A.
+    return swizzle >= 0 and swizzle <= 6;
+}
+
+fn validComponentSwizzles(components: [4]i32) bool {
+    for (components) |component| if (!validComponentSwizzle(component)) return false;
+    return true;
 }
 
 fn imageViewInvalid(reason: []const u8) Result {
@@ -14136,13 +14147,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_binding: u8, writes_texture: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_binding: u8, writes_texture: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_binding = 0, .writes_texture = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_binding = 0, .writes_texture = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -14172,6 +14183,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5) return;
             update.texture = view.image;
             update.sampler = sampler;
+            update.texture_components = view.components;
             update.texture_binding = @intCast(descriptor_write.dst_binding);
             update.writes_texture = true;
         } else return;
@@ -14191,7 +14203,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.storage_range = update.storage_range;
         }
         if (update.writes_texture) {
-            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler };
+            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components };
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
@@ -14285,7 +14297,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_binding = @intCast(entry.dst_binding);
-            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler };
+            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components };
         }
     }
     set.uniform = update.uniform;
@@ -15148,7 +15160,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5) return false;
             candidate.texture = view.image;
             candidate.sampler = sampler;
-            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler };
+            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components };
         } else return false;
     };
     command_buffer.impl.push_descriptor = candidate;
