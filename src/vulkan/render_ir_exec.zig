@@ -16,6 +16,11 @@ pub const backend_version: u32 = 1;
 pub const max_key_ir_bytes: usize = 256 * 1024;
 const max_execution_steps: usize = ir.max_instructions * 64;
 
+fn renderDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
 pub const Error = error{
     InvalidProgram,
     InvalidType,
@@ -406,6 +411,17 @@ pub const Executor = struct {
     }
 
     pub fn execute(self: *Executor, bindings: []const Binding, outputs: []const Output) Error!void {
+        var executing_pc: usize = std.math.maxInt(usize);
+        errdefer |err| if (renderDiagnosticsEnabled()) {
+            if (executing_pc < self.program.instructions.len) {
+                std.debug.print(
+                    "ZPU render IR failed err={s} pc={} op={s} type={any}\n",
+                    .{ @errorName(err), executing_pc, @tagName(self.program.instructions[executing_pc].op), self.program.instructions[executing_pc].ty },
+                );
+            } else {
+                std.debug.print("ZPU render IR setup failed err={s}\n", .{@errorName(err)});
+            }
+        };
         for (bindings, 0..) |binding, i| {
             if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
             const storage = self.program.interfaces[binding.interface].storage;
@@ -457,6 +473,7 @@ pub const Executor = struct {
         while (pc < self.program.instructions.len) {
             if (execution_steps == max_execution_steps) return error.LimitExceeded;
             execution_steps += 1;
+            executing_pc = pc;
             const instruction = self.program.instructions[pc];
             var next_pc = pc + 1;
             var result = Value{ .ty = instruction.ty };
