@@ -103,6 +103,8 @@ def main() -> None:
     parser.add_argument("url")
     parser.add_argument("--port", type=int, default=9222)
     parser.add_argument("--screenshot", required=True)
+    parser.add_argument("--no-screenshot", action="store_true")
+    parser.add_argument("--no-scroll", action="store_true")
     parser.add_argument("--query", action="append", default=[])
     parser.add_argument("--settle-seconds", type=float, default=5)
     parser.add_argument("--no-navigate", action="store_true")
@@ -133,11 +135,14 @@ def main() -> None:
         page_state = page_state_response.get("result", {}).get("value", "")
         if not page_state:
             print(json.dumps({"page_state_response": page_state_response}, sort_keys=True))
-        cdp.call("Runtime.evaluate", {"expression": "window.scrollBy(0, Math.max(400, innerHeight));"})
-        cdp.call("Runtime.evaluate", {"expression": "document.title"})
-        screenshot = cdp.call("Page.captureScreenshot", {"format": "png", "fromSurface": True})
-    with open(args.screenshot, "wb") as output:
-        output.write(base64.b64decode(screenshot["data"]))
+        if not args.no_screenshot:
+            if not args.no_scroll:
+                cdp.call("Runtime.evaluate", {"expression": "window.scrollBy(0, Math.max(400, innerHeight));"})
+            cdp.call("Runtime.evaluate", {"expression": "document.title"})
+            screenshot = cdp.call("Page.captureScreenshot", {"format": "png", "fromSurface": True})
+    if not args.no_screenshot:
+        with open(args.screenshot, "wb") as output:
+            output.write(base64.b64decode(screenshot["data"]))
     print(json.dumps({"url": args.url, "checks": checks, "page": page_state, "screenshot": args.screenshot}))
 
 

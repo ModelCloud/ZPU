@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ZPU Chromium Vulkan render fixture</title>
+<style>
+  body { margin: 0; width: 1280px; min-height: 720px; background: #f7f9fc; color: #172033; font: 20px/1.5 sans-serif; }
+  main { padding: 72px 96px; }
+  h1 { margin: 0 0 20px; font-size: 56px; letter-spacing: -1px; }
+  p { max-width: 760px; }
+  button { margin-top: 24px; padding: 14px 24px; border: 0; border-radius: 8px; background: #1769e0; color: white; font: inherit; }
+  .card { margin-top: 52px; padding: 28px; width: 520px; border-radius: 14px; background: white; box-shadow: 0 8px 28px #17203322; }
+</style>
+<main>
+  <h1>ZPU Vulkan rendering</h1>
+  <p>This page exercises Chromium text, sampled images, rounded geometry, and compositing through the native ZPU Vulkan driver.</p>
+  <button>Interact with the compositor</button>
+  <section class="card"><strong>Native Skia Ganesh Vulkan</strong><br>Raster and presentation stay inside the ZPU CPU implementation.</section>
+</main>

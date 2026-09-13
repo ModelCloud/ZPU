@@ -31,6 +31,8 @@ width=${ZPU_CHROME_WIDTH:-1280}
 height=${ZPU_CHROME_HEIGHT:-720}
 wait_budget=${ZPU_CHROME_WAIT:-10000}
 diagnose_failures=${ZPU_DIAGNOSE_FAILURES:-0}
+diagnose_render=${ZPU_DIAGNOSE_RENDER:-0}
+present_dump=${ZPU_PRESENT_DUMP:-}
 
 socket_root=/tmp/.X11-unix
 host_socket=$socket_root/X${display#:}
@@ -45,6 +47,7 @@ die() {
 }
 
 [[ $diagnose_failures == 0 || $diagnose_failures == 1 ]] || die 'ZPU_DIAGNOSE_FAILURES must be 0 or 1'
+[[ $diagnose_render == 0 || $diagnose_render == 1 ]] || die 'ZPU_DIAGNOSE_RENDER must be 0 or 1'
 
 run() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
@@ -277,6 +280,8 @@ launch_chrome() {
         VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
+        ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+        ZPU_PRESENT_DUMP="$present_dump" \
         "$chrome_bin" --no-sandbox \
         --disable-gpu-sandbox \
         --headless \

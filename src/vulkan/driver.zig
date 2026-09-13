@@ -1762,6 +1762,7 @@ var render_diagnostic_page_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_texture_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_glyph_target_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_page_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
@@ -9567,6 +9568,16 @@ test "scalar profile color writes preserve RGBA and BGRA storage order" {
     try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
 }
 
+test "scalar profile color writes preserve R8 red storage" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 0.25, 0.5, 0.75, 1 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var r8 = [_]u8{ 0, 17, 33, 255 };
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&r8, 9, false, &output, 0x1, .{}));
+    try std.testing.expectEqual([_]u8{ 63, 17, 33, 255 }, r8);
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&r8, 9, false, &output, 0x2, .{}));
+    try std.testing.expectEqual([_]u8{ 63, 127, 33, 255 }, r8);
+}
+
 test "scalar profile color blending uses source and destination factors" {
     var bytes = [_]u8{ 0, 0, 0, 255 };
     var output = [_]u8{0} ** 16;
@@ -10160,6 +10171,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256)
         dumpDiagnosticImage(target, "ZPU_GLYPH_TARGET_DUMP", &render_diagnostic_glyph_target_dump);
+    if (target.width == 1024 and target.height == 512)
+        dumpDiagnosticImage(target, "ZPU_PAGE_TARGET_DUMP", &render_diagnostic_page_target_dump);
     if (diagnostic_draw == 305) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
     if (diagnostic_draw == 270) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
 }
