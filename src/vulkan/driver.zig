@@ -12544,7 +12544,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         ia.topology != 3 and
         (ia.topology != 4 or profile_contract == null)) or
         (!dynamic_primitive_restart_enable and
-            pipeline_primitive_restart_enable != 0))
+            pipeline_primitive_restart_enable != 0 and ia.topology != 3))
         return pipelineInvalid(@src().line);
     const vp = ci.viewport orelse return pipelineInvalid(@src().line);
     if (vp.s_type != 22 or vp.p_next != null or vp.flags != 0 or vp.viewport_count != 1 or vp.scissor_count != 1 or (!dynamic_viewport and vp.viewports == null) or (!dynamic_scissor and vp.scissors == null)) return pipelineInvalid(@src().line);
@@ -15095,7 +15095,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
         pipeline.execution_abi == .profile_v1_scalar_graphics,
         primitive_topology,
     );
-    if (!topology_supported or primitive_restart_enable != 0 or stencil_test_enable != 0) {
+    if (!topology_supported or (primitive_restart_enable != 0 and primitive_topology != 3) or stencil_test_enable != 0) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster mode rejected topology={d} supported={} restart={d} stencil={d}\n", .{ primitive_topology, topology_supported, primitive_restart_enable, stencil_test_enable });
         return null;
     }
@@ -15258,6 +15258,10 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.dynamic.primitive_topology = 3;
     impl.dynamic.primitive_restart_enable = 1;
+    resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(i32, 3), resolved.primitive_topology);
+    try std.testing.expectEqual(@as(u32, 1), resolved.primitive_restart_enable);
+    impl.dynamic.primitive_topology = 4;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.dynamic.primitive_restart_enable = 0;
 
