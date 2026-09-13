@@ -7803,10 +7803,17 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
             return;
         };
         const in_dynamic_rendering = command_buffer.impl.dynamic_rendering;
+        const dynamic_scope_valid = !in_dynamic_rendering or dynamicRenderingDependencyValid(ci);
+        const render_pass_scope_valid = in_dynamic_rendering or renderPassDependencyValid(command_buffer, ci);
         if (command_buffer.impl.state != 1 or command_buffer.impl.invalid or
-            (in_dynamic_rendering and !dynamicRenderingDependencyValid(ci)) or
-            (!in_dynamic_rendering and !renderPassDependencyValid(command_buffer, ci)))
+            !dynamic_scope_valid or !render_pass_scope_valid)
         {
+            if (failureDiagnosticsEnabled()) {
+                std.debug.print(
+                    "ZPU pipeline barrier2 rejected state={d} invalid={} dynamic={} dynamic_scope={} render_scope={} memory={d} buffers={d} images={d} dependency=0x{x}\n",
+                    .{ command_buffer.impl.state, command_buffer.impl.invalid, in_dynamic_rendering, dynamic_scope_valid, render_pass_scope_valid, ci.memory_barrier_count, ci.buffer_memory_barrier_count, ci.image_memory_barrier_count, ci.dependency_flags },
+                );
+            }
             command_buffer.impl.invalid = true;
             mutex.unlock();
             return;
