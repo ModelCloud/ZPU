@@ -1836,6 +1836,7 @@ var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
@@ -11525,6 +11526,8 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
             if (op.pipeline.execution_abi == .profile_v1_scalar_graphics) {
                 if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(1, .monotonic);
+                const profile_timing_enabled = profileTimingDiagnosticsEnabled();
+                const profile_start = if (profile_timing_enabled) frame_pacing.monotonicNs() else 0;
                 var draw = op;
                 const instance_count = draw.instance_count;
                 draw.instance_count = 1;
@@ -11533,6 +11536,19 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
                     while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null);
+                }
+                if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < 512) {
+                    const target = color orelse depth;
+                    std.debug.print(
+                        "ZPU direct profile timing target={d}x{d} topology={d} vertices={d} fragment_path={s} fragment_ir={x} total_ns={d}\n",
+                        .{ if (target) |image| image.width else 0, if (target) |image| image.height else 0, op.primitive_topology, op.vertex_count, switch (op.pipeline.execution_abi) {
+                            .profile_v1_scalar_graphics => |profile| profile.fragment.prevalidatedPathName(),
+                            else => unreachable,
+                        }, switch (op.pipeline.execution_abi) {
+                            .profile_v1_scalar_graphics => |profile| profile.fragment.program.identity.digest,
+                            else => unreachable,
+                        }, frame_pacing.monotonicNs() - profile_start },
+                    );
                 }
                 return;
             }
