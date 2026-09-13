@@ -9739,7 +9739,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     if (renderDiagnosticsEnabled() and ((op.descriptors.texture == null and op.vertex_count == 90) or
         (target.width == 1280 and target.height == 256 and op.vertex_count == 474)) and
         target.width == 1280 and target.height == 256 and
-        render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
+        (op.vertex_count == 474 or render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0))
     {
         std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
         for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
