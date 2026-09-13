@@ -843,53 +843,48 @@ fn detectChromiumVp9SampleCoverage(program: *const ir.Program) ?SampleCoverageFa
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
-    if (program.stage != .fragment or !std.mem.eql(u8, &program.identity.digest, &chromium_vp9_sample_coverage_identity)) return null;
-    var coordinate_interface: ?u32 = null;
-    var coverage_interface: ?u32 = null;
-    var image_interface: ?u32 = null;
-    var output_interface: ?u32 = null;
-    var sampled_value: ?u32 = null;
-    var sample_bias_value: ?u32 = null;
-    var coverage_value: ?u32 = null;
-    for (program.instructions, 0..) |instruction, index| {
-        const value: u32 = @intCast(index);
-        switch (instruction.op) {
-            .input => if (instruction.operands.len == 1) {
-                if (same(instruction.ty, f32x2)) coordinate_interface = instruction.operands[0];
-                if (same(instruction.ty, f32_scalar)) {
-                    coverage_interface = instruction.operands[0];
-                    coverage_value = value;
-                }
-            },
-            .image_sample_implicit_lod => {
-                if (same(instruction.ty, f32x4) and instruction.operands.len == 3) {
-                    image_interface = instruction.operands[0];
-                    sampled_value = value;
-                    sample_bias_value = instruction.operands[2];
-                }
-            },
-            .output => {
-                if (same(instruction.ty, f32x4) and instruction.operands.len == 2) output_interface = instruction.operands[0];
-            },
-            else => {},
-        }
-    }
-    const sampled_instruction = sampled_value orelse return null;
-    const coverage = coverage_value orelse return null;
-    var multiplied = false;
-    for (program.instructions) |instruction| {
-        if (instruction.op == .vector_times_scalar and same(instruction.ty, f32x4) and instruction.operands.len == 2 and
-            ((instruction.operands[0] == sampled_instruction and instruction.operands[1] == coverage) or (instruction.operands[0] == coverage and instruction.operands[1] == sampled_instruction))) multiplied = true;
-    }
-    if (!multiplied) return null;
-    const bias_index: usize = @intCast(sample_bias_value orelse return null);
-    if (bias_index >= program.instructions.len or !same(program.instructions[bias_index].ty, f32_scalar) or program.instructions[bias_index].literal.len != 4) return null;
+    // Chromium's emitted source has locals for both the sampled color and
+    // scalar coverage, but the canonical Render IR uses the SSA input values
+    // directly in the final multiply.  Match the complete lowered program,
+    // including that dead local-store scaffolding, rather than guessing from
+    // a partial data-flow pattern.  The digest is the primary guard; these
+    // checks make the runtime ABI explicit and reject malformed test inputs.
+    if (program.stage != .fragment or program.instructions.len != 20 or program.interfaces.len != 5 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_vp9_sample_coverage_identity)) return null;
+    const instructions = program.instructions;
+    if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or instructions[0].literal.len != 4 or
+        instructions[1].op != .constant or !same(instructions[1].ty, f32_scalar) or instructions[1].operands.len != 0 or instructions[1].literal.len != 4 or
+        !exactInstruction(instructions[2], .local, f32_scalar, &.{}) or
+        !exactInstruction(instructions[3], .local, f32x2, &.{}) or
+        !exactInstruction(instructions[4], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[5], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[6], .constant_composite, f32x4, &.{ 0, 0, 0, 0 }) or
+        instructions[7].op != .label or !same(instructions[7].ty, .{ .scalar = .u32 }) or instructions[7].operands.len != 0 or instructions[7].literal.len != 4 or
+        !exactInstruction(instructions[8], .local_store, f32x4, &.{ 4, 6 }) or
+        !exactInstruction(instructions[9], .input, f32x2, &.{0}) or
+        !exactInstruction(instructions[10], .local_store, f32x2, &.{ 3, 9 }) or
+        !exactInstruction(instructions[11], .image_sample_implicit_lod, f32x4, &.{ 4, 9, 1 }) or
+        !exactInstruction(instructions[12], .local_store, f32x4, &.{ 4, 11 }) or
+        !exactInstruction(instructions[13], .input, f32_scalar, &.{1}) or
+        !exactInstruction(instructions[14], .local_store, f32_scalar, &.{ 2, 13 }) or
+        !exactInstruction(instructions[15], .composite, f32x4, &.{ 13, 13, 13, 13 }) or
+        !exactInstruction(instructions[16], .local_store, f32x4, &.{ 5, 15 }) or
+        !exactInstruction(instructions[17], .fmul, f32x4, &.{ 11, 15 }) or
+        !exactInstruction(instructions[18], .output, f32x4, &.{ 3, 17 }) or
+        !exactInstruction(instructions[19], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    if (program.interfaces[0].storage != .input or !same(program.interfaces[0].ty, f32x2) or
+        program.interfaces[1].storage != .input or !same(program.interfaces[1].ty, f32_scalar) or
+        program.interfaces[3].storage != .output or !same(program.interfaces[3].ty, f32x4) or
+        program.interfaces[4].storage != .sampled_image or !same(program.interfaces[4].ty, f32x4) or
+        program.interfaces[4].descriptor_set == null or program.interfaces[4].descriptor_set.? != 1 or
+        program.interfaces[4].binding == null or program.interfaces[4].binding.? != 0) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
     return .{
-        .coordinate_interface = coordinate_interface orelse return null,
-        .coverage_interface = coverage_interface orelse return null,
-        .image_interface = image_interface orelse return null,
-        .output_interface = output_interface orelse return null,
-        .bias_literal = program.instructions[bias_index].literal[0..4].*,
+        .coordinate_interface = 0,
+        .coverage_interface = 1,
+        .image_interface = 4,
+        .output_interface = 3,
+        .bias_literal = instructions[1].literal[0..4].*,
     };
 }
 
@@ -3118,23 +3113,39 @@ test "exact sampled-color modulation fast path preserves Chromium compositing se
 }
 
 test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
+    const one = f32bytes(1);
     const bias = f32bytes(-0.475);
+    const label = [_]u8{ 25, 0, 0, 0 };
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
     var interfaces = [_]ir.Interface{
         .{ .storage = .input, .ty = f32x2, .location = 0 },
         .{ .storage = .input, .ty = f32_scalar, .location = 1 },
+        .{ .storage = .input, .ty = f32x4, .location = 2 },
         .{ .storage = .output, .ty = f32x4, .location = 0 },
         .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
     };
     var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &one },
         .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32_scalar, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x2, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .constant_composite, .ty = f32x4, .operands = &.{ 0, 0, 0, 0 }, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 4, 6 }, .literal = &.{} },
         .{ .op = .input, .ty = f32x2, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x2, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 4, 9, 1 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 4, 11 }, .literal = &.{} },
         .{ .op = .input, .ty = f32_scalar, .operands = &.{1}, .literal = &.{} },
-        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 3, 1, 0 }, .literal = &.{} },
-        .{ .op = .vector_times_scalar, .ty = f32x4, .operands = &.{ 3, 2 }, .literal = &.{} },
-        .{ .op = .output, .ty = f32x4, .operands = &.{ 2, 4 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32_scalar, .operands = &.{ 2, 13 }, .literal = &.{} },
+        .{ .op = .composite, .ty = f32x4, .operands = &.{ 13, 13, 13, 13 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 5, 15 }, .literal = &.{} },
+        .{ .op = .fmul, .ty = f32x4, .operands = &.{ 11, 15 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 17 }, .literal = &.{} },
         .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
     };
     var source = try testProgram(&interfaces, &instructions);
@@ -3153,9 +3164,9 @@ test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
     const bindings = [_]Binding{
         .{ .interface = 0, .bytes = &coordinates },
         .{ .interface = 1, .bytes = &coverage },
-        .{ .interface = 3, .sampled_image = .{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } },
+        .{ .interface = 4, .sampled_image = .{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } },
     };
-    const outputs = [_]Output{.{ .interface = 2, .bytes = &output }};
+    const outputs = [_]Output{.{ .interface = 3, .bytes = &output }};
     try std.testing.expect(try executor.executePrevalidated(&bindings, &outputs));
     for (pixel, 0..) |channel, lane| {
         const sampled: f32 = @as(f32, @floatFromInt(channel)) / 255;
