@@ -7714,6 +7714,12 @@ fn sync2AccessMaskToLegacy(mask: u64) ?u32 {
     if (mask & high_storage_write != 0) legacy |= 0x40; // SHADER_WRITE
     return legacy;
 }
+fn diagnoseSync2BarrierRejection(kind: []const u8, index: usize, reason: []const u8, stage_mask: u64, access_mask: u64) void {
+    if (failureDiagnosticsEnabled()) std.debug.print(
+        "ZPU synchronization2 barrier rejected kind={s} index={} reason={s} stages=0x{x} access=0x{x}\n",
+        .{ kind, index, reason, stage_mask, access_mask },
+    );
+}
 fn sync2TimestampStageToLegacy(stage: u64) ?u32 {
     // VkCmdWriteTimestamp2 has a single-stage domain even though the
     // synchronization2 ABI uses a 64-bit flags mask for the parameter.
@@ -7873,22 +7879,27 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     var memories: [max_api_items]MemoryBarrier = undefined;
     if (ci.memory_barriers) |items| for (items[0..ci.memory_barrier_count], 0..) |barrier, index| {
         const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
+            diagnoseSync2BarrierRejection("memory-src-stage", index, "stage-mask", barrier.src_stage_mask, barrier.src_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_dst_stage = sync2BarrierStageMaskToLegacy(barrier.dst_stage_mask, barrier.dst_access_mask) orelse {
+            diagnoseSync2BarrierRejection("memory-dst-stage", index, "stage-mask", barrier.dst_stage_mask, barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_src_access = sync2AccessMaskToLegacy(barrier.src_access_mask) orelse {
+            diagnoseSync2BarrierRejection("memory-src-access", index, "access-mask", barrier.src_stage_mask, barrier.src_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_dst_access = sync2AccessMaskToLegacy(barrier.dst_access_mask) orelse {
+            diagnoseSync2BarrierRejection("memory-dst-access", index, "access-mask", barrier.dst_stage_mask, barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         if (!stagesSupportAccess(converted_src_stage, converted_src_access) or !stagesSupportAccess(converted_dst_stage, converted_dst_access)) {
+            diagnoseSync2BarrierRejection("memory", index, "stage-access", barrier.src_stage_mask | barrier.dst_stage_mask, barrier.src_access_mask | barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         }
@@ -7899,22 +7910,27 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     var buffers: [max_api_items]BufferMemoryBarrier = undefined;
     if (ci.buffer_memory_barriers) |items| for (items[0..ci.buffer_memory_barrier_count], 0..) |barrier, index| {
         const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
+            diagnoseSync2BarrierRejection("buffer-src-stage", index, "stage-mask", barrier.src_stage_mask, barrier.src_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_dst_stage = sync2BarrierStageMaskToLegacy(barrier.dst_stage_mask, barrier.dst_access_mask) orelse {
+            diagnoseSync2BarrierRejection("buffer-dst-stage", index, "stage-mask", barrier.dst_stage_mask, barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_src_access = sync2AccessMaskToLegacy(barrier.src_access_mask) orelse {
+            diagnoseSync2BarrierRejection("buffer-src-access", index, "access-mask", barrier.src_stage_mask, barrier.src_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_dst_access = sync2AccessMaskToLegacy(barrier.dst_access_mask) orelse {
+            diagnoseSync2BarrierRejection("buffer-dst-access", index, "access-mask", barrier.dst_stage_mask, barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         if (!stagesSupportAccess(converted_src_stage, converted_src_access) or !stagesSupportAccess(converted_dst_stage, converted_dst_access)) {
+            diagnoseSync2BarrierRejection("buffer", index, "stage-access", barrier.src_stage_mask | barrier.dst_stage_mask, barrier.src_access_mask | barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         }
@@ -7925,22 +7941,27 @@ fn cmdPipelineBarrier2(cb: ?CommandBuffer, info: ?*const DependencyInfo) callcon
     var images: [max_api_items]ImageMemoryBarrier = undefined;
     if (ci.image_memory_barriers) |items| for (items[0..ci.image_memory_barrier_count], 0..) |barrier, index| {
         const converted_src_stage = sync2BarrierStageMaskToLegacy(barrier.src_stage_mask, barrier.src_access_mask) orelse {
+            diagnoseSync2BarrierRejection("image-src-stage", index, "stage-mask", barrier.src_stage_mask, barrier.src_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_dst_stage = sync2BarrierStageMaskToLegacy(barrier.dst_stage_mask, barrier.dst_access_mask) orelse {
+            diagnoseSync2BarrierRejection("image-dst-stage", index, "stage-mask", barrier.dst_stage_mask, barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_src_access = sync2AccessMaskToLegacy(barrier.src_access_mask) orelse {
+            diagnoseSync2BarrierRejection("image-src-access", index, "access-mask", barrier.src_stage_mask, barrier.src_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         const converted_dst_access = sync2AccessMaskToLegacy(barrier.dst_access_mask) orelse {
+            diagnoseSync2BarrierRejection("image-dst-access", index, "access-mask", barrier.dst_stage_mask, barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         };
         if (!stagesSupportAccess(converted_src_stage, converted_src_access) or !stagesSupportAccess(converted_dst_stage, converted_dst_access)) {
+            diagnoseSync2BarrierRejection("image", index, "stage-access", barrier.src_stage_mask | barrier.dst_stage_mask, barrier.src_access_mask | barrier.dst_access_mask);
             markCommandBufferInvalid(cb);
             return;
         }
