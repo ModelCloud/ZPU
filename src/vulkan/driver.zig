@@ -1750,6 +1750,8 @@ var mutex: std.atomic.Mutex = .unlocked;
 var active_queue_submissions = std.atomic.Value(u32).init(0);
 var render_diagnostic_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_presents = std.atomic.Value(u32).init(0);
+var render_diagnostic_clears = std.atomic.Value(u32).init(0);
+var render_diagnostic_begins = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -10128,6 +10130,8 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
         },
         .render_clear => |op| {
             const operation_start = frame_pacing.monotonicNs();
+            const diagnostic_clear = if (renderDiagnosticsEnabled()) render_diagnostic_clears.fetchAdd(1, .monotonic) else 0;
+            const diagnostic_before = if (renderDiagnosticsEnabled() and diagnostic_clear < 64) diagnosticDarkPixelCount(op.image) else 0;
             const full_color_clear = op.color_base_layer == 0 and op.layer_count == op.image.array_layers;
             const full_depth_clear = if (op.depth) |depth| op.depth_base_layer == 0 and op.layer_count == depth.array_layers else true;
             if (!full_color_clear or !full_depth_clear) {
@@ -10153,6 +10157,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                     }
                 }
                 op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
+                if (renderDiagnosticsEnabled() and diagnostic_clear < 64) std.debug.print(
+                    "ZPU render clear seq={d} image={x} {d}x{d} format={d} color={} depth={} before={d} after={d} partial=true\n",
+                    .{ diagnostic_clear, @intFromPtr(op.image), op.image.width, op.image.height, op.image.format, op.clear_color, op.clear_depth, diagnostic_before, diagnosticDarkPixelCount(op.image) },
+                );
                 return;
             }
             const bytes = imageBytes(op.image);
@@ -10206,6 +10214,10 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 }
             }
             op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
+            if (renderDiagnosticsEnabled() and diagnostic_clear < 64) std.debug.print(
+                "ZPU render clear seq={d} image={x} {d}x{d} format={d} color={} depth={} before={d} after={d} partial=false\n",
+                .{ diagnostic_clear, @intFromPtr(op.image), op.image.width, op.image.height, op.image.format, op.clear_color, op.clear_depth, diagnostic_before, diagnosticDarkPixelCount(op.image) },
+            );
         },
         .discard_image => |op| invalidateImageContents(op.image),
         .clear_attachments => |op| {
@@ -13580,6 +13592,13 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or (image != null and image.?.owner != command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > render_width or area_end_y > render_height) {
         command_buffer.impl.invalid = true;
         return;
+    }
+    if (renderDiagnosticsEnabled()) {
+        const diagnostic_begin = render_diagnostic_begins.fetchAdd(1, .monotonic);
+        if (diagnostic_begin < 64) std.debug.print(
+            "ZPU begin render seq={d} image={x} {d}x{d} colorLoad={d} colorStore={d} depthLoad={d} depthStore={d} area={d},{d} {d}x{d}\n",
+            .{ diagnostic_begin, if (image) |target| @intFromPtr(target) else 0, render_width, render_height, render_pass.color_load_op, render_pass.color_store_op, render_pass.depth_load_op, render_pass.depth_store_op, begin.render_area.offset.x, begin.render_area.offset.y, begin.render_area.extent.width, begin.render_area.extent.height },
+        );
     }
     command_buffer.impl.active_framebuffer = framebuffer;
     command_buffer.impl.active_render_pass = render_pass;
