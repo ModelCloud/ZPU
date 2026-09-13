@@ -1757,6 +1757,8 @@ var render_diagnostic_profile_ir = std.atomic.Value(u32).init(0);
 var render_diagnostic_vertex_inputs = std.atomic.Value(u32).init(0);
 var render_diagnostic_copies = std.atomic.Value(u32).init(0);
 var render_diagnostic_page_geometry = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_page_dump = std.atomic.Value(bool).init(false);
 
 const max_present_entries = 24;
 
@@ -9367,6 +9369,26 @@ fn diagnoseImageTransfer(kind: []const u8, src: ?*ImageObj, dst: *ImageObj) void
     );
 }
 
+fn dumpDiagnosticImage(image: *ImageObj, variable: [*:0]const u8, completed: *std.atomic.Value(bool)) void {
+    if (!renderDiagnosticsEnabled() or completed.load(.acquire)) return;
+    if (completed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+    const path = std.c.getenv(variable) orelse return;
+    const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
+    if (fd < 0) {
+        std.debug.print("ZPU diagnostic image dump open failed path={s}\n", .{std.mem.span(path)});
+        return;
+    }
+    const bytes = imageBytes(image);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const amount = write(fd, bytes[offset..].ptr, bytes.len - offset);
+        if (amount <= 0) break;
+        offset += @intCast(amount);
+    }
+    _ = close(fd);
+    std.debug.print("ZPU diagnostic image dump path={s} image={d}x{d} bytes={} complete={}\n", .{ std.mem.span(path), image.width, image.height, bytes.len, offset == bytes.len });
+}
+
 fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
@@ -10055,6 +10077,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
         .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
+    if (target.width == 1024 and target.height == 512) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
+    if (target.width == 1280 and target.height == 256) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
 }
 fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
     switch (op.pipeline.execution_abi) {
