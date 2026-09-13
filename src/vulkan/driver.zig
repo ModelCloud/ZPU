@@ -10333,8 +10333,8 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
 
 const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
 
-fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip, publish_state: bool) void {
-    const profile = profile_override orelse switch (op.pipeline.execution_abi) {
+fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
+    const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
     };
@@ -10798,35 +10798,33 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         };
     }
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
-    if (publish_state) {
-        if (color) |color_image| {
-            color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
-            color_image.complex_3d_content = true;
-            color_image.force_full_present = true;
-        }
-        if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
+    if (color) |color_image| {
+        color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
+        color_image.complex_3d_content = true;
+        color_image.force_full_present = true;
     }
-    if (publish_state and renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
+    if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
+    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
         .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
-    if (publish_state and renderDiagnosticsEnabled() and op.descriptors.texture != null and
+    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
         op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
         target.width == 1280 and target.height == 256)
     {
         dumpDiagnosticImage(op.descriptors.texture.?, "ZPU_TEXT_TEXTURE_DUMP", &render_diagnostic_text_texture_dump);
         dumpDiagnosticImage(target, "ZPU_TEXT_TARGET_DUMP", &render_diagnostic_text_target_dump);
     }
-    if (publish_state and renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256)
         dumpDiagnosticImage(target, "ZPU_GLYPH_TARGET_DUMP", &render_diagnostic_glyph_target_dump);
-    if (publish_state and target.width == 1024 and target.height == 512) {
+    if (target.width == 1024 and target.height == 512) {
         const match = render_diagnostic_page_target_matches.fetchAdd(1, .monotonic) + 1;
         if (match >= pageTargetDumpMatch())
             dumpDiagnosticImage(target, "ZPU_PAGE_TARGET_DUMP", &render_diagnostic_page_target_dump);
     }
-    if (publish_state and diagnostic_draw == 305) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
-    if (publish_state and diagnostic_draw == 270) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
+    if (diagnostic_draw == 305) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
+    if (diagnostic_draw == 270) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
 }
 fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
     switch (op.pipeline.execution_abi) {
@@ -10924,98 +10922,6 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
 
 const profile_mosaic_tile_size: u32 = 256;
 const profile_mosaic_batch_commands: usize = 64;
-const profile_parallel_lanes: usize = 8;
-
-/// Per-lane executor ownership for the prevalidated final-composite path.
-/// Generic Render IR keeps mutable values/locals and remains serial; only an
-/// exact immutable sample-modulate fragment may use these independent clones.
-const ProfileGraphicsClone = struct {
-    graphics: ProfileGraphics,
-
-    fn init(source: *const ProfileGraphics) render_ir_exec.Error!ProfileGraphicsClone {
-        var graphics = source.*;
-        graphics.vertex = try render_ir_exec.Executor.init(source.vertex.allocator, &source.vertex.program);
-        errdefer graphics.vertex.deinit();
-        graphics.fragment = try render_ir_exec.Executor.init(source.fragment.allocator, &source.fragment.program);
-        return .{ .graphics = graphics };
-    }
-
-    fn deinit(self: *ProfileGraphicsClone) void {
-        self.graphics.vertex.deinit();
-        self.graphics.fragment.deinit();
-        self.* = undefined;
-    }
-};
-
-fn profileParallelSampleModulateEligible(op: anytype) bool {
-    if (!profileMosaicEligible(op)) return false;
-    const profile = switch (op.pipeline.execution_abi) {
-        .profile_v1_scalar_graphics => |*value| value,
-        else => return false,
-    };
-    return std.mem.eql(u8, profile.fragment.prevalidatedPathName(), "sample_modulate");
-}
-
-/// Execute one exact sample-modulate profile over disjoint horizontal Mosaic
-/// regions. Each lane has private vertex/fragment executor state; the image
-/// regions do not overlap, and per-pixel draw order is unchanged because this
-/// helper is invoked once per command in submission order.
-fn executeMosaicProfileDrawParallel(op: anytype, query_context: *QueryExecutionContext) bool {
-    const source = switch (op.pipeline.execution_abi) {
-        .profile_v1_scalar_graphics => |*value| value,
-        else => return false,
-    };
-    const target_state = profileMosaicTarget(op);
-    const target = target_state.color orelse target_state.depth orelse return false;
-    var clones: [profile_parallel_lanes]ProfileGraphicsClone = undefined;
-    var initialized: usize = 0;
-    while (initialized < clones.len) : (initialized += 1) clones[initialized] = ProfileGraphicsClone.init(source) catch {
-        for (clones[0..initialized]) |*clone| clone.deinit();
-        return false;
-    };
-    defer for (&clones) |*clone| clone.deinit();
-
-    const Op = @TypeOf(op);
-    const Context = struct {
-        op: Op,
-        query_context: *QueryExecutionContext,
-        target_width: u32,
-        target_height: u32,
-        clones: *[profile_parallel_lanes]ProfileGraphicsClone,
-
-        fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
-            const context: *@This() = @ptrCast(@alignCast(raw));
-            if (lane_count == 0 or lane_count > context.clones.len) return;
-            const min_y: u32 = @intCast(@as(u64, context.target_height) * lane_index / lane_count);
-            const max_y: u32 = @intCast(@as(u64, context.target_height) * (lane_index + 1) / lane_count);
-            if (min_y >= max_y) return;
-            executeProfileDraw(context.op, &context.clones[lane_index].graphics, context.query_context, 0, .{
-                .min_x = 0,
-                .min_y = min_y,
-                .max_x = context.target_width,
-                .max_y = max_y,
-            }, false);
-        }
-    };
-    var context = Context{
-        .op = op,
-        .query_context = query_context,
-        .target_width = target.width,
-        .target_height = target.height,
-        .clones = &clones,
-    };
-    if (!cpu_cube.dispatchParallelLanes(&context, Context.run)) return false;
-    // Parallel lanes do not mutate attachment bookkeeping. Publish a single
-    // conservative full-target damage region after all writes complete.
-    const bounds = cpu_cube.Rect{ .x = 0, .y = 0, .width = target.width, .height = target.height };
-    if (target_state.color) |color| {
-        color.content_bounds = unionRect(color.content_bounds, bounds);
-        color.complex_3d_content = true;
-        color.force_full_present = true;
-    }
-    if (target_state.depth) |depth| depth.content_bounds = unionRect(depth.content_bounds, bounds);
-    return true;
-}
 
 /// Mosaic is worthwhile either for a group of profile draws or for one
 /// framebuffer-sized composite. Chromium's video compositor produces the
@@ -11082,53 +10988,6 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     const timing_enabled = profileTimingDiagnosticsEnabled();
     var command_elapsed_ns = [_]u64{0} ** profile_mosaic_batch_commands;
     const start = cursor.*;
-    var all_parallel_sample_modulate = true;
-    var eligibility_cursor = start;
-    for (0..batch_count) |_| {
-        const raw = eligibility_cursor.current() orelse return null;
-        const op = switch (raw.*) {
-            .cube_draw => |value| value,
-            else => return null,
-        };
-        if (!profileParallelSampleModulateEligible(op)) {
-            all_parallel_sample_modulate = false;
-            break;
-        }
-        eligibility_cursor.advance();
-    }
-    if (all_parallel_sample_modulate) {
-        var draw_cursor = start;
-        for (0..batch_count) |draw_index| {
-            const raw = draw_cursor.current() orelse return null;
-            const op = switch (raw.*) {
-                .cube_draw => |value| value,
-                else => return null,
-            };
-            const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
-            // Allocation or worker-start failure occurs before this draw has
-            // modified its target, so the serial path is a safe exact
-            // fallback without replaying an already completed command.
-            if (!executeMosaicProfileDrawParallel(op, query_context))
-                executeProfileDraw(op, null, query_context, 0, null, true);
-            if (timing_enabled) command_elapsed_ns[draw_index] = frame_pacing.monotonicNs() - command_start;
-            draw_cursor.advance();
-        }
-        if (renderDiagnosticsEnabled()) {
-            const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
-            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel profile batch seq={d} commands={d} target={x} {d}x{d} lanes<= {d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_parallel_lanes });
-        }
-        color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
-        if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128) {
-            std.debug.print(
-                "ZPU Mosaic parallel profile timing target={d}x{d} commands={d} total_ns={d}",
-                .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
-            );
-            for (command_elapsed_ns[0..batch_count], 0..) |elapsed, index| std.debug.print(" draw[{d}]_ns={d}", .{ index, elapsed });
-            std.debug.print("\n", .{});
-        }
-        cursor.* = candidate;
-        return batch_count;
-    }
     var tile_y: u32 = 0;
     while (tile_y < color_image.height) : (tile_y += profile_mosaic_tile_size) {
         var tile_x: u32 = 0;
@@ -11148,7 +11007,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                     else => return null,
                 };
                 const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
-                executeProfileDraw(op, null, query_context, 0, clip, true);
+                executeProfileDraw(op, query_context, 0, clip);
                 if (timing_enabled) command_elapsed_ns[draw_index] += frame_pacing.monotonicNs() - command_start;
                 draw_cursor.advance();
             }
@@ -11424,7 +11283,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 while (instance < instance_count) : (instance += 1) {
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
-                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null, true);
+                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, query_context, layer, null);
                 }
                 return;
             }

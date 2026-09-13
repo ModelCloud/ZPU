@@ -1958,9 +1958,7 @@ const MosaicBatchDraw = struct {
 };
 const ParallelClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32 = 0, rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
 const ParallelTileClear = struct { color: []u8, color_pattern: u32, depth: []u8, depth_pattern: u32, width: u32, height: u32, tiles: []const u8 };
-pub const ParallelLaneCallback = *const fn (context: *anyopaque, lane_index: usize, lane_count: usize) void;
-const ParallelExternal = struct { context: *anyopaque, callback: ParallelLaneCallback };
-const ParallelJob = union(enum) { draw: *ParallelDraw, batch: *ParallelBatchDraw, mosaic: *MosaicBatchDraw, batch_prepare: *ParallelBatchPrepare, clear: *ParallelClear, tile_clear: *ParallelTileClear, external: ParallelExternal };
+const ParallelJob = union(enum) { draw: *ParallelDraw, batch: *ParallelBatchDraw, mosaic: *MosaicBatchDraw, batch_prepare: *ParallelBatchPrepare, clear: *ParallelClear, tile_clear: *ParallelTileClear };
 
 var parallel_mutex: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
 var parallel_condition: std.c.pthread_cond_t = std.c.PTHREAD_COND_INITIALIZER;
@@ -3822,7 +3820,6 @@ fn runParallelJob(job: ParallelJob, lane_index: usize) void {
                 fillPatternRectAll(context.depth, context.width, rect, context.depth_pattern);
             }
         },
-        .external => |context| context.callback(context.context, lane_index, parallelBandCount()),
     }
 }
 
@@ -3911,14 +3908,6 @@ fn dispatchParallel(job: ParallelJob) bool {
     _ = std.c.pthread_cond_broadcast(&parallel_condition);
     _ = std.c.pthread_mutex_unlock(&parallel_mutex);
     return true;
-}
-
-/// Run a bounded caller-owned lane callback on the established Mosaic worker
-/// pool. The callback context must remain live until this function returns;
-/// each lane owns a disjoint output region. This is intentionally private to
-/// the ZPU renderer rather than a public Vulkan execution API.
-pub fn dispatchParallelLanes(context: *anyopaque, callback: ParallelLaneCallback) bool {
-    return dispatchParallel(.{ .external = .{ .context = context, .callback = callback } });
 }
 
 // The vkcube performance workload submits the same full-frame draw for every
@@ -5047,26 +5036,4 @@ fn drawPreparedBatchFastRegion(target: []u8, depth: []u8, width: u32, height: u3
         }
     }
     return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0, clip);
-}
-
-test "external Mosaic lane callback runs each active worker exactly once" {
-    const Probe = struct {
-        seen: [max_parallel_band_count]std.atomic.Value(u32) = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** max_parallel_band_count,
-        lanes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    };
-    const Callback = struct {
-        fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
-            const probe: *Probe = @ptrCast(@alignCast(raw));
-            if (lane_index >= probe.seen.len) return;
-            _ = probe.seen[lane_index].fetchAdd(1, .monotonic);
-            probe.lanes.store(lane_count, .release);
-        }
-    };
-    defer shutdownParallelWorkers();
-    var probe = Probe{};
-    try std.testing.expect(dispatchParallelLanes(&probe, Callback.run));
-    const lanes = probe.lanes.load(.acquire);
-    try std.testing.expect(lanes >= 1 and lanes <= max_parallel_band_count);
-    for (probe.seen[0..lanes]) |seen| try std.testing.expectEqual(@as(u32, 1), seen.load(.acquire));
-    for (probe.seen[lanes..]) |seen| try std.testing.expectEqual(@as(u32, 0), seen.load(.acquire));
 }
