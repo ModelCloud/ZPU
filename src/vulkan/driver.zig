@@ -13885,16 +13885,40 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     const out = output orelse return .error_initialization_failed;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 2 or (ci.attachment_count != 0 and ci.attachments == null) or ci.width == 0 or ci.height == 0 or ci.layers == 0) return .error_initialization_failed;
-    const render_pass = validRenderPassLocked(ci.render_pass) orelse return .error_initialization_failed;
-    if (!render_pass.owner.eql(d) or !render_pass.framebuffer_supported or ci.attachment_count != render_pass.framebuffer_attachment_count) return .error_initialization_failed;
+    if (!validDeviceLocked(d) or ci.s_type != 37 or ci.p_next != null or ci.flags != 0 or ci.attachment_count > 2 or (ci.attachment_count != 0 and ci.attachments == null) or ci.width == 0 or ci.height == 0 or ci.layers == 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU framebuffer rejected device={} s_type={} pnext={} flags=0x{x} attachments={} attachments_ptr={} extent={}x{} layers={}\n",
+            .{ validDeviceLocked(d), ci.s_type, ci.p_next != null, ci.flags, ci.attachment_count, ci.attachments != null, ci.width, ci.height, ci.layers },
+        );
+        return .error_initialization_failed;
+    }
+    const render_pass = validRenderPassLocked(ci.render_pass) orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU framebuffer rejected stale render pass=0x{x}\n", .{ci.render_pass});
+        return .error_initialization_failed;
+    };
+    if (!render_pass.owner.eql(d) or !render_pass.framebuffer_supported or ci.attachment_count != render_pass.framebuffer_attachment_count) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU framebuffer rejected pass owner={} supported={} requested_attachments={} required_attachments={} pass=0x{x}\n",
+            .{ render_pass.owner.eql(d), render_pass.framebuffer_supported, ci.attachment_count, render_pass.framebuffer_attachment_count, ci.render_pass },
+        );
+        return .error_initialization_failed;
+    }
     var color: ?*ImageObj = null;
     var depth: ?*ImageObj = null;
     var prior_view: ?*ImageViewObj = null;
     if (ci.attachments) |attachments| {
-        for (attachments[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count]) |handle, requirement| {
-            const view = validImageViewLocked(handle) orelse return .error_initialization_failed;
-            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
+        for (attachments[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count], 0..) |handle, requirement, index| {
+            const view = validImageViewLocked(handle) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU framebuffer rejected stale view index={} view=0x{x}\n", .{ index, handle });
+                return .error_initialization_failed;
+            };
+            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) {
+                if (failureDiagnosticsEnabled()) std.debug.print(
+                    "ZPU framebuffer rejected view index={} owner={} duplicate_view={} duplicate_image={} view_format={} required_format={} image_format={} samples={}/{} image={}x{} requested={}x{} mip={}+{} layer={}+{} image_layers={}\n",
+                    .{ index, view.owner == d, view == prior_view, prior_view != null and view.image == prior_view.?.image, view.format, requirement.format, view.image.format, view.image.samples, requirement.samples, view.image.width, view.image.height, ci.width, ci.height, view.base_mip_level, view.level_count, view.base_array_layer, view.layer_count, view.image.array_layers },
+                );
+                return .error_initialization_failed;
+            }
             switch (requirement.role) {
                 .color => {
                     if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
@@ -13908,7 +13932,10 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
             prior_view = view;
         }
     }
-    if (color == null and depth == null and render_pass.framebuffer_attachment_count != 0) return .error_initialization_failed;
+    if (color == null and depth == null and render_pass.framebuffer_attachment_count != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU framebuffer rejected no usable attachments required={}\n", .{render_pass.framebuffer_attachment_count});
+        return .error_initialization_failed;
+    }
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
