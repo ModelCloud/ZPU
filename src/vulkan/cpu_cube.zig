@@ -5047,3 +5047,25 @@ fn drawPreparedBatchFastRegion(target: []u8, depth: []u8, width: u32, height: u3
     }
     return drawPreparedBatchFastImpl(false, target, depth, width, height, prepared, 0, 1, null, null, 0, 0, clip);
 }
+
+test "external Mosaic lane callback runs every active worker exactly once" {
+    const Probe = struct {
+        seen: [max_parallel_band_count]std.atomic.Value(u32) = [_]std.atomic.Value(u32){std.atomic.Value(u32).init(0)} ** max_parallel_band_count,
+        lanes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    };
+    const Callback = struct {
+        fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+            const probe: *Probe = @ptrCast(@alignCast(raw));
+            if (lane_index >= probe.seen.len) return;
+            _ = probe.seen[lane_index].fetchAdd(1, .monotonic);
+            probe.lanes.store(lane_count, .release);
+        }
+    };
+    defer shutdownParallelWorkers();
+    var probe = Probe{};
+    try std.testing.expect(dispatchParallelLanes(&probe, Callback.run));
+    const lanes = probe.lanes.load(.acquire);
+    try std.testing.expect(lanes >= 1 and lanes <= max_parallel_band_count);
+    for (probe.seen[0..lanes]) |seen| try std.testing.expectEqual(@as(u32, 1), seen.load(.acquire));
+    for (probe.seen[lanes..]) |seen| try std.testing.expectEqual(@as(u32, 0), seen.load(.acquire));
+}
