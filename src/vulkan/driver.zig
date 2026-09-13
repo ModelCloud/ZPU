@@ -1052,9 +1052,7 @@ pub const SamplerCreateInfo = extern struct { s_type: i32, p_next: ?*const anyop
 /// reduction mode is kept typed so the core sampler entry point can accept
 /// the ABI without treating the node as an opaque byte blob.
 pub const SamplerReductionModeCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, reduction_mode: i32 };
-/// Promoted VK_KHR_sampler_ycbcr_conversion sampler-chain payload.  ZPU does
-/// not advertise multi-planar formats, but recognizing the node lets us
-/// distinguish a valid unsupported request from a malformed chain.
+/// Promoted VK_KHR_sampler_ycbcr_conversion sampler-chain payload.
 pub const SamplerYcbcrConversionInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, conversion: usize };
 pub const WriteDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32, descriptor_type: i32, image_info: ?[*]const DescriptorImageInfo, buffer_info: ?[*]const DescriptorBufferInfo, texel_buffer_view: ?[*]const usize };
 pub const CopyDescriptorSet = extern struct { s_type: i32, p_next: ?*const anyopaque, src_set: usize, src_binding: u32, src_array_element: u32, dst_set: usize, dst_binding: u32, dst_array_element: u32, descriptor_count: u32 };
@@ -1222,7 +1220,18 @@ const QueryPoolObj = struct {
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
-const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
+const YcbcrConversion = struct {
+    format: i32,
+    model: i32,
+    range: i32,
+    components: [4]i32,
+    x_chroma_offset: i32,
+    y_chroma_offset: i32,
+    chroma_filter: i32,
+    force_explicit_reconstruction: u32,
+};
+const SamplerYcbcrConversionObj = struct { handle: usize, owner: Device, conversion: YcbcrConversion };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, ycbcr: ?YcbcrConversion = null, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -1239,6 +1248,7 @@ const SamplerObj = struct {
     reduction_mode: i32 = 0,
     border_color: i32 = 0,
     unnormalized_coordinates: bool = false,
+    ycbcr: ?YcbcrConversion = null,
 };
 const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
@@ -1278,7 +1288,7 @@ const DescriptorSetObj = struct {
     active_users: std.atomic.Value(u32) = .init(0),
     retire_pending: bool = false,
 };
-const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
+const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 }, ycbcr: ?YcbcrConversion = null };
 const DescriptorInputAttachment = struct { image: ?*ImageObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
@@ -1650,6 +1660,10 @@ const max_child_objects = 64;
 const max_command_pool_objects = 4096;
 const max_buffer_objects = 4096;
 const max_image_view_objects = 4096;
+// Chromium may retain conversion objects through several compositor frames.
+// Keep this independent bounded registry so conversion churn cannot consume
+// the generic child-object pool.
+const max_sampler_ycbcr_conversion_objects = 1024;
 const max_shader_modules = 4000;
 // Chromium's Skia pipeline cache can keep more than the generic child-object
 // budget live while old layouts are waiting for submitted work to retire.
@@ -1752,6 +1766,8 @@ var surface_objects: [max_child_objects]SurfaceObj = undefined;
 var surface_state = [_]SlotState{.never} ** max_child_objects;
 var image_view_objects: [max_image_view_objects]ImageViewObj = undefined;
 var image_view_state = [_]SlotState{.never} ** max_image_view_objects;
+var sampler_ycbcr_conversion_objects: [max_sampler_ycbcr_conversion_objects]SamplerYcbcrConversionObj = undefined;
+var sampler_ycbcr_conversion_state = [_]SlotState{.never} ** max_sampler_ycbcr_conversion_objects;
 var sampler_objects: [max_sampler_objects]SamplerObj = undefined;
 var sampler_state = [_]SlotState{.never} ** max_sampler_objects;
 var framebuffer_objects: [max_framebuffer_objects]FramebufferObj = undefined;
@@ -2670,6 +2686,13 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
         @memset(bytes[16 .. 16 + words * @sizeOf(u32)], 0);
         const payload = bytes[16 .. 16 + words * @sizeOf(u32)];
         switch (header.s_type) {
+            49 => { // VkPhysicalDeviceVulkan11Features
+                // samplerYcbcrConversion is payload word 10.
+                propertyWriteU32(payload, 40, 1);
+            },
+            1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
+                propertyWriteU32(payload, 0, 1);
+            },
             1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
                 propertyWriteU32(payload, 0, 1);
                 propertyWriteU32(payload, 4, 0);
@@ -2688,6 +2711,18 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
         const words = coreFeaturePayloadWords(header.s_type) orelse return true;
         const bytes: [*]const u8 = @ptrCast(item);
         switch (header.s_type) {
+            49 => { // VkPhysicalDeviceVulkan11Features
+                for (0..words) |index| {
+                    const value = std.mem.readInt(u32, @ptrCast(&bytes[16 + index * @sizeOf(u32)]), .little);
+                    if (index == 10) {
+                        if (value != 0 and value != 1) return true;
+                    } else if (value != 0) return true;
+                }
+            },
+            1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
+                const enabled = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
+                if (enabled != 0 and enabled != 1) return true;
+            },
             1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
                 const last = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
                 const preserve = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
@@ -3869,6 +3904,31 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
 fn isDepthFormat(format: i32) bool {
     return format == 124 or format == 126;
 }
+const format_g8_b8r8_2plane_420_unorm: i32 = 1000156003;
+const image_aspect_color_bit: u32 = 0x1;
+const image_aspect_plane_0_bit: u32 = 0x10;
+const image_aspect_plane_1_bit: u32 = 0x20;
+
+fn ycbcr420Nv12Format(format: i32) bool {
+    return format == format_g8_b8r8_2plane_420_unorm;
+}
+
+fn ycbcr420ChromaExtent(value: u32) u32 {
+    return (value + 1) / 2;
+}
+
+fn nv12ImageByteSize(width: u32, height: u32) ?u64 {
+    const luma = std.math.mul(u64, width, height) catch return null;
+    const chroma_samples = std.math.mul(u64, ycbcr420ChromaExtent(width), ycbcr420ChromaExtent(height)) catch return null;
+    const chroma = std.math.mul(u64, chroma_samples, 2) catch return null;
+    return std.math.add(u64, luma, chroma) catch null;
+}
+
+fn imageFormatMipChainLayerByteSize(format: i32, width: u32, height: u32, mip_levels: u32) ?u64 {
+    if (ycbcr420Nv12Format(format)) return if (mip_levels == 1) nv12ImageByteSize(width, height) else null;
+    return imageMipChainLayerByteSize(width, height, mip_levels);
+}
+
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
     // and vkCreateImage both receive the tiling explicitly.
@@ -3882,6 +3942,10 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
+        // Bounded NV12 support is sampled and transferred only. It is not a
+        // render target or input attachment, and every plane shares one
+        // allocation rather than exposing disjoint-memory semantics.
+        format_g8_b8r8_2plane_420_unorm => 0x2 | 0x4,
         124 => 0x2 | 0x20,
         126 => 0x2 | 0x20,
         else => 0,
@@ -3916,6 +3980,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
         37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
@@ -4553,6 +4618,9 @@ fn validImageViewLocked(handle: usize) ?*ImageViewObj {
     return for (&image_view_objects, image_view_state) |*object, state| {
         if (object.handle == handle) break if (state == .live) object else null;
     } else null;
+}
+fn validSamplerYcbcrConversionLocked(handle: usize) ?*SamplerYcbcrConversionObj {
+    return findLiveHandle(SamplerYcbcrConversionObj, handle, &sampler_ycbcr_conversion_objects, &sampler_ycbcr_conversion_state);
 }
 fn validSamplerLocked(handle: usize) ?*SamplerObj {
     return findLiveHandle(SamplerObj, handle, &sampler_objects, &sampler_state);
@@ -5472,17 +5540,17 @@ fn validImageMipCount(width: u32, height: u32, mip_levels: u32) bool {
     return mip_levels <= max_levels;
 }
 fn imageLayerByteSize(image: *const ImageObj) ?u64 {
-    return imageMipChainLayerByteSize(image.width, image.height, 1);
+    return imageFormatMipChainLayerByteSize(image.format, image.width, image.height, 1);
 }
 fn imageByteSize(image: *const ImageObj) ?u64 {
-    const layer_bytes = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
+    const layer_bytes = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
     return std.math.mul(u64, layer_bytes, image.array_layers) catch {
         hit(.overflow_image_size);
         return null;
     };
 }
-fn imageMipChainByteSize(width: u32, height: u32, mip_levels: u32, array_layers: u32) ?u64 {
-    const layer_bytes = imageMipChainLayerByteSize(width, height, mip_levels) orelse return null;
+fn imageMipChainByteSize(format: i32, width: u32, height: u32, mip_levels: u32, array_layers: u32) ?u64 {
+    const layer_bytes = imageFormatMipChainLayerByteSize(format, width, height, mip_levels) orelse return null;
     return std.math.mul(u64, layer_bytes, array_layers) catch {
         hit(.overflow_image_size);
         return null;
@@ -5498,7 +5566,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage usage rejected format={d} tiling={d} usage=0x{x} allowed=0x{x}\n", .{ ci.format, ci.tiling, ci.usage, allowed_usage });
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ycbcr420Nv12Format(ci.format) and (ci.mip_levels != 1 or ci.array_layers != 1)) or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage rejected alloc={} s_type={d} pnext={} flags=0x{x} type={d} allowed=0x{x} extent={d}x{d}x{d} mips={d} layers={d} samples={d} tiling={d} sharing={d} families={d} layout={d} format={d} usage=0x{x}\n", .{ alloc != null, ci.s_type, imageCreatePNextValid(ci.p_next, ci.format), ci.flags, ci.image_type, allowed_usage, ci.extent.width, ci.extent.height, ci.extent.depth, ci.mip_levels, ci.array_layers, ci.samples, ci.tiling, ci.sharing_mode, ci.queue_family_index_count, ci.initial_layout, ci.format, ci.usage });
         return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     }
@@ -5591,8 +5659,8 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
     const allowed_usage = imageFormatUsage(info.format, info.tiling);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
-    const bytes = imageMipChainByteSize(info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (ycbcr420Nv12Format(info.format) and (info.mip_levels != 1 or info.array_layers != 1)) or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    const bytes = imageMipChainByteSize(info.format, info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
     return .{ .size = bytes, .alignment = 4, .memory_type_bits = 1 };
 }
 fn hostCopyLayoutValid(layout: i32) bool {
@@ -6859,11 +6927,24 @@ fn validBarrierRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) b
     return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
-    return layers.aspect_mask == 1 and layers.mip_level < image.mip_levels and layers.layer_count != 0 and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
+    const aspect_valid = if (ycbcr420Nv12Format(image.format)) layers.aspect_mask == image_aspect_plane_0_bit or layers.aspect_mask == image_aspect_plane_1_bit else layers.aspect_mask == image_aspect_color_bit;
+    return aspect_valid and layers.mip_level < image.mip_levels and layers.layer_count != 0 and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
+}
+
+const ImagePlane = struct { offset: usize, width: u32, height: u32, bytes_per_texel: u64 };
+
+fn imagePlane(image: *const ImageObj, aspect: u32) ?ImagePlane {
+    if (!ycbcr420Nv12Format(image.format)) return null;
+    const luma_len = std.math.mul(usize, image.width, image.height) catch return null;
+    return switch (aspect) {
+        image_aspect_plane_0_bit => .{ .offset = 0, .width = image.width, .height = image.height, .bytes_per_texel = 1 },
+        image_aspect_plane_1_bit => .{ .offset = luma_len, .width = ycbcr420ChromaExtent(image.width), .height = ycbcr420ChromaExtent(image.height), .bytes_per_texel = 2 },
+        else => null,
+    };
 }
 fn imageLayerOffset(image: *const ImageObj, layer: u32) ?usize {
     if (layer >= image.array_layers) return null;
-    const stride = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
+    const stride = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
     const offset = std.math.mul(u64, stride, layer) catch return null;
     return @intCast(offset);
 }
@@ -6884,6 +6965,7 @@ fn imageMipExtent(image: *const ImageObj, mip_level: u32) ?ImageMipExtent {
 
 fn imageMipOffsetInLayer(image: *const ImageObj, mip_level: u32) ?usize {
     if (mip_level >= image.mip_levels) return null;
+    if (ycbcr420Nv12Format(image.format)) return if (mip_level == 0) 0 else null;
     var offset: u64 = 0;
     var width = image.width;
     var height = image.height;
@@ -7264,6 +7346,11 @@ fn cmdResolveImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_h
 }
 fn validImageRegion(image: *const ImageObj, offset: Offset3D, extent: Extent3D, layers: ImageSubresourceLayers) bool {
     if (!validLayersForImage(image, layers) or offset.x < 0 or offset.y < 0 or offset.z != 0 or extent.width == 0 or extent.height == 0 or extent.depth != 1) return false;
+    if (imagePlane(image, layers.aspect_mask)) |plane| {
+        const end_x = std.math.add(u64, @intCast(offset.x), extent.width) catch return false;
+        const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
+        return end_x <= plane.width and end_y <= plane.height;
+    }
     const mip = imageMipExtent(image, layers.mip_level) orelse return false;
     const end_x = std.math.add(u64, @intCast(offset.x), extent.width) catch return false;
     const end_y = std.math.add(u64, @intCast(offset.y), extent.height) catch return false;
@@ -7379,6 +7466,14 @@ fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
 }
 fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers, a_offset: Offset3D, a_extent: Extent3D, b_layers: ImageSubresourceLayers, b_offset: Offset3D, b_extent: Extent3D) bool {
     if (a_layers.mip_level != b_layers.mip_level) return false;
+    if (ycbcr420Nv12Format(image.format)) {
+        if (a_layers.aspect_mask != b_layers.aspect_mask) return false;
+        const ax1 = @as(i64, a_offset.x) + @as(i64, a_extent.width);
+        const ay1 = @as(i64, a_offset.y) + @as(i64, a_extent.height);
+        const bx1 = @as(i64, b_offset.x) + @as(i64, b_extent.width);
+        const by1 = @as(i64, b_offset.y) + @as(i64, b_extent.height);
+        return a_offset.x < bx1 and b_offset.x < ax1 and a_offset.y < by1 and b_offset.y < ay1;
+    }
     const mip = imageMipExtent(image, a_layers.mip_level) orelse return true;
     const a_row_texels = checkedBufferImageMul(@as(u64, @intCast(a_offset.y)), mip.width) orelse return true;
     const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), mip.width) orelse return true;
@@ -7449,6 +7544,12 @@ fn bufferImageBytesPerTexel(format: i32) ?u64 {
     };
 }
 
+fn bufferImageBytesPerTexelForAspect(image: *const ImageObj, aspect: u32) ?u64 {
+    if (imagePlane(image, aspect)) |plane| return plane.bytes_per_texel;
+    if (aspect != image_aspect_color_bit) return null;
+    return bufferImageBytesPerTexel(image.format);
+}
+
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -7486,7 +7587,7 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         return;
     }
     for (list[0..count]) |region| {
-        const end = bufferImageEndForBpp(region, bufferImageBytesPerTexel(dst.format) orelse 0);
+        const end = bufferImageEndForBpp(region, bufferImageBytesPerTexelForAspect(dst, region.image_subresource.aspect_mask) orelse 0);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 7) or !validImageRegion(dst, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > src.size) {
             if (failureDiagnosticsEnabled()) std.debug.print(
                 "ZPU copy buffer image rejected src_owner={} dst_owner={} src_usage=0x{x} dst_usage=0x{x} src_memory={} dst_memory={} layout={} region_valid={} end={any} src_size={} format={} mip={} layer={}+{} offset={d},{d},{d} extent={}x{}x{}\n",
@@ -7501,7 +7602,10 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         c.impl.invalid = true;
         return;
     };
-    if (src.memory.? == dst.memory.?) for (list[0..count]) |buffer_region| for (list[0..count]) |image_region| if (bufferImageMemoryOverlap(src, buffer_region, dst, image_region)) {
+    if (src.memory.? == dst.memory.? and ycbcr420Nv12Format(dst.format)) {
+        c.impl.invalid = true;
+        return;
+    } else if (src.memory.? == dst.memory.?) for (list[0..count]) |buffer_region| for (list[0..count]) |image_region| if (bufferImageMemoryOverlap(src, buffer_region, dst, image_region)) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU copy buffer image rejected overlapping aliased memory cb=0x{x} sourceOffset={} sourceSize={} image={}x{} format={} bufferOffset={} rowLength={} imageHeight={} extent={}x{}x{}\n",
             .{ @intFromPtr(c), src.offset, src.size, dst.width, dst.height, dst.format, buffer_region.buffer_offset, buffer_region.buffer_row_length, buffer_region.buffer_image_height, buffer_region.image_extent.width, buffer_region.image_extent.height, buffer_region.image_extent.depth },
@@ -10085,6 +10189,7 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
         9 => .r8_unorm,
         37 => .rgba8_unorm,
         44 => .bgra8_unorm,
+        format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
         else => return null,
     };
     const filter: render_ir_exec.SampledImage.Filter = switch (sampler.mag_filter) {
@@ -10100,8 +10205,43 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
         4, 5 => .{ 1, 1, 1, 1 },
         else => return null,
     };
+    const bytes = imageBytes(image);
+    if (format == .ycbcr_420_2plane) {
+        const conversion = sampled.ycbcr orelse return null;
+        const model: render_ir_exec.SampledImage.YcbcrModel = switch (conversion.model) {
+            1 => .identity,
+            2 => .bt709,
+            3 => .bt601,
+            4 => .bt2020,
+            else => return null,
+        };
+        const range: render_ir_exec.SampledImage.YcbcrRange = switch (conversion.range) {
+            0 => .full,
+            1 => .narrow,
+            else => return null,
+        };
+        const luma_len = std.math.mul(usize, image.width, image.height) catch return null;
+        if (luma_len > bytes.len) return null;
+        return .{
+            .pixels = bytes[0..luma_len],
+            .width = image.width,
+            .height = image.height,
+            .row_stride = image.width,
+            .bytes_per_texel = 1,
+            .format = format,
+            .swizzle = sampled.components,
+            .filter = filter,
+            .address_u = address_u,
+            .address_v = address_v,
+            .border = border,
+            .plane_1 = bytes[luma_len..],
+            .plane_1_row_stride = ycbcr420ChromaExtent(image.width) * 2,
+            .ycbcr_model = model,
+            .ycbcr_range = range,
+        };
+    }
     return .{
-        .pixels = imageBytes(image),
+        .pixels = bytes,
         .width = image.width,
         .height = image.height,
         .row_stride = image.width * 4,
@@ -11462,6 +11602,23 @@ test "host image rows bulk-copy disjoint memory and preserve overlap semantics" 
 fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy, to_image: bool) void {
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
+    if (imagePlane(image, region.image_subresource.aspect_mask)) |plane| {
+        const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
+        const layer_stride = bufferImageLayerStrideForBpp(region, plane.bytes_per_texel).?;
+        const row_bytes = @as(usize, region.image_extent.width) * @as(usize, @intCast(plane.bytes_per_texel));
+        var layer: u32 = 0;
+        while (layer < region.image_subresource.layer_count) : (layer += 1) {
+            const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer));
+            const io = plane.offset + (@as(usize, @intCast(region.image_offset.y)) * plane.width + @as(usize, @intCast(region.image_offset.x))) * @as(usize, @intCast(plane.bytes_per_texel));
+            const image_stride = @as(usize, plane.width) * @as(usize, @intCast(plane.bytes_per_texel));
+            const buffer_stride = @as(usize, row) * @as(usize, @intCast(plane.bytes_per_texel));
+            if (to_image)
+                copyTransferRows(pixels[io..], image_stride, b[bo..], buffer_stride, row_bytes, region.image_extent.height)
+            else
+                copyTransferRows(b[bo..], buffer_stride, pixels[io..], image_stride, row_bytes, region.image_extent.height);
+        }
+        return;
+    }
     const mip = imageMipExtent(image, region.image_subresource.mip_level).?;
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const bytes_per_texel = bufferImageBytesPerTexel(image.format).?;
@@ -11523,6 +11680,24 @@ test "R8 buffer image transfers preserve packed rows and expand sampled storage"
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x11, 0, 0, 0x20, 0x21, 0, 0 }, &buffer_storage);
+}
+
+test "NV12 plane uploads preserve the bounded multi-planar layout" {
+    const owner: Device = @ptrFromInt(8);
+    var upload_storage: [6]u8 align(64) = .{ 81, 81, 81, 81, 90, 240 };
+    var image_storage: [6]u8 align(64) = .{0} ** 6;
+    var memory = MemoryObj{ .owner = owner, .bytes = upload_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = upload_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = format_g8_b8r8_2plane_420_unorm, .usage = 6, .layout = 1, .owned_bytes = image_storage[0..] };
+    const luma = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 2, .buffer_image_height = 2, .image_subresource = .{ .aspect_mask = image_aspect_plane_0_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    const chroma = BufferImageCopy{ .buffer_offset = 4, .buffer_row_length = 1, .buffer_image_height = 1, .image_subresource = .{ .aspect_mask = image_aspect_plane_1_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 1, .height = 1, .depth = 1 } };
+    try std.testing.expect(validImageRegion(&image, luma.image_offset, luma.image_extent, luma.image_subresource));
+    try std.testing.expect(validImageRegion(&image, chroma.image_offset, chroma.image_extent, chroma.image_subresource));
+    try std.testing.expectEqual(@as(?u64, 4), bufferImageEndForBpp(luma, bufferImageBytesPerTexelForAspect(&image, luma.image_subresource.aspect_mask).?));
+    try std.testing.expectEqual(@as(?u64, 6), bufferImageEndForBpp(chroma, bufferImageBytesPerTexelForAspect(&image, chroma.image_subresource.aspect_mask).?));
+    copyBufferImage(&buffer, &image, luma, true);
+    copyBufferImage(&buffer, &image, chroma, true);
+    try std.testing.expectEqualSlices(u8, &upload_storage, &image_storage);
 }
 
 test "mipmapped buffer image transfers use the selected subresource footprint" {
@@ -13488,11 +13663,8 @@ const SamplerCreatePNextState = struct {
 };
 
 /// Validate the mandatory core sampler extension chain without publishing
-/// partial sampler state.  The promoted min/max reduction feature is not
-/// advertised by ZPU, so only the default weighted-average mode is executable;
-/// a well-formed MIN/MAX request is reported as a feature rejection by the
-/// caller.  YCbCr conversion remains a valid ABI node but is explicitly
-/// unsupported because no conversion handles or multi-planar formats exist.
+/// partial sampler state. The promoted min/max reduction feature is not
+/// advertised by ZPU, so only weighted-average reduction is executable.
 fn samplerCreatePNextState(raw: ?*const anyopaque) SamplerCreatePNextState {
     var state = SamplerCreatePNextState{};
     var next = raw;
@@ -13539,10 +13711,14 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (pnext.reduction_mode != 0) return .error_feature_not_present;
-    if (pnext.has_ycbcr_conversion) return .error_format_not_supported;
     lock();
     defer mutex.unlock();
     if (!validDeviceLocked(d)) return .error_initialization_failed;
+    const ycbcr = if (pnext.has_ycbcr_conversion) blk: {
+        const conversion = validSamplerYcbcrConversionLocked(pnext.ycbcr_conversion) orelse return .error_initialization_failed;
+        if (conversion.owner != d) return .error_initialization_failed;
+        break :blk conversion.conversion;
+    } else null;
     for (&sampler_objects, &sampler_state) |*object, *state| if (state.* != .live) {
         object.* = .{
             .owner = d,
@@ -13560,6 +13736,7 @@ fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc:
             .reduction_mode = pnext.reduction_mode,
             .border_color = info.border_color,
             .unnormalized_coordinates = info.unnormalized_coordinates != 0,
+            .ycbcr = ycbcr,
         };
         state.* = .live;
         out.* = @intFromPtr(object);
@@ -13606,21 +13783,43 @@ fn samplerYcbcrConversionCreateInfoValid(ci: *const SamplerYcbcrConversionCreate
         ci.chroma_filter >= 0 and ci.chroma_filter <= 1 and
         ci.force_explicit_reconstruction <= 1;
 }
+
+fn supportedSamplerYcbcrConversion(ci: *const SamplerYcbcrConversionCreateInfo) bool {
+    // The initial executable profile is non-disjoint NV12 with nearest
+    // chroma reconstruction and identity component mapping. The compositor
+    // path uses the YCbCr colour models below; rejecting other combinations
+    // is required until their reconstruction semantics are implemented.
+    return ci.format == format_g8_b8r8_2plane_420_unorm and
+        ci.model >= 1 and ci.model <= 4 and
+        ci.components[0] == 0 and ci.components[1] == 0 and ci.components[2] == 0 and ci.components[3] == 0 and
+        ci.x_chroma_offset == 0 and ci.y_chroma_offset == 0 and
+        ci.chroma_filter == 0 and ci.force_explicit_reconstruction == 0;
+}
 fn createSamplerYcbcrConversion(device: ?Device, info: ?*const SamplerYcbcrConversionCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (alloc != null or !samplerYcbcrConversionCreateInfoValid(ci)) return .error_initialization_failed;
-    _ = device orelse return .error_initialization_failed;
-    _ = out;
-    // ZPU exposes no multi-planar YCbCr formats; report the capability result
-    // explicitly instead of publishing an object with incomplete conversion
-    // state.
-    return .error_format_not_supported;
+    if (!supportedSamplerYcbcrConversion(ci)) return .error_format_not_supported;
+    const d = device orelse return .error_initialization_failed;
+    lock();
+    defer mutex.unlock();
+    if (!validDeviceLocked(d)) return .error_initialization_failed;
+    for (&sampler_ycbcr_conversion_objects, &sampler_ycbcr_conversion_state) |*object, *state| if (state.* != .live) {
+        const handle = allocateGenericHandle();
+        object.* = .{ .handle = handle, .owner = d, .conversion = .{ .format = ci.format, .model = ci.model, .range = ci.range, .components = ci.components, .x_chroma_offset = ci.x_chroma_offset, .y_chroma_offset = ci.y_chroma_offset, .chroma_filter = ci.chroma_filter, .force_explicit_reconstruction = ci.force_explicit_reconstruction } };
+        state.* = .live;
+        out.* = handle;
+        return .success;
+    };
+    return objectPoolExhausted("sampler-ycbcr-conversion");
 }
 fn destroySamplerYcbcrConversion(device: ?Device, handle: usize, alloc: ?*const Alloc) callconv(.c) void {
-    _ = device;
-    _ = handle;
-    _ = alloc;
+    if (alloc != null) return;
+    lock();
+    defer mutex.unlock();
+    const d = device orelse return;
+    const object = validSamplerYcbcrConversionLocked(handle) orelse return;
+    if (validDeviceLocked(d) and object.owner == d) stateForObject(SamplerYcbcrConversionObj, object, &sampler_ycbcr_conversion_objects, &sampler_ycbcr_conversion_state).?.* = .tombstone;
 }
 fn pipelineCacheHeader() [pipeline_cache_header_size]u8 {
     var bytes = [_]u8{0} ** pipeline_cache_header_size;
@@ -13956,15 +14155,16 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         );
         return .error_initialization_failed;
     }
-    if (pnext.has_ycbcr_conversion) {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU image view rejected reason=ycbcr\n", .{});
-        return .error_format_not_supported;
-    }
     lock();
     defer mutex.unlock();
     const image = validImageLocked(ci.image) orelse return imageViewInvalid("image");
     const usage = if (pnext.has_usage) pnext.usage else image.usage;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+    const ycbcr = if (pnext.has_ycbcr_conversion) blk: {
+        const conversion = validSamplerYcbcrConversionLocked(pnext.ycbcr_conversion) orelse return imageViewInvalid("ycbcr-conversion");
+        if (conversion.owner != d or conversion.conversion.format != image.format) return imageViewInvalid("ycbcr-format");
+        break :blk conversion.conversion;
+    } else null;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != image_aspect_color_bit and ci.subresource_range.aspect_mask != 2) or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
             .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
@@ -13973,7 +14173,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .ycbcr = ycbcr, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = handle;
         return .success;
@@ -14001,6 +14201,11 @@ fn destroyImageView(device: ?Device, handle: usize, alloc: ?*const Alloc) callco
     defer mutex.unlock();
     const object = validImageViewLocked(handle) orelse return;
     if (validDeviceLocked(device orelse return) and object.owner == device.?) stateForObject(ImageViewObj, object, &image_view_objects, &image_view_state).?.* = .tombstone;
+}
+
+fn sampledYcbcrCompatible(view: *const ImageViewObj, sampler: *const SamplerObj) bool {
+    if (ycbcr420Nv12Format(view.image.format)) return view.ycbcr != null and sampler.ycbcr != null and std.meta.eql(view.ycbcr.?, sampler.ycbcr.?);
+    return view.ycbcr == null and sampler.ycbcr == null;
 }
 fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
@@ -14464,13 +14669,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -14497,10 +14702,11 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             const info = descriptor_write.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return;
             const view = validImageViewLocked(info.image_view) orelse return;
-            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5) return;
+            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_components = view.components;
+            update.texture_ycbcr = view.ycbcr;
             update.texture_binding = @intCast(descriptor_write.dst_binding);
             update.writes_texture = true;
         } else if (descriptor_write.descriptor_type == 10 and descriptor_write.dst_binding < update.set.input_attachments.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 10 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
@@ -14530,7 +14736,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.storage_range = update.storage_range;
         }
         if (update.writes_texture) {
-            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components };
+            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components, .ycbcr = update.texture_ycbcr };
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
@@ -14621,11 +14827,11 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
             const sampler = validSamplerLocked(descriptor.sampler) orelse return;
             const view = validImageViewLocked(descriptor.image_view) orelse return;
-            if (entry.dst_binding >= sampled_images.len or sampler.owner != d or view.owner != d or descriptor.image_layout != 5) return;
+            if (entry.dst_binding >= sampled_images.len or sampler.owner != d or view.owner != d or descriptor.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_binding = @intCast(entry.dst_binding);
-            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components };
+            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr };
         }
     }
     set.uniform = update.uniform;
@@ -15485,10 +15691,10 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             const info = item.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return false;
             const view = validImageViewLocked(info.image_view) orelse return false;
-            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5) return false;
+            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return false;
             candidate.texture = view.image;
             candidate.sampler = sampler;
-            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components };
+            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components, .ycbcr = view.ycbcr };
         } else return false;
     };
     command_buffer.impl.push_descriptor = candidate;
@@ -19257,7 +19463,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     var unsupported_ycbcr_info = sampler_info;
     unsupported_ycbcr_info.p_next = @ptrCast(&ycbcr_info);
     unpublished_sampler = 0xeeee;
-    try std.testing.expectEqual(Result.error_format_not_supported, createSampler(device, &unsupported_ycbcr_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &unsupported_ycbcr_info, null, &unpublished_sampler));
     try std.testing.expectEqual(@as(usize, 0xeeee), unpublished_sampler);
     ycbcr_info.conversion = 0;
     unpublished_sampler = 0xffff;
@@ -22384,12 +22590,15 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getDeviceGroupPeerMemoryFeatures(ctx.device, 0, 0, 0, &peer_features);
     try std.testing.expectEqual(@as(u32, 0), peer_features);
     var ycbcr_handle: usize = 0xfeed;
-    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = 1000156000, .model = 0, .range = 0, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0 };
-    try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
-    try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
-    // Unsupported multi-planar formats still receive full ABI-domain
-    // validation before the capability result.  Every malformed payload must
-    // leave the output handle untouched and return initialization failure.
+    const ycbcr_info = SamplerYcbcrConversionCreateInfo{ .s_type = 1000156000, .p_next = null, .format = format_g8_b8r8_2plane_420_unorm, .model = 3, .range = 1, .components = .{ 0, 0, 0, 0 }, .x_chroma_offset = 0, .y_chroma_offset = 0, .chroma_filter = 0, .force_explicit_reconstruction = 0 };
+    try std.testing.expectEqual(Result.success, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    try std.testing.expect(ycbcr_handle != 0xfeed);
+    const stale_ycbcr = ycbcr_handle;
+    destroySamplerYcbcrConversion(ctx.device, stale_ycbcr, null);
+    try std.testing.expect(validSamplerYcbcrConversionLocked(stale_ycbcr) == null);
+    ycbcr_handle = 0xfeed;
+    // Every malformed payload must leave the output handle untouched and
+    // return initialization failure.
     var malformed_ycbcr = ycbcr_info;
     malformed_ycbcr.format = 37;
     try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
@@ -22408,7 +22617,9 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
     try std.testing.expectEqual(@as(usize, 0xfeed), ycbcr_handle);
     test_allocations_before_failure = 0;
-    for (0..4096) |_| try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &ycbcr_info, null, &ycbcr_handle));
+    malformed_ycbcr = ycbcr_info;
+    malformed_ycbcr.chroma_filter = 1;
+    for (0..4096) |_| try std.testing.expectEqual(Result.error_format_not_supported, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
     malformed_ycbcr = ycbcr_info;
     malformed_ycbcr.format = 37;
     for (0..4096) |_| try std.testing.expectEqual(Result.error_initialization_failed, createSamplerYcbcrConversion(ctx.device, &malformed_ycbcr, null, &ycbcr_handle));
@@ -22538,7 +22749,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
         var i: usize = 0;
         while (i < 12) : (i += 1) {
             const value = std.mem.readInt(u32, @ptrCast(&v11_bytes[i * 4]), .little);
-            try std.testing.expectEqual(@as(u32, 0), value);
+            try std.testing.expectEqual(@as(u32, if (i == 10) 1 else 0), value);
         }
     }
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&vulkan12_features)[16..204], 0));
@@ -24385,13 +24596,13 @@ test "dynamic rendering begin and end own attachment scope" {
     unsupported_view_info.p_next = &unsupported_usage;
     try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &unsupported_view_info, null, &unchanged_view));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unchanged_view);
-    // A well-formed promoted YCbCr conversion chain is recognized as an
-    // unsupported-format request, while a null conversion is malformed.
+    // A stale promoted YCbCr conversion is rejected before view creation,
+    // while a null conversion remains malformed.
     var ycbcr_view_conversion = SamplerYcbcrConversionInfo{ .s_type = 1000156001, .p_next = null, .conversion = 1 };
     var ycbcr_view_info = view_info;
     ycbcr_view_info.p_next = @ptrCast(&ycbcr_view_conversion);
     unchanged_view = 0xcafe_babe;
-    try std.testing.expectEqual(Result.error_format_not_supported, createImageView(ctx.device, &ycbcr_view_info, null, &unchanged_view));
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &ycbcr_view_info, null, &unchanged_view));
     try std.testing.expectEqual(@as(usize, 0xcafe_babe), unchanged_view);
     ycbcr_view_conversion.conversion = 0;
     unchanged_view = 0xd00d;
