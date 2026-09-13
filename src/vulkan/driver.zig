@@ -5103,7 +5103,7 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
     _ = cpu_locality.pinCurrent(.render);
     const bytes = allocateBytes(std.math.cast(usize, ci.allocation_size) orelse return .error_out_of_host_memory) catch return .error_out_of_host_memory;
     @memset(bytes, 0);
-    for (&memory_objects, &memory_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
+    for (&memory_objects, &memory_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending and object.active_users.load(.acquire) == 0)) {
         const handle = allocateGenericHandle();
         object.* = .{ .handle = handle, .owner = d, .bytes = bytes, .mapped = false };
         state.* = .live;
