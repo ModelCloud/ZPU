@@ -3942,7 +3942,7 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // Chromium's separate-plane YUV promise images use R8 for luma and
         // R8G8 for interleaved chroma. Both are sampled/transfer resources;
         // neither is exposed as a color attachment in this bounded profile.
-        16 => 0x1 | 0x2 | 0x4,
+        16 => 0x1 | 0x2 | 0x4 | 0x10,
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
@@ -7538,7 +7538,7 @@ fn transferableColorFormat(format: i32) bool {
 }
 
 fn colorAttachmentFormat(format: i32) bool {
-    return format == 9 or transferableColorFormat(format);
+    return format == 9 or format == 16 or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
