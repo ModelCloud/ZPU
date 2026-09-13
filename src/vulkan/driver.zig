@@ -6487,6 +6487,10 @@ fn record(cb: CommandBuffer, command: Command) void {
         cb.impl.invalid = true;
         return;
     }
+    if (failureDiagnosticsEnabled() and cb.impl.count >= 190 and cb.impl.count < 260) std.debug.print(
+        "ZPU recorded command index={} kind={s}\n",
+        .{ cb.impl.count, @tagName(owned) },
+    );
     cb.impl.commands[cb.impl.count] = owned;
     cb.impl.count += 1;
 }
