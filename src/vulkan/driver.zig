@@ -10438,6 +10438,23 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
     }
+    // Resolve the exact sample-modulate profile's interface slots once per
+    // draw. The regular binding path remains the fallback for every other
+    // profile or any malformed/mismatched setup. This avoids repeated linear
+    // binding-table scans in the per-pixel Mosaic composite loop.
+    const sample_modulate_plan = profile.fragment.sampleModulatePlan();
+    var sample_modulate_color_varying: ?usize = null;
+    var sample_modulate_coordinate_varying: ?usize = null;
+    var sample_modulate_image: ?render_ir_exec.SampledImage = null;
+    if (sample_modulate_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) sample_modulate_color_varying = index;
+            if (varying.fragment_interface == plan.coordinate_interface) sample_modulate_coordinate_varying = index;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) sample_modulate_image = binding.sampled_image;
+        }
+    }
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
@@ -10719,9 +10736,25 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[fragment_binding_count] = binding;
                     fragment_binding_count += 1;
                 }
-                const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
-                    return;
+                const fragment_fast = direct: {
+                    if (sample_modulate_plan != null) {
+                        const color_varying = sample_modulate_color_varying orelse break :direct false;
+                        const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
+                        const image = sample_modulate_image orelse break :direct false;
+                        break :direct profile.fragment.executeSampleModulateDirect(
+                            fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                            image,
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                    break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                        return;
+                    };
                 };
                 if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                     if (renderDiagnosticsEnabled()) std.debug.print(

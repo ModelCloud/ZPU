@@ -738,14 +738,20 @@ const RadialGradientFastPath = struct {
     output_interface: u32,
 };
 
+/// Fully validated interface map for Chromium's simple final-composite
+/// shader.  The driver may resolve these interfaces once per triangle and
+/// invoke the direct form for every covered pixel, avoiding repeated generic
+/// binding-table searches in Mosaic's hottest video-compositor path.
+pub const SampleModulatePlan = struct {
+    color_interface: u32,
+    coordinate_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
 const FastPath = union(enum) {
-    sample_modulate: struct {
-        color_interface: u32,
-        coordinate_interface: u32,
-        image_interface: u32,
-        output_interface: u32,
-        bias_literal: [4]u8,
-    },
+    sample_modulate: SampleModulatePlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -976,6 +982,17 @@ pub const Executor = struct {
         };
     }
 
+    /// Return the interface plan only for the exact prevalidated compositor
+    /// program.  This is deliberately not a general shader shortcut: a
+    /// program which differs by even one canonical instruction remains on the
+    /// normal executor path.
+    pub fn sampleModulatePlan(self: *const Executor) ?SampleModulatePlan {
+        return switch (self.fast_path orelse return null) {
+            .sample_modulate => |plan| plan,
+            else => null,
+        };
+    }
+
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
         const end = std.math.add(usize, offset, 4) catch return error.Bounds;
         if (end > bytes.len) return error.Bounds;
@@ -1129,7 +1146,7 @@ pub const Executor = struct {
         var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
         sample_coordinates.bits[0] = @bitCast(sample_x);
         sample_coordinates.bits[1] = @bitCast(sample_y);
-        const sample_bias = Value{ .ty = .{ .scalar = .f32 }, .bits = .{ 0xbef33333 } ++ .{0} ** 15 };
+        const sample_bias = Value{ .ty = .{ .scalar = .f32 }, .bits = .{0xbef33333} ++ .{0} ** 15 };
         const sampled = try sample(image, sample_coordinates, sample_bias);
         const sampled_red: f32 = @bitCast(sampled.bits[0]);
         const contrast = try uniformF32(uniform.bytes, 464);
@@ -1166,6 +1183,27 @@ pub const Executor = struct {
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
         }
+    }
+
+    /// Execute the exact sampled-color compositor profile after its inputs
+    /// have been resolved by the rasterizer.  It preserves the ordinary
+    /// executor's byte decoding, sampling, canonical-NaN policy, and output
+    /// layout, but avoids re-discovering the three bindings and output for
+    /// every pixel.  This direct ABI is also the narrow contract a future ORC
+    /// kernel must match.
+    pub fn executeSampleModulateDirect(self: *const Executor, color_bytes: []const u8, coordinate_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.sampleModulatePlan() orelse return false;
+        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| {
+            const sample_value: f32 = @bitCast(sampled.bits[lane]);
+            const color_value: f32 = @bitCast(color.bits[lane]);
+            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
+        }
+        return true;
     }
 
     /// Execute an exact prevalidated specialization for the driver's hot
@@ -2936,6 +2974,13 @@ test "exact sampled-color modulation fast path preserves Chromium compositing se
         const sampled: f32 = @as(f32, @floatFromInt(pixel[lane])) / 255;
         try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * value)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
     }
+    const generic_output = output;
+    @memset(&output, 0);
+    try std.testing.expect(try executor.executeSampleModulateDirect(&color, &coordinates, bindings[2].sampled_image.?, &output));
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    // The direct ABI remains fail-closed on malformed resolved inputs and
+    // must not be mistaken for a broad fast path.
+    try std.testing.expectError(error.Bounds, executor.executeSampleModulateDirect(color[0..12], &coordinates, bindings[2].sampled_image.?, &output));
     @memset(&output, 0);
     try executor.execute(&bindings, &outputs);
     for (color_values, 0..) |value, lane| {
