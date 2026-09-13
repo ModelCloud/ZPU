@@ -5644,7 +5644,7 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     }, &fragment_program.identity.digest);
     var executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer executor.deinit();
-    try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+    try std.testing.expectEqualStrings("radial_gradient_2004_reference", executor.prevalidatedPathName());
     try std.testing.expectEqualStrings("chromium_radial_gradient_2004", executor.jitCandidateName());
 
     // Exercise the captured profile with every live interface populated.  The
@@ -5658,6 +5658,7 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     var outputs: [max_interfaces]render_ir_exec.Output = undefined;
     var binding_count: usize = 0;
     var output_count: usize = 0;
+    var uniform_interface_index: ?usize = null;
     const pixels = [_]u8{ 64, 128, 192, 255 };
     for (fragment_program.interfaces, 0..) |interface, interface_index| {
         if (interface.storage == .output) {
@@ -5683,14 +5684,17 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
             continue;
         }
         if (interface.storage == .uniform) {
+            uniform_interface_index = interface_index;
             // thresholds[0] = { 0, .25, .75, 1 } keeps t=.5 inside the
             // dynamic ramp. Every scale/bias entry is initialized because the
             // selected index is data-dependent in the captured shader.
             for ([_]f32{ 0, 0.25, 0.75, 1 }, 0..) |value, lane|
                 std.mem.writeInt(u32, backing[interface_index][32 + lane * 4 ..][0..4], @bitCast(value), .little);
             for (0..8) |entry| for (0..4) |lane| {
-                std.mem.writeInt(u32, backing[interface_index][64 + entry * 16 + lane * 4 ..][0..4], @bitCast(@as(f32, 0.25)), .little);
-                std.mem.writeInt(u32, backing[interface_index][192 + entry * 16 + lane * 4 ..][0..4], @bitCast(@as(f32, 0.25)), .little);
+                const scale = @as(f32, @floatFromInt(entry + 1)) * 0.125;
+                const bias = @as(f32, @floatFromInt(lane + 1)) * 0.0625;
+                std.mem.writeInt(u32, backing[interface_index][64 + entry * 16 + lane * 4 ..][0..4], @bitCast(scale), .little);
+                std.mem.writeInt(u32, backing[interface_index][192 + entry * 16 + lane * 4 ..][0..4], @bitCast(bias), .little);
             };
             std.mem.writeInt(u32, backing[interface_index][324..][0..4], @bitCast(@as(f32, 1)), .little);
             // The live sampler transform is a column-major identity matrix.
@@ -5700,6 +5704,10 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
             // keeps the fixture independent of screen origin convention.
             std.mem.writeInt(u32, backing[interface_index][464..][0..4], @bitCast(@as(f32, 0)), .little);
             std.mem.writeInt(u32, backing[interface_index][468..][0..4], @bitCast(@as(f32, 0)), .little);
+            for ([_]f32{ 0.1, 0.2, 0.3, 1 }, 0..) |value, lane|
+                std.mem.writeInt(u32, backing[interface_index][384 + lane * 4 ..][0..4], @bitCast(value), .little);
+            for ([_]f32{ 0.8, 0.7, 0.6, 1 }, 0..) |value, lane|
+                std.mem.writeInt(u32, backing[interface_index][400 + lane * 4 ..][0..4], @bitCast(value), .little);
         } else if (interface.storage == .input and interface.builtin_frag_coord) {
             const value = [_]f32{ 0.5, 0.5, 0, 1 };
             @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
@@ -5729,6 +5737,23 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     @memset(backing[outputs[0].interface][0..16], 0xa5);
     try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
     try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expect(try executor.executePrevalidated(bindings[0..binding_count], outputs[0..output_count]));
+    try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+
+    // Exercise both border exits and every data-dependent scale/bias array
+    // index. The generic interpreter is deliberately retained as oracle for
+    // each case, so a future ORC lowering inherits this branch coverage.
+    const uniform_index = uniform_interface_index orelse return error.TestUnexpectedResult;
+    for ([_]f32{ -2, -0.875, -0.625, -0.375, -0.125, 2 }) |phase_bias| {
+        std.mem.writeInt(u32, backing[uniform_index][320..][0..4], @bitCast(phase_bias), .little);
+        @memset(backing[outputs[0].interface][0..16], 0xa5);
+        try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+        const generic_case = backing[outputs[0].interface][0..16].*;
+        @memset(backing[outputs[0].interface][0..16], 0xa5);
+        try std.testing.expect(try executor.executePrevalidated(bindings[0..binding_count], outputs[0..output_count]));
+        try std.testing.expectEqualSlices(u8, &generic_case, backing[outputs[0].interface][0..16]);
+    }
 
     // Validation must still happen before a JIT is selected. A descriptor
     // range which cannot cover the last live uniform field fails closed and
@@ -5740,6 +5765,7 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     @memset(backing[outputs[0].interface][0..16], 0xa5);
     try std.testing.expectError(error.Bounds, executor.execute(short_bindings[0..binding_count], outputs[0..output_count]));
     try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), backing[outputs[0].interface][0..16]);
+    try std.testing.expectError(error.Bounds, executor.executePrevalidated(short_bindings[0..binding_count], outputs[0..output_count]));
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {

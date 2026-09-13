@@ -725,6 +725,19 @@ const ConvolutionFastPath = struct {
     bias_literal: [4]u8,
 };
 
+/// Exact layout and interface map for the captured Chromium radial-gradient
+/// fragment.  It is deliberately admitted only after the whole canonical IR
+/// identity has matched; this reference lowering is also the differential
+/// oracle for the optional ORC implementation.
+const RadialGradientFastPath = struct {
+    circle_interface: u32,
+    coordinates_interface: u32,
+    frag_coord_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+};
+
 const FastPath = union(enum) {
     sample_modulate: struct {
         color_interface: u32,
@@ -743,6 +756,10 @@ const FastPath = union(enum) {
     /// specialization, not a claim that arbitrary shader input is JITed;
     /// every other program uses the interpreter.
     convolution_8tap: ConvolutionFastPath,
+    /// Semantics-first direct lowering for the current Chromium radial
+    /// gradient. This remains normal ZPU code, not a JIT claim: it is the
+    /// stable oracle the ORC path must match before runtime selection.
+    radial_gradient_2004: RadialGradientFastPath,
 };
 
 fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operands: []const u32) bool {
@@ -753,6 +770,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     const instructions = program.instructions;
     if (instructions.len != 13 or instructions[0].literal.len != 4 or instructions[3].literal.len != 4) return null;
@@ -852,6 +870,49 @@ fn detectChromiumConvolution(program: *const ir.Program) ?ConvolutionFastPath {
     };
 }
 
+fn detectChromiumRadialGradient(program: *const ir.Program) ?RadialGradientFastPath {
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 251 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_radial_gradient_identity)) return null;
+    var result: RadialGradientFastPath = undefined;
+    var circle_found = false;
+    var coordinates_found = false;
+    var frag_coord_found = false;
+    var uniform_found = false;
+    var image_found = false;
+    var output_found = false;
+    for (program.interfaces, 0..) |interface, index| {
+        const interface_index: u32 = @intCast(index);
+        if (interface.storage == .input and interface.location != null and interface.location.? == 0 and same(interface.ty, f32x4)) {
+            if (circle_found) return null;
+            result.circle_interface = interface_index;
+            circle_found = true;
+        } else if (interface.storage == .input and interface.location != null and interface.location.? == 2 and same(interface.ty, f32x2)) {
+            if (coordinates_found) return null;
+            result.coordinates_interface = interface_index;
+            coordinates_found = true;
+        } else if (interface.storage == .input and interface.builtin_frag_coord and same(interface.ty, f32x4)) {
+            if (frag_coord_found) return null;
+            result.frag_coord_interface = interface_index;
+            frag_coord_found = true;
+        } else if (interface.storage == .uniform and interface.block and interface.descriptor_set != null and interface.descriptor_set.? == 0 and interface.binding != null and interface.binding.? == 0 and interface.member_count == 11) {
+            if (uniform_found) return null;
+            result.uniform_interface = interface_index;
+            uniform_found = true;
+        } else if (interface.storage == .sampled_image and same(interface.ty, f32x4) and interface.descriptor_set != null and interface.descriptor_set.? == 1 and interface.binding != null and interface.binding.? == 0) {
+            if (image_found) return null;
+            result.image_interface = interface_index;
+            image_found = true;
+        } else if (interface.storage == .output and same(interface.ty, f32x4) and interface.location != null and interface.location.? == 0) {
+            if (output_found) return null;
+            result.output_interface = interface_index;
+            output_found = true;
+        }
+    }
+    return if (circle_found and coordinates_found and frag_coord_found and uniform_found and image_found and output_found) result else null;
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
@@ -901,6 +962,7 @@ pub const Executor = struct {
         return switch (self.fast_path orelse return "interpreter") {
             .sample_modulate => "sample_modulate",
             .convolution_8tap => "convolution_8tap",
+            .radial_gradient_2004 => "radial_gradient_2004_reference",
         };
     }
 
@@ -914,10 +976,20 @@ pub const Executor = struct {
         };
     }
 
-    fn convolutionF32(bytes: []const u8, offset: usize) Error!f32 {
+    fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
         const end = std.math.add(usize, offset, 4) catch return error.Bounds;
         if (end > bytes.len) return error.Bounds;
         return @bitCast(canonicalFloat(std.mem.readInt(u32, bytes[offset..][0..4], .little)));
+    }
+
+    fn canonicalF32(value: f32) f32 {
+        return @bitCast(canonicalFloat(@bitCast(value)));
+    }
+
+    fn radialClamp(value: f32, minimum: f32, maximum: f32) Error!f32 {
+        if (minimum > maximum) return error.NumericDomain;
+        const lower = if (value < minimum) minimum else value;
+        return canonicalF32(if (maximum < lower) maximum else lower);
     }
 
     fn convolutionCoordinate(matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32) Value {
@@ -968,21 +1040,108 @@ pub const Executor = struct {
         if (uniform.bytes.len < 64 or uniform.bytes.len < 192 or uniform.bytes.len < 296) return error.Bounds;
         var matrix: [3][3]f32 = undefined;
         for (0..3) |column| for (0..3) |row| {
-            matrix[column][row] = try convolutionF32(uniform.bytes, 16 + column * 16 + row * 4);
+            matrix[column][row] = try uniformF32(uniform.bytes, 16 + column * 16 + row * 4);
         };
-        const direction = [_]f32{ try convolutionF32(uniform.bytes, 288), try convolutionF32(uniform.bytes, 292) };
+        const direction = [_]f32{ try uniformF32(uniform.bytes, 288), try uniformF32(uniform.bytes, 292) };
         const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
         var sum = [_]f32{ 0, 0, 0, 0 };
         inline for (0..8) |tap| {
             const base = 64 + tap * 16;
-            const first_offset = try convolutionF32(uniform.bytes, base);
-            const first_weight = try convolutionF32(uniform.bytes, base + 4);
-            const second_offset = try convolutionF32(uniform.bytes, base + 8);
-            const second_weight = try convolutionF32(uniform.bytes, base + 12);
+            const first_offset = try uniformF32(uniform.bytes, base);
+            const first_weight = try uniformF32(uniform.bytes, base + 4);
+            const second_offset = try uniformF32(uniform.bytes, base + 8);
+            const second_weight = try uniformF32(uniform.bytes, base + 12);
             try convolutionAccumulate(&sum, image, matrix, coordinates, direction, first_offset, first_weight, bias);
             try convolutionAccumulate(&sum, image, matrix, coordinates, direction, second_offset, second_weight, bias);
         }
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
+    }
+
+    fn executeRadialGradientReference(path: RadialGradientFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        const circle = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.circle_interface));
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinates_interface));
+        const frag_coord = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.frag_coord_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 480) return error.Bounds;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+
+        const circle_x: f32 = @bitCast(circle.bits[0]);
+        const circle_y: f32 = @bitCast(circle.bits[1]);
+        const circle_z: f32 = @bitCast(circle.bits[2]);
+        var length_squared = canonicalF32(circle_x * circle_x);
+        length_squared = canonicalF32(length_squared + canonicalF32(circle_y * circle_y));
+        const distance = canonicalF32(std.math.sqrt(length_squared));
+        const edge_distance = canonicalF32(circle_z * canonicalF32(1 - distance));
+        const edge_alpha = try radialClamp(edge_distance, 0, 1);
+
+        const coordinate_x: f32 = @bitCast(coordinates.bits[0]);
+        const coordinate_y: f32 = @bitCast(coordinates.bits[1]);
+        const angle = if (coordinate_x != 0)
+            canonicalF32(std.math.atan2(-coordinate_y, -coordinate_x))
+        else blk: {
+            const sign: f32 = if (std.math.isNan(coordinate_y)) 0 else if (coordinate_y > 0) 1 else if (coordinate_y < 0) -1 else @bitCast(coordinates.bits[1] & 0x80000000);
+            break :blk canonicalF32(sign * -1.57079637);
+        };
+        const phase_bias = try uniformF32(uniform.bytes, 320);
+        const phase_scale = try uniformF32(uniform.bytes, 324);
+        var t = canonicalF32(angle * 0.159154937);
+        t = canonicalF32(t + 0.5);
+        t = canonicalF32(t + phase_bias);
+        t = canonicalF32(t * phase_scale);
+
+        var color: [4]f32 = undefined;
+        if (t < 0) {
+            for (0..4) |lane| color[lane] = try uniformF32(uniform.bytes, 384 + lane * 4);
+        } else if (t > 1) {
+            for (0..4) |lane| color[lane] = try uniformF32(uniform.bytes, 400 + lane * 4);
+        } else {
+            const threshold_x = try uniformF32(uniform.bytes, 32);
+            const threshold_y = try uniformF32(uniform.bytes, 36);
+            const threshold_z = try uniformF32(uniform.bytes, 40);
+            // The validated shader's single bounded loop leaves chunk zero
+            // for every possible threshold result. Keep the subsequent
+            // dynamic position selection explicit because it indexes live
+            // scale/bias arrays at draw time.
+            const position: usize = if (t < threshold_y)
+                if (t < threshold_x) 0 else 1
+            else if (t < threshold_z) 2 else 3;
+            for (0..4) |lane| {
+                const scale = try uniformF32(uniform.bytes, 64 + position * 16 + lane * 4);
+                const bias = try uniformF32(uniform.bytes, 192 + position * 16 + lane * 4);
+                color[lane] = canonicalF32(canonicalF32(scale * t) + bias);
+            }
+        }
+
+        const range_x = try uniformF32(uniform.bytes, 472);
+        const range_y = try uniformF32(uniform.bytes, 476);
+        const fragment_x: f32 = @bitCast(frag_coord.bits[0]);
+        const fragment_y: f32 = @bitCast(frag_coord.bits[1]);
+        const transformed_y = canonicalF32(range_x + canonicalF32(range_y * fragment_y));
+        const sample_x = canonicalF32(canonicalF32((try uniformF32(uniform.bytes, 416)) * fragment_x) + canonicalF32((try uniformF32(uniform.bytes, 432)) * transformed_y) + (try uniformF32(uniform.bytes, 448)));
+        const sample_y = canonicalF32(canonicalF32((try uniformF32(uniform.bytes, 420)) * fragment_x) + canonicalF32((try uniformF32(uniform.bytes, 436)) * transformed_y) + (try uniformF32(uniform.bytes, 452)));
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(sample_x);
+        sample_coordinates.bits[1] = @bitCast(sample_y);
+        const sample_bias = Value{ .ty = .{ .scalar = .f32 }, .bits = .{ 0xbef33333 } ++ .{0} ** 15 };
+        const sampled = try sample(image, sample_coordinates, sample_bias);
+        const sampled_red: f32 = @bitCast(sampled.bits[0]);
+        const contrast = try uniformF32(uniform.bytes, 464);
+        const sample_value = canonicalF32(sampled_red - 0.5);
+        const alpha = color[3];
+        var result: [4]f32 = undefined;
+        for (0..3) |lane| {
+            const adjusted = canonicalF32(color[lane] + canonicalF32(sample_value * contrast));
+            result[lane] = try radialClamp(adjusted, 0, alpha);
+        }
+        result[3] = alpha;
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(result[lane] * edge_alpha))), .little);
     }
 
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -1005,6 +1164,7 @@ pub const Executor = struct {
                 }
             },
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
+            .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
         }
     }
 
