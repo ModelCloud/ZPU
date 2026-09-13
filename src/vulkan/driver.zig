@@ -8615,6 +8615,61 @@ fn deadResource() bool {
     hit(.recorded_dead_resource);
     return false;
 }
+fn diagnoseCubeDrawResources(op: anytype) void {
+    if (!failureDiagnosticsEnabled()) return;
+    var dead = false;
+    if (op.framebuffer) |framebuffer| {
+        if (stateForObject(FramebufferObj, framebuffer, &framebuffer_objects, &framebuffer_state)) |state| {
+            if (state.* != .live) dead = true;
+        } else dead = true;
+        if (framebuffer.color_image) |image| {
+            if (!liveImageObject(image) or (image.memory != null and !liveMemoryObject(image.memory.?))) dead = true;
+        }
+        if (framebuffer.depth_image) |image| {
+            if (!liveImageObject(image) or (image.memory != null and !liveMemoryObject(image.memory.?))) dead = true;
+        }
+    }
+    if (stateForObject(GraphicsPipelineObj, op.pipeline, &graphics_pipeline_objects, &graphics_pipeline_state)) |state| {
+        if (state.* != .live) dead = true;
+    } else dead = true;
+    if (!liveDescriptorObject(op.descriptors)) dead = true;
+    if (op.descriptors.uniform) |buffer| {
+        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) dead = true;
+    }
+    if (op.descriptors.texture) |image| {
+        if (!liveImageObject(image) or image.memory == null or !liveMemoryObject(image.memory.?)) dead = true;
+    }
+    if (op.descriptors.sampler) |sampler| {
+        if (stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state)) |state| {
+            if (state.* != .live) dead = true;
+        } else dead = true;
+    }
+    for (op.descriptors.sampled_images, 0..) |sampled, index| if (sampled.image) |image| {
+        if (!liveImageObject(image) or image.memory == null or !liveMemoryObject(image.memory.?)) {
+            dead = true;
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU dead cube sampled index={d} image={x} image_live={} memory_live={}\n", .{ index, @intFromPtr(image), liveImageObject(image), image.memory != null and liveMemoryObject(image.memory.?) });
+        }
+    };
+    for (op.vertex_bindings.buffers, 0..) |buffer, index| if (buffer) |value| if (!liveBufferObject(value) or value.memory == null or !liveMemoryObject(value.memory.?)) {
+        dead = true;
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU dead cube vertex index={d} buffer={x} buffer_live={} memory_live={}\n", .{ index, @intFromPtr(value), liveBufferObject(value), value.memory != null and liveMemoryObject(value.memory.?) });
+    };
+    if (op.indexed) |indexed| if (!liveBufferObject(indexed.buffer) or indexed.buffer.memory == null or !liveMemoryObject(indexed.buffer.memory.?)) {
+        dead = true;
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU dead cube index buffer={x} buffer_live={} memory_live={}\n", .{ @intFromPtr(indexed.buffer), liveBufferObject(indexed.buffer), indexed.buffer.memory != null and liveMemoryObject(indexed.buffer.memory.?) });
+    };
+    if (dead) std.debug.print("ZPU dead cube draw pipeline={x} descriptors={x} framebuffer={x} color={x} depth={x} uniform={x} texture={x} sampler={x} abi={s}\n", .{
+        @intFromPtr(op.pipeline),
+        @intFromPtr(op.descriptors),
+        if (op.framebuffer) |value| @intFromPtr(value) else 0,
+        if (op.color_image) |value| @intFromPtr(value) else 0,
+        if (op.depth_image) |value| @intFromPtr(value) else 0,
+        if (op.descriptors.uniform) |value| @intFromPtr(value) else 0,
+        if (op.descriptors.texture) |value| @intFromPtr(value) else 0,
+        if (op.descriptors.sampler) |value| @intFromPtr(value) else 0,
+        @tagName(op.pipeline.execution_abi),
+    });
+}
 fn wrongSubmittingDevice() bool {
     hit(.submitting_device_ownership);
     return false;
@@ -8950,6 +9005,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             }
         },
         .cube_draw => |op| {
+            diagnoseCubeDrawResources(op);
             const framebuffer = op.framebuffer;
             const color_image = op.color_image orelse if (framebuffer) |fb| fb.color_image else null;
             const depth = op.depth_image orelse if (framebuffer) |fb| fb.depth_image else null;
