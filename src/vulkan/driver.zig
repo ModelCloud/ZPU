@@ -3791,6 +3791,10 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // and vkCreateImage both receive the tiling explicitly.
     _ = tiling;
     return switch (format) {
+        // R8_UNORM is retained in the internal image store as one red byte
+        // per texel followed by an opaque padding word.  It is a sampled
+        // transfer texture only; it is not a color attachment.
+        9 => 0x1 | 0x2 | 0x4,
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
@@ -3824,6 +3828,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
     out.* = switch (format) {
+        9 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
@@ -7047,24 +7052,30 @@ fn checkedBufferImageAdd(a: u64, b: u64) ?u64 {
         return null;
     };
 }
-fn bufferImageLayerStride(region: BufferImageCopy) ?u64 {
+fn bufferImageLayerStrideForBpp(region: BufferImageCopy, bytes_per_texel: u64) ?u64 {
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const height = if (region.buffer_image_height == 0) region.image_extent.height else region.buffer_image_height;
     const row_height = checkedBufferImageMul(row, height) orelse return null;
-    return checkedBufferImageMul(row_height, 4);
+    return checkedBufferImageMul(row_height, bytes_per_texel);
 }
-fn bufferImageEnd(region: BufferImageCopy) ?u64 {
+fn bufferImageLayerStride(region: BufferImageCopy) ?u64 {
+    return bufferImageLayerStrideForBpp(region, 4);
+}
+fn bufferImageEndForBpp(region: BufferImageCopy, bytes_per_texel: u64) ?u64 {
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
     const height = if (region.buffer_image_height == 0) region.image_extent.height else region.buffer_image_height;
     if (region.image_subresource.layer_count == 0 or row < region.image_extent.width or height < region.image_extent.height or region.buffer_offset % 4 != 0) return null;
-    const layer_stride = bufferImageLayerStride(region) orelse return null;
+    const layer_stride = bufferImageLayerStrideForBpp(region, bytes_per_texel) orelse return null;
     const prior_layers = checkedBufferImageMul(@as(u64, region.image_subresource.layer_count) - 1, layer_stride) orelse return null;
     const rows_before_last = checkedBufferImageSub(region.image_extent.height, 1) orelse return null;
     const prior_rows = checkedBufferImageMul(rows_before_last, row) orelse return null;
     const texels = checkedBufferImageAdd(prior_rows, region.image_extent.width) orelse return null;
-    const bytes = checkedBufferImageMul(texels, 4) orelse return null;
+    const bytes = checkedBufferImageMul(texels, bytes_per_texel) orelse return null;
     const last_layer = checkedBufferImageAdd(prior_layers, bytes) orelse return null;
     return checkedBufferImageAdd(region.buffer_offset, last_layer);
+}
+fn bufferImageEnd(region: BufferImageCopy) ?u64 {
+    return bufferImageEndForBpp(region, 4);
 }
 fn rowSequencesOverlap(a_base: u64, a_stride: u64, a_rows: u32, a_width: u64, b_base: u64, b_stride: u64, b_rows: u32, b_width: u64) bool {
     var a_y: u32 = 0;
@@ -7188,6 +7199,14 @@ fn transferableColorFormat(format: i32) bool {
     return format == 37 or format == 44;
 }
 
+fn bufferImageBytesPerTexel(format: i32) ?u64 {
+    return switch (format) {
+        9 => 1,
+        37, 44 => 4,
+        else => null,
+    };
+}
+
 fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize, layout: i32, count: u32, regions: ?[*]const BufferImageCopy) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -7218,7 +7237,7 @@ fn cmdCopyBufferToImage(cb: ?CommandBuffer, src_handle: usize, dst_handle: usize
         return;
     }
     for (list[0..count]) |region| {
-        const end = bufferImageEnd(region);
+        const end = bufferImageEndForBpp(region, bufferImageBytesPerTexel(dst.format) orelse 0);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 7) or !validImageRegion(dst, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > src.size) {
             c.impl.invalid = true;
             return;
@@ -7264,7 +7283,7 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
         return;
     }
     for (list[0..count]) |region| {
-        const end = bufferImageEnd(region);
+        const end = bufferImageEndForBpp(region, bufferImageBytesPerTexel(src.format) orelse 0);
         if (src.owner != c.impl.owner or dst.owner != c.impl.owner or src.usage & 0x1 == 0 or dst.usage & 0x2 == 0 or src.memory == null or dst.memory == null or (layout != 1 and layout != 6) or !validImageRegion(src, region.image_offset, region.image_extent, region.image_subresource) or end == null or end.? > dst.size) {
             c.impl.invalid = true;
             return;
@@ -9653,6 +9672,7 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj) ?render_ir_exec.Sam
     const sampler = descriptors.sampler orelse return null;
     if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler.unnormalized_coordinates or sampler.mag_filter != sampler.min_filter) return null;
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
+        9 => .r8_unorm,
         37 => .rgba8_unorm,
         44 => .bgra8_unorm,
         else => return null,
@@ -9675,6 +9695,7 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj) ?render_ir_exec.Sam
         .width = image.width,
         .height = image.height,
         .row_stride = image.width * 4,
+        .bytes_per_texel = 4,
         .format = format,
         .filter = filter,
         .address_u = address_u,
@@ -10867,8 +10888,9 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     const b = bufferBytes(buffer);
     const pixels = imageBytes(image);
     const row = if (region.buffer_row_length == 0) region.image_extent.width else region.buffer_row_length;
-    const layer_stride = bufferImageLayerStride(region).?;
-    const len = @as(usize, region.image_extent.width) * 4;
+    const bytes_per_texel = bufferImageBytesPerTexel(image.format).?;
+    const layer_stride = bufferImageLayerStrideForBpp(region, bytes_per_texel).?;
+    const len = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
     var layer: u32 = 0;
     while (layer < region.image_subresource.layer_count) : (layer += 1) {
         const image_layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + layer).?;
@@ -10878,11 +10900,53 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
         // cmdCopyImageToBuffer before this recorded command executes. Copying
         // a complete layer in one call avoids per-row dispatch overhead while
         // retaining explicit strides for pitched transfers.
-        if (to_image)
-            copyTransferRows(pixels[io..], @as(usize, image.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
-        else
-            copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, image.width) * 4, len, region.image_extent.height);
+        if (image.format != 9) {
+            if (to_image)
+                copyTransferRows(pixels[io..], @as(usize, image.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
+            else
+                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, image.width) * 4, len, region.image_extent.height);
+        } else {
+            // Keep the public R8 transfer layout (one byte per texel) while
+            // using the driver's existing four-byte internal image storage.
+            // The padded channels are deterministic and sample as (r,0,0,1).
+            for (0..region.image_extent.height) |y| {
+                const source_row = bo + y * @as(usize, @intCast(row));
+                const image_row = io + y * @as(usize, image.width) * 4;
+                for (0..region.image_extent.width) |x| {
+                    if (to_image) {
+                        pixels[image_row + x * 4] = b[source_row + x];
+                        pixels[image_row + x * 4 + 1] = 0;
+                        pixels[image_row + x * 4 + 2] = 0;
+                        pixels[image_row + x * 4 + 3] = 255;
+                    } else {
+                        b[source_row + x] = pixels[image_row + x * 4];
+                    }
+                }
+            }
+        }
     }
+}
+
+test "R8 buffer image transfers preserve packed rows and expand sampled storage" {
+    const owner: Device = @ptrFromInt(8);
+    var buffer_storage: [8]u8 align(64) = .{ 0x10, 0x11, 0xaa, 0xbb, 0x20, 0x21, 0xcc, 0xdd };
+    var image_storage: [16]u8 align(64) = .{0} ** 16;
+    var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .owned_bytes = image_storage[0..] };
+    const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 4, .buffer_image_height = 2, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+
+    copyBufferImage(&buffer, &image, region, true);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        0x10, 0, 0, 255,
+        0x11, 0, 0, 255,
+        0x20, 0, 0, 255,
+        0x21, 0, 0, 255,
+    }, &image_storage);
+
+    @memset(&buffer_storage, 0);
+    copyBufferImage(&buffer, &image, region, false);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x11, 0, 0, 0x20, 0x21, 0, 0 }, &buffer_storage);
 }
 
 const max_canonical_bytes = 2 * spirv.max_code_bytes + 64 * 1024;

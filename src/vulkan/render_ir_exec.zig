@@ -49,7 +49,7 @@ pub const Value = struct {
 };
 
 pub const SampledImage = struct {
-    pub const Format = enum { rgba8_unorm, bgra8_unorm };
+    pub const Format = enum { r8_unorm, rgba8_unorm, bgra8_unorm };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
 
@@ -57,6 +57,10 @@ pub const SampledImage = struct {
     width: u32,
     height: u32,
     row_stride: u32,
+    // The driver keeps sampled image storage in its existing four-byte
+    // internal layout, while standalone IR fixtures may use the format's
+    // natural packed layout.
+    bytes_per_texel: u32 = 4,
     format: Format,
     filter: Filter,
     address_u: AddressMode,
@@ -351,9 +355,11 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     const offset = std.math.add(
         usize,
         std.math.mul(usize, addressed_y, image.row_stride) catch return error.Bounds,
-        std.math.mul(usize, addressed_x, 4) catch return error.Bounds,
+        std.math.mul(usize, addressed_x, image.bytes_per_texel) catch return error.Bounds,
     ) catch return error.Bounds;
-    if (offset > image.pixels.len or image.pixels.len - offset < 4) return error.Bounds;
+    if (image.bytes_per_texel == 0 or offset > image.pixels.len or image.pixels.len - offset < image.bytes_per_texel) return error.Bounds;
+    if (image.format == .r8_unorm) return .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, 0, 0, 1 };
+    if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
     const pixel = image.pixels[offset..][0..4];
     const r = if (image.format == .rgba8_unorm) pixel[0] else pixel[2];
     const b = if (image.format == .rgba8_unorm) pixel[2] else pixel[0];
@@ -365,7 +371,7 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     };
 }
 fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
-    if (image.width == 0 or image.height == 0 or image.row_stride < image.width * 4) return error.Bounds;
+    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
     if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or bias.ty.scalar != .f32 or bias.ty.columns != 1 or bias.ty.rows != 1) return error.InvalidType;
     const u: f32 = @bitCast(coordinates.bits[0]);
     const v: f32 = @bitCast(coordinates.bits[1]);
@@ -434,6 +440,31 @@ test "sample applies normalized addressing before bounded texel indexing" {
     coordinates.bits[0] = @bitCast(@as(f32, -2));
     const border = try sample(border_image, coordinates, bias);
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(border.bits[3])));
+}
+
+test "sample decodes packed R8 coverage as red with opaque alpha" {
+    const pixels = [_]u8{ 0, 64, 128, 255 };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 2,
+        .bytes_per_texel = 1,
+        .format = .r8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.75));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.75));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
 }
 fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);

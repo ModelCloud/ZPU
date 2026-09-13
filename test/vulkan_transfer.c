@@ -329,7 +329,8 @@ int main(void) {
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_D32_SFLOAT, &fp);
     CHECK_TRUE(fp.linearTilingFeatures == 0 && fp.optimalTilingFeatures == (VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT) && fp.bufferFeatures == 0);
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8_UNORM, &fp);
-    CHECK_TRUE(fp.linearTilingFeatures == 0 && fp.optimalTilingFeatures == 0 && fp.bufferFeatures == 0);
+    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
+    CHECK_TRUE(fp.optimalTilingFeatures == fp.linearTilingFeatures && fp.bufferFeatures == 0);
 
     VkImageFormatProperties ifp;
     CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp));
@@ -341,10 +342,11 @@ int main(void) {
     CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &ifp));
     CHECK_TRUE(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp) == VK_ERROR_FORMAT_NOT_SUPPORTED);
     CHECK_TRUE(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_D32_SFLOAT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &ifp) == VK_ERROR_FORMAT_NOT_SUPPORTED);
-    CHECK_TRUE(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp) == VK_ERROR_FORMAT_NOT_SUPPORTED);
+    CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp));
     VkImage bad_image;
     VkImageCreateInfo bad = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8_UNORM, .extent = { WIDTH, HEIGHT, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_LINEAR, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
-    CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_FORMAT_NOT_SUPPORTED);
+    CHECK_VK(vkCreateImage(device, &bad, NULL, &bad_image));
+    vkDestroyImage(device, bad_image, NULL);
     bad.format = VK_FORMAT_R8G8B8A8_UNORM;
     bad.extent.width = UINT32_MAX;
     CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_INITIALIZATION_FAILED);
