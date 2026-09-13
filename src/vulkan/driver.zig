@@ -155,11 +155,13 @@ fn featureWords(features: *const Features) []const u32 {
 }
 
 fn coreFeaturesSupported(features: *const Features) bool {
+    const independent_blend_index = @offsetOf(Features, "independent_blend") / @sizeOf(u32);
     const multi_draw_index = @offsetOf(Features, "multi_draw_indirect") / @sizeOf(u32);
     const inherited_queries_index = @offsetOf(Features, "inherited_queries") / @sizeOf(u32);
+    const vertex_pipeline_stores_index = @offsetOf(Features, "vertex_pipeline_stores_and_atomics") / @sizeOf(u32);
     for (featureWords(features), 0..) |value, index| {
         if (value > 1) return false;
-        if (value != 0 and index != multi_draw_index and index != inherited_queries_index) return false;
+        if (value != 0 and index != independent_blend_index and index != multi_draw_index and index != inherited_queries_index and index != vertex_pipeline_stores_index) return false;
     }
     return true;
 }
@@ -458,6 +460,8 @@ pub const PhysicalDevice16BitStorageFeatures = extern struct {
 };
 pub const PhysicalDeviceVariablePointersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, variable_pointers_storage_buffer: u32, variable_pointers: u32 };
 pub const PhysicalDeviceSamplerYcbcrConversionFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, sampler_ycbcr_conversion: u32 };
+pub const PhysicalDeviceProvokingVertexFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, provoking_vertex_last: u32, transform_feedback_preserves_provoking_vertex: u32 };
+pub const PhysicalDeviceProvokingVertexProperties = extern struct { s_type: i32, p_next: ?*anyopaque, provoking_vertex_mode_per_pipeline: u32, transform_feedback_preserves_triangle_fan_provoking_vertex: u32 };
 pub const PhysicalDeviceMultiviewFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, multiview: u32, multiview_geometry_shader: u32, multiview_tessellation_shader: u32 };
 pub const PhysicalDeviceShaderDrawParametersFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, shader_draw_parameters: u32 };
 pub const PhysicalDeviceVulkanMemoryModelFeatures = extern struct { s_type: i32, p_next: ?*anyopaque, vulkan_memory_model: u32, vulkan_memory_model_device_scope: u32, vulkan_memory_model_availability_visibility_chains: u32 };
@@ -1121,6 +1125,7 @@ pub const PipelineRasterizationStateCreateInfo = extern struct { s_type: i32, p_
 pub const PipelineRasterizationLineStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, line_rasterization_mode: i32, stippled_line_enable: u32, line_stipple_factor: u32, line_stipple_pattern: u16 };
 pub const PipelineRasterizationLineStateCreateInfoKHR = PipelineRasterizationLineStateCreateInfo;
 pub const PipelineRasterizationLineStateCreateInfoEXT = PipelineRasterizationLineStateCreateInfo;
+pub const PipelineRasterizationProvokingVertexStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, provoking_vertex_mode: i32 };
 pub const PipelineMultisampleStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, rasterization_samples: u32, sample_shading_enable: u32, min_sample_shading: f32, sample_mask: ?[*]const u32, alpha_to_coverage_enable: u32, alpha_to_one_enable: u32 };
 pub const StencilOpState = extern struct { fail_op: i32, pass_op: i32, depth_fail_op: i32, compare_op: i32, compare_mask: u32, write_mask: u32, reference: u32 };
 pub const PipelineDepthStencilStateCreateInfo = extern struct { s_type: i32, p_next: ?*const anyopaque, flags: u32, depth_test_enable: u32, depth_write_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, stencil_test_enable: u32, front: StencilOpState, back: StencilOpState, min_depth_bounds: f32, max_depth_bounds: f32 };
@@ -1464,6 +1469,7 @@ const GraphicsPipelineObj = struct {
     execution_abi: ExecutionAbi,
     cull_mode: u32,
     front_face: i32,
+    provoking_vertex_mode: i32 = 0,
     primitive_topology: i32 = 3,
     primitive_restart_enable: u32 = 0,
     rasterizer_discard_enable: u32 = 0,
@@ -1953,6 +1959,7 @@ fn lock() void {
 
 const ChainHeader = extern struct { s_type: i32, p_next: ?*const ChainHeader };
 const google_display_timing_extension = "VK_GOOGLE_display_timing";
+const provoking_vertex_extension = "VK_EXT_provoking_vertex";
 const google_present_times_info_stype: i32 = 1_000_092_000;
 const memory_dedicated_requirements_stype: i32 = 1_000_127_000;
 const pipeline_rendering_create_info_stype: i32 = 1_000_044_002;
@@ -2015,17 +2022,32 @@ fn pipelineVertexInputDivisorStateValid(raw: ?*const anyopaque) bool {
 fn pipelineRasterizationLineStateValid(raw: ?*const anyopaque) bool {
     var next = raw;
     var depth: usize = 0;
-    var seen = false;
+    var seen_line = false;
+    var seen_provoking = false;
     while (next) |item| {
         if (depth == 16) return false;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (header.s_type != 1_000_259_001 or seen) return false;
-        const info: *const PipelineRasterizationLineStateCreateInfo = @ptrCast(@alignCast(item));
-        // Line-rasterization features are not advertised.  Accept only the
-        // default mode and disabled stippling; the default factor/pattern
-        // keep the complete promoted ABI deterministic.
-        if (info.line_rasterization_mode != 0 or info.stippled_line_enable != 0 or info.line_stipple_factor != 1 or info.line_stipple_pattern != 0) return false;
-        seen = true;
+        switch (header.s_type) {
+            1_000_259_001 => {
+                if (seen_line) return false;
+                const info: *const PipelineRasterizationLineStateCreateInfo = @ptrCast(@alignCast(item));
+                // Line-rasterization features are not advertised.  Accept only the
+                // default mode and disabled stippling; the default factor/pattern
+                // keep the complete promoted ABI deterministic.
+                if (info.line_rasterization_mode != 0 or info.stippled_line_enable != 0 or info.line_stipple_factor != 1 or info.line_stipple_pattern != 0) return false;
+                seen_line = true;
+            },
+            1000254001 => {
+                if (seen_provoking) return false;
+                const info: *const PipelineRasterizationProvokingVertexStateCreateInfo = @ptrCast(@alignCast(item));
+                // ZPU implements the EXT_provoking_vertex first/last selection
+                // for triangle lists and strips.  The extension property says
+                // the mode is selected per pipeline, as required by ANGLE.
+                if (info.provoking_vertex_mode != 0 and info.provoking_vertex_mode != 1) return false;
+                seen_provoking = true;
+            },
+            else => return false,
+        }
         next = header.p_next;
         depth += 1;
     }
@@ -2489,6 +2511,7 @@ fn coreFeaturePayloadWords(s_type: i32) ?usize {
         1000083000 => 4,
         1000259000 => 6,
         1000191002 => 2,
+        1000254000 => 2,
         49 => 12,
         53 => 15,
         1000161001 => 20,
@@ -2531,6 +2554,10 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
             1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
                 propertyWriteU32(payload, 0, 1);
             },
+            1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
+                propertyWriteU32(payload, 0, 1);
+                propertyWriteU32(payload, 4, 0);
+            },
             else => {},
         }
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
@@ -2555,6 +2582,12 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
             1000156004 => { // VkPhysicalDeviceSamplerYcbcrConversionFeatures
                 const value = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
                 if (value != 0 and value != 1) return true;
+            },
+            1000254000 => { // VkPhysicalDeviceProvokingVertexFeaturesEXT
+                const last = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
+                const preserve = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
+                if (last != 0 and last != 1) return true;
+                if (preserve != 0) return true;
             },
             else => {
                 for (bytes[16 .. 16 + words * @sizeOf(u32)]) |value| if (value != 0) return true;
@@ -2674,6 +2707,7 @@ fn corePropertyPayloadBytes(s_type: i32) ?usize {
         1000094000, 1000168000, 1000199000, 1000225000, 1000068002 => 16,
         1000117000, 1000053002, 1000413001, 1000130000, 1000259002, 1000526000 => 8,
         1000196000 => 520,
+        1000254002 => 8,
         50 => 96,
         52 => 720,
         1000207001 => 8,
@@ -2787,6 +2821,10 @@ fn populatePromotedPropertyPayload(s_type: i32, bytes: []u8) void {
         },
         1000259002 => { // VkPhysicalDeviceLineRasterizationProperties
             propertyWriteU32(bytes, 0, 4);
+        },
+        1000254002 => { // VkPhysicalDeviceProvokingVertexPropertiesEXT
+            propertyWriteU32(bytes, 0, 1);
+            propertyWriteU32(bytes, 4, 0);
         },
         1000526000 => { // VkPhysicalDeviceVertexAttributeDivisorProperties
             propertyWriteU32(bytes, 0, 1);
@@ -3569,8 +3607,10 @@ fn getFeaturesLocked(h: Physical, out: *Features) bool {
         hit(.concurrent_overlap);
     }
     out.* = std.mem.zeroes(Features);
+    out.independent_blend = 1;
     out.multi_draw_indirect = 1;
     out.inherited_queries = 1;
+    out.vertex_pipeline_stores_and_atomics = 1;
     return true;
 }
 fn getFeatures(physical: ?Physical, output: ?*Features) callconv(.c) void {
@@ -3599,7 +3639,10 @@ fn conservativeLimits() Limits {
     v.buffer_image_granularity = 131_072;
     v.max_bound_descriptor_sets = 4;
     v.max_per_stage_descriptor_samplers = 16;
-    v.max_per_stage_descriptor_uniform_buffers = 12;
+    // ANGLE reserves one per-stage uniform binding for its default uniforms.
+    // Keep twelve application-visible blocks while truthfully reporting the
+    // extra native slot required by that reservation.
+    v.max_per_stage_descriptor_uniform_buffers = 13;
     v.max_per_stage_descriptor_storage_buffers = 4;
     v.max_per_stage_descriptor_sampled_images = 16;
     v.max_per_stage_descriptor_storage_images = 4;
@@ -3651,7 +3694,7 @@ fn conservativeLimits() Limits {
     v.framebuffer_depth_sample_counts = 1;
     v.framebuffer_stencil_sample_counts = 1;
     v.framebuffer_no_attachments_sample_counts = 1;
-    v.max_color_attachments = 4;
+    v.max_color_attachments = 1;
     v.sampled_image_color_sample_counts = 1;
     v.sampled_image_integer_sample_counts = 1;
     v.sampled_image_depth_sample_counts = 1;
@@ -3998,7 +4041,7 @@ fn enumerateDeviceExtensions(physical: ?Physical, layer: ?[*:0]const u8, count: 
     if (!validPhysicalLocked(physical orelse return .error_initialization_failed)) return .error_initialization_failed;
     const n = count orelse return .error_initialization_failed;
     if (layer != null) return .error_extension_not_present;
-    const extensions = [_]struct { name: []const u8, version: u32 }{ .{ .name = "VK_KHR_swapchain", .version = 70 }, .{ .name = "VK_EXT_present_timing", .version = 3 }, .{ .name = google_display_timing_extension, .version = 1 } };
+    const extensions = [_]struct { name: []const u8, version: u32 }{ .{ .name = "VK_KHR_swapchain", .version = 70 }, .{ .name = "VK_EXT_present_timing", .version = 3 }, .{ .name = google_display_timing_extension, .version = 1 }, .{ .name = provoking_vertex_extension, .version = 1 } };
     if (props) |items| {
         const written = @min(n.*, extensions.len);
         for (extensions[0..written], 0..) |extension, i| {
@@ -4033,7 +4076,7 @@ fn createDevice(physical: ?Physical, info: ?*const DeviceInfo, alloc: ?*const Al
             const name = std.mem.span(extension);
             if (std.mem.eql(u8, name, google_display_timing_extension)) {
                 logGoogleDisplayTimingMapped("device extension request");
-            } else if (!std.mem.eql(u8, name, "VK_KHR_swapchain") and !std.mem.eql(u8, name, "VK_EXT_present_timing")) return .error_extension_not_present;
+            } else if (!std.mem.eql(u8, name, "VK_KHR_swapchain") and !std.mem.eql(u8, name, "VK_EXT_present_timing") and !std.mem.eql(u8, name, provoking_vertex_extension)) return .error_extension_not_present;
         }
     }
     if (alloc != null) {
@@ -9713,7 +9756,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                         const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
                         const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
                         const numerator = q0 * a + q1 * b + q2 * c;
-                        const value = if (varying.flat) a else numerator / denominator;
+                        // VK_EXT_provoking_vertex selects which triangle
+                        // vertex supplies flat-qualified outputs.  The
+                        // profile emits the logical triangle in API order,
+                        // so first/last map directly to a/c here.
+                        const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
+                        const value = if (varying.flat) flat_value else numerator / denominator;
                         const numerator_dx = dq0_dx * a + dq1_dx * b + dq2_dx * c;
                         const numerator_dy = dq0_dy * a + dq1_dy * b + dq2_dy * c;
                         const derivative_scale = denominator * denominator;
@@ -11391,6 +11439,28 @@ test "line rasterization pNext accepts only the feature-disabled default" {
     try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&line)));
 }
 
+test "provoking vertex pNext validates first and last modes" {
+    var provoking = PipelineRasterizationProvokingVertexStateCreateInfo{
+        .s_type = 1000254001,
+        .p_next = null,
+        .provoking_vertex_mode = 0,
+    };
+    test_allocations_before_failure = 0;
+    defer test_allocations_before_failure = null;
+    for (0..4096) |_| try std.testing.expect(pipelineRasterizationLineStateValid(@ptrCast(&provoking)));
+    provoking.provoking_vertex_mode = 1;
+    try std.testing.expect(pipelineRasterizationLineStateValid(@ptrCast(&provoking)));
+    provoking.provoking_vertex_mode = 2;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&provoking)));
+    provoking.provoking_vertex_mode = 0;
+    var duplicate = provoking;
+    provoking.p_next = @ptrCast(&duplicate);
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&provoking)));
+    provoking.p_next = null;
+    provoking.s_type = 1000254000;
+    try std.testing.expect(!pipelineRasterizationLineStateValid(@ptrCast(&provoking)));
+}
+
 test "dynamic rendering pipeline pNext validation is bounded and canonical" {
     var formats = [_]i32{44};
     var rendering = PipelineRenderingCreateInfo{ .s_type = pipeline_rendering_create_info_stype, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = &formats, .depth_attachment_format = 126, .stencil_attachment_format = 0 };
@@ -11917,8 +11987,19 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const pipeline_depth_bias_enable = try bool32(rs.depth_bias_enable);
     const pipeline_depth_bias = [3]f32{ rs.depth_bias_constant_factor, rs.depth_bias_clamp, rs.depth_bias_slope_factor };
     if (rs.s_type != 23 or !pipelineRasterizationLineStateValid(rs.p_next) or rs.flags != 0 or try bool32(rs.depth_clamp_enable) != 0 or rs.polygon_mode != 0 or rs.cull_mode & ~@as(u32, 3) != 0 or (rs.front_face != 0 and rs.front_face != 1) or !validDepthBiasFactors(pipeline_depth_bias) or (!dynamic_depth_bias_enable and pipeline_depth_bias_enable != 0) or (!dynamic_depth_bias and !std.meta.eql(pipeline_depth_bias, [3]f32{ 0, 0, 0 })) or (!dynamic_line_width and rs.line_width != 1)) return pipelineInvalid(@src().line);
+    var provoking_vertex_mode: i32 = 0;
+    var raster_next = rs.p_next;
+    while (raster_next) |item| {
+        const header: *const ChainHeader = @ptrCast(@alignCast(item));
+        if (header.s_type == 1000254001) {
+            const info: *const PipelineRasterizationProvokingVertexStateCreateInfo = @ptrCast(@alignCast(item));
+            provoking_vertex_mode = info.provoking_vertex_mode;
+        }
+        raster_next = header.p_next;
+    }
     try w.u32le(rs.cull_mode);
     try w.i32le(rs.front_face);
+    try w.i32le(provoking_vertex_mode);
     try w.u32le(pipeline_rasterizer_discard_enable);
     for (pipeline_depth_bias) |factor| try w.f32le(factor);
     if (!dynamic_line_width) try w.f32le(rs.line_width);
@@ -12034,7 +12115,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_image = contract.fragment_sampled_image, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -17352,7 +17433,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
     var physical: [1]Physical = undefined;
     try std.testing.expectEqual(Result.success, enumeratePhysicalDevices(instance, &physical_count, &physical));
     var instance_extensions: [5]ExtensionProperties = undefined;
-    var device_extensions: [3]ExtensionProperties = undefined;
+    var device_extensions: [4]ExtensionProperties = undefined;
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
@@ -17370,16 +17451,16 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u32, 1), count);
         count = 0;
         try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, null));
-        try std.testing.expectEqual(@as(u32, 3), count);
+        try std.testing.expectEqual(@as(u32, 4), count);
         count = device_extensions.len;
         try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(physical[0], null, &count, &device_extensions));
-        try std.testing.expectEqual(@as(u32, 3), count);
+        try std.testing.expectEqual(@as(u32, 4), count);
         var features = std.mem.zeroes(Features);
         @memset(std.mem.asBytes(&features), 1);
         getFeatures(physical[0], &features);
         try std.testing.expectEqual(@as(u32, 1), features.multi_draw_indirect);
         try std.testing.expectEqual(@as(u32, 1), features.inherited_queries);
-        for (featureWords(&features), 0..) |value, index| if (index != 9 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
+        for (featureWords(&features), 0..) |value, index| if (index != 3 and index != 9 and index != 25 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
         var sparse_count: u32 = 1;
         getSparseImageFormatProperties(physical[0], 37, 1, 1, 4, 0, &sparse_count, @ptrFromInt(8));
         try std.testing.expectEqual(@as(u32, 0), sparse_count);
@@ -20460,7 +20541,10 @@ test "physical properties start with coherent conservative limits" {
     try std.testing.expectEqual(samples_1, l.framebuffer_depth_sample_counts);
     try std.testing.expectEqual(samples_1, l.framebuffer_stencil_sample_counts);
     try std.testing.expectEqual(samples_1, l.framebuffer_no_attachments_sample_counts);
-    try std.testing.expect(l.max_color_attachments >= 4);
+    // ZPU exposes one color attachment.  That makes independentBlend
+    // complete rather than aspirational: there is no second attachment whose
+    // blend state could diverge, while the Vulkan minimum remains satisfied.
+    try std.testing.expectEqual(@as(u32, 1), l.max_color_attachments);
     try std.testing.expectEqual(samples_1, l.sampled_image_color_sample_counts);
     try std.testing.expectEqual(samples_1, l.sampled_image_integer_sample_counts);
     try std.testing.expectEqual(samples_1, l.sampled_image_depth_sample_counts);
@@ -20503,7 +20587,7 @@ test "all physical queries cover success boundaries and invalid handles" {
     getFeatures(p, &features);
     try std.testing.expectEqual(@as(u32, 1), features.multi_draw_indirect);
     try std.testing.expectEqual(@as(u32, 1), features.inherited_queries);
-    for (featureWords(&features), 0..) |value, index| if (index != 9 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
+    for (featureWords(&features), 0..) |value, index| if (index != 3 and index != 9 and index != 25 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
     var queue_count: u32 = 7;
     getQueueProperties(p, &queue_count, null);
     try std.testing.expectEqual(@as(u32, 1), queue_count);
@@ -20575,20 +20659,22 @@ test "all physical queries cover success boundaries and invalid handles" {
     try std.testing.expectEqual(@as(u32, 0), sparse_count);
     var extension_count: u32 = 9;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, null));
-    try std.testing.expectEqual(@as(u32, 3), extension_count);
-    var device_extensions: [2]ExtensionProperties = undefined;
+    try std.testing.expectEqual(@as(u32, 4), extension_count);
+    var device_extensions: [3]ExtensionProperties = undefined;
     extension_count = 0;
     try std.testing.expectEqual(Result.incomplete, enumerateDeviceExtensions(p, null, &extension_count, &device_extensions));
-    var complete_device_extensions: [3]ExtensionProperties = undefined;
+    var complete_device_extensions: [4]ExtensionProperties = undefined;
     extension_count = complete_device_extensions.len;
     try std.testing.expectEqual(Result.success, enumerateDeviceExtensions(p, null, &extension_count, &complete_device_extensions));
-    try std.testing.expectEqual(@as(u32, 3), extension_count);
+    try std.testing.expectEqual(@as(u32, 4), extension_count);
     try std.testing.expectEqualStrings("VK_KHR_swapchain", std.mem.sliceTo(&complete_device_extensions[0].name, 0));
     try std.testing.expectEqual(@as(u32, 70), complete_device_extensions[0].spec_version);
     try std.testing.expectEqualStrings("VK_EXT_present_timing", std.mem.sliceTo(&complete_device_extensions[1].name, 0));
     try std.testing.expectEqual(@as(u32, 3), complete_device_extensions[1].spec_version);
     try std.testing.expectEqualStrings(google_display_timing_extension, std.mem.sliceTo(&complete_device_extensions[2].name, 0));
     try std.testing.expectEqual(@as(u32, 1), complete_device_extensions[2].spec_version);
+    try std.testing.expectEqualStrings(provoking_vertex_extension, std.mem.sliceTo(&complete_device_extensions[3].name, 0));
+    try std.testing.expectEqual(@as(u32, 1), complete_device_extensions[3].spec_version);
     try std.testing.expectEqual(Result.error_extension_not_present, enumerateDeviceExtensions(p, "layer", &extension_count, null));
     try std.testing.expectEqual(Result.error_initialization_failed, enumerateDeviceExtensions(p, null, null, null));
     try std.testing.expect(vk_icdGetInstanceProcAddr(instance, "notAnEntryPoint") == null);
@@ -21010,7 +21096,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     getPhysicalDeviceFeatures2(ctx.physical, &features);
     try std.testing.expectEqual(@as(u32, 1), features.features.multi_draw_indirect);
     try std.testing.expectEqual(@as(u32, 1), features.features.inherited_queries);
-    for (featureWords(&features.features), 0..) |value, index| if (index != 9 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
+    for (featureWords(&features.features), 0..) |value, index| if (index != 3 and index != 9 and index != 25 and index != 54) try std.testing.expectEqual(@as(u32, 0), value);
     {
         const v11_bytes = std.mem.asBytes(&vulkan11_features)[16..64];
         var i: usize = 0;

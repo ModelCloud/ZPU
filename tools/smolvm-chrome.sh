@@ -282,7 +282,6 @@ launch_chrome() {
         --headless \
         --enable-gpu \
         --use-angle=vulkan \
-        --enable-angle-features=exposeES32ForTesting \
         --ozone-platform=headless \
         --use-vulkan=native \
         --enable-features=Vulkan \

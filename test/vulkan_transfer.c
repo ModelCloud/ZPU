@@ -173,9 +173,15 @@ int main(void) {
     vkGetPhysicalDeviceFeatures(physical, &physical_features);
     const uint8_t *feature_bytes = (const uint8_t *)&physical_features;
     const size_t multi_draw_offset = (const uint8_t *)&physical_features.multiDrawIndirect - feature_bytes;
+    const size_t inherited_queries_offset = (const uint8_t *)&physical_features.inheritedQueries - feature_bytes;
+    const size_t vertex_pipeline_stores_offset = (const uint8_t *)&physical_features.vertexPipelineStoresAndAtomics - feature_bytes;
     CHECK_TRUE(physical_features.multiDrawIndirect == VK_TRUE);
+    CHECK_TRUE(physical_features.inheritedQueries == VK_TRUE);
+    CHECK_TRUE(physical_features.vertexPipelineStoresAndAtomics == VK_TRUE);
     for (size_t i = 0; i < sizeof(physical_features); ++i) {
-        if (i >= multi_draw_offset && i < multi_draw_offset + sizeof(VkBool32)) continue;
+        if ((i >= multi_draw_offset && i < multi_draw_offset + sizeof(VkBool32)) ||
+            (i >= inherited_queries_offset && i < inherited_queries_offset + sizeof(VkBool32)) ||
+            (i >= vertex_pipeline_stores_offset && i < vertex_pipeline_stores_offset + sizeof(VkBool32))) continue;
         CHECK_TRUE(feature_bytes[i] == 0);
     }
     uint32_t sparse_property_count = 1;
