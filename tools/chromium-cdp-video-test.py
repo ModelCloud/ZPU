@@ -89,7 +89,13 @@ class DevTools:
     def close(self) -> None:
         self.connection.close()
 
-    def call(self, method: str, params: dict | None = None, session_id: str | None = None) -> dict:
+    def call(
+        self,
+        method: str,
+        params: dict | None = None,
+        session_id: str | None = None,
+        timeout: float | None = None,
+    ) -> dict:
         request_id = self.next_id
         self.next_id += 1
         request = {"id": request_id, "method": method}
@@ -97,19 +103,25 @@ class DevTools:
             request["params"] = params
         if session_id is not None:
             request["sessionId"] = session_id
-        send_text(self.connection, json.dumps(request))
-        while True:
-            opcode, payload = receive_frame(self.connection)
-            if opcode == 8:
-                raise RuntimeError("DevTools WebSocket closed")
-            if opcode != 1:
-                continue
-            response = json.loads(payload)
-            if response.get("id") != request_id:
-                continue
-            if "error" in response:
-                raise RuntimeError(f"{method}: {response['error']}")
-            return response["result"]
+        previous_timeout = self.connection.gettimeout()
+        if timeout is not None:
+            self.connection.settimeout(timeout)
+        try:
+            send_text(self.connection, json.dumps(request))
+            while True:
+                opcode, payload = receive_frame(self.connection)
+                if opcode == 8:
+                    raise RuntimeError("DevTools WebSocket closed")
+                if opcode != 1:
+                    continue
+                response = json.loads(payload)
+                if response.get("id") != request_id:
+                    continue
+                if "error" in response:
+                    raise RuntimeError(f"{method}: {response['error']}")
+                return response["result"]
+        finally:
+            self.connection.settimeout(previous_timeout)
 
 
 def main() -> None:
@@ -140,25 +152,51 @@ def main() -> None:
         # while getVideoPlaybackQuality exposes decoded/dropped frame counts.
         expression = f"""(async () => {{
           const video = document.getElementById('v');
-          await new Promise((resolve, reject) => {{
-            if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return resolve();
-            video.onloadeddata = () => resolve();
-            video.onerror = () => reject(new Error('media error ' + (video.error && video.error.code)));
+          const loadState = await new Promise(resolve => {{
+            let finished = false;
+            const finish = state => {{
+              if (finished) return;
+              finished = true;
+              clearTimeout(timeout);
+              resolve(state);
+            }};
+            const timeout = setTimeout(() => finish('timeout'), 10000);
+            if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) finish('ready');
+            video.onloadeddata = () => finish('ready');
+            video.onerror = () => finish('error');
           }});
+          if (loadState !== 'ready') return {{
+            loadState, currentTime: video.currentTime, readyState: video.readyState,
+            paused: video.paused, ended: video.ended, error: video.error && video.error.code,
+            videoWidth: video.videoWidth, videoHeight: video.videoHeight,
+            callbacks: 0, callbackElapsedSeconds: 0, presentedFramesPerSecond: 0,
+            totalVideoFrames: 0, droppedVideoFrames: 0, corruptedVideoFrames: 0,
+          }};
           await video.play();
           let callbacks = 0, first = null, last = null;
           const deadline = performance.now() + {args.duration * 1000:.3f};
           await new Promise(resolve => {{
+            let finished = false;
+            const finish = () => {{
+              if (finished) return;
+              finished = true;
+              clearTimeout(timeout);
+              resolve();
+            }};
+            // A compositor that cannot present the video must produce a
+            // bounded negative result, not leave the host test waiting for a
+            // requestVideoFrameCallback that will never arrive.
+            const timeout = setTimeout(finish, {args.duration * 1000 + 1000:.3f});
             function frame(now) {{
               callbacks++; first ??= now; last = now;
-              if (now < deadline) video.requestVideoFrameCallback(frame); else resolve();
+              if (now < deadline) video.requestVideoFrameCallback(frame); else finish();
             }}
             video.requestVideoFrameCallback(frame);
           }});
           const quality = video.getVideoPlaybackQuality();
           const elapsed = first === null || last === null ? 0 : (last - first) / 1000;
           return {{
-            currentTime: video.currentTime, readyState: video.readyState,
+            loadState, currentTime: video.currentTime, readyState: video.readyState,
             paused: video.paused, ended: video.ended, error: video.error && video.error.code,
             videoWidth: video.videoWidth, videoHeight: video.videoHeight,
             callbacks, callbackElapsedSeconds: elapsed,
@@ -168,11 +206,19 @@ def main() -> None:
             corruptedVideoFrames: quality.corruptedVideoFrames,
           }};
         }})()"""
-        result = devtools.call(
-            "Runtime.evaluate",
-            {"expression": expression, "awaitPromise": True, "returnByValue": True},
-            session_id,
-        )
+        try:
+            result = devtools.call(
+                "Runtime.evaluate",
+                {"expression": expression, "awaitPromise": True, "returnByValue": True},
+                session_id,
+                timeout=args.duration + 15,
+            )
+        except TimeoutError:
+            print(json.dumps({
+                "devtoolsTimedOut": True,
+                "reason": "renderer did not complete the bounded media evaluation",
+            }, indent=2, sort_keys=True))
+            return
         if "exceptionDetails" in result:
             raise RuntimeError(json.dumps(result["exceptionDetails"], indent=2))
         telemetry = result["result"].get("value")
