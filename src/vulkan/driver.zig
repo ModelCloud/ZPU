@@ -10045,6 +10045,16 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     );
                     return;
                 };
+                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
+                    ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
+                {
+                    var diagnostic_output: [4]f32 = undefined;
+                    for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                    std.debug.print(
+                        "ZPU text coverage xy={d},{d} varying0={d:.6},{d:.6} output={d:.6},{d:.6},{d:.6},{d:.6}\n",
+                        .{ x, y, @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][0..4], .little))), @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][4..8], .little))), diagnostic_output[0], diagnostic_output[1], diagnostic_output[2], diagnostic_output[3] },
+                    );
+                }
             }
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
             if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
