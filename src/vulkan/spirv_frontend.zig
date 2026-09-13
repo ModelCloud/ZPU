@@ -5644,6 +5644,100 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     var executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer executor.deinit();
     try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+
+    // Exercise the captured profile with every live interface populated.  The
+    // values intentionally select the dynamic gradient lookup and texture
+    // path rather than the two border-color exits.  This is the semantic
+    // baseline a future ORC lowering must match bit-for-bit; do not replace it
+    // with a precomputed output golden that accidentally stops testing the
+    // branch, uniform-array, atan2, or sampled-image operations.
+    var backing = [_][512]u8{.{0} ** 512} ** max_interfaces;
+    var bindings: [max_interfaces]render_ir_exec.Binding = undefined;
+    var outputs: [max_interfaces]render_ir_exec.Output = undefined;
+    var binding_count: usize = 0;
+    var output_count: usize = 0;
+    const pixels = [_]u8{ 64, 128, 192, 255 };
+    for (fragment_program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage == .output) {
+            outputs[output_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+            output_count += 1;
+            continue;
+        }
+        if (interface.storage == .sampled_image) {
+            bindings[binding_count] = .{
+                .interface = @intCast(interface_index),
+                .sampled_image = .{
+                    .pixels = &pixels,
+                    .width = 1,
+                    .height = 1,
+                    .row_stride = 4,
+                    .format = .rgba8_unorm,
+                    .filter = .nearest,
+                    .address_u = .clamp_to_edge,
+                    .address_v = .clamp_to_edge,
+                },
+            };
+            binding_count += 1;
+            continue;
+        }
+        if (interface.storage == .uniform) {
+            // thresholds[0] = { 0, .25, .75, 1 } keeps t=.5 inside the
+            // dynamic ramp. Every scale/bias entry is initialized because the
+            // selected index is data-dependent in the captured shader.
+            for ([_]f32{ 0, 0.25, 0.75, 1 }, 0..) |value, lane|
+                std.mem.writeInt(u32, backing[interface_index][32 + lane * 4 ..][0..4], @bitCast(value), .little);
+            for (0..8) |entry| for (0..4) |lane| {
+                std.mem.writeInt(u32, backing[interface_index][64 + entry * 16 + lane * 4 ..][0..4], @bitCast(@as(f32, 0.25)), .little);
+                std.mem.writeInt(u32, backing[interface_index][192 + entry * 16 + lane * 4 ..][0..4], @bitCast(@as(f32, 0.25)), .little);
+            };
+            std.mem.writeInt(u32, backing[interface_index][324..][0..4], @bitCast(@as(f32, 1)), .little);
+            // The live sampler transform is a column-major identity matrix.
+            for (0..3) |column|
+                std.mem.writeInt(u32, backing[interface_index][416 + column * 16 + column * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+            // u_skRTFlip is sampled as a vec2 by this profile. A zero scale
+            // keeps the fixture independent of screen origin convention.
+            std.mem.writeInt(u32, backing[interface_index][464..][0..4], @bitCast(@as(f32, 0)), .little);
+            std.mem.writeInt(u32, backing[interface_index][468..][0..4], @bitCast(@as(f32, 0)), .little);
+        } else if (interface.storage == .input and interface.builtin_frag_coord) {
+            const value = [_]f32{ 0.5, 0.5, 0, 1 };
+            @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
+        } else if (interface.storage == .input and interface.builtin_front_facing) {
+            backing[interface_index][0] = 1;
+        } else if (interface.storage == .input and interface.location != null) switch (interface.location.?) {
+            0 => {
+                const value = [_]f32{ 0, 0, 1, 0 };
+                @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
+            },
+            1 => {
+                const value = [_]f32{ 1, 1, 1, 1 };
+                @memcpy(backing[interface_index][0..16], std.mem.sliceAsBytes(&value));
+            },
+            2 => {
+                const value = [_]f32{ 1, 0 };
+                @memcpy(backing[interface_index][0..8], std.mem.sliceAsBytes(&value));
+            },
+            else => return error.TestUnexpectedResult,
+        };
+        bindings[binding_count] = .{ .interface = @intCast(interface_index), .bytes = &backing[interface_index] };
+        binding_count += 1;
+    }
+    try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+    const result = backing[outputs[0].interface][0..16].*;
+    try std.testing.expect(std.mem.readInt(u32, result[12..16], .little) != 0);
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try executor.execute(bindings[0..binding_count], outputs[0..output_count]);
+    try std.testing.expectEqualSlices(u8, &result, backing[outputs[0].interface][0..16]);
+
+    // Validation must still happen before a JIT is selected. A descriptor
+    // range which cannot cover the last live uniform field fails closed and
+    // leaves the render target untouched.
+    var short_bindings = bindings;
+    for (short_bindings[0..binding_count]) |*binding| {
+        if (fragment_program.interfaces[binding.interface].storage == .uniform) binding.bytes = binding.bytes[0..468];
+    }
+    @memset(backing[outputs[0].interface][0..16], 0xa5);
+    try std.testing.expectError(error.Bounds, executor.execute(short_bindings[0..binding_count], outputs[0..output_count]));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), backing[outputs[0].interface][0..16]);
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {
