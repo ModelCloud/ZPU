@@ -1662,6 +1662,12 @@ const max_command_buffer_commands: usize = cpu_cube.max_batch_commands;
 const max_resource_pins = 1024;
 const max_memory_objects = 4096;
 const max_sampler_objects = 4000;
+// Chromium keeps render-target/framebuffer pairs alive while its Skia cache
+// rotates through page, canvas, and screenshot surfaces.  A generic
+// 64-object budget turns ordinary compositor churn into a Skia OOM/context
+// loss, so framebuffers need the same explicit bounded scale as images,
+// views, and graphics pipelines.
+const max_framebuffer_objects = 4096;
 // Chromium's Skia backend keeps a descriptor set live per draw-state
 // combination across its render-target cache, so this registry is sized for a
 // compositor rather than for the bounded child registries.
@@ -1739,8 +1745,8 @@ var image_view_objects: [max_image_view_objects]ImageViewObj = undefined;
 var image_view_state = [_]SlotState{.never} ** max_image_view_objects;
 var sampler_objects: [max_sampler_objects]SamplerObj = undefined;
 var sampler_state = [_]SlotState{.never} ** max_sampler_objects;
-var framebuffer_objects: [max_child_objects]FramebufferObj = undefined;
-var framebuffer_state = [_]SlotState{.never} ** max_child_objects;
+var framebuffer_objects: [max_framebuffer_objects]FramebufferObj = undefined;
+var framebuffer_state = [_]SlotState{.never} ** max_framebuffer_objects;
 var pipeline_cache_objects: [max_child_objects]PipelineCacheObj = undefined;
 var pipeline_cache_state = [_]SlotState{.never} ** max_child_objects;
 var descriptor_pool_objects: [max_child_objects]DescriptorPoolObj = undefined;
@@ -13936,6 +13942,17 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU framebuffer rejected no usable attachments required={}\n", .{render_pass.framebuffer_attachment_count});
         return .error_initialization_failed;
     }
+    var free_slots: usize = 0;
+    for (framebuffer_state) |state| {
+        if (state != .live) free_slots += 1;
+    }
+    if (free_slots == 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU framebuffer pool exhausted capacity={} requested={}x{} layers={} attachments={}\n",
+            .{ max_framebuffer_objects, ci.width, ci.height, ci.layers, ci.attachment_count },
+        );
+        return .error_out_of_host_memory;
+    }
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
@@ -19055,6 +19072,13 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(missing_output_before, unpublished);
     try std.testing.expectEqualSlices(SlotState, &framebuffer_states_before_oom, &framebuffer_state);
     try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, &framebuffer));
+    // Chromium's Skia render-target cache can retain more than the historical
+    // generic child-object budget while page, canvas, and screenshot surfaces
+    // overlap. Prove that the 65th live framebuffer is admitted rather than
+    // becoming a spurious VK_ERROR_OUT_OF_HOST_MEMORY/context loss.
+    var compositor_framebuffers: [max_child_objects + 1]usize = undefined;
+    for (&compositor_framebuffers) |*handle| try std.testing.expectEqual(Result.success, createFramebuffer(device, &framebuffer_info, null, handle));
+    for (compositor_framebuffers) |handle| destroyFramebuffer(device, handle, null);
 
     const sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 0, .min_filter = 0, .mipmap_mode = 0, .address_mode_u = 0, .address_mode_v = 0, .address_mode_w = 0, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 1, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
     try std.testing.expectEqual(@as(usize, 80), @sizeOf(SamplerCreateInfo));
@@ -29093,8 +29117,12 @@ fn resetDeadChildSlotsForAbiTest() !void {
         try std.testing.expect(state != .live);
     }
     image_state = [_]SlotState{.never} ** max_image_objects;
+    for (framebuffer_state, 0..) |state, i| {
+        if (state == .live) std.debug.print("resetDeadChildSlotsForAbiTest leak: framebuffer[{d}]\n", .{i});
+        try std.testing.expect(state != .live);
+    }
+    framebuffer_state = [_]SlotState{.never} ** max_framebuffer_objects;
     const state_pairs = .{
-        .{ "framebuffer", &framebuffer_state },
         .{ "render_pass", &render_pass_state },
         .{ "command_buffer", &command_buffer_state },
     };
