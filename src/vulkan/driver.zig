@@ -6504,7 +6504,7 @@ fn record(cb: CommandBuffer, command: Command) void {
     if (!pinCommandResourcesLocked(owned, cb.impl.owner, &command_buffer_recorded_resources[slot], &command_buffer_recorded_descriptor_sets[slot], &command_buffer_recorded_pipeline_layouts[slot]) or
         !pinCommandPipelinesLocked(owned, cb.impl.owner, &command_buffer_recorded_pipelines[slot]))
     {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU record pin rejected kind={s} command={d} images={d} memories={d} pipelines={d} descriptors={d} layouts={d}\n", .{ @tagName(owned), cb.impl.count, command_buffer_recorded_resources[slot].image_count, command_buffer_recorded_resources[slot].memory_count, command_buffer_recorded_pipelines[slot].graphics_count + command_buffer_recorded_pipelines[slot].compute_count, command_buffer_recorded_descriptor_sets[slot].set_count, command_buffer_recorded_pipeline_layouts[slot].layout_count });
+        std.debug.print("ZPU record pin rejected kind={s} command={d} images={d} memories={d} pipelines={d} descriptors={d} layouts={d}\n", .{ @tagName(owned), cb.impl.count, command_buffer_recorded_resources[slot].image_count, command_buffer_recorded_resources[slot].memory_count, command_buffer_recorded_pipelines[slot].graphics_count + command_buffer_recorded_pipelines[slot].compute_count, command_buffer_recorded_descriptor_sets[slot].set_count, command_buffer_recorded_pipeline_layouts[slot].layout_count });
         releasePinnedResourcesLocked(&command_buffer_recorded_resources[slot]);
         releasePinnedPipelinesLocked(&command_buffer_recorded_pipelines[slot]);
         releasePinnedDescriptorSetsLocked(&command_buffer_recorded_descriptor_sets[slot]);
