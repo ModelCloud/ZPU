@@ -1180,6 +1180,11 @@ const ImageObj = struct {
     owner: Device,
     width: u32,
     height: u32,
+    // Storage is laid out as a complete mip chain per array layer.  The
+    // raster ABI currently consumes level 0, while retaining the chain here
+    // lets Chromium create mipmapped upload images without losing the Vulkan
+    // memory-size contract.
+    mip_levels: u32 = 1,
     array_layers: u32,
     samples: u32,
     format: i32,
@@ -1657,6 +1662,7 @@ const max_descriptor_set_objects = 4096;
 const max_image_objects = 4096;
 const heap_size: u64 = 256 * 1024 * 1024;
 const max_2d_extent: u32 = 8192;
+const max_image_mip_levels: u32 = 16;
 const max_image_array_layers: u32 = 256;
 const max_api_items: u32 = 256;
 const swapchain_present_timing_bit: u32 = 1 << 9;
@@ -3881,7 +3887,7 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
         const allowed_usage = imageFormatUsage(format, tiling);
         if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or !imageCreateFlagsValid(flags) or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) break :result .error_format_not_supported;
         const out = output orelse break :result .error_initialization_failed;
-        out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = 1, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
+        out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = max_image_mip_levels, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
         break :result .success;
     };
     const allowed_usage = imageFormatUsage(format, tiling);
@@ -5328,19 +5334,53 @@ fn bindBufferMemory(device: ?Device, handle: usize, memory_handle: usize, offset
     object.offset = offset;
     return .success;
 }
+fn imageMipChainLayerByteSize(width: u32, height: u32, mip_levels: u32) ?u64 {
+    var total: u64 = 0;
+    var mip_width = width;
+    var mip_height = height;
+    var mip: u32 = 0;
+    while (mip < mip_levels) : (mip += 1) {
+        const pixels = std.math.mul(u64, mip_width, mip_height) catch {
+            hit(.overflow_image_size);
+            return null;
+        };
+        const bytes = std.math.mul(u64, pixels, 4) catch {
+            hit(.overflow_image_size);
+            return null;
+        };
+        total = std.math.add(u64, total, bytes) catch {
+            hit(.overflow_image_size);
+            return null;
+        };
+        mip_width = @max(@as(u32, 1), mip_width / 2);
+        mip_height = @max(@as(u32, 1), mip_height / 2);
+    }
+    return total;
+}
+fn validImageMipCount(width: u32, height: u32, mip_levels: u32) bool {
+    if (mip_levels == 0 or mip_levels > max_image_mip_levels) return false;
+    var max_levels: u32 = 1;
+    var mip_width = width;
+    var mip_height = height;
+    while (mip_width > 1 or mip_height > 1) : (max_levels += 1) {
+        mip_width = @max(@as(u32, 1), mip_width / 2);
+        mip_height = @max(@as(u32, 1), mip_height / 2);
+    }
+    return mip_levels <= max_levels;
+}
 fn imageLayerByteSize(image: *const ImageObj) ?u64 {
-    const pixels = std.math.mul(u64, image.width, image.height) catch {
-        hit(.overflow_image_size);
-        return null;
-    };
-    return std.math.mul(u64, pixels, 4) catch {
+    return imageMipChainLayerByteSize(image.width, image.height, 1);
+}
+fn imageByteSize(image: *const ImageObj) ?u64 {
+    const layer_bytes = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
+    return std.math.mul(u64, layer_bytes, image.array_layers) catch {
         hit(.overflow_image_size);
         return null;
     };
 }
-fn imageByteSize(image: *const ImageObj) ?u64 {
-    const layer_bytes = imageLayerByteSize(image) orelse return null;
-    return std.math.mul(u64, layer_bytes, image.array_layers) catch {
+fn imageMipChainByteSize(width: u32, height: u32, mip_levels: u32, array_layers: u32) ?u64 {
+    const layer_bytes = imageMipChainLayerByteSize(width, height, mip_levels) orelse return null;
+    return std.math.mul(u64, layer_bytes, array_layers) catch {
         hit(.overflow_image_size);
         return null;
     };
@@ -5354,7 +5394,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         hit(.invalid_image_usage);
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or ci.mip_levels != 1 or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage rejected alloc={} s_type={d} pnext={} flags=0x{x} type={d} allowed=0x{x} extent={d}x{d}x{d} mips={d} layers={d} samples={d} tiling={d} sharing={d} families={d} layout={d} format={d} usage=0x{x}\n", .{ alloc != null, ci.s_type, imageCreatePNextValid(ci.p_next, ci.format), ci.flags, ci.image_type, allowed_usage, ci.extent.width, ci.extent.height, ci.extent.depth, ci.mip_levels, ci.array_layers, ci.samples, ci.tiling, ci.sharing_mode, ci.queue_family_index_count, ci.initial_layout, ci.format, ci.usage });
         return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     }
@@ -5363,7 +5403,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&image_objects, &image_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
+        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
         if (imageByteSize(object) == null) return .error_initialization_failed;
         state.* = .live;
         out.* = handle;
@@ -5447,10 +5487,8 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
     const allowed_usage = imageFormatUsage(info.format, info.tiling);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or info.mip_levels != 1 or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
-    const pixels = std.math.mul(u64, info.extent.width, info.extent.height) catch return null;
-    const layer_bytes = std.math.mul(u64, pixels, 4) catch return null;
-    const bytes = std.math.mul(u64, layer_bytes, info.array_layers) catch return null;
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    const bytes = imageMipChainByteSize(info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
     return .{ .size = bytes, .alignment = 4, .memory_type_bits = 1 };
 }
 fn hostCopyLayoutValid(layout: i32) bool {
@@ -6686,7 +6724,7 @@ fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) b
 }
 fn imageLayerOffset(image: *const ImageObj, layer: u32) ?usize {
     if (layer >= image.array_layers) return null;
-    const stride = imageLayerByteSize(image) orelse return null;
+    const stride = imageMipChainLayerByteSize(image.width, image.height, image.mip_levels) orelse return null;
     const offset = std.math.mul(u64, stride, layer) catch return null;
     return @intCast(offset);
 }
@@ -21201,7 +21239,7 @@ test "all physical queries cover success boundaries and invalid handles" {
             try std.testing.expectEqual(expected, getImageFormatProperties(p, case.format, 1, @intCast(tiling), @intCast(usage), 0, &properties));
             if (supported) {
                 try std.testing.expectEqual(Extent3D{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, properties.max_extent);
-                try std.testing.expectEqual(@as(u32, 1), properties.max_mip_levels);
+                try std.testing.expectEqual(max_image_mip_levels, properties.max_mip_levels);
                 try std.testing.expectEqual(max_image_array_layers, properties.max_array_layers);
                 try std.testing.expectEqual(@as(u32, 1), properties.sample_counts);
                 try std.testing.expectEqual(@as(u64, heap_size), properties.max_resource_size);
