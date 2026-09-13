@@ -1838,6 +1838,7 @@ var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
 // the normal Vulkan path pays one cached disabled-mode branch and no clock
@@ -1922,6 +1923,31 @@ fn renderDiagnosticsEnabled() bool {
 fn profileIrDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Compare a canonical digest with the optional 64-hex-character selector
+/// supplied by a developer. This is diagnostic-only and is called solely
+/// after the general profile-IR diagnostic has already been enabled.
+fn profileIrDigestSelectorMatches(selector: []const u8, digest: *const [32]u8) bool {
+    if (selector.len != digest.len * 2) return false;
+    for (digest, 0..) |actual, index| {
+        const expected = std.fmt.parseInt(u8, selector[index * 2 ..][0..2], 16) catch return false;
+        if (actual != expected) return false;
+    }
+    return true;
+}
+
+fn profileIrTargetDigestMatches(digest: *const [32]u8) bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR_DIGEST") orelse return false;
+    return profileIrDigestSelectorMatches(std.mem.span(raw), digest);
+}
+
+test "profile IR digest selector is exact hexadecimal" {
+    const digest = [_]u8{0} ** 31 ++ [_]u8{0xab};
+    try std.testing.expect(profileIrDigestSelectorMatches("00000000000000000000000000000000000000000000000000000000000000ab", &digest));
+    try std.testing.expect(!profileIrDigestSelectorMatches("00000000000000000000000000000000000000000000000000000000000000ac", &digest));
+    try std.testing.expect(!profileIrDigestSelectorMatches("00000000000000000000000000000000000000000000000000000000000000ag", &digest));
+    try std.testing.expect(!profileIrDigestSelectorMatches("ab", &digest));
 }
 
 /// Emit a bounded raw shader capture only when the operator explicitly asks
@@ -10481,6 +10507,14 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
             );
             std.debug.print("ZPU VP9 composite canonical IR end\n", .{});
+        }
+        if (profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+            std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
+            for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+                "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+                .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+            );
+            std.debug.print("ZPU selected profile canonical IR end\n", .{});
         }
     }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
