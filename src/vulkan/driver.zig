@@ -12485,10 +12485,22 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
 fn profileBlockByteSize(interface: render_ir.Interface) ?u8 {
     var size: u32 = 0;
     for (interface.members[0..interface.member_count]) |member| {
-        const member_size = @as(u32, member.ty.columns) * member.ty.rows * 4;
+        const member_size = if (member.array_stride != 0)
+            std.math.mul(u32, member.array_count, member.array_stride) catch return null
+        else if (member.ty.rows > 1)
+            @as(u32, member.ty.columns) * 16
+        else
+            @as(u32, member.ty.columns) * 4;
         size = @max(size, std.math.add(u32, member.offset, member_size) catch return null);
     }
     return if (size == 0 or size > 128) null else @intCast(size);
+}
+
+test "profile block byte size preserves std140 matrix and array strides" {
+    var interface = render_ir.Interface{ .storage = .push_constant, .ty = .{ .scalar = .u32 }, .block = true, .member_count = 2 };
+    interface.members[0] = .{ .ty = .{ .scalar = .f32, .columns = 3, .rows = 3 }, .offset = 0 };
+    interface.members[1] = .{ .ty = .{ .scalar = .f32, .columns = 4 }, .offset = 48, .array_count = 2, .array_stride = 16 };
+    try std.testing.expectEqual(@as(?u8, 80), profileBlockByteSize(interface));
 }
 
 /// Exact bridge for the immutable distro-vkcube shader pair used by the
