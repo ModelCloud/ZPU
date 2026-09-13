@@ -286,6 +286,7 @@ launch_chrome() {
         --disable-gpu-sandbox \
         --headless \
         --enable-gpu \
+        --ignore-gpu-blocklist \
         --use-angle=vulkan \
         --ozone-platform=headless \
         --use-vulkan=native \
