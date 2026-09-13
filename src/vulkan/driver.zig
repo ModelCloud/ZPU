@@ -9368,10 +9368,9 @@ fn diagnoseImageTransfer(kind: []const u8, src: ?*ImageObj, dst: *ImageObj) void
     const sequence = render_diagnostic_copies.fetchAdd(1, .monotonic);
     if (sequence >= 256) return;
     const source = if (src) |image| image else null;
-    if ((dst.width < 256 and dst.height < 64) or (source != null and source.?.width < 256 and source.?.height < 64)) return;
     std.debug.print(
-        "ZPU image transfer seq={d} op={s} src={x} {d}x{d}/dark={d} dst={x} {d}x{d}/dark={d}\n",
-        .{ sequence, kind, if (source) |image| @intFromPtr(image) else 0, if (source) |image| image.width else 0, if (source) |image| image.height else 0, if (source) |image| diagnosticDarkPixelCount(image) else 0, @intFromPtr(dst), dst.width, dst.height, diagnosticDarkPixelCount(dst) },
+        "ZPU image transfer seq={d} op={s} src={x} {d}x{d}/format={d}/dark={d} dst={x} {d}x{d}/format={d}/dark={d}\n",
+        .{ sequence, kind, if (source) |image| @intFromPtr(image) else 0, if (source) |image| image.width else 0, if (source) |image| image.height else 0, if (source) |image| image.format else 0, if (source) |image| diagnosticDarkPixelCount(image) else 0, @intFromPtr(dst), dst.width, dst.height, dst.format, diagnosticDarkPixelCount(dst) },
     );
 }
 
