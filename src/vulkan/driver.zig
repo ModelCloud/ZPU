@@ -1930,6 +1930,30 @@ fn profileShaderCaptureEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+// Canonical fragment identity observed repeatedly while Chromium composites
+// the local VP9 fixture into its 320x256 video surface.  It is not accepted as
+// an execution fast path: this opt-in capture gate exists solely to preserve
+// the exact live SPIR-V before any specialization or ORC lowering is written.
+const chromium_vp9_composite_fragment_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
+
+fn profileShaderCaptureCandidate(program: *const render_ir.Program) bool {
+    return program.instructions.len >= 200 or std.mem.eql(u8, &program.identity.digest, &chromium_vp9_composite_fragment_identity);
+}
+
+test "VP9 shader capture is identity-gated below the generic large-program threshold" {
+    var program = render_ir.Program{
+        .stage = .fragment,
+        .entry_name = &.{},
+        .interfaces = &.{},
+        .instructions = &.{},
+        .bytes = &.{},
+        .identity = .{ .digest = chromium_vp9_composite_fragment_identity, .bytes = &.{} },
+    };
+    try std.testing.expect(profileShaderCaptureCandidate(&program));
+    program.identity.digest[0] ^= 1;
+    try std.testing.expect(!profileShaderCaptureCandidate(&program));
+}
+
 /// Attribute an ordered Mosaic batch to its individual profile draws. This is
 /// opt-in because a clock read around every tile/draw pair would perturb the
 /// workload being measured. The records identify the next scalar or SIMD
@@ -13304,7 +13328,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
         if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
-            if (frontend_stage == .fragment and profileShaderCaptureEnabled() and program.instructions.len >= 200 and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
+            if (frontend_stage == .fragment and profileShaderCaptureEnabled() and profileShaderCaptureCandidate(&program) and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
                 std.debug.print(
                     "ZPU profile shader capture spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
                     .{ shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
