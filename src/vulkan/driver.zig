@@ -6783,6 +6783,10 @@ fn validRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
     const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
     return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
+fn validBarrierRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
+    const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
+    return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
+}
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
     return validLayers(layers) and layers.base_array_layer < image.array_layers and layers.layer_count <= image.array_layers - layers.base_array_layer;
 }
@@ -8233,7 +8237,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         const layouts_valid = supportedLayout(barrier.old_layout) and supportedLayout(barrier.new_layout);
         const access_valid = stagesSupportAccess(src_stage_mask, barrier.src_access_mask) and stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask);
         const owner_valid = image.owner == c.impl.owner;
-        const range_valid = validRangeForImage(image, barrier.subresource_range);
+        const range_valid = validBarrierRangeForImage(image, barrier.subresource_range);
         if (!shape_valid or !layouts_valid or !access_valid or !queues_valid or !owner_valid or !range_valid) {
             if (failureDiagnosticsEnabled()) {
                 std.debug.print(
@@ -8438,7 +8442,7 @@ fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const 
         };
         const ignored: u32 = std.math.maxInt(u32);
         const queues_valid = (barrier.src_queue_family_index == ignored and barrier.dst_queue_family_index == ignored) or (barrier.src_queue_family_index == 0 and barrier.dst_queue_family_index == 0);
-        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !supportedLayout(barrier.new_layout) or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or image.owner != c.impl.owner or !validRangeForImage(image, barrier.subresource_range)) {
+        if (barrier.s_type != 45 or barrier.p_next != null or !supportedLayout(barrier.old_layout) or !supportedLayout(barrier.new_layout) or !stagesSupportAccess(src_stage_mask, barrier.src_access_mask) or !stagesSupportAccess(dst_stage_mask, barrier.dst_access_mask) or !queues_valid or image.owner != c.impl.owner or !validBarrierRangeForImage(image, barrier.subresource_range)) {
             c.impl.invalid = true;
             return;
         }
