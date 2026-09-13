@@ -1753,6 +1753,7 @@ var render_diagnostic_presents = std.atomic.Value(u32).init(0);
 var render_diagnostic_clears = std.atomic.Value(u32).init(0);
 var render_diagnostic_begins = std.atomic.Value(u32).init(0);
 var render_diagnostic_geometry = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_ir = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
 
@@ -9649,6 +9650,19 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
+    if (renderDiagnosticsEnabled() and render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0 and
+        op.descriptors.texture != null and op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512)
+    {
+        std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
+        for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
+            "ZPU profile fragment interface={} storage={s} type={any} location={any} set={any} binding={any}\n",
+            .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding },
+        );
+        for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU profile fragment instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+    }
     if (renderDiagnosticsEnabled() and diagnostic_draw < 96) std.debug.print(
         "ZPU profile draw seq={d} target={d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
         .{ diagnostic_draw, target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image != null, profile.varying_count, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).x else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).y else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).width else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).height else 0 },
