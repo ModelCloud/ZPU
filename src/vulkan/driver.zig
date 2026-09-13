@@ -1975,7 +1975,7 @@ fn emitCommandTimingSummary() void {
     const sequence = command_timing_summaries.fetchAdd(1, .monotonic);
     if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
-        "ZPU command timing present={d} buffer={d}/{d} clear={d}/{d} compute={d}/{d} transfer={d}/{d} profile_draw={d}/{d} legacy_draw={d}/{d} indirect={d}/{d} mosaic_profile={d}/{d} mosaic_legacy={d}/{d} sync={d}/{d} other={d}/{d}\\n",
+        "ZPU command timing present={d} buffer={d}/{d} clear={d}/{d} compute={d}/{d} transfer={d}/{d} profile_draw={d}/{d} legacy_draw={d}/{d} indirect={d}/{d} mosaic_profile={d}/{d} mosaic_legacy={d}/{d} sync={d}/{d} other={d}/{d}\n",
         .{
             sequence,
             command_timing_counts[@intFromEnum(CommandTimingKind.buffer)].load(.acquire),
