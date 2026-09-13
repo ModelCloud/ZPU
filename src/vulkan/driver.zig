@@ -1647,6 +1647,10 @@ const max_shader_modules = 4000;
 // Keep the registry bounded, but give this compositor-scale object its own
 // capacity rather than returning VK_ERROR_OUT_OF_HOST_MEMORY at 64 layouts.
 const max_pipeline_layout_objects = 4096;
+// Skia creates distinct graphics pipelines for the many text, image, and
+// transfer-cache variants in a page.  Their submitted-use pins can delay
+// retirement, so they need the same bounded compositor-scale registry.
+const max_graphics_pipeline_objects = 4096;
 // A primary command buffer may contain a long ordered draw stream.  Allocate
 // this storage lazily on first begin so command-buffer creation stays cheap,
 // while keeping the Mosaic batch bound and descriptor snapshot capacity in
@@ -1751,8 +1755,8 @@ var pipeline_layout_objects: [max_pipeline_layout_objects]PipelineLayoutObj = un
 var pipeline_layout_state = [_]SlotState{.never} ** max_pipeline_layout_objects;
 var render_pass_objects: [max_child_objects]RenderPassObj = undefined;
 var render_pass_state = [_]SlotState{.never} ** max_child_objects;
-var graphics_pipeline_objects: [max_child_objects]GraphicsPipelineObj = undefined;
-var graphics_pipeline_state = [_]SlotState{.never} ** max_child_objects;
+var graphics_pipeline_objects: [max_graphics_pipeline_objects]GraphicsPipelineObj = undefined;
+var graphics_pipeline_state = [_]SlotState{.never} ** max_graphics_pipeline_objects;
 var compute_pipeline_objects: [max_child_objects]ComputePipelineObj = undefined;
 var compute_pipeline_state = [_]SlotState{.never} ** max_child_objects;
 var private_data_slot_objects: [max_child_objects]PrivateDataSlotObj = undefined;
@@ -13781,7 +13785,10 @@ fn createGraphicsPipelines(device: ?Device, cache: usize, count: u32, infos: ?[*
         slots[free_count] = @intCast(index);
         free_count += 1;
     };
-    if (free_count < count) return .error_out_of_host_memory;
+    if (free_count < count) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU graphics pipeline pool exhausted free={} requested={} capacity={}\n", .{ free_count, count, max_graphics_pipeline_objects });
+        return .error_out_of_host_memory;
+    }
     var built_count: usize = 0;
     for (0..count) |index| {
         built[index] = buildGraphicsPipelineLocked(d, &create_infos[index]) catch |err| {
