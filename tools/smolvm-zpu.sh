@@ -10,6 +10,7 @@ image=${ZPU_SMOLVM_IMAGE:-archlinux:base-devel}
 cpus=${ZPU_SMOLVM_CPUS:-8}
 memory=${ZPU_SMOLVM_MEMORY:-8192}
 guest_cpu_tier=${ZPU_GUEST_CPU_TIER:-baseline}
+smolvm_uid_drop=${ZPU_SMOLVM_UID_DROP:-on}
 display=${DISPLAY:-:0}
 socket_root=${ZPU_SMOLVM_TEST_SOCKET_ROOT:-/tmp/.X11-unix}
 host_socket=$socket_root/X0
@@ -17,11 +18,16 @@ runtime=
 runtime_base=
 runtime_is_temporary=0
 guest_manifest=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json
-required_smolvm_version=1.15.0
+required_smolvm_version=1.7.1
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 [[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
 [[ $guest_cpu_tier == baseline || $guest_cpu_tier == native ]] || die 'ZPU_GUEST_CPU_TIER must be baseline or native'
+case $smolvm_uid_drop in
+    on) unset SMOLVM_VM_UID_DROP ;;
+    off) export SMOLVM_VM_UID_DROP=off ;;
+    *) die 'ZPU_SMOLVM_UID_DROP must be on or off' ;;
+esac
 [[ ! -L $host_socket ]] || die "host X11 socket must not be a symlink: $host_socket"
 if [[ $socket_root != /tmp/.X11-unix ]]; then
     [[ ${ZPU_SMOLVM_TESTING:-0} == 1 ]] || die 'ZPU_SMOLVM_TEST_SOCKET_ROOT is test-only and requires ZPU_SMOLVM_TESTING=1'
@@ -189,6 +195,9 @@ preflight() {
     smolvm --version
     printf 'READY: Linux x86_64, KVM, X11 socket, xauth, clean host Vulkan environment\n'
     printf 'NOTE: launch never passes --gpu; ZPU/Venus coexistence is rejected by construction\n'
+    if [[ $smolvm_uid_drop == off ]]; then
+        printf 'WARNING: SmolVM per-VM UID isolation is explicitly disabled (ZPU_SMOLVM_UID_DROP=off); use only for controlled bring-up.\n' >&2
+    fi
 }
 prepare_auth() (
     local bootstrap_auth=$auth_dir/bootstrap-Xauthority
@@ -363,19 +372,19 @@ bootstrap() {
 sync_source() {
     assert_network_disabled
     prepare_source
-    run smolvm machine exec --name "$machine" -- sh -ceu 'rm -rf /mnt/zpu-source && mkdir -p /mnt/zpu-source'
+    run smolvm machine exec --name "$machine" -- sh -ceu 'rm -rf /mnt/zpu-source /workspace/.zpu-source-transfer && mkdir -p /mnt/zpu-source /workspace/.zpu-source-transfer'
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
+        run smolvm machine cp "$source_archive" "$machine:/workspace/.zpu-source-transfer/zpu-source.tar"
     else
-        run smolvm machine exec --name "$machine" -- sh -ceu 'rm -f /var/tmp/zpu-source.tar /var/tmp/zpu-source.tar.part.*'
+        run smolvm machine exec --name "$machine" -- sh -ceu 'rm -f /workspace/.zpu-source-transfer/zpu-source.tar /workspace/.zpu-source-transfer/zpu-source.tar.part.*'
         local source_part
         for source_part in "$source_part_prefix"*; do
-            run smolvm machine cp "$source_part" "$machine:/var/tmp/$(basename "$source_part")"
+            run smolvm machine cp "$source_part" "$machine:/workspace/.zpu-source-transfer/$(basename "$source_part")"
         done
-        run smolvm machine exec --name "$machine" -- sh -ceu 'cat /var/tmp/zpu-source.tar.part.* > /var/tmp/zpu-source.tar && rm -f /var/tmp/zpu-source.tar.part.*'
+        run smolvm machine exec --name "$machine" -- sh -ceu 'cat /workspace/.zpu-source-transfer/zpu-source.tar.part.* > /workspace/.zpu-source-transfer/zpu-source.tar && rm -f /workspace/.zpu-source-transfer/zpu-source.tar.part.*'
     fi
-    run smolvm machine exec --name "$machine" -- tar -C /mnt/zpu-source -xf /var/tmp/zpu-source.tar
-    run smolvm machine exec --name "$machine" -- rm -f /var/tmp/zpu-source.tar
+    run smolvm machine exec --name "$machine" -- tar -C /mnt/zpu-source -xf /workspace/.zpu-source-transfer/zpu-source.tar
+    run smolvm machine exec --name "$machine" -- rm -f /workspace/.zpu-source-transfer/zpu-source.tar
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
         rm -f -- "$source_archive" "$source_part_prefix"*
     fi

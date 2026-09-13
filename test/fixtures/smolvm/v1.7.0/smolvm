@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-fail() { printf 'strict SmolVM v1.15.0 fixture: %s\n' "$*" >&2; exit 64; }
+fail() { printf 'strict SmolVM v1.7.1 fixture: %s\n' "$*" >&2; exit 64; }
 take_value() { (($# >= 2)) || fail "$1 requires a value"; }
 [[ -z ${SMOLVM_FIXTURE_LOG:-} ]] || printf '%q ' "$@" >> "$SMOLVM_FIXTURE_LOG"
 [[ -z ${SMOLVM_FIXTURE_LOG:-} ]] || printf '\n' >> "$SMOLVM_FIXTURE_LOG"
 
+case ${SMOLVM_FIXTURE_EXPECT_UID_DROP:-any} in
+    any) ;;
+    unset) [[ -z ${SMOLVM_VM_UID_DROP+x} ]] || fail 'SMOLVM_VM_UID_DROP must be unset' ;;
+    off) [[ ${SMOLVM_VM_UID_DROP:-} == off ]] || fail 'SMOLVM_VM_UID_DROP must be off' ;;
+    *) fail 'unknown SMOLVM_FIXTURE_EXPECT_UID_DROP' ;;
+esac
+
 if (($# == 1)) && [[ $1 == --version ]]; then
-    echo 'smolvm 1.15.0'
+    echo 'smolvm 1.7.1'
     exit 0
 fi
 (($# >= 2)) && [[ $1 == machine ]] || fail 'expected machine subcommand'

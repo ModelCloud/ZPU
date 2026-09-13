@@ -21,6 +21,7 @@ if [[ -r $config ]]; then
 fi
 
 machine=${ZPU_SMOLVM_MACHINE:-zpu-omarchy}
+smolvm_uid_drop=${ZPU_SMOLVM_UID_DROP:-on}
 display=${ZPU_DISPLAY:-:0}
 start_desktop=${ZPU_START_DESKTOP:-1}
 chrome_bin=${ZPU_CHROME_BIN:-/usr/bin/chromium}
@@ -52,6 +53,14 @@ die() {
 
 [[ $diagnose_failures == 0 || $diagnose_failures == 1 ]] || die 'ZPU_DIAGNOSE_FAILURES must be 0 or 1'
 [[ $diagnose_render == 0 || $diagnose_render == 1 ]] || die 'ZPU_DIAGNOSE_RENDER must be 0 or 1'
+case $smolvm_uid_drop in
+    on) unset SMOLVM_VM_UID_DROP ;;
+    off)
+        export SMOLVM_VM_UID_DROP=off
+        printf 'zpu-chrome: WARNING: SmolVM per-VM UID isolation is explicitly disabled (ZPU_SMOLVM_UID_DROP=off); use only for controlled bring-up.\n' >&2
+        ;;
+    *) die 'ZPU_SMOLVM_UID_DROP must be on or off' ;;
+esac
 
 run() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
