@@ -11087,15 +11087,16 @@ fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
     return &profile_lane_cache.?.clone.graphics;
 }
 
-/// Mosaic is worthwhile either for a group of profile draws or for one
-/// framebuffer-sized composite. Chromium's video compositor produces the
-/// latter: a single textured quad over a large target. Keep smaller UI work
-/// on the direct path to avoid adding tile scheduling overhead to glyphs.
+/// Mosaic is worthwhile for a group of profile draws that share a target.
+/// A one-command "batch" repeats that draw's complete vertex setup for every
+/// target tile; sparse Skia UI quads then pay a framebuffer-sized cost even
+/// when their actual raster bounds are only a few pixels. Execute one draw
+/// directly instead: it has identical raster ordering and clip semantics,
+/// but establishes its vertices once and scans only its natural bounds.
 fn profileMosaicBatchEligible(batch_count: usize, width: u32, height: u32) bool {
-    if (batch_count == 0) return false;
-    const target_pixels = @as(u64, width) * @as(u64, height);
-    const tile_pixels = @as(u64, profile_mosaic_tile_size) * @as(u64, profile_mosaic_tile_size);
-    return batch_count > 1 or target_pixels >= tile_pixels;
+    _ = width;
+    _ = height;
+    return batch_count > 1;
 }
 
 fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageObj } {
@@ -30540,11 +30541,11 @@ test "Mosaic command cursor skips empty primary streams without reordering" {
     try std.testing.expect(cursor.current() == null);
 }
 
-test "Mosaic admits a large single profile composite without scheduling small UI draws" {
+test "Mosaic batches only ordered groups of profile draws" {
     try std.testing.expect(!profileMosaicBatchEligible(0, 1920, 1080));
     try std.testing.expect(!profileMosaicBatchEligible(1, 255, 256));
-    try std.testing.expect(profileMosaicBatchEligible(1, 256, 256));
-    try std.testing.expect(profileMosaicBatchEligible(1, 780, 580));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 256, 256));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 780, 580));
     try std.testing.expect(profileMosaicBatchEligible(2, 32, 32));
 }
 
