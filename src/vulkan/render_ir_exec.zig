@@ -54,7 +54,7 @@ pub const Value = struct {
 };
 
 pub const SampledImage = struct {
-    pub const Format = enum { r8_unorm, rgba8_unorm, bgra8_unorm, ycbcr_420_2plane, ycbcr_420_3plane };
+    pub const Format = enum { r8_unorm, rg8_unorm, rgba8_unorm, bgra8_unorm, ycbcr_420_2plane, ycbcr_420_3plane };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
     pub const YcbcrModel = enum { identity, bt601, bt709, bt2020 };
@@ -462,6 +462,10 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     ) catch return error.Bounds;
     if (image.bytes_per_texel == 0 or offset > image.pixels.len or image.pixels.len - offset < image.bytes_per_texel) return error.Bounds;
     if (image.format == .r8_unorm) return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, 0, 0, 1 });
+    if (image.format == .rg8_unorm) {
+        if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
+        return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, @as(f32, @floatFromInt(image.pixels[offset + 1])) / 255, 0, 1 });
+    }
     if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
     const pixel = image.pixels[offset..][0..4];
     const r = if (image.format == .rgba8_unorm) pixel[0] else pixel[2];
@@ -580,6 +584,31 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     const result = try sample(image, coordinates, bias);
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[0])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample decodes Chromium packed RG8 chroma inputs" {
+    const pixels = [_]u8{ 90, 240 };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 2,
+        .bytes_per_texel = 2,
+        .format = .rg8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const result = try sample(image, coordinates, bias);
+    try std.testing.expectEqual(@as(f32, 90.0 / 255.0), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 240.0 / 255.0), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
 }

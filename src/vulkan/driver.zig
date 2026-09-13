@@ -3939,6 +3939,10 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // sampled, transfer, and single color-attachment paths used by
         // Chromium's glyph atlases.
         9 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
+        // Chromium's separate-plane YUV promise images use R8 for luma and
+        // R8G8 for interleaved chroma. Both are sampled/transfer resources;
+        // neither is exposed as a color attachment in this bounded profile.
+        16 => 0x1 | 0x2 | 0x4,
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
@@ -3977,6 +3981,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     const out = output orelse return false;
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
@@ -7539,6 +7544,7 @@ fn colorAttachmentFormat(format: i32) bool {
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
     return switch (format) {
         9 => 1,
+        16 => 2,
         37, 44 => 4,
         else => null,
     };
@@ -10187,6 +10193,7 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler.unnormalized_coordinates or sampler.mag_filter != sampler.min_filter) return null;
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
         9 => .r8_unorm,
+        16 => .rg8_unorm,
         37 => .rgba8_unorm,
         44 => .bgra8_unorm,
         format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
@@ -11633,26 +11640,27 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
         // cmdCopyImageToBuffer before this recorded command executes. Copying
         // a complete layer in one call avoids per-row dispatch overhead while
         // retaining explicit strides for pitched transfers.
-        if (image.format != 9) {
+        if (image.format != 9 and image.format != 16) {
             if (to_image)
                 copyTransferRows(pixels[io..], @as(usize, mip.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
             else
                 copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, mip.width) * 4, len, region.image_extent.height);
         } else {
-            // Keep the public R8 transfer layout (one byte per texel) while
-            // using the driver's existing four-byte internal image storage.
-            // The padded channels are deterministic and sample as (r,0,0,1).
+            // Keep the public R8/R8G8 transfer layouts while using the
+            // driver's existing four-byte sampled storage. This is the path
+            // Chromium uses for separate Y and interleaved-UV video planes.
             for (0..region.image_extent.height) |y| {
-                const source_row = bo + y * @as(usize, @intCast(row));
+                const source_row = bo + y * @as(usize, @intCast(row)) * @as(usize, @intCast(bytes_per_texel));
                 const image_row = io + y * @as(usize, mip.width) * 4;
                 for (0..region.image_extent.width) |x| {
                     if (to_image) {
-                        pixels[image_row + x * 4] = b[source_row + x];
-                        pixels[image_row + x * 4 + 1] = 0;
+                        pixels[image_row + x * 4] = b[source_row + x * @as(usize, @intCast(bytes_per_texel))];
+                        pixels[image_row + x * 4 + 1] = if (image.format == 16) b[source_row + x * 2 + 1] else 0;
                         pixels[image_row + x * 4 + 2] = 0;
                         pixels[image_row + x * 4 + 3] = 255;
                     } else {
-                        b[source_row + x] = pixels[image_row + x * 4];
+                        b[source_row + x * @as(usize, @intCast(bytes_per_texel))] = pixels[image_row + x * 4];
+                        if (image.format == 16) b[source_row + x * 2 + 1] = pixels[image_row + x * 4 + 1];
                     }
                 }
             }
@@ -11680,6 +11688,21 @@ test "R8 buffer image transfers preserve packed rows and expand sampled storage"
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x11, 0, 0, 0x20, 0x21, 0, 0 }, &buffer_storage);
+}
+
+test "R8G8 buffer image transfers preserve Chromium UV plane pairs" {
+    const owner: Device = @ptrFromInt(8);
+    var buffer_storage: [4]u8 align(64) = .{ 90, 240, 110, 100 };
+    var image_storage: [8]u8 align(64) = .{0} ** 8;
+    var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 1, .array_layers = 1, .samples = 1, .format = 16, .usage = 7, .layout = 1, .owned_bytes = image_storage[0..] };
+    const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 2, .buffer_image_height = 1, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 1, .depth = 1 } };
+    copyBufferImage(&buffer, &image, region, true);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 0, 255, 110, 100, 0, 255 }, &image_storage);
+    @memset(&buffer_storage, 0);
+    copyBufferImage(&buffer, &image, region, false);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 110, 100 }, &buffer_storage);
 }
 
 test "NV12 plane uploads preserve the bounded multi-planar layout" {
