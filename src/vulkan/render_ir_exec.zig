@@ -332,6 +332,19 @@ fn addressCoordinate(value: i32, size: u32, mode: SampledImage.AddressMode) ?u32
         .mirror_clamp_to_edge => @intCast(std.math.clamp(if (value < 0) -value - 1 else value, 0, signed_size - 1)),
     };
 }
+fn normalizedCoordinate(value: f32, mode: SampledImage.AddressMode) ?f32 {
+    if (!std.math.isFinite(value)) return null;
+    return switch (mode) {
+        .repeat => value - @floor(value),
+        .mirrored_repeat => blk: {
+            const period = value - @floor(value / 2) * 2;
+            break :blk if (period <= 1) period else 2 - period;
+        },
+        .clamp_to_edge => std.math.clamp(value, 0, 1),
+        .clamp_to_border => if (value < 0 or value > 1) null else value,
+        .mirror_clamp_to_edge => if (value < -1) 0 else if (value > 1) 1 else @abs(value),
+    };
+}
 fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return image.border;
     const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return image.border;
@@ -358,36 +371,69 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     const v: f32 = @bitCast(coordinates.bits[1]);
     const lod_bias: f32 = @bitCast(bias.bits[0]);
     if (!std.math.isFinite(u) or !std.math.isFinite(v) or !std.math.isFinite(lod_bias)) return error.NumericDomain;
-    const fx = u * @as(f32, @floatFromInt(image.width)) - 0.5;
-    const fy = v * @as(f32, @floatFromInt(image.height)) - 0.5;
-    var rgba: [4]f32 = undefined;
-    if (image.filter == .nearest) {
-        rgba = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
-    } else {
-        const x0: i32 = @intFromFloat(@floor(fx));
-        const y0: i32 = @intFromFloat(@floor(fy));
-        const tx = fx - @floor(fx);
-        const ty = fy - @floor(fy);
-        const p00 = try texel(image, x0, y0);
-        const p10 = try texel(image, x0 + 1, y0);
-        const p01 = try texel(image, x0, y0 + 1);
-        const p11 = try texel(image, x0 + 1, y0 + 1);
-        for (0..4) |lane| rgba[lane] =
-            (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
-            (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
-    }
+    const normalized_u = normalizedCoordinate(u, image.address_u);
+    const normalized_v = normalizedCoordinate(v, image.address_v);
+    var rgba = image.border;
+    if (normalized_u) |sample_u| if (normalized_v) |sample_v| {
+        const fx = sample_u * @as(f32, @floatFromInt(image.width)) - 0.5;
+        const fy = sample_v * @as(f32, @floatFromInt(image.height)) - 0.5;
+        if (image.filter == .nearest) {
+            rgba = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+        } else {
+            const x0: i32 = @intFromFloat(@floor(fx));
+            const y0: i32 = @intFromFloat(@floor(fy));
+            const tx = fx - @floor(fx);
+            const ty = fy - @floor(fy);
+            const p00 = try texel(image, x0, y0);
+            const p10 = try texel(image, x0 + 1, y0);
+            const p01 = try texel(image, x0, y0 + 1);
+            const p11 = try texel(image, x0 + 1, y0 + 1);
+            for (0..4) |lane| rgba[lane] =
+                (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+                (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+        }
+    };
     var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
     for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
-    if (renderDiagnosticsEnabled() and image.width == 1024 and image.height == 512 and
-        u > 0.30 and u < 0.40 and v > 0.0 and v < 0.02)
-    {
+    if (renderDiagnosticsEnabled() and image.width == 1024 and image.height == 512) {
         const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
         if (sequence < 64) std.debug.print(
-            "ZPU IR sample seq={d} uv={d:.4},{d:.4} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
-            .{ sequence, u, v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
+            "ZPU IR sample seq={d} uv={d:.4},{d:.4} normalized={any},{any} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
+            .{ sequence, u, v, normalized_u, normalized_v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
         );
     }
     return result;
+}
+
+test "sample applies normalized addressing before bounded texel indexing" {
+    const pixels = [_]u8{
+        1,  2,  3,  4,  11, 12, 13, 14,
+        21, 22, 23, 24, 31, 32, 33, 34,
+    };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .format = .rgba8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 1.0e30));
+    coordinates.bits[1] = @bitCast(@as(f32, -1.0e30));
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    const clamped = try sample(image, coordinates, bias);
+    try std.testing.expectEqual(@as(f32, 11.0 / 255.0), @as(f32, @bitCast(clamped.bits[0])));
+    try std.testing.expectEqual(@as(f32, 14.0 / 255.0), @as(f32, @bitCast(clamped.bits[3])));
+
+    var border_image = image;
+    border_image.address_u = .clamp_to_border;
+    coordinates.bits[0] = @bitCast(@as(f32, -2));
+    const border = try sample(border_image, coordinates, bias);
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(border.bits[3])));
 }
 fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);
