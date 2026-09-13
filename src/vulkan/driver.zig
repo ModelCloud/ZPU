@@ -9389,6 +9389,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner) return wrongSubmittingDevice();
             if (op.old_layout != 0 and layouts[slot] != op.old_layout) {
+                if (failureDiagnosticsEnabled()) std.debug.print(
+                    "ZPU transition rejected image=0x{x} slot={} current={} old={} new={} format={} size={}x{} mips={}\n",
+                    .{ @intFromPtr(op.image), slot, layouts[slot], op.old_layout, op.new_layout, op.image.format, op.image.width, op.image.height, op.image.mip_levels },
+                );
                 hit(.layout_mismatch);
                 return false;
             }
