@@ -10948,6 +10948,12 @@ const ProfileGraphicsClone = struct {
 };
 
 fn profileParallelSampleModulateEligible(op: anytype) bool {
+    // Clone construction is currently per draw. Keep this experimental path
+    // explicitly opt-in while persistent per-pipeline lane executors are
+    // implemented: the guest measurement shows that spawning work without
+    // that cache regresses the real VP9 compositor.
+    const requested = std.c.getenv("ZPU_EXPERIMENTAL_PROFILE_PARALLEL") orelse return false;
+    if (!std.mem.eql(u8, std.mem.span(requested), "1")) return false;
     if (!profileMosaicEligible(op)) return false;
     const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
