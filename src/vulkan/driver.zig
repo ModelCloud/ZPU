@@ -1439,6 +1439,7 @@ const ProfileGraphics = struct {
     fragment_push_constant: ?ProfileUniform = null,
     fragment_frag_coord: ?u32 = null,
     fragment_front_facing: ?u32 = null,
+    fragment_needs_derivatives: bool = false,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
     fragment_input_attachments: [8]ProfileInputAttachment = undefined,
@@ -1470,6 +1471,17 @@ const ProfileGraphicsContract = struct {
     fragment_output: u32,
     fragment_bool: bool,
 };
+
+/// The profile executor needs derivative payloads only for explicit derivative
+/// IR operations. Implicit-LOD sampling in ZPU's bounded scalar sampler does
+/// not consume them, so omitting the quotient-rule work is semantics-neutral.
+fn profileFragmentNeedsDerivatives(fragment: *const render_ir.Program) bool {
+    for (fragment.instructions) |instruction| switch (instruction.op) {
+        .dpdx, .dpdy, .fwidth => return true,
+        else => {},
+    };
+    return false;
+}
 const ExecutionAbi = union(enum) {
     cpu_cube_v1,
     profile_v1_metadata,
@@ -1872,6 +1884,15 @@ fn failureDiagnosticsEnabled() bool {
 
 fn renderDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Print a bounded sample of live profile programs only when explicitly
+/// requested. This is separate from the per-draw render trace so that a
+/// Chromium workload can identify an optimization candidate without logging
+/// every raster operation.
+fn profileIrDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
@@ -10301,6 +10322,17 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
+    const profile_ir_primary_tile = if (mosaic_clip) |clip| clip.min_x == 0 and clip.min_y == 0 else true;
+    if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile and render_diagnostic_profile_ir.fetchAdd(1, .monotonic) < 128) {
+        std.debug.print(
+            "ZPU profile IR seq={d} target={d}x{d} topology={d} vertices={d} varyings={d} fragment_instructions={} vertex_instructions={}\n",
+            .{ diagnostic_draw, target.width, target.height, op.primitive_topology, op.vertex_count, profile.varying_count, profile.fragment.program.instructions.len, profile.vertex.program.instructions.len },
+        );
+        for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU profile IR fragment instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+    }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
@@ -10548,7 +10580,11 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 fragment_bindings[fragment_binding_count] = binding;
                 fragment_binding_count += 1;
             }
-            profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+            const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                return;
+            };
+            if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                 if (renderDiagnosticsEnabled()) std.debug.print(
                     "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
                     .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index },
@@ -10577,20 +10613,21 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 const q2 = b2 / vertices[2].w;
                 const denominator = q0 + q1 + q2;
                 if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                const db0_dx = (vertices[2].y - vertices[1].y) * inverse_area;
-                const db1_dx = (vertices[0].y - vertices[2].y) * inverse_area;
-                const db2_dx = (vertices[1].y - vertices[0].y) * inverse_area;
-                const db0_dy = (vertices[1].x - vertices[2].x) * inverse_area;
-                const db1_dy = (vertices[2].x - vertices[0].x) * inverse_area;
-                const db2_dy = (vertices[0].x - vertices[1].x) * inverse_area;
-                const dq0_dx = db0_dx / vertices[0].w;
-                const dq1_dx = db1_dx / vertices[1].w;
-                const dq2_dx = db2_dx / vertices[2].w;
-                const dq0_dy = db0_dy / vertices[0].w;
-                const dq1_dy = db1_dy / vertices[1].w;
-                const dq2_dy = db2_dy / vertices[2].w;
-                const denominator_dx = dq0_dx + dq1_dx + dq2_dx;
-                const denominator_dy = dq0_dy + dq1_dy + dq2_dy;
+                const needs_derivatives = profile.fragment_needs_derivatives;
+                const db0_dx = if (needs_derivatives) (vertices[2].y - vertices[1].y) * inverse_area else 0;
+                const db1_dx = if (needs_derivatives) (vertices[0].y - vertices[2].y) * inverse_area else 0;
+                const db2_dx = if (needs_derivatives) (vertices[1].y - vertices[0].y) * inverse_area else 0;
+                const db0_dy = if (needs_derivatives) (vertices[1].x - vertices[2].x) * inverse_area else 0;
+                const db1_dy = if (needs_derivatives) (vertices[2].x - vertices[0].x) * inverse_area else 0;
+                const db2_dy = if (needs_derivatives) (vertices[0].x - vertices[1].x) * inverse_area else 0;
+                const dq0_dx = if (needs_derivatives) db0_dx / vertices[0].w else 0;
+                const dq1_dx = if (needs_derivatives) db1_dx / vertices[1].w else 0;
+                const dq2_dx = if (needs_derivatives) db2_dx / vertices[2].w else 0;
+                const dq0_dy = if (needs_derivatives) db0_dy / vertices[0].w else 0;
+                const dq1_dy = if (needs_derivatives) db1_dy / vertices[1].w else 0;
+                const dq2_dy = if (needs_derivatives) db2_dy / vertices[2].w else 0;
+                const denominator_dx = if (needs_derivatives) dq0_dx + dq1_dx + dq2_dx else 0;
+                const denominator_dy = if (needs_derivatives) dq0_dy + dq1_dy + dq2_dy else 0;
                 for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
                     for (0..varying.lanes) |lane| {
                         const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
@@ -10603,12 +10640,12 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                         // so first/last map directly to a/c here.
                         const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
                         const value = if (varying.flat) flat_value else numerator / denominator;
-                        const numerator_dx = dq0_dx * a + dq1_dx * b + dq2_dx * c;
-                        const numerator_dy = dq0_dy * a + dq1_dy * b + dq2_dy * c;
-                        const derivative_scale = denominator * denominator;
-                        const dpdx = if (varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
-                        const dpdy = if (varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
-                        if (!std.math.isFinite(value) or !std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)) return;
+                        const numerator_dx = if (needs_derivatives) dq0_dx * a + dq1_dx * b + dq2_dx * c else 0;
+                        const numerator_dy = if (needs_derivatives) dq0_dy * a + dq1_dy * b + dq2_dy * c else 0;
+                        const derivative_scale = if (needs_derivatives) denominator * denominator else 1;
+                        const dpdx = if (!needs_derivatives or varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
+                        const dpdy = if (!needs_derivatives or varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
+                        if (!std.math.isFinite(value) or (needs_derivatives and (!std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)))) return;
                         std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
                         std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
                         std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
@@ -10616,8 +10653,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[varying_index] = .{
                         .interface = varying.fragment_interface,
                         .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
-                        .dpdx_bytes = fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4],
-                        .dpdy_bytes = fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4],
+                        .dpdx_bytes = if (needs_derivatives) fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4] else &.{},
+                        .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
                     };
                 }
                 var fragment_binding_count: usize = profile.varying_count;
@@ -10642,8 +10679,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[fragment_binding_count] = .{
                         .interface = interface,
                         .bytes = &frag_coord_bytes,
-                        .dpdx_bytes = &frag_coord_dpdx_bytes,
-                        .dpdy_bytes = &frag_coord_dpdy_bytes,
+                        .dpdx_bytes = if (needs_derivatives) &frag_coord_dpdx_bytes else &.{},
+                        .dpdy_bytes = if (needs_derivatives) &frag_coord_dpdy_bytes else &.{},
                     };
                     fragment_binding_count += 1;
                 }
@@ -10662,7 +10699,11 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     fragment_bindings[fragment_binding_count] = binding;
                     fragment_binding_count += 1;
                 }
-                profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                    return;
+                };
+                if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                     if (renderDiagnosticsEnabled()) std.debug.print(
                         "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
                         .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
@@ -10862,6 +10903,17 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
 const profile_mosaic_tile_size: u32 = 256;
 const profile_mosaic_batch_commands: usize = 64;
 
+/// Mosaic is worthwhile either for a group of profile draws or for one
+/// framebuffer-sized composite. Chromium's video compositor produces the
+/// latter: a single textured quad over a large target. Keep smaller UI work
+/// on the direct path to avoid adding tile scheduling overhead to glyphs.
+fn profileMosaicBatchEligible(batch_count: usize, width: u32, height: u32) bool {
+    if (batch_count == 0) return false;
+    const target_pixels = @as(u64, width) * @as(u64, height);
+    const tile_pixels = @as(u64, profile_mosaic_tile_size) * @as(u64, profile_mosaic_tile_size);
+    return batch_count > 1 or target_pixels >= tile_pixels;
+}
+
 fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageObj } {
     return .{
         .color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null,
@@ -10904,9 +10956,15 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         batch_count += 1;
         candidate.advance();
     }
-    if (batch_count < 2) return null;
+    // Chromium's video composite is often one large textured quad. Route it
+    // through the same ordered Mosaic tile scheduler as adjacent profile
+    // draws; execution stays serial because profile executors own mutable
+    // scratch, but every tile is explicit and auditable. Small draws retain
+    // the direct path so UI glyphs do not pay scheduler overhead.
+    if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
+    const operation_start = frame_pacing.monotonicNs();
     const start = cursor.*;
     var tile_y: u32 = 0;
     while (tile_y < color_image.height) : (tile_y += profile_mosaic_tile_size) {
@@ -10935,6 +10993,10 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
         if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
     }
+    // Trace the entire ordered tile operation as one native Mosaic draw so
+    // frame pacing shows time spent before presentation rather than attributing
+    // it to an opaque gap in the browser.
+    color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
     cursor.* = candidate;
     return batch_count;
 }
@@ -13370,7 +13432,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
                 return error.Invalid;
             },
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
@@ -16314,6 +16376,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     defer fragment_derivative_executor.deinit();
     var derivative_profile = profile;
     derivative_profile.fragment = fragment_derivative_executor;
+    derivative_profile.fragment_needs_derivatives = true;
     var derivative_pipeline = pipeline;
     derivative_pipeline.execution_abi = .{ .profile_v1_scalar_graphics = derivative_profile };
     var derivative_command = command;
@@ -30193,6 +30256,19 @@ test "explicit behavioral requirement matrix is complete" {
     }
 }
 
+test "profile derivative classifier is exact" {
+    const name = [_]u8{'x'};
+    const no_derivatives = [_]render_ir.Instruction{.{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} }};
+    const derivative = [_]render_ir.Instruction{
+        .{ .op = .dpdx, .ty = .{ .scalar = .f32 }, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    const plain = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&.{}), .instructions = @constCast(&no_derivatives), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    const needs = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&.{}), .instructions = @constCast(&derivative), .bytes = &.{}, .identity = .{ .digest = .{0} ** 32, .bytes = &.{} } };
+    try std.testing.expect(!profileFragmentNeedsDerivatives(&plain));
+    try std.testing.expect(profileFragmentNeedsDerivatives(&needs));
+}
+
 test "Mosaic command buffers allocate bounded recording storage lazily" {
     const ctx = try createTestDeviceContext();
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
@@ -30237,6 +30313,14 @@ test "Mosaic command cursor skips empty primary streams without reordering" {
     try std.testing.expectEqual(@as(std.meta.Tag(Command), .next_subpass), std.meta.activeTag(cursor.current().?.*));
     cursor.advance();
     try std.testing.expect(cursor.current() == null);
+}
+
+test "Mosaic admits a large single profile composite without scheduling small UI draws" {
+    try std.testing.expect(!profileMosaicBatchEligible(0, 1920, 1080));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 255, 256));
+    try std.testing.expect(profileMosaicBatchEligible(1, 256, 256));
+    try std.testing.expect(profileMosaicBatchEligible(1, 780, 580));
+    try std.testing.expect(profileMosaicBatchEligible(2, 32, 32));
 }
 
 test "pinned Vulkan 1.4 core command inventory resolves through the ICD dispatch" {

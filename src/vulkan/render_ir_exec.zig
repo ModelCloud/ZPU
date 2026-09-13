@@ -713,12 +713,64 @@ fn branchTarget(program: *const ir.Program, label_id: u32) Error!usize {
     return error.InvalidOperand;
 }
 
+/// An exact, validated lowering for Chromium's common final-composite
+/// fragment program: sample one image and modulate it by a vec4 varying. It
+/// is deliberately structural rather than heuristic; any extra operation,
+/// interface, or differing data flow remains on the general interpreter.
+const FastPath = union(enum) {
+    sample_modulate: struct {
+        color_interface: u32,
+        coordinate_interface: u32,
+        image_interface: u32,
+        output_interface: u32,
+        bias_literal: [4]u8,
+    },
+};
+
+fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operands: []const u32) bool {
+    return instruction.op == op and same(instruction.ty, ty) and std.mem.eql(u32, instruction.operands, operands) and instruction.literal.len == 0;
+}
+
+fn detectFastPath(program: *const ir.Program) ?FastPath {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const instructions = program.instructions;
+    if (instructions.len != 13 or instructions[0].literal.len != 4 or instructions[3].literal.len != 4) return null;
+    if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or
+        instructions[3].op != .label or !same(instructions[3].ty, .{ .scalar = .u32 }) or instructions[3].operands.len != 0 or
+        !exactInstruction(instructions[1], .local, f32x2, &.{}) or
+        !exactInstruction(instructions[2], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[4], .input, f32x4, &.{0}) or
+        !exactInstruction(instructions[5], .local_store, f32x4, &.{ 2, 4 }) or
+        !exactInstruction(instructions[6], .input, f32x2, &.{1}) or
+        !exactInstruction(instructions[7], .local_store, f32x2, &.{ 1, 6 }) or
+        !exactInstruction(instructions[8], .image_sample_implicit_lod, f32x4, &.{ 4, 6, 0 }) or
+        !exactInstruction(instructions[9], .fmul, f32x4, &.{ 8, 4 }) or
+        !exactInstruction(instructions[10], .local_store, f32x4, &.{ 2, 9 }) or
+        !exactInstruction(instructions[11], .output, f32x4, &.{ 3, 9 }) or
+        !exactInstruction(instructions[12], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    if (program.interfaces.len <= 4 or program.interfaces[0].storage != .input or !same(program.interfaces[0].ty, f32x4) or
+        program.interfaces[1].storage != .input or !same(program.interfaces[1].ty, f32x2) or
+        program.interfaces[3].storage != .output or !same(program.interfaces[3].ty, f32x4) or
+        program.interfaces[4].storage != .sampled_image or !same(program.interfaces[4].ty, f32x4)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{ .sample_modulate = .{
+        .color_interface = 0,
+        .coordinate_interface = 1,
+        .image_interface = 4,
+        .output_interface = 3,
+        .bias_literal = instructions[0].literal[0..4].*,
+    } };
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
     values: []Value,
     locals: []Value,
     output_scratch: []u8,
+    fast_path: ?FastPath,
 
     pub fn init(allocator: std.mem.Allocator, source: *const ir.Program) Error!Executor {
         if (source.instructions.len > ir.max_instructions or source.bytes.len > max_key_ir_bytes) return error.LimitExceeded;
@@ -734,7 +786,7 @@ pub const Executor = struct {
             total = std.math.add(usize, total, try byteSize(interface.ty)) catch return error.LimitExceeded;
         };
         const scratch = allocator.alloc(u8, total) catch return error.OutOfMemory;
-        return .{ .allocator = allocator, .program = program, .values = values, .locals = locals, .output_scratch = scratch };
+        return .{ .allocator = allocator, .program = program, .values = values, .locals = locals, .output_scratch = scratch, .fast_path = detectFastPath(&program) };
     }
     pub fn deinit(self: *Executor) void {
         self.allocator.free(self.output_scratch);
@@ -742,6 +794,38 @@ pub const Executor = struct {
         self.allocator.free(self.values);
         self.program.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        switch (fast_path) {
+            .sample_modulate => |path| {
+                const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| {
+                    if (candidate.interface == path.output_interface) output = candidate.bytes;
+                }
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                for (0..4) |lane| {
+                    const sample_value: f32 = @bitCast(sampled.bits[lane]);
+                    const color_value: f32 = @bitCast(color.bits[lane]);
+                    std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
+                }
+            },
+        }
+    }
+
+    /// Execute an exact prevalidated specialization for the driver's hot
+    /// fragment loop. Public `execute` intentionally keeps its full alias,
+    /// binding, and output validation contract; callers that have already
+    /// established those invariants can avoid repeating it per pixel.
+    pub fn executePrevalidated(self: *const Executor, bindings: []const Binding, outputs: []const Output) Error!bool {
+        const fast_path = self.fast_path orelse return false;
+        try executeFastPath(fast_path, bindings, outputs);
+        return true;
     }
 
     pub fn execute(self: *Executor, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -2449,6 +2533,65 @@ fn f32bytes(x: f32) [4]u8 {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, @bitCast(x), .little);
     return b;
+}
+
+test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
+    const bias = f32bytes(-0.475);
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = f32x2, .location = 1 },
+        .{ .storage = .input, .ty = f32_scalar, .location = 2 }, // unused by this exact program
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    const label = [_]u8{ 25, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32x2, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .input, .ty = f32x4, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 4 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32x2, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x2, .operands = &.{ 1, 6 }, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 4, 6, 0 }, .literal = &.{} },
+        .{ .op = .fmul, .ty = f32x4, .operands = &.{ 8, 4 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 9 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expect(executor.fast_path != null);
+    var color: [16]u8 = undefined;
+    const color_values = [_]f32{ 0.5, 0.25, 1, 1 };
+    for (color_values, 0..) |value, lane| std.mem.writeInt(u32, color[lane * 4 ..][0..4], @bitCast(value), .little);
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    const pixel = [_]u8{ 64, 128, 192, 255 };
+    var output: [16]u8 = undefined;
+    const bindings = [_]Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 4, .sampled_image = .{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } },
+    };
+    const outputs = [_]Output{.{ .interface = 3, .bytes = &output }};
+    try std.testing.expect(try executor.executePrevalidated(&bindings, &outputs));
+    for (color_values, 0..) |value, lane| {
+        const sampled: f32 = @as(f32, @floatFromInt(pixel[lane])) / 255;
+        try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * value)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    }
+    @memset(&output, 0);
+    try executor.execute(&bindings, &outputs);
+    for (color_values, 0..) |value, lane| {
+        const sampled: f32 = @as(f32, @floatFromInt(pixel[lane])) / 255;
+        try std.testing.expectEqual(canonicalFloat(@bitCast(sampled * value)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    }
 }
 
 test "forward branches execute local stores and select phi predecessors" {
