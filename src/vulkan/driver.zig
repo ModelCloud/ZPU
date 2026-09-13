@@ -9921,7 +9921,9 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     };
 }
 
-fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32) void {
+const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
+
+fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
     const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
@@ -10171,10 +10173,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             };
         }
         const inverse_area = 1.0 / area;
-        const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0);
-        const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0);
-        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)));
-        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)));
+        const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
         if (max_x <= min_x or max_y <= min_y) continue;
         for (@intCast(min_y)..@intCast(max_y)) |y| for (@intCast(min_x)..@intCast(max_x)) |x| {
             const px = @as(f32, @floatFromInt(x)) + 0.5;
@@ -10468,6 +10470,85 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
     return batch.len;
 }
 
+const profile_mosaic_tile_size: u32 = 256;
+const profile_mosaic_batch_commands: usize = 64;
+
+fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageObj } {
+    return .{
+        .color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null,
+        .depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null,
+    };
+}
+
+fn profileMosaicEligible(op: anytype) bool {
+    return op.pipeline.execution_abi == .profile_v1_scalar_graphics and
+        op.rasterizer_discard_enable == 0 and op.layer_count == 1;
+}
+
+/// Execute adjacent native Skia profile draws through the Vulkan command
+/// stream's Mosaic tile scheduler. Tiles are visited in image order, while
+/// draws remain in submission order inside every tile; this preserves depth,
+/// blending, and query ordering without translating profile draws into the
+/// legacy cpu_cube ABI.
+fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context: *QueryExecutionContext) ?usize {
+    const first_raw = cursor.current() orelse return null;
+    const first = switch (first_raw.*) {
+        .cube_draw => |op| op,
+        else => return null,
+    };
+    if (!profileMosaicEligible(first)) return null;
+    const first_target = profileMosaicTarget(first);
+    const color_image = first_target.color orelse first_target.depth orelse return null;
+    if (first_target.depth) |depth| if (depth.width != color_image.width or depth.height != color_image.height) return null;
+
+    var candidate = cursor.*;
+    var batch_count: usize = 0;
+    while (batch_count < profile_mosaic_batch_commands) {
+        const raw = candidate.current() orelse break;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => break,
+        };
+        if (!profileMosaicEligible(op)) break;
+        const target = profileMosaicTarget(op);
+        if (target.color != first_target.color or target.depth != first_target.depth or op.color_base_layer != first.color_base_layer or op.depth_base_layer != first.depth_base_layer) break;
+        batch_count += 1;
+        candidate.advance();
+    }
+    if (batch_count < 2) return null;
+
+    const start = cursor.*;
+    var tile_y: u32 = 0;
+    while (tile_y < color_image.height) : (tile_y += profile_mosaic_tile_size) {
+        var tile_x: u32 = 0;
+        while (tile_x < color_image.width) : (tile_x += profile_mosaic_tile_size) {
+            const clip = ProfileMosaicClip{
+                .min_x = tile_x,
+                .min_y = tile_y,
+                .max_x = @min(color_image.width, tile_x + profile_mosaic_tile_size),
+                .max_y = @min(color_image.height, tile_y + profile_mosaic_tile_size),
+            };
+            var draw_cursor = start;
+            var draw_index: usize = 0;
+            while (draw_index < batch_count) : (draw_index += 1) {
+                const raw = draw_cursor.current() orelse return null;
+                const op = switch (raw.*) {
+                    .cube_draw => |value| value,
+                    else => return null,
+                };
+                executeProfileDraw(op, query_context, 0, clip);
+                draw_cursor.advance();
+            }
+        }
+    }
+    if (renderDiagnosticsEnabled()) {
+        const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+        if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
+    }
+    cursor.* = candidate;
+    return batch_count;
+}
+
 /// Collapse adjacent eligible Vulkan draws into one private Mosaic
 /// submission. This is deliberately narrower than Vulkan's general command
 /// semantics: it only accepts the exact opaque, non-indexed, single-layer
@@ -10480,6 +10561,7 @@ fn executeMosaicPreparedBatch(first: anytype, batch: []const cpu_cube.DrawComman
 /// API order while removing redundant worker dispatches from applications
 /// that split a long ordered draw stream across primary buffers.
 fn executeMosaicCommandBatchStreams(cursor: *MosaicCommandCursor, query_context: *QueryExecutionContext) ?usize {
+    if (executeMosaicProfileBatchStreams(cursor, query_context)) |count| return count;
     const first_raw = cursor.current() orelse return null;
     const first = switch (first_raw.*) {
         .cube_draw => |op| op,
@@ -10713,7 +10795,7 @@ fn executeValidatedCommand(command: Command, query_context: *QueryExecutionConte
                 while (instance < instance_count) : (instance += 1) {
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
-                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, query_context, layer);
+                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, query_context, layer, null);
                 }
                 return;
             }
