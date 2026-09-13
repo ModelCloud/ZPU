@@ -8092,6 +8092,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     }
     const stages_valid = validPipelineStageMask(src_stage_mask) and validPipelineStageMask(dst_stage_mask);
     if (c.impl.state != 1 or c.impl.invalid or dependency_flags & ~@as(u32, 1) != 0 or !stages_valid or memory_barrier_count > max_api_items or buffer_barrier_count > max_api_items or image_barrier_count > max_api_items or @as(usize, c.impl.count) + buffer_barrier_count + image_barrier_count > c.impl.commands.len) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU barrier rejected envelope state={d} invalid={} dependency=0x{x} stages={} counts={d}/{d}/{d} command_count={d} command_capacity={d}\n", .{ c.impl.state, c.impl.invalid, dependency_flags, stages_valid, memory_barrier_count, buffer_barrier_count, image_barrier_count, c.impl.count, c.impl.commands.len });
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
@@ -8133,6 +8134,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
     };
     for (image_list) |barrier| {
         const image = validImageLocked(barrier.image) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU image barrier rejected stale image=0x{x}\n", .{barrier.image});
             hit(.invalid_barrier);
             c.impl.invalid = true;
             return;
@@ -8157,6 +8159,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         }
     }
     if (!legacyDependencyScopeValid(c, src_stage_mask, dst_stage_mask, dependency_flags, memory_list, buffer_list, image_list)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU barrier rejected dependency scope state={d} render_pass={} dynamic={} stages=0x{x}/0x{x} buffers={d} images={d}\n", .{ c.impl.state, c.impl.active_render_pass != null, c.impl.dynamic_rendering, src_stage_mask, dst_stage_mask, buffer_list.len, image_list.len });
         hit(.invalid_barrier);
         c.impl.invalid = true;
         return;
