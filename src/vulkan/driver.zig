@@ -10506,7 +10506,7 @@ fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageOb
 }
 
 fn profileMosaicEligible(op: anytype) bool {
-    return op.pipeline.execution_abi == .profile_v1_scalar_graphics and
+    return false and op.pipeline.execution_abi == .profile_v1_scalar_graphics and
         op.rasterizer_discard_enable == 0 and op.layer_count == 1;
 }
 
