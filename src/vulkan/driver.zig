@@ -9662,7 +9662,6 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     if (triangle_count == 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
     var bounds = emptyRect();
     var pixels_written: usize = 0;
-    var diagnostic_fragments_logged: u32 = 0;
     var vertex_bindings: [21]render_ir_exec.Binding = undefined;
     var vertex_binding_storage: [16][16]u8 = undefined;
     var vertex_output_bytes: [16][16]u8 = undefined;
@@ -9921,7 +9920,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                 };
             }
             const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-            if (renderDiagnosticsEnabled() and diagnostic_draw >= 70 and diagnostic_draw <= 75 and diagnostic_fragments_logged < 4) {
+            if (renderDiagnosticsEnabled() and diagnostic_draw == 71 and x == 166 and y == 1) {
                 var diagnostic_source: [4]f32 = undefined;
                 var diagnostic_destination: [4]f32 = undefined;
                 for (0..4) |channel| {
@@ -9929,13 +9928,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
                     const storage_index = colorStorageIndices(color.?.format).?[channel];
                     diagnostic_destination[channel] = @as(f32, @floatFromInt(color_bytes.?[offset + storage_index])) / 255;
                 }
-                if (diagnostic_source[3] != 0) {
-                    std.debug.print(
-                        "ZPU compositor nonzero fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
-                        .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
-                    );
-                    diagnostic_fragments_logged += 1;
-                }
+                std.debug.print(
+                    "ZPU targeted fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
+                    .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                );
             }
             if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
             if (depth_bytes) |depth_storage| {
