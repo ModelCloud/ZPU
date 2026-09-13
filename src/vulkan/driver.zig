@@ -9674,7 +9674,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
     }
-    if (renderDiagnosticsEnabled() and diagnostic_draw < 96) std.debug.print(
+    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw seq={d} target={d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
         .{ diagnostic_draw, target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image != null, profile.varying_count, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).x else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).y else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).width else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).height else 0 },
     );
@@ -10010,7 +10010,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
         color_image.force_full_present = true;
     }
     if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
-    if (renderDiagnosticsEnabled() and diagnostic_draw < 96) std.debug.print(
+    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
         .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
