@@ -1761,6 +1761,7 @@ var render_diagnostic_profile_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_page_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_texture_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_text_target_dump = std.atomic.Value(bool).init(false);
+var render_diagnostic_glyph_target_dump = std.atomic.Value(bool).init(false);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 
 const max_present_entries = 24;
@@ -9690,11 +9691,10 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
-    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
-        ((op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
-            target.width == 1280 and target.height == 256) or
-            (op.descriptors.texture == null and op.vertex_count == 54 and
-                target.width == 1536 and target.height == 128)) and
+    if (renderDiagnosticsEnabled() and
+        ((op.descriptors.texture != null and op.descriptors.texture.?.width == 256 and
+            op.descriptors.texture.?.height == 64 and target.width == 1280 and target.height == 256) or
+            (op.descriptors.texture == null and op.vertex_count == 54 and target.width == 1536 and target.height == 128)) and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
         std.debug.print("ZPU profile fragment IR interfaces={} instructions={}\n", .{ profile.fragment.program.interfaces.len, profile.fragment.program.instructions.len });
@@ -10112,7 +10112,7 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 54 and
         target.width == 1536 and target.height == 128)
-        dumpDiagnosticImage(target, "ZPU_TEXT_TARGET_DUMP", &render_diagnostic_text_target_dump);
+        dumpDiagnosticImage(target, "ZPU_GLYPH_TARGET_DUMP", &render_diagnostic_glyph_target_dump);
     if (diagnostic_draw == 305) dumpDiagnosticImage(target, "ZPU_PROFILE_DUMP", &render_diagnostic_profile_dump);
     if (diagnostic_draw == 270) dumpDiagnosticImage(target, "ZPU_PAGE_DUMP", &render_diagnostic_page_dump);
 }
