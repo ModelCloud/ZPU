@@ -9736,7 +9736,8 @@ fn executeProfileDraw(op: anytype, query_context: *QueryExecutionContext, layer:
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
-    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and (op.vertex_count == 90 or op.vertex_count == 474) and
+    if (renderDiagnosticsEnabled() and ((op.descriptors.texture == null and op.vertex_count == 90) or
+        (target.width == 1280 and target.height == 256 and op.vertex_count == 474)) and
         target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
