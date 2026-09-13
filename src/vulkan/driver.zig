@@ -1868,6 +1868,7 @@ var render_diagnostic_pipeline_creations = std.atomic.Value(u64).init(0);
 var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_modulate_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_sample_coverage_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
 var render_diagnostic_submissions = std.atomic.Value(u64).init(0);
 var render_diagnostic_session_summaries = std.atomic.Value(u32).init(0);
@@ -2049,13 +2050,14 @@ fn emitRenderDiagnosticSession(presents: u64) void {
     const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
     if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
-        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
+        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_sample_coverage_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
         .{
             renderDiagnosticSessionId(),
             render_diagnostic_pipeline_creations.load(.acquire),
             render_diagnostic_recorded_draws.load(.acquire),
             render_diagnostic_executed_profile_draws.load(.acquire),
             render_diagnostic_direct_sample_modulate_draws.load(.acquire),
+            render_diagnostic_direct_sample_coverage_draws.load(.acquire),
             render_diagnostic_executed_transitions.load(.acquire),
             render_diagnostic_submissions.load(.acquire),
             render_diagnostic_mosaic_batches.load(.acquire),
@@ -10601,6 +10603,8 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) sample_coverage_image = binding.sampled_image;
         }
     }
+    if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
+        _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
