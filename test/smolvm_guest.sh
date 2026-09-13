@@ -14,6 +14,26 @@ unset SMOLVM_XAUTH_DUPLICATE_EQUIVALENT SMOLVM_XAUTH_EQUAL_KEY SMOLVM_XAUTH_MULT
 unset SMOLVM_XAUTH_READY SMOLVM_XAUTH_SLEEP SMOLVM_FIXTURE_CAPTURE_AUTH_DIR SMOLVM_TAR_LONG_LIST
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# Chromium's native Vulkan validation must never rely on ANGLE's test-only
+# capability override.  Keep the launcher pinned to the ZPU-only ICD and
+# explicit fallback rejection so a future reproduction cannot silently turn
+# into an ANGLE/GL or software-compositing run.
+chrome_launcher=$repo/tools/smolvm-chrome.sh
+if grep -Fq -- '--enable-angle-features=exposeES32ForTesting' "$chrome_launcher"; then
+    echo 'Chromium launcher must not enable ANGLE ES testing capabilities' >&2
+    exit 1
+fi
+for chrome_requirement in \
+    'VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json' \
+    'VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json' \
+    '--use-vulkan=native' \
+    '--disable-vulkan-fallback-to-gl-for-testing' \
+    '--disable-software-compositing-fallback'; do
+    grep -F -- "$chrome_requirement" "$chrome_launcher" >/dev/null || {
+        echo "Chromium launcher missing native Vulkan requirement: $chrome_requirement" >&2
+        exit 1
+    }
+done
 tmp=$(mktemp -d)
 display_fixture_pid=
 untracked_probe=$repo/smolvm-review-untracked-probe
@@ -518,16 +538,16 @@ grep -F 'runtime and authorization paths must not be symlinks' "$tmp/err"
 
 # Source transfer removes both transient copies after extraction.
 touch "$untracked_probe"
-if "$repo/tools/smolvm-zpu.sh" build >"$tmp/out" 2>"$tmp/err"; then
+if SMOLVM_FIXTURE_STATE=stopped SMOLVM_FIXTURE_NETWORK=false "$repo/tools/smolvm-zpu.sh" build >"$tmp/out" 2>"$tmp/err"; then
     echo 'untracked source file unexpectedly passed export' >&2; exit 1
 fi
 grep -F 'untracked files are forbidden' "$tmp/err"
 rm -f "$untracked_probe"
-if SMOLVM_TAR_LONG_LIST=1 "$repo/tools/smolvm-zpu.sh" build >"$tmp/out" 2>"$tmp/err"; then
+if SMOLVM_FIXTURE_STATE=stopped SMOLVM_FIXTURE_NETWORK=false SMOLVM_TAR_LONG_LIST=1 "$repo/tools/smolvm-zpu.sh" build >"$tmp/out" 2>"$tmp/err"; then
     echo 'early artifact in long tar listing unexpectedly passed' >&2; exit 1
 fi
 grep -F 'source export unexpectedly contains a build artifact' "$tmp/err"
-"$repo/tools/smolvm-zpu.sh" build >/dev/null
+SMOLVM_FIXTURE_STATE=stopped SMOLVM_FIXTURE_NETWORK=false "$repo/tools/smolvm-zpu.sh" build >/dev/null
 [[ ! -e $tmp/runtime/zpu-smolvm/zpu-source.tar ]] || { echo 'host source archive remained after transfer' >&2; exit 1; }
 if compgen -G "$tmp/runtime/zpu-smolvm/zpu-source.tar.part.*" >/dev/null; then
     echo 'host source archive part remained after transfer' >&2
