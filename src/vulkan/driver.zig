@@ -1223,7 +1223,7 @@ const QueryPoolObj = struct {
 const SemaphoreObj = struct { owner: Device, signaled: std.atomic.Value(bool), timeline: bool, timeline_value: std.atomic.Value(u64) };
 const CommandPoolObj = struct { owner: Device, flags: u32 };
 const SurfaceObj = struct { owner: Instance, connection: *anyopaque, window: u32, headless: bool = false };
-const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_array_layer: u32, layer_count: u32 };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -13645,7 +13645,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const ci = info orelse return imageViewInvalid("create-info");
     const out = output orelse return imageViewInvalid("output");
     const pnext = imageViewCreatePNextState(ci.p_next);
-    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.base_mip_level != 0 or ci.subresource_range.level_count != 1 or ci.subresource_range.layer_count == 0) {
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !std.meta.eql(ci.components, [_]i32{ 0, 0, 0, 0 }) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=structure s_type={} pnext_valid={} flags=0x{x} view_type={} components={any} mip={} levels={} aspect=0x{x} base_layer={} layers={} usage_present={} usage=0x{x}\n",
             .{ ci.s_type, pnext.valid, ci.flags, ci.view_type, ci.components, ci.subresource_range.base_mip_level, ci.subresource_range.level_count, ci.subresource_range.aspect_mask, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, pnext.has_usage, pnext.usage },
@@ -13660,7 +13660,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     defer mutex.unlock();
     const image = validImageLocked(ci.image) orelse return imageViewInvalid("image");
     const usage = if (pnext.has_usage) pnext.usage else image.usage;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != 1 and ci.subresource_range.aspect_mask != 2) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
             .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
@@ -13669,7 +13669,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = handle;
         return .success;
@@ -13704,7 +13704,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     if (ci.attachments) |attachments| {
         for (attachments[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count]) |handle, requirement| {
             const view = validImageViewLocked(handle) orelse return .error_initialization_failed;
-            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
+            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) return .error_initialization_failed;
             switch (requirement.role) {
                 .color => {
                     if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or color != null) return .error_initialization_failed;
