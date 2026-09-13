@@ -12,3 +12,25 @@ external assembler or its version.
 
 The deterministic property corpus uses seed `0x5a50554952334431`; failures must
 report that seed and the mutated word offset so they can be replayed exactly.
+
+`chromium_skia_vertex.spvasm` disassembles the binary fixture embedded from
+`src/vulkan/fixtures/chromium_skia_vertex.spv`. It captures the first vertex
+shader submitted by Chromium 152's Skia Vulkan backend during GPU-process
+startup. The fixture exercises `vec2` inputs and varyings, a push-constant
+block, member-decorated `sk_PerVertex`, and output access chains.
+
+`chromium_skia_vertex_relaxed.spvasm` captures a later Chromium Skia vertex
+shader with relaxed-precision decorations, multiple `vec4` inputs and
+varyings, and function-local storage.
+
+`chromium_skia_vertex_flat.spvasm` captures Chromium's flat-color vertex path.
+It exercises `Flat` interpolation metadata on a `vec4` output while retaining
+the structured position and push-constant interfaces.
+
+`chromium_skia_fragment_flat.spvasm` captures the matching fragment path. It
+exercises the fragment origin mode, output index zero, `FrontFacing`, and a flat
+`vec4` input.
+
+`chromium_skia_fragment_circle.spvasm` captures Skia's analytic circle coverage
+path. It exercises the standard GLSL `Length` instruction and fragment
+execution with multiple `vec4` inputs.

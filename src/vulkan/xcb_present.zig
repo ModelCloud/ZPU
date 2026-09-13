@@ -130,6 +130,19 @@ fn recordFrameMetric(now: u64) void {
     }
     previous_metric_present_ns = now;
 }
+
+fn dumpPresentPixels(pixels: []const u8) void {
+    const path = std.c.getenv("ZPU_PRESENT_DUMP") orelse return;
+    const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
+    if (fd < 0) return;
+    var offset: usize = 0;
+    while (offset < pixels.len) {
+        const amount = write(fd, pixels[offset..].ptr, pixels.len - offset);
+        if (amount <= 0) break;
+        offset += @intCast(amount);
+    }
+    _ = close(fd);
+}
 pub const Region = struct { x: u32 = 0, y: u32 = 0, width: u32 = 0, height: u32 = 0 };
 
 fn unionRegion(a: Region, b: Region) Region {
@@ -190,6 +203,12 @@ fn monotonicNs() u64 {
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+fn diagnoseFailure(comptime reason: []const u8) void {
+    if (builtin.is_test) return;
+    const enabled = std.c.getenv("ZPU_DIAGNOSE_FAILURES") orelse return;
+    if (enabled[0] == '1') std.debug.print("ZPU XCB present rejected: {s}\n", .{reason});
 }
 
 /// Creates persistent X resources once per swapchain. Frames are uploaded to
@@ -254,10 +273,19 @@ pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_
         return pixels.len == @as(usize, width) * height * 4;
     }
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
-    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
-    if (pixels.len != expected or pixels.len > std.math.maxInt(u32)) return false;
+    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch {
+        diagnoseFailure("upload size overflow");
+        return false;
+    };
+    if (pixels.len != expected or pixels.len > std.math.maxInt(u32)) {
+        diagnoseFailure("upload pixel envelope");
+        return false;
+    }
     const connection = transport.connection;
-    if (xcb_connection_has_error(connection) != 0) return false;
+    if (xcb_connection_has_error(connection) != 0) {
+        diagnoseFailure("upload XCB connection");
+        return false;
+    }
     const row_bytes = @as(usize, width) * 4;
     const request_bytes = @as(usize, xcb_get_maximum_request_length(connection)) * 4;
     const payload_bytes = if (request_bytes > 64) request_bytes - 64 else 0;
@@ -273,12 +301,18 @@ pub fn upload(transport: *Transport, pixels: []const u8, content: Region, force_
     if (transport.shared_upload) |shared| {
         const shared_start = @intFromPtr(shared.address.ptr);
         const pixel_start = @intFromPtr(pixels.ptr);
-        if (pixels.len > shared.address.len or pixel_start < shared_start or pixel_start - shared_start > shared.address.len - pixels.len) return false;
+        if (pixels.len > shared.address.len or pixel_start < shared_start or pixel_start - shared_start > shared.address.len - pixels.len) {
+            diagnoseFailure("upload shared-memory range");
+            return false;
+        }
         if (damage.width != 0 and damage.height != 0) {
             const offset: u32 = @intCast(pixel_start - shared_start);
             _ = shared.api.put_image(connection, transport.pixmap, transport.gc, @intCast(width), @intCast(height), @intCast(damage.x), @intCast(damage.y), @intCast(damage.width), @intCast(damage.height), @intCast(damage.x), @intCast(damage.y), 24, 2, 0, shared.segment, offset);
             transport.last.upload_requests = 1;
-            const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse return false;
+            const reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), null) orelse {
+                diagnoseFailure("upload XCB round trip");
+                return false;
+            };
             std.c.free(reply);
         }
     } else {
@@ -300,6 +334,7 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     const height = transport.height;
     if (transport.headless) {
         if (pixels.len != @as(usize, width) * height * 4) return false;
+        dumpPresentPixels(pixels);
         const now = monotonicNs();
         transport.last.copy_start_ns = now;
         transport.last.copy_end_ns = now;
@@ -310,9 +345,16 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
         recordFrameMetric(now);
         return true;
     }
+    dumpPresentPixels(pixels);
     if (builtin.is_test) return pixels.len == @as(usize, width) * height * 4;
-    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch return false;
-    if (pixels.len != expected) return false;
+    const expected = std.math.mul(usize, @as(usize, width) * height, 4) catch {
+        diagnoseFailure("commit size overflow");
+        return false;
+    };
+    if (pixels.len != expected) {
+        diagnoseFailure("commit pixel envelope");
+        return false;
+    }
     const connection = transport.connection;
     const copy_start = monotonicNs();
     transport.last.copy_start_ns = copy_start;
@@ -321,7 +363,10 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     transport.last.copy_end_ns = monotonicNs();
     transport.last.copy_ns = transport.last.copy_end_ns - copy_start;
     const flush_start = monotonicNs();
-    if (xcb_flush(connection) <= 0) return false;
+    if (xcb_flush(connection) <= 0) {
+        diagnoseFailure("commit XCB flush");
+        return false;
+    }
     transport.last.flush_end_ns = monotonicNs();
     transport.last.flush_ns = transport.last.flush_end_ns - flush_start;
     transport.last.transport_total_ns = transport.last.flush_end_ns - transport.last.present_start_ns;
@@ -331,12 +376,30 @@ pub fn commit(transport: *Transport, pixels: []const u8) bool {
     const verify = std.c.getenv("ZPU_VERIFY_PRESENT") orelse null;
     if (!verification_done and verify != null and verify.?[0] == '1') {
         verification_done = true;
-        const reply = xcb_get_image_reply(connection, xcb_get_image(connection, 2, transport.window, @intCast(width / 2), @intCast(height / 2), 1, 1, std.math.maxInt(u32)), null);
+        var sample_x: u32 = width / 2;
+        var sample_y: u32 = height / 2;
+        if (verify.?[0] == '2') {
+            var found = false;
+            var y: u32 = 0;
+            while (y < height and !found) : (y += 1) {
+                var x: u32 = 0;
+                while (x < width) : (x += 1) {
+                    const offset = (@as(usize, y) * width + x) * 4;
+                    if (pixels[offset] < 200 or pixels[offset + 1] < 200 or pixels[offset + 2] < 200) {
+                        sample_x = x;
+                        sample_y = y;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        const sample_offset = (@as(usize, sample_y) * width + sample_x) * 4;
+        const reply = xcb_get_image_reply(connection, xcb_get_image(connection, 2, transport.window, @intCast(sample_x), @intCast(sample_y), 1, 1, std.math.maxInt(u32)), null);
         if (reply) |image_reply| {
             defer std.c.free(image_reply);
             const data = xcb_get_image_data(image_reply);
-            const source_offset = (@as(usize, height / 2) * width + width / 2) * 4;
-            if (std.mem.eql(u8, data[0..4], pixels[source_offset..][0..4])) std.debug.print("zpu_visual_present=BGRA({},{},{},{})\n", .{ data[0], data[1], data[2], data[3] });
+            std.debug.print("zpu_visual_present xy={d},{d} source=({},{},{},{}) drawable=({},{},{},{}) equal={}\n", .{ sample_x, sample_y, pixels[sample_offset], pixels[sample_offset + 1], pixels[sample_offset + 2], pixels[sample_offset + 3], data[0], data[1], data[2], data[3], std.mem.eql(u8, data[0..4], pixels[sample_offset..][0..4]) });
         }
     }
     return true;

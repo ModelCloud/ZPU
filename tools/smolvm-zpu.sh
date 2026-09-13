@@ -16,6 +16,7 @@ runtime=
 runtime_base=
 runtime_is_temporary=0
 guest_manifest=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json
+required_smolvm_version=1.15.0
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 [[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
@@ -54,6 +55,7 @@ init_runtime() {
     runtime=$base/zpu-smolvm
     auth_dir=$runtime/xauth
     source_archive=$runtime/zpu-source.tar
+    source_part_prefix=$runtime/zpu-source.tar.part.
     [[ ! -L $runtime && ! -L $auth_dir ]] || die 'runtime and authorization paths must not be symlinks'
     if [[ -e $runtime ]]; then
         [[ -d $runtime && $(stat -c %u "$runtime") == "$UID" && $(stat -c %a "$runtime") == 700 ]] || die 'existing ZPU runtime must be a current-user directory with mode exactly 700'
@@ -64,7 +66,7 @@ cleanup_runtime() {
     trap - EXIT
     trap '' HUP INT TERM QUIT
     if [[ -n ${runtime:-} && ! -L $runtime && -d $runtime ]]; then
-        rm -f -- "$runtime/source-list" "$runtime/untracked-list" "$runtime/zpu-source.tar"
+        rm -f -- "$runtime/source-list" "$runtime/untracked-list" "$runtime/zpu-source.tar" "$runtime"/zpu-source.tar.part.*
         if [[ -n ${auth_dir:-} && ! -L $auth_dir && -d $auth_dir ]]; then
             rm -f -- "$auth_dir/bootstrap-Xauthority" "$auth_dir/before.nlist" "$auth_dir/after.nlist" \
                 "$auth_dir/selected.nlist" "$auth_dir/host-raw.nlist" "$auth_dir/after-raw.nlist" \
@@ -77,11 +79,11 @@ cleanup_runtime() {
 }
 require_smolvm_cli() {
     local version version_output create_help start_help stop_help update_help exec_help cp_help ls_help
-    command -v smolvm >/dev/null || die 'smolvm not found (requires smol-machines/smolvm >= 1.7.0)'
+    command -v smolvm >/dev/null || die "smolvm not found (requires smol-machines/smolvm $required_smolvm_version)"
     version_output=$(smolvm --version)
     [[ $version_output =~ ([0-9]+\.[0-9]+\.[0-9]+) ]] || die 'could not parse smolvm --version'
     version=${BASH_REMATCH[1]}
-    [[ $(printf '%s\n' 1.7.0 "$version" | sort -V | head -1) == 1.7.0 ]] || die "smolvm $version is too old; require >= 1.7.0 for --mount-socket"
+    [[ $version == "$required_smolvm_version" ]] || die "smolvm $version is unsupported; require exactly $required_smolvm_version"
     create_help=$(smolvm machine create --help) || die 'failed to capture smolvm machine create --help'
     start_help=$(smolvm machine start --help) || die 'failed to capture smolvm machine start --help'
     stop_help=$(smolvm machine stop --help) || die 'failed to capture smolvm machine stop --help'
@@ -170,7 +172,7 @@ require_host() {
 }
 require_auth_tools() {
     local program
-    for program in xauth stat awk sed sort comm grep mktemp install python3; do command -v "$program" >/dev/null || die "$program not found"; done
+    for program in xauth stat awk sed sort comm grep mktemp install python3 split; do command -v "$program" >/dev/null || die "$program not found"; done
 }
 require_display() {
     require_auth_tools
@@ -265,7 +267,7 @@ prepare_source() {
         die 'untracked files are forbidden when creating the immutable guest source mount; add, ignore, or remove them first'
     fi
     rm -f "$untracked_list"
-    git -C "$repo" archive --format=tar --output="$source_archive" HEAD
+    git -C "$repo" archive --format=tar.gz --output="$source_archive" HEAD
     if ! tar -tf "$source_archive" > "$source_list"; then
         rm -f "$source_list" "$source_archive"
         die 'failed to inspect guest source archive'
@@ -275,6 +277,8 @@ prepare_source() {
         die 'source export unexpectedly contains a build artifact'
     fi
     rm -f "$source_list"
+    rm -f -- "$source_part_prefix"*
+    split -b 768K -d -a 4 -- "$source_archive" "$source_part_prefix"
 }
 create() {
     reject_host_injection
@@ -358,10 +362,21 @@ sync_source() {
     assert_network_disabled
     prepare_source
     run smolvm machine exec --name "$machine" -- sh -ceu 'rm -rf /mnt/zpu-source && mkdir -p /mnt/zpu-source'
-    run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        run smolvm machine cp "$source_archive" "$machine:/var/tmp/zpu-source.tar"
+    else
+        run smolvm machine exec --name "$machine" -- sh -ceu 'rm -f /var/tmp/zpu-source.tar /var/tmp/zpu-source.tar.part.*'
+        local source_part
+        for source_part in "$source_part_prefix"*; do
+            run smolvm machine cp "$source_part" "$machine:/var/tmp/$(basename "$source_part")"
+        done
+        run smolvm machine exec --name "$machine" -- sh -ceu 'cat /var/tmp/zpu-source.tar.part.* > /var/tmp/zpu-source.tar && rm -f /var/tmp/zpu-source.tar.part.*'
+    fi
     run smolvm machine exec --name "$machine" -- tar -C /mnt/zpu-source -xf /var/tmp/zpu-source.tar
     run smolvm machine exec --name "$machine" -- rm -f /var/tmp/zpu-source.tar
-    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then rm -f -- "$source_archive"; fi
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
+        rm -f -- "$source_archive" "$source_part_prefix"*
+    fi
 }
 build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- /mnt/zpu-source/smolvm/guest-build.sh; }
 package_guest() {

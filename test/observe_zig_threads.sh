@@ -47,6 +47,13 @@ wait "$root_pid" || { cat "$tmp/build.log" >&2; exit 1; }
 configured=$(sed -n 's/.*configured_workers=\([0-9][0-9]*\).*/\1/p' "$tmp/build.log" | head -1)
 [[ -n "$configured" ]] || { cat "$tmp/build.log" >&2; exit 1; }
 (( configured >= 1 && configured <= 8 )) || { echo "invalid configured worker count $configured" >&2; exit 1; }
-# One coordinating thread plus the explicitly configured workers.
-(( max_tasks <= configured + 1 )) || { echo "observed $max_tasks threads in one Zig process (>1 coordinator + $configured workers)" >&2; exit 1; }
-echo "Zig thread observation: samples=$observations max_process_threads=$max_tasks configured_workers=$configured affinity<=8: PASS"
+# `-j` caps build-graph workers, rather than every thread owned by the Zig
+# compiler.  Zig 0.16 also creates two bounded compiler-runtime helpers
+# (allocator/event-loop work) even with `-j1`; they inherit the same taskset
+# affinity and are not ZPU render workers.  Account for them explicitly so
+# this check still catches unbounded worker creation without mistaking Zig's
+# toolchain runtime for application parallelism.
+runtime_helpers=2
+allowed_tasks=$((configured + 1 + runtime_helpers))
+(( max_tasks <= allowed_tasks )) || { echo "observed $max_tasks threads in one Zig process (>1 coordinator + $configured workers + $runtime_helpers Zig runtime helpers)" >&2; exit 1; }
+echo "Zig thread observation: samples=$observations max_process_threads=$max_tasks configured_workers=$configured runtime_helpers=$runtime_helpers affinity<=8: PASS"

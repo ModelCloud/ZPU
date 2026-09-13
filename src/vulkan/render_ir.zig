@@ -4,7 +4,7 @@
 const std = @import("std");
 
 pub const profile_version: u32 = 1;
-pub const serialization_version: u32 = 2;
+pub const serialization_version: u32 = 7;
 pub const max_values: usize = 4096;
 pub const max_instructions: usize = 4096;
 
@@ -349,6 +349,22 @@ pub const Op = enum(u8) {
     /// The second lane stores the signed i32 exponent as raw bits. Appended
     /// to preserve serialized values.
     f_frexp_struct,
+    /// Sample a bound two-dimensional combined image sampler using normalized
+    /// coordinates. The first operand is the resource interface, followed by
+    /// the coordinate and implicit-LOD bias values.
+    image_sample_implicit_lod,
+    local,
+    local_access,
+    local_load,
+    local_store,
+    label,
+    branch,
+    branch_conditional,
+    phi,
+    return_,
+    dpdx,
+    dpdy,
+    fwidth,
 };
 
 pub const Instruction = struct {
@@ -358,9 +374,14 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform };
+pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image };
 pub const max_uniform_members: usize = 16;
-pub const UniformMember = struct { ty: Type = .{ .scalar = .u32 }, offset: u32 = 0 };
+pub const UniformMember = struct {
+    ty: Type = .{ .scalar = .u32 },
+    offset: u32 = 0,
+    array_count: u32 = 1,
+    array_stride: u32 = 0,
+};
 pub const Interface = struct {
     storage: Storage,
     ty: Type,
@@ -368,6 +389,9 @@ pub const Interface = struct {
     descriptor_set: ?u32 = null,
     binding: ?u32 = null,
     builtin_position: bool = false,
+    builtin_frag_coord: bool = false,
+    builtin_front_facing: bool = false,
+    flat: bool = false,
     block: bool = false,
     member_count: u8 = 0,
     members: [max_uniform_members]UniformMember = .{UniformMember{}} ** max_uniform_members,
@@ -464,6 +488,9 @@ pub fn serialize(allocator: std.mem.Allocator, stage: Stage, entry_name: []const
         try putU32(&list, allocator, item.descriptor_set orelse std.math.maxInt(u32));
         try putU32(&list, allocator, item.binding orelse std.math.maxInt(u32));
         try list.append(allocator, @intFromBool(item.builtin_position));
+        try list.append(allocator, @intFromBool(item.builtin_frag_coord));
+        try list.append(allocator, @intFromBool(item.builtin_front_facing));
+        try list.append(allocator, @intFromBool(item.flat));
         try list.append(allocator, @intFromBool(item.block));
         try list.append(allocator, item.member_count);
         for (item.members[0..item.member_count]) |member| {
@@ -471,6 +498,8 @@ pub fn serialize(allocator: std.mem.Allocator, stage: Stage, entry_name: []const
             try list.append(allocator, member.ty.columns);
             try list.append(allocator, member.ty.rows);
             try putU32(&list, allocator, member.offset);
+            try putU32(&list, allocator, member.array_count);
+            try putU32(&list, allocator, member.array_stride);
         }
     }
     try putU32(&list, allocator, @intCast(instructions.len));
@@ -495,13 +524,16 @@ pub fn identify(bytes: []const u8) Identity {
 
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage => false,
+        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
+        .image_sample_implicit_lod => operand_index != 0,
+        .local_access, .local_store, .phi => true,
+        .local_load, .branch_conditional => operand_index == 0,
         .constant_composite => true,
         .access => operand_index != 0,
         .composite => true,
         .extract => operand_index == 0,
         .shuffle => operand_index < 2,
-        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .convert, .bitcast, .copy_object, .quantize_f16 => operand_index == 0,
+        .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .bit_not, .convert, .bitcast, .copy_object, .quantize_f16, .dpdx, .dpdy, .fwidth => operand_index == 0,
         .select => operand_index < 3,
         .u_min, .i_min, .u_max, .i_max => operand_index < 2,
         .f_clamp, .u_clamp, .i_clamp, .f_n_clamp => operand_index < 3,
@@ -549,7 +581,7 @@ fn declarationLess(context: DeclarationContext, a: u32, b: u32) bool {
 }
 
 fn declaration(op: Op) bool {
-    return op == .constant or op == .constant_composite;
+    return op == .constant or op == .constant_composite or op == .local;
 }
 
 /// Deterministically renumbers scalar constants by semantic bytes, then
@@ -634,7 +666,7 @@ test "serialization is exact little endian and identity checks full bytes" {
     const instructions = [_]Instruction{.{ .op = .constant, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{ 4, 3, 2, 1 } }};
     const bytes = try serialize(std.testing.allocator, .fragment, "main", &interfaces, &instructions);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x02\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
+    try std.testing.expectEqualSlices(u8, "ZPUIR3D\x00\x01\x00\x00\x00\x07\x00\x00\x00\x01\x04\x00\x00\x00main", bytes[0..25]);
     const first = identify(bytes);
     var changed = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(changed);

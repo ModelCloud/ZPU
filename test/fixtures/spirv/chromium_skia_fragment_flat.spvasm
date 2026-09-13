@@ -1,0 +1,46 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Google Skia SkSL; 0
+; Bound: 22
+; Schema: 0
+               OpCapability Shader
+          %5 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %6 "main" %7 %11 %13
+               OpExecutionMode %6 OriginUpperLeft
+               OpName %7 "sk_FragColor"
+               OpName %11 "vcolor_S0"
+               OpName %13 "sk_Clockwise"
+               OpName %6 "main"
+               OpName %19 "outputColor_S0"
+               OpDecorate %7 RelaxedPrecision
+               OpDecorate %7 Location 0
+               OpDecorate %7 Index 0
+               OpDecorate %11 RelaxedPrecision
+               OpDecorate %11 Location 0
+               OpDecorate %11 Flat
+               OpDecorate %13 BuiltIn FrontFacing
+               OpDecorate %19 RelaxedPrecision
+               OpDecorate %21 RelaxedPrecision
+          %1 = OpTypeInt 32 1
+          %2 = OpTypePointer Input %1
+          %8 = OpTypeFloat 32
+          %9 = OpTypeVector %8 4
+         %10 = OpTypePointer Output %9
+          %7 = OpVariable %10 Output
+         %12 = OpTypePointer Input %9
+         %11 = OpVariable %12 Input
+         %14 = OpTypeBool
+         %15 = OpTypePointer Input %14
+         %13 = OpVariable %15 Input
+         %16 = OpTypeVoid
+         %17 = OpTypeFunction %16
+         %20 = OpTypePointer Function %9
+          %6 = OpFunction %16 None %17
+         %18 = OpLabel
+         %19 = OpVariable %20 Function
+         %21 = OpLoad %9 %11
+               OpStore %19 %21
+               OpStore %7 %21
+               OpReturn
+               OpFunctionEnd
