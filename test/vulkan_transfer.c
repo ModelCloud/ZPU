@@ -172,14 +172,17 @@ int main(void) {
     memset(&physical_features, 0xff, sizeof(physical_features));
     vkGetPhysicalDeviceFeatures(physical, &physical_features);
     const uint8_t *feature_bytes = (const uint8_t *)&physical_features;
+    const size_t independent_blend_offset = (const uint8_t *)&physical_features.independentBlend - feature_bytes;
     const size_t multi_draw_offset = (const uint8_t *)&physical_features.multiDrawIndirect - feature_bytes;
     const size_t inherited_queries_offset = (const uint8_t *)&physical_features.inheritedQueries - feature_bytes;
     const size_t vertex_pipeline_stores_offset = (const uint8_t *)&physical_features.vertexPipelineStoresAndAtomics - feature_bytes;
+    CHECK_TRUE(physical_features.independentBlend == VK_TRUE);
     CHECK_TRUE(physical_features.multiDrawIndirect == VK_TRUE);
     CHECK_TRUE(physical_features.inheritedQueries == VK_TRUE);
     CHECK_TRUE(physical_features.vertexPipelineStoresAndAtomics == VK_TRUE);
     for (size_t i = 0; i < sizeof(physical_features); ++i) {
-        if ((i >= multi_draw_offset && i < multi_draw_offset + sizeof(VkBool32)) ||
+        if ((i >= independent_blend_offset && i < independent_blend_offset + sizeof(VkBool32)) ||
+            (i >= multi_draw_offset && i < multi_draw_offset + sizeof(VkBool32)) ||
             (i >= inherited_queries_offset && i < inherited_queries_offset + sizeof(VkBool32)) ||
             (i >= vertex_pipeline_stores_offset && i < vertex_pipeline_stores_offset + sizeof(VkBool32))) continue;
         CHECK_TRUE(feature_bytes[i] == 0);
@@ -319,12 +322,12 @@ int main(void) {
 
     VkFormatProperties fp;
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, &fp);
-    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
+    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
     CHECK_TRUE(fp.optimalTilingFeatures == fp.linearTilingFeatures && fp.bufferFeatures == 0);
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_R8G8B8A8_SRGB, &fp);
     CHECK_TRUE(fp.linearTilingFeatures == VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT && fp.optimalTilingFeatures == VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT && fp.bufferFeatures == 0);
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_B8G8R8A8_UNORM, &fp);
-    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
+    CHECK_TRUE(fp.linearTilingFeatures == (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT));
     CHECK_TRUE(fp.optimalTilingFeatures == fp.linearTilingFeatures && fp.bufferFeatures == 0);
     vkGetPhysicalDeviceFormatProperties(physical, VK_FORMAT_D32_SFLOAT, &fp);
     CHECK_TRUE(fp.linearTilingFeatures == 0 && fp.optimalTilingFeatures == (VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT) && fp.bufferFeatures == 0);
@@ -335,7 +338,7 @@ int main(void) {
     VkImageFormatProperties ifp;
     CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp));
     CHECK_TRUE(ifp.maxExtent.width == 8192 && ifp.maxExtent.height == 8192 && ifp.maxExtent.depth == 1);
-    CHECK_TRUE(ifp.maxMipLevels == 1 && ifp.maxArrayLayers == 256 && ifp.sampleCounts == VK_SAMPLE_COUNT_1_BIT && ifp.maxResourceSize == 256ull * 1024ull * 1024ull);
+    CHECK_TRUE(ifp.maxMipLevels == 16 && ifp.maxArrayLayers == 256 && ifp.sampleCounts == VK_SAMPLE_COUNT_1_BIT && ifp.maxResourceSize == 256ull * 1024ull * 1024ull);
     CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0, &ifp));
     CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &ifp));
     CHECK_VK(vkGetPhysicalDeviceImageFormatProperties(physical, VK_FORMAT_D32_SFLOAT, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &ifp));
@@ -351,7 +354,7 @@ int main(void) {
     bad.extent.width = UINT32_MAX;
     CHECK_TRUE(vkCreateImage(device, &bad, NULL, &bad_image) == VK_ERROR_INITIALIZATION_FAILED);
     VkBuffer bad_buffer;
-    VkBufferCreateInfo bad_buffer_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    VkBufferCreateInfo bad_buffer_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16, .usage = 1u << 31, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     CHECK_TRUE(vkCreateBuffer(device, &bad_buffer_info, NULL, &bad_buffer) == VK_ERROR_INITIALIZATION_FAILED);
 
     VkBuffer misaligned;
