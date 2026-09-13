@@ -3818,7 +3818,7 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // per texel followed by an opaque padding word. It supports the
         // sampled, transfer, and single color-attachment paths used by
         // Chromium's glyph atlases.
-        9 => 0x1 | 0x2 | 0x4 | 0x10,
+        9 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         43 => 0x4,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
