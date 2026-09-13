@@ -923,6 +923,13 @@ fn detectJitCandidate(program: *const ir.Program) ?JitCandidate {
     // already cloned and validated the whole program before this point.
     if (program.stage != .fragment or program.instructions.len != 251 or
         !std.mem.eql(u8, &program.identity.digest, &chromium_radial_gradient_identity)) return null;
+    // The digest covers the serialized interface records produced by the
+    // frontend, but callers can construct an `ir.Program` directly. Keep the
+    // prospective ORC ABI behind the same complete interface validation as
+    // the reference lowering. This is intentionally a second, cheap check at
+    // executor creation time: a stale identity paired with altered live
+    // interface metadata must remain interpreter-only.
+    _ = detectChromiumRadialGradient(program) orelse return null;
     return .chromium_radial_gradient_2004;
 }
 

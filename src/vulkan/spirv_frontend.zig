@@ -5766,6 +5766,20 @@ test "captured Chromium circular-gradient fragment remains a hot Render IR fixtu
     try std.testing.expectError(error.Bounds, executor.execute(short_bindings[0..binding_count], outputs[0..output_count]));
     try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 16), backing[outputs[0].interface][0..16]);
     try std.testing.expectError(error.Bounds, executor.executePrevalidated(short_bindings[0..binding_count], outputs[0..output_count]));
+
+    // A canonical digest is necessary but not sufficient at the prospective
+    // JIT ABI boundary: direct Program construction can pair a stale identity
+    // with altered interface metadata. Such a program is not eligible for
+    // generated code even though the generic executor still owns validation.
+    var altered_program = try fragment_program.clone(std.testing.allocator);
+    defer altered_program.deinit(std.testing.allocator);
+    for (altered_program.interfaces) |*interface| if (interface.storage == .sampled_image) {
+        interface.binding = 7;
+        break;
+    };
+    var altered_executor = try render_ir_exec.Executor.init(std.testing.allocator, &altered_program);
+    defer altered_executor.deinit();
+    try std.testing.expectEqualStrings("none", altered_executor.jitCandidateName());
 }
 
 test "specialization uniform matrix and fragment canonical identities are golden" {
