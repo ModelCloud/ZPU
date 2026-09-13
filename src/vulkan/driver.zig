@@ -12722,8 +12722,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (found or attribute.binding >= 16 or attribute.offset > 2047) return null;
             var binding_found = false;
             for (bindings) |binding| if (binding.binding == attribute.binding) {
-                const attribute_end = std.math.add(u32, attribute.offset, source_byte_size) catch return null;
-                if (binding_found or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride < attribute_end or binding.stride > 2048) return null;
+                if (binding_found or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
                 result.inputs[input_index].binding = attribute.binding;
                 result.inputs[input_index].offset = attribute.offset;
                 result.inputs[input_index].stride = binding.stride;
@@ -15662,6 +15661,21 @@ test "scalar graphics profile admits Chromium R32G32_UINT vertex inputs" {
     var storage: [16]u8 = undefined;
     const decoded = profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, &storage).?;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, decoded);
+
+    var crossing_attribute = attribute;
+    crossing_attribute.offset = 12;
+    var crossing_binding = binding;
+    crossing_binding.stride = 16;
+    const crossing_vi = PipelineVertexInputStateCreateInfo{
+        .s_type = 19,
+        .p_next = null,
+        .flags = 0,
+        .binding_count = 1,
+        .bindings = @ptrCast(&crossing_binding),
+        .attribute_count = 1,
+        .attributes = @ptrCast(&crossing_attribute),
+    };
+    try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &crossing_vi) != null);
 }
 
 test "scalar graphics profile executes descriptor uniform blocks" {
