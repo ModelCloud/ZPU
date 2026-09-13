@@ -1834,6 +1834,7 @@ var render_diagnostic_page_target_matches = std.atomic.Value(u32).init(0);
 var render_diagnostic_glyph_fragment = std.atomic.Value(u32).init(0);
 var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
+var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
 // These counters deliberately describe accepted native work rather than API
 // attempts.  They make a Chromium run auditable even when its per-draw trace
 // is capped: every line is scoped to this ICD process and is emitted only by
@@ -1893,6 +1894,15 @@ fn renderDiagnosticsEnabled() bool {
 /// every raster operation.
 fn profileIrDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Attribute an ordered Mosaic batch to its individual profile draws. This is
+/// opt-in because a clock read around every tile/draw pair would perturb the
+/// workload being measured. The records identify the next scalar or SIMD
+/// candidate without weakening the execution contract.
+fn profileTimingDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_TIMING") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
@@ -10965,6 +10975,8 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
     const operation_start = frame_pacing.monotonicNs();
+    const timing_enabled = profileTimingDiagnosticsEnabled();
+    var command_elapsed_ns = [_]u64{0} ** profile_mosaic_batch_commands;
     const start = cursor.*;
     var tile_y: u32 = 0;
     while (tile_y < color_image.height) : (tile_y += profile_mosaic_tile_size) {
@@ -10984,7 +10996,9 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                     .cube_draw => |value| value,
                     else => return null,
                 };
+                const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
                 executeProfileDraw(op, query_context, 0, clip);
+                if (timing_enabled) command_elapsed_ns[draw_index] += frame_pacing.monotonicNs() - command_start;
                 draw_cursor.advance();
             }
         }
@@ -10997,6 +11011,14 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     // frame pacing shows time spent before presentation rather than attributing
     // it to an opaque gap in the browser.
     color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 32) {
+        std.debug.print(
+            "ZPU Mosaic profile timing target={d}x{d} commands={d} total_ns={d}",
+            .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
+        );
+        for (command_elapsed_ns[0..batch_count], 0..) |elapsed, index| std.debug.print(" draw[{d}]_ns={d}", .{ index, elapsed });
+        std.debug.print("\n", .{});
+    }
     cursor.* = candidate;
     return batch_count;
 }
