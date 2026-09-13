@@ -16016,6 +16016,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         const sampled = command_buffer.impl.bound_sampled_descriptors orelse return null;
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
+        snapshot.sampled_images = sampled.sampled_images;
         snapshot.sampled_source_set = sampled;
     }
     snapshot.synthetic = true;
