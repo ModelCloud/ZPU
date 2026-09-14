@@ -12724,20 +12724,16 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
             for (0..region.image_extent.height) |y| {
                 const source_row = bo + y * @as(usize, @intCast(row)) * @as(usize, @intCast(bytes_per_texel));
                 const image_row = io + y * @as(usize, mip.width) * 4;
-                if (to_image and image.format == 9) {
-                    for (0..region.image_extent.width) |x| {
-                        const source = b[source_row + x];
-                        std.mem.writeInt(u32, pixels[image_row + x * 4 ..][0..4], @as(u32, source) | 0xff00_0000, .little);
+                for (0..region.image_extent.width) |x| {
+                    if (to_image) {
+                        pixels[image_row + x * 4] = b[source_row + x * @as(usize, @intCast(bytes_per_texel))];
+                        pixels[image_row + x * 4 + 1] = if (image.format == 16) b[source_row + x * 2 + 1] else 0;
+                        pixels[image_row + x * 4 + 2] = 0;
+                        pixels[image_row + x * 4 + 3] = 255;
+                    } else {
+                        b[source_row + x * @as(usize, @intCast(bytes_per_texel))] = pixels[image_row + x * 4];
+                        if (image.format == 16) b[source_row + x * 2 + 1] = pixels[image_row + x * 4 + 1];
                     }
-                } else if (to_image) {
-                    for (0..region.image_extent.width) |x| {
-                        const source = source_row + x * 2;
-                        const pixel = @as(u32, b[source]) | (@as(u32, b[source + 1]) << 8) | 0xff00_0000;
-                        std.mem.writeInt(u32, pixels[image_row + x * 4 ..][0..4], pixel, .little);
-                    }
-                } else for (0..region.image_extent.width) |x| {
-                    b[source_row + x * @as(usize, @intCast(bytes_per_texel))] = pixels[image_row + x * 4];
-                    if (image.format == 16) b[source_row + x * 2 + 1] = pixels[image_row + x * 4 + 1];
                 }
             }
         }
