@@ -10421,6 +10421,35 @@ fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, 
     return 1;
 }
 
+/// Exact specialization of the source-over blend state Chromium uses for
+/// compositor layers. It intentionally preserves the scalar path's f32
+/// operation order and u8 conversion; it only removes repeated factor and
+/// equation dispatch after the caller has selected this exact fixed state.
+fn profileWriteSourceOverColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32) ?u32 {
+    if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+    const storage_indices = colorStorageIndices(format) orelse return null;
+    var source = source_values;
+    for (&source) |*value| {
+        if (!std.math.isFinite(value.*)) return null;
+        value.* = std.math.clamp(value.*, 0, 1);
+    }
+    var destination: [4]f32 = undefined;
+    for (&destination, 0..) |*value, channel| value.* = @as(f32, @floatFromInt(bytes[storage_indices[channel]])) / 255.0;
+    const destination_factor = 1 - source[3];
+    var result: [4]f32 = undefined;
+    for (&result, 0..) |*value, channel| {
+        value.* = source[channel] + destination[channel] * destination_factor;
+        if (!std.math.isFinite(value.*)) return null;
+        value.* = std.math.clamp(value.*, 0, 1);
+    }
+    var rgba: [4]u8 = undefined;
+    for (&rgba, 0..) |*value, index| value.* = @intFromFloat(std.math.clamp(result[index], 0, 1) * 255.0);
+    for (storage_indices, 0..) |storage_index, channel| {
+        if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) bytes[storage_index] = rgba[channel];
+    }
+    return 1;
+}
+
 fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
     var source: [4]f32 = undefined;
     if (fragment_bool) {
@@ -10432,6 +10461,19 @@ fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []co
         for (&source, 0..) |*value, index| value.* = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
     }
     return profileWriteColorComponents(bytes, format, source, color_write_mask, blend);
+}
+
+fn profileWriteSourceOverColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32) ?u32 {
+    var source: [4]f32 = undefined;
+    if (fragment_bool) {
+        if (output.len < 4) return null;
+        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
+        source = .{ if (value) 1 else 0, if (value) 1 else 0, if (value) 1 else 0, 1 };
+    } else {
+        if (output.len < 16) return null;
+        for (&source, 0..) |*value, index| value.* = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
+    }
+    return profileWriteSourceOverColorComponents(bytes, format, source, color_write_mask);
 }
 
 /// Check draw-invariant blend state before a direct profile loop starts
@@ -10555,6 +10597,25 @@ test "scalar profile color blending uses source and destination factors" {
         bytes = .{ 0, 0, 0, 255 };
         try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0xf, blend));
     }
+}
+
+test "specialized source-over color write matches the generic scalar blend" {
+    const source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
+    var seed: u32 = 0x9e37_79b9;
+    for ([_]i32{ 9, 37, 44 }) |format| for ([_]u32{ 0, 1, 5, 0xf }) |mask| for (0..1024) |_| {
+        seed = seed *% 1_664_525 +% 1_013_904_223;
+        var generic = [_]u8{ @truncate(seed), @truncate(seed >> 8), @truncate(seed >> 16), @truncate(seed >> 24) };
+        var specialized = generic;
+        seed = seed *% 1_664_525 +% 1_013_904_223;
+        const source = [_]f32{
+            @as(f32, @floatFromInt(seed & 0x3ff)) / 768 - 0.25,
+            @as(f32, @floatFromInt((seed >> 10) & 0x3ff)) / 768 - 0.25,
+            @as(f32, @floatFromInt((seed >> 20) & 0x3ff)) / 768 - 0.25,
+            @as(f32, @floatFromInt((seed >> 2) & 0x3ff)) / 768 - 0.25,
+        };
+        try std.testing.expectEqual(profileWriteColorComponents(&generic, format, source, mask, source_over), profileWriteSourceOverColorComponents(&specialized, format, source, mask));
+        try std.testing.expectEqualSlices(u8, &generic, &specialized);
+    };
 }
 
 test "scalar profile blend-state preflight accepts only supported finite state" {
@@ -11368,6 +11429,18 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         }
         return;
     }
+    const draw_blend = ProfileBlendState{
+        .enable = op.pipeline.color_blend_enable,
+        .src_color_factor = op.pipeline.src_color_blend_factor,
+        .dst_color_factor = op.pipeline.dst_color_blend_factor,
+        .color_op = op.pipeline.color_blend_op,
+        .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+        .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+        .alpha_op = op.pipeline.alpha_blend_op,
+        .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
+    };
+    const direct_source_over_write = draw_blend.enable == 1 and draw_blend.src_color_factor == 1 and draw_blend.dst_color_factor == 7 and draw_blend.color_op == 0 and
+        draw_blend.src_alpha_factor == 1 and draw_blend.dst_alpha_factor == 7 and draw_blend.alpha_op == 0;
     var vertices: [3]ProfileScreenVertex = undefined;
     for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
@@ -11996,22 +12069,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
                 }
                 if (color_bytes) |color_storage| {
-                    const blend = ProfileBlendState{
-                        .enable = op.pipeline.color_blend_enable,
-                        .src_color_factor = op.pipeline.src_color_blend_factor,
-                        .dst_color_factor = op.pipeline.dst_color_blend_factor,
-                        .color_op = op.pipeline.color_blend_op,
-                        .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
-                        .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
-                        .alpha_op = op.pipeline.alpha_blend_op,
-                        .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
-                    };
                     const wrote = if (direct_vp9_opaque_write)
                         profileWriteOpaqueColor(color_storage[offset..][0..4], color.?.format, &fragment_output_bytes)
                     else if (direct_fragment_color) |components|
-                        profileWriteColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask, blend)
+                        if (direct_source_over_write)
+                            profileWriteSourceOverColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask)
+                        else
+                            profileWriteColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask, draw_blend)
+                    else if (direct_source_over_write)
+                        profileWriteSourceOverColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask)
                     else
-                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, blend);
+                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
                     if (wrote == null) return;
                 }
                 if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
