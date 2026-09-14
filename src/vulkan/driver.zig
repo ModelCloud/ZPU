@@ -10805,6 +10805,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             return;
         } orelse return;
     }
+    const passthrough_plan = profile.fragment.passthroughPlan();
+    var passthrough_varying: ?usize = null;
+    if (passthrough_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+        if (varying.fragment_interface == plan.input_interface) passthrough_varying = index;
+    };
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
@@ -11032,6 +11037,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             profile.fragment_frag_coord == null and
             profile.varyings[radial_mask_color_varying.?].lanes == 4 and !profile.varyings[radial_mask_color_varying.?].flat and
             profile.varyings[radial_mask_coordinate_varying.?].lanes == 4 and !profile.varyings[radial_mask_coordinate_varying.?].flat;
+        const direct_passthrough_coordinates = passthrough_plan != null and passthrough_varying != null and
+            profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+            profile.varyings[passthrough_varying.?].lanes == 4 and !profile.varyings[passthrough_varying.?].flat;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
@@ -11096,6 +11104,24 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 }
                 profile.fragment.executeRadialMaskPreparedCoordinates(radial_mask_prepared.?, radial_color, radial_coordinates, &fragment_output_bytes) catch |err| {
                     if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                    return;
+                };
+            } else if (direct_passthrough_coordinates) {
+                const q0 = b0 / vertices[0].w;
+                const q1 = b1 / vertices[1].w;
+                const q2 = b2 / vertices[2].w;
+                const denominator = q0 + q1 + q2;
+                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                const varying = passthrough_varying.?;
+                var value: [4]f32 = undefined;
+                for (0..4) |lane| {
+                    const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
+                    const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
+                    const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
+                    value[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
+                }
+                _ = profile.fragment.executePassthroughCoordinates(value, &fragment_output_bytes) catch |err| {
+                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct pass-through failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                     return;
                 };
             } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {

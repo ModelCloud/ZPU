@@ -772,6 +772,14 @@ pub const RadialMaskPrepared = struct {
     bias: f32,
 };
 
+/// Exact ABI of Chromium's canonical vec4 pass-through compositor profile.
+/// It is identity-gated because even a seemingly trivial extra operation can
+/// be shader-visible for NaNs or signed zero.
+pub const PassthroughPlan = struct {
+    input_interface: u32,
+    output_interface: u32,
+};
+
 /// Fully validated interface map for Chromium's simple final-composite
 /// shader.  The driver may resolve these interfaces once per triangle and
 /// invoke the direct form for every covered pixel, avoiding repeated generic
@@ -836,6 +844,7 @@ const FastPath = union(enum) {
     sample_coverage: SampleCoverageFastPath,
     vp9_color_transform: Vp9ColorTransformPlan,
     radial_mask: RadialMaskPlan,
+    passthrough: PassthroughPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -869,6 +878,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumVp9SampleCoverage(program)) |path| return .{ .sample_coverage = path };
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
+    if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     if (detectChromiumClampedConvolution(program)) |path| return .{ .clamped_convolution_8tap = path };
@@ -1047,6 +1057,13 @@ const chromium_radial_mask_identity = [_]u8{
     0x2d, 0xdc, 0x07, 0xc5, 0x5a, 0x1d, 0xcb, 0xa5,
 };
 
+const chromium_passthrough_identity = [_]u8{
+    0x9a, 0x0c, 0xe3, 0x40, 0xc2, 0xa3, 0xe9, 0x4e,
+    0xab, 0x6f, 0x77, 0x27, 0x46, 0xb9, 0xe4, 0xdc,
+    0x2a, 0x00, 0xa3, 0x53, 0x5b, 0xb1, 0xb1, 0x9e,
+    0xbd, 0x7d, 0xa4, 0x11, 0xca, 0xd6, 0x05, 0x3a,
+};
+
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1205,6 +1222,20 @@ fn detectChromiumRadialMask(program: *const ir.Program) ?RadialMaskPlan {
     return .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 4, .image_interface = 5, .output_interface = 3, .bias_literal = .{ 51, 51, 243, 190 } };
 }
 
+fn detectChromiumPassthrough(program: *const ir.Program) ?PassthroughPlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 6 or program.interfaces.len != 3 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_passthrough_identity)) return null;
+    const input = program.interfaces[0];
+    const front_facing = program.interfaces[1];
+    const output = program.interfaces[2];
+    if (input.storage != .input or !same(input.ty, f32x4) or input.location == null or input.location.? != 0 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0) return null;
+    return .{ .input_interface = 0, .output_interface = 2 };
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
@@ -1257,6 +1288,7 @@ pub const Executor = struct {
             .sample_coverage => "chromium_vp9_sample_coverage",
             .vp9_color_transform => "chromium_vp9_color_transform",
             .radial_mask => "chromium_radial_mask",
+            .passthrough => "chromium_passthrough",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
@@ -1317,6 +1349,14 @@ pub const Executor = struct {
     pub fn radialMaskPlan(self: *const Executor) ?RadialMaskPlan {
         return switch (self.fast_path orelse return null) {
             .radial_mask => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the ABI only for Chromium's exact vec4 pass-through profile.
+    pub fn passthroughPlan(self: *const Executor) ?PassthroughPlan {
+        return switch (self.fast_path orelse return null) {
+            .passthrough => |plan| plan,
             else => null,
         };
     }
@@ -1810,6 +1850,18 @@ pub const Executor = struct {
         try executeRadialMaskPreparedCoordinatesResolved(prepared, color_values, coordinate, bytes);
     }
 
+    fn executePassthroughFastPath(path: PassthroughPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.input_interface));
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(value.bits[lane]), .little);
+    }
+
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
             .sample_modulate => |path| {
@@ -1871,6 +1923,7 @@ pub const Executor = struct {
                 try executeVp9ColorTransformResolved(luma_coordinates.bytes, chroma_coordinates.bytes, uniform.bytes, try findSampledImage(bindings, path.luma_image_interface), try findSampledImage(bindings, path.chroma_image_interface), output orelse return error.InvalidOutput);
             },
             .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
+            .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
@@ -1989,6 +2042,16 @@ pub const Executor = struct {
     /// transient binding records and repeated push-constant decoding.
     pub fn executeRadialMaskPreparedCoordinates(_: *const Executor, prepared: RadialMaskPrepared, color: [4]f32, coordinates: [4]f32, output: []u8) Error!void {
         try executeRadialMaskPreparedCoordinatesResolved(prepared, color, coordinates, output);
+    }
+
+    /// Raster-side form of the exact pass-through profile. It preserves the
+    /// executor's canonical floating-point output policy while avoiding
+    /// binding-table construction for a value that is simply forwarded.
+    pub fn executePassthroughCoordinates(self: *const Executor, value: [4]f32, output: []u8) Error!bool {
+        _ = self.passthroughPlan() orelse return false;
+        if (output.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(value[lane])), .little);
+        return true;
     }
 
     /// Execute an exact prevalidated specialization for the driver's hot
