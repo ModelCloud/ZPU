@@ -2343,6 +2343,17 @@ pub const Executor = struct {
         const offset01 = row1 + column0;
         const offset11 = row1 + column1;
         var result: [2]f32 = .{ 0, 0 };
+        // A one-to-one luma plane lands exactly on texel centres. The normal
+        // bilinear expression is then identically p00 (all source values are
+        // finite UNORM values), so avoid three redundant loads and the zero
+        // weight arithmetic. Chroma and scaled planes retain the generic
+        // expression below. This condition is evaluated after the same
+        // coordinate/clamp/floor sequence, preserving its exact boundary
+        // behavior including negative zero.
+        if (tx == 0 and ty == 0) {
+            for (0..components) |lane| result[lane] = unorm8_to_f32[image.pixels[offset00 + lane]];
+            return result;
+        }
         for (0..components) |lane| {
             const p00 = unorm8_to_f32[image.pixels[offset00 + lane]];
             const p10 = unorm8_to_f32[image.pixels[offset10 + lane]];
@@ -2351,6 +2362,28 @@ pub const Executor = struct {
             result[lane] = (p00 * (1 - tx) + p10 * tx) * (1 - ty) + (p01 * (1 - tx) + p11 * tx) * ty;
         }
         return result;
+    }
+
+    test "prepared VP9 sampling preserves centre texels and bilinear samples" {
+        const pixels = [_]u8{ 10, 20, 30, 40 };
+        const image = SampledImage{
+            .pixels = &pixels,
+            .width = 2,
+            .height = 2,
+            .row_stride = 2,
+            .bytes_per_texel = 1,
+            .format = .r8_unorm,
+            .filter = .linear,
+            .address_u = .clamp_to_edge,
+            .address_v = .clamp_to_edge,
+        };
+        const centre = sampleVp9PlanePrepared(image, 0.25, 0.25);
+        try std.testing.expectEqual(unorm8_to_f32[10], centre[0]);
+        try std.testing.expectEqual(@as(f32, 0), centre[1]);
+        const bilinear = sampleVp9PlanePrepared(image, 0.5, 0.5);
+        const expected = (unorm8_to_f32[10] * 0.5 + unorm8_to_f32[20] * 0.5) * 0.5 +
+            (unorm8_to_f32[30] * 0.5 + unorm8_to_f32[40] * 0.5) * 0.5;
+        try std.testing.expectEqual(expected, bilinear[0]);
     }
 
     fn sampleCoverageImageIsFast(image: SampledImage) bool {
