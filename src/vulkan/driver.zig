@@ -12342,6 +12342,20 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
         );
         for (command_elapsed_ns[0..batch_count], 0..) |elapsed, index| std.debug.print(" draw[{d}]_ns={d}", .{ index, elapsed });
+        var timing_cursor = start;
+        for (0..batch_count) |index| {
+            const raw = timing_cursor.current() orelse break;
+            const op = switch (raw.*) {
+                .cube_draw => |value| value,
+                else => break,
+            };
+            const profile = switch (op.pipeline.execution_abi) {
+                .profile_v1_scalar_graphics => |value| value,
+                else => break,
+            };
+            std.debug.print(" path[{d}]={s} ir[{d}]={x}", .{ index, profile.fragment.prevalidatedPathName(), index, profile.fragment.program.identity.digest });
+            timing_cursor.advance();
+        }
         std.debug.print("\n", .{});
     }
     cursor.* = candidate;
