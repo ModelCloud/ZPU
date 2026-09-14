@@ -10432,6 +10432,23 @@ fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []co
     return profileWriteColorComponents(bytes, format, source, color_write_mask, blend);
 }
 
+/// Check draw-invariant blend state before a direct profile loop starts
+/// writing.  A direct loop must never discover an unsupported blend factor
+/// after updating only part of its rectangle: the ordinary scalar path
+/// remains the fallback until this narrow precondition is proved.
+fn profileBlendStateSupported(blend: ProfileBlendState) bool {
+    for (blend.constants) |value| if (!std.math.isFinite(value)) return false;
+    if (blend.enable == 0) return true;
+    const zero = [_]f32{ 0, 0, 0, 0 };
+    for (0..4) |channel| {
+        const alpha = channel == 3;
+        if (profileBlendFactor(if (alpha) blend.src_alpha_factor else blend.src_color_factor, zero, zero, blend.constants, channel, alpha) == null or
+            profileBlendFactor(if (alpha) blend.dst_alpha_factor else blend.dst_color_factor, zero, zero, blend.constants, channel, alpha) == null or
+            profileBlendEquation(if (alpha) blend.alpha_op else blend.color_op, 0, 0) == null) return false;
+    }
+    return true;
+}
+
 /// Write an opaque RGBA fragment without loading destination color.  This is
 /// equivalent to `profileWriteColor` only when the caller has established a
 /// complete write mask and either blending is disabled or the fixed-function
@@ -10522,6 +10539,13 @@ test "scalar profile color blending uses source and destination factors" {
         bytes = .{ 0, 0, 0, 255 };
         try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0xf, blend));
     }
+}
+
+test "scalar profile blend-state preflight accepts only supported finite state" {
+    try std.testing.expect(profileBlendStateSupported(.{}));
+    try std.testing.expect(profileBlendStateSupported(.{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 }));
+    try std.testing.expect(!profileBlendStateSupported(.{ .enable = 1, .src_color_factor = 15 }));
+    try std.testing.expect(!profileBlendStateSupported(.{ .constants = .{ std.math.nan(f32), 0, 0, 0 } }));
 }
 
 fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
@@ -11228,6 +11252,84 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(vp9_quad_pixels, .monotonic);
         if (color) |color_image| {
             color_image.content_bounds = unionRect(color_image.content_bounds, vp9_quad_bounds);
+            color_image.complex_3d_content = true;
+            color_image.force_full_present = true;
+        }
+        return;
+    }
+
+    // Chromium's exact texture-copy compositor profile is also routinely
+    // emitted as a four-vertex affine strip. The generic rasterizer would
+    // process its two triangles independently, repeating edge tests and
+    // perspective interpolation for every pixel. Admit a rectangular form
+    // only after proving the complete geometry, coordinate grid, and blend
+    // state are equivalent.
+    var texture_copy_quad_bounds = emptyRect();
+    var texture_copy_quad_pixels: usize = 0;
+    const direct_texture_copy_affine_quad = blk: {
+        if (texture_copy_prepared == null or texture_copy_coordinate_varying == null or
+            op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
+            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
+            profile.varying_count != 1 or profile.varyings[texture_copy_coordinate_varying.?].lanes != 2 or profile.varyings[texture_copy_coordinate_varying.?].flat or
+            profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or colorStorageIndices(color.?.format) == null or
+            op.pipeline.color_write_mask & ~@as(u32, 0xf) != 0) break :blk false;
+        const blend = ProfileBlendState{
+            .enable = op.pipeline.color_blend_enable,
+            .src_color_factor = op.pipeline.src_color_blend_factor,
+            .dst_color_factor = op.pipeline.dst_color_blend_factor,
+            .color_op = op.pipeline.color_blend_op,
+            .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+            .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+            .alpha_op = op.pipeline.alpha_blend_op,
+            .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
+        };
+        if (!profileBlendStateSupported(blend)) break :blk false;
+        const v0 = profileEvaluateVertex(op, profile, 0, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v1 = profileEvaluateVertex(op, profile, 1, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v2 = profileEvaluateVertex(op, profile, 2, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v3 = profileEvaluateVertex(op, profile, 3, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const varying = texture_copy_coordinate_varying.?;
+        const t0 = profileEvaluatedVaryingVec2(&v0, varying) orelse break :blk false;
+        const t1 = profileEvaluatedVaryingVec2(&v1, varying) orelse break :blk false;
+        const t2 = profileEvaluatedVaryingVec2(&v2, varying) orelse break :blk false;
+        const t3 = profileEvaluatedVaryingVec2(&v3, varying) orelse break :blk false;
+        const unit_w = @as(u32, @bitCast(v0.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v1.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v2.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v3.screen.w)) == 0x3f80_0000;
+        const affine_geometry = unit_w and v0.screen.x == v1.screen.x and v0.screen.y == v2.screen.y and v2.screen.x == v3.screen.x and v1.screen.y == v3.screen.y and
+            v0.screen.z == v1.screen.z and v0.screen.z == v2.screen.z and v0.screen.z == v3.screen.z and v2.screen.x > v0.screen.x and v1.screen.y > v0.screen.y and
+            t0[0] == t1[0] and t0[1] == t2[1] and t2[0] == t3[0] and t1[1] == t3[1];
+        if (!affine_geometry) break :blk false;
+        const min_x = @max(@as(i32, @intFromFloat(@floor(v0.screen.x))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(v0.screen.y))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(v2.screen.x))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(v1.screen.y))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
+        if (max_x <= min_x or max_y <= min_y) break :blk false;
+        const inverse_width = 1.0 / (v2.screen.x - v0.screen.x);
+        const inverse_height = 1.0 / (v1.screen.y - v0.screen.y);
+        for (@intCast(min_y)..@intCast(max_y)) |y| {
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            const vertical = (py - v0.screen.y) * inverse_height;
+            for (@intCast(min_x)..@intCast(max_x)) |x| {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const horizontal = (px - v0.screen.x) * inverse_width;
+                const coordinates = [2]f32{
+                    t0[0] + horizontal * (t2[0] - t0[0]),
+                    t0[1] + vertical * (t1[1] - t0[1]),
+                };
+                profile.fragment.executeTextureCopyPreparedCoordinates(texture_copy_prepared.?, coordinates, &fragment_output_bytes) catch return;
+                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                if (profileWriteColor(color_bytes.?[offset..][0..4], color.?.format, false, &fragment_output_bytes, op.pipeline.color_write_mask, blend) == null) return;
+            }
+        }
+        texture_copy_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
+        texture_copy_quad_pixels = @as(usize, @intCast(max_x - min_x)) * @as(usize, @intCast(max_y - min_y));
+        break :blk true;
+    };
+    if (direct_texture_copy_affine_quad) {
+        if (!publish_metadata) return;
+        if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(texture_copy_quad_pixels, .monotonic);
+        if (color) |color_image| {
+            color_image.content_bounds = unionRect(color_image.content_bounds, texture_copy_quad_bounds);
             color_image.complex_3d_content = true;
             color_image.force_full_present = true;
         }
