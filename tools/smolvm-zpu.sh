@@ -11,6 +11,7 @@ cpus=${ZPU_SMOLVM_CPUS:-8}
 memory=${ZPU_SMOLVM_MEMORY:-8192}
 guest_cpu_tier=${ZPU_GUEST_CPU_TIER:-baseline}
 guest_optimize=${ZPU_GUEST_OPTIMIZE:-ReleaseSafe}
+guest_build_step=${ZPU_GUEST_BUILD_STEP:-install}
 smolvm_uid_drop=${ZPU_SMOLVM_UID_DROP:-on}
 display=${DISPLAY:-:0}
 socket_root=${ZPU_SMOLVM_TEST_SOCKET_ROOT:-/tmp/.X11-unix}
@@ -25,6 +26,7 @@ die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 [[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
 [[ $guest_cpu_tier == baseline || $guest_cpu_tier == native ]] || die 'ZPU_GUEST_CPU_TIER must be baseline or native'
 [[ $guest_optimize == ReleaseSafe || $guest_optimize == ReleaseFast ]] || die 'ZPU_GUEST_OPTIMIZE must be ReleaseSafe or ReleaseFast'
+[[ $guest_build_step == install || $guest_build_step == icd-install ]] || die 'ZPU_GUEST_BUILD_STEP must be install or icd-install'
 case $smolvm_uid_drop in
     on) unset SMOLVM_VM_UID_DROP ;;
     off) export SMOLVM_VM_UID_DROP=off ;;
@@ -391,7 +393,7 @@ sync_source() {
         rm -f -- "$source_archive" "$source_part_prefix"*
     fi
 }
-build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- env "ZPU_GUEST_CPU_TIER=$guest_cpu_tier" "ZPU_GUEST_OPTIMIZE=$guest_optimize" /mnt/zpu-source/smolvm/guest-build.sh; }
+build_guest() { reject_host_injection; sync_source; run smolvm machine exec --name "$machine" -- env "ZPU_GUEST_CPU_TIER=$guest_cpu_tier" "ZPU_GUEST_OPTIMIZE=$guest_optimize" "ZPU_GUEST_BUILD_STEP=$guest_build_step" /mnt/zpu-source/smolvm/guest-build.sh; }
 package_guest() {
     reject_host_injection
     assert_network_disabled
