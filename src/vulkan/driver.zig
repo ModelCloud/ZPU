@@ -11061,6 +11061,16 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     // input or descriptor dependency, but the ordinary bounded blend writer
     // remains responsible for its destination-visible effect.
     const constant_black_plan = profile.fragment.constantBlackPlan();
+    // This identity's fwidth is evaluated from the ordinary perspective-
+    // resolved varying gradients below. Keep that direct ABI separate from
+    // simpler color-only profiles: its derivative order is shader-visible.
+    const analytic_coverage_plan = profile.fragment.analyticCoveragePlan();
+    var analytic_coverage_color_varying: ?usize = null;
+    var analytic_coverage_coordinate_varying: ?usize = null;
+    if (analytic_coverage_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+        if (varying.fragment_interface == plan.color_interface) analytic_coverage_color_varying = index;
+        if (varying.fragment_interface == plan.coordinate_interface) analytic_coverage_coordinate_varying = index;
+    };
     const circle_mask_plan = profile.fragment.circleMaskPlan();
     var circle_mask_circle_varying: ?usize = null;
     var circle_mask_color_varying: ?usize = null;
@@ -11666,6 +11676,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                 &fragment_output_bytes,
                             ) catch |err| {
                                 if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (analytic_coverage_plan != null) {
+                            const color_varying = analytic_coverage_color_varying orelse break :direct false;
+                            const coordinate_varying = analytic_coverage_coordinate_varying orelse break :direct false;
+                            break :direct profile.fragment.executeAnalyticCoverageDirect(
+                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                fragment_dpdx_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                fragment_dpdy_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
                         }

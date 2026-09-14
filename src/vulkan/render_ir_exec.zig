@@ -809,6 +809,15 @@ pub const ConstantBlackPlan = struct {
     output_interface: u32,
 };
 
+/// Exact ABI of Chromium's derivative-based analytic coverage profile. The
+/// direct form preserves the canonical IR's f32 operation and derivative
+/// order; it is not a general replacement for fragment derivatives.
+pub const AnalyticCoveragePlan = struct {
+    color_interface: u32,
+    coordinate_interface: u32,
+    output_interface: u32,
+};
+
 /// Exact ABI of Chromium's small analytic circle-coverage profile. It is
 /// identity-gated: the direct form is not a generic replacement for GLSL
 /// Length or clamp programs.
@@ -907,6 +916,7 @@ const FastPath = union(enum) {
     radial_mask: RadialMaskPlan,
     passthrough: PassthroughPlan,
     constant_black: ConstantBlackPlan,
+    analytic_coverage: AnalyticCoveragePlan,
     circle_mask: CircleMaskPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
@@ -948,6 +958,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
     if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
     if (detectChromiumConstantBlack(program)) |path| return .{ .constant_black = path };
+    if (detectChromiumAnalyticCoverage(program)) |path| return .{ .analytic_coverage = path };
     if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
@@ -1193,6 +1204,15 @@ const chromium_constant_black_identity = [_]u8{
     0xdf, 0x3a, 0x38, 0xd4, 0x07, 0xc4, 0xe0, 0x95,
 };
 
+/// Canonical identity of Chromium's derivative-based analytic coverage
+/// fragment captured as the dominant two-core compositor profile.
+const chromium_analytic_coverage_identity = [_]u8{
+    0xcb, 0x55, 0x63, 0x18, 0x4b, 0xb2, 0x2a, 0xc7,
+    0xf0, 0x2b, 0x70, 0xae, 0xff, 0x30, 0xc3, 0x95,
+    0x05, 0x45, 0xd8, 0x19, 0xfb, 0x8a, 0xe4, 0x96,
+    0x6b, 0x60, 0xe6, 0xfe, 0x6e, 0x0a, 0x31, 0x9e,
+};
+
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1418,6 +1438,54 @@ fn detectChromiumConstantBlack(program: *const ir.Program) ?ConstantBlackPlan {
     return .{ .output_interface = 2 };
 }
 
+fn detectChromiumAnalyticCoverage(program: *const ir.Program) ?AnalyticCoveragePlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const u32_scalar = ir.Type{ .scalar = .u32 };
+    if (program.stage != .fragment or program.instructions.len != 46 or program.interfaces.len != 4 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_analytic_coverage_identity)) return null;
+    const color = program.interfaces[0];
+    const coordinates = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const instructions = program.instructions;
+    const zero = [_]u8{ 0, 0, 0, 0 };
+    const one_half = [_]u8{ 0, 0, 0, 63 };
+    const two = [_]u8{ 0, 0, 0, 64 };
+    const one = [_]u8{ 0, 0, 128, 63 };
+    const label_21 = [_]u8{ 21, 0, 0, 0 };
+    const label_35 = [_]u8{ 35, 0, 0, 0 };
+    const label_36 = [_]u8{ 36, 0, 0, 0 };
+    const label_37 = [_]u8{ 37, 0, 0, 0 };
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinates.storage != .input or !same(coordinates.ty, f32x2) or coordinates.location == null or coordinates.location.? != 1 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or !std.mem.eql(u8, instructions[0].literal, &zero) or
+        instructions[1].op != .constant or !same(instructions[1].ty, f32_scalar) or instructions[1].operands.len != 0 or !std.mem.eql(u8, instructions[1].literal, &one_half) or
+        instructions[2].op != .constant or !same(instructions[2].ty, f32_scalar) or instructions[2].operands.len != 0 or !std.mem.eql(u8, instructions[2].literal, &two) or
+        instructions[3].op != .constant or !same(instructions[3].ty, f32_scalar) or instructions[3].operands.len != 0 or !std.mem.eql(u8, instructions[3].literal, &one) or
+        !exactInstruction(instructions[4], .local, f32_scalar, &.{}) or !exactInstruction(instructions[5], .local, f32_scalar, &.{}) or
+        !exactInstruction(instructions[6], .local, f32_scalar, &.{}) or !exactInstruction(instructions[7], .local, f32_scalar, &.{}) or
+        !exactInstruction(instructions[8], .local, f32_scalar, &.{}) or !exactInstruction(instructions[9], .local, f32x4, &.{}) or !exactInstruction(instructions[10], .local, f32x4, &.{}) or
+        instructions[11].op != .label or !same(instructions[11].ty, u32_scalar) or instructions[11].operands.len != 0 or !std.mem.eql(u8, instructions[11].literal, &label_21) or
+        !exactInstruction(instructions[12], .input, f32x4, &.{0}) or !exactInstruction(instructions[13], .local_store, f32x4, &.{ 9, 12 }) or
+        !exactInstruction(instructions[14], .input, f32x2, &.{1}) or !exactInstruction(instructions[15], .extract, f32_scalar, &.{ 14, 0 }) or !exactInstruction(instructions[16], .local_store, f32_scalar, &.{ 4, 15 }) or
+        !exactInstruction(instructions[17], .input, f32x2, &.{1}) or !exactInstruction(instructions[18], .extract, f32_scalar, &.{ 17, 1 }) or !exactInstruction(instructions[19], .local_store, f32_scalar, &.{ 5, 18 }) or
+        !exactInstruction(instructions[20], .ford_eq, boolean, &.{ 0, 15 }) or instructions[21].op != .branch_conditional or !same(instructions[21].ty, u32_scalar) or !std.mem.eql(u32, instructions[21].operands, &.{20}) or !std.mem.eql(u8, instructions[21].literal, &.{ 35, 0, 0, 0, 36, 0, 0, 0 }) or
+        instructions[22].op != .label or !same(instructions[22].ty, u32_scalar) or instructions[22].operands.len != 0 or !std.mem.eql(u8, instructions[22].literal, &label_35) or !exactInstruction(instructions[23], .local_store, f32_scalar, &.{ 6, 18 }) or
+        instructions[24].op != .branch or !same(instructions[24].ty, u32_scalar) or instructions[24].operands.len != 0 or !std.mem.eql(u8, instructions[24].literal, &label_37) or
+        instructions[25].op != .label or !same(instructions[25].ty, u32_scalar) or instructions[25].operands.len != 0 or !std.mem.eql(u8, instructions[25].literal, &label_36) or
+        !exactInstruction(instructions[26], .fsub, f32_scalar, &.{ 15, 2 }) or !exactInstruction(instructions[27], .fmul, f32_scalar, &.{ 15, 26 }) or !exactInstruction(instructions[28], .local_store, f32_scalar, &.{ 7, 27 }) or
+        !exactInstruction(instructions[29], .fma, f32_scalar, &.{ 18, 18, 27 }) or !exactInstruction(instructions[30], .local_store, f32_scalar, &.{ 7, 29 }) or !exactInstruction(instructions[31], .fwidth, f32_scalar, &.{29}) or !exactInstruction(instructions[32], .local_store, f32_scalar, &.{ 8, 31 }) or
+        !exactInstruction(instructions[33], .fdiv, f32_scalar, &.{ 29, 31 }) or !exactInstruction(instructions[34], .fsub, f32_scalar, &.{ 1, 33 }) or !exactInstruction(instructions[35], .local_store, f32_scalar, &.{ 6, 34 }) or !exactInstruction(instructions[36], .f_clamp, f32_scalar, &.{ 34, 0, 3 }) or !exactInstruction(instructions[37], .local_store, f32_scalar, &.{ 6, 36 }) or
+        instructions[38].op != .branch or !same(instructions[38].ty, u32_scalar) or instructions[38].operands.len != 0 or !std.mem.eql(u8, instructions[38].literal, &label_37) or instructions[39].op != .label or !same(instructions[39].ty, u32_scalar) or instructions[39].operands.len != 0 or !std.mem.eql(u8, instructions[39].literal, &label_37) or
+        !exactInstruction(instructions[40], .local_load, f32_scalar, &.{6}) or !exactInstruction(instructions[41], .composite, f32x4, &.{ 40, 40, 40, 40 }) or !exactInstruction(instructions[42], .local_store, f32x4, &.{ 10, 41 }) or !exactInstruction(instructions[43], .fmul, f32x4, &.{ 12, 41 }) or !exactInstruction(instructions[44], .output, f32x4, &.{ 3, 43 }) or !exactInstruction(instructions[45], .return_, u32_scalar, &.{})) return null;
+    return .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 3 };
+}
+
 fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
     if (program.stage != .fragment or program.instructions.len != 27 or program.interfaces.len != 4 or
         !std.mem.eql(u8, &program.identity.digest, &chromium_circle_mask_identity)) return null;
@@ -1515,6 +1583,7 @@ pub const Executor = struct {
             .radial_mask => "chromium_radial_mask",
             .passthrough => "chromium_passthrough",
             .constant_black => "chromium_constant_black",
+            .analytic_coverage => "chromium_analytic_coverage",
             .circle_mask => "chromium_circle_mask",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
@@ -1602,6 +1671,15 @@ pub const Executor = struct {
     pub fn constantBlackPlan(self: *const Executor) ?ConstantBlackPlan {
         return switch (self.fast_path orelse return null) {
             .constant_black => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the derivative-aware ABI only for Chromium's captured analytic
+    /// coverage program. All other derivative programs retain the executor.
+    pub fn analyticCoveragePlan(self: *const Executor) ?AnalyticCoveragePlan {
+        return switch (self.fast_path orelse return null) {
+            .analytic_coverage => |plan| plan,
             else => null,
         };
     }
@@ -2417,6 +2495,54 @@ pub const Executor = struct {
         @memset(bytes[0..16], 0);
     }
 
+    fn analyticCanonical(value: f32) f32 {
+        return @bitCast(canonicalFloat(@bitCast(value)));
+    }
+
+    fn analyticCoverageResolved(color: [4]f32, coordinate: [2]f32, coordinate_dx: [2]f32, coordinate_dy: [2]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        const x = coordinate[0];
+        const y = coordinate[1];
+        const coverage = if (!std.math.isNan(x) and x == 0) y else blk: {
+            const distance = analyticCanonical(x - 2);
+            const distance_squared = analyticCanonical(x * distance);
+            const distance_squared_dx = analyticCanonical(coordinate_dx[0] * distance + x * coordinate_dx[0]);
+            const distance_squared_dy = analyticCanonical(coordinate_dy[0] * distance + x * coordinate_dy[0]);
+            const value = analyticCanonical(@mulAdd(f32, y, y, distance_squared));
+            const value_dx = analyticCanonical(coordinate_dx[1] * y + y * coordinate_dx[1] + distance_squared_dx);
+            const value_dy = analyticCanonical(coordinate_dy[1] * y + y * coordinate_dy[1] + distance_squared_dy);
+            const width = analyticCanonical(@abs(value_dx) + @abs(value_dy));
+            const unclamped = analyticCanonical(0.5 - analyticCanonical(value / width));
+            const lower = if (unclamped < 0) @as(f32, 0) else unclamped;
+            break :blk analyticCanonical(if (1 < lower) @as(f32, 1) else lower);
+        };
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color[lane] * coverage)), .little);
+    }
+
+    fn executeAnalyticCoverageFastPath(path: AnalyticCoveragePlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        const coordinate_value = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const coordinate_binding = try findBindingRecord(bindings, path.coordinate_interface);
+        const coordinate_dx = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_binding.dpdx_bytes });
+        const coordinate_dy = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_binding.dpdy_bytes });
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        var color: [4]f32 = undefined;
+        var coordinate: [2]f32 = undefined;
+        var dx: [2]f32 = undefined;
+        var dy: [2]f32 = undefined;
+        for (0..4) |lane| color[lane] = @bitCast(color_value.bits[lane]);
+        for (0..2) |lane| {
+            coordinate[lane] = @bitCast(coordinate_value.bits[lane]);
+            dx[lane] = @bitCast(coordinate_dx.bits[lane]);
+            dy[lane] = @bitCast(coordinate_dy.bits[lane]);
+        }
+        try analyticCoverageResolved(color, coordinate, dx, dy, output orelse return error.InvalidOutput);
+    }
+
     /// Execute the exact circle profile in the same scalar operation order as
     /// its canonical Render IR: two-term Length, subtraction, multiply,
     /// clamp, then the final vec4 multiply. The caller has already validated
@@ -2513,6 +2639,7 @@ pub const Executor = struct {
             .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
             .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
             .constant_black => |path| try executeConstantBlackFastPath(path, outputs),
+            .analytic_coverage => |path| try executeAnalyticCoverageFastPath(path, bindings, outputs),
             .circle_mask => |path| try executeCircleMaskFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
@@ -2539,6 +2666,28 @@ pub const Executor = struct {
             const color_value: f32 = @bitCast(color.bits[lane]);
             std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
         }
+        return true;
+    }
+
+    /// Execute the exact derivative-aware analytic coverage program after the
+    /// rasterizer has resolved the coordinate and its screen-space gradients.
+    pub fn executeAnalyticCoverageDirect(self: *const Executor, color_bytes: []const u8, coordinate_bytes: []const u8, coordinate_dx_bytes: []const u8, coordinate_dy_bytes: []const u8, output: []u8) Error!bool {
+        const path = self.analyticCoveragePlan() orelse return false;
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const coordinate_value = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const coordinate_dx = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_dx_bytes });
+        const coordinate_dy = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_dy_bytes });
+        var color: [4]f32 = undefined;
+        var coordinate: [2]f32 = undefined;
+        var dx: [2]f32 = undefined;
+        var dy: [2]f32 = undefined;
+        for (0..4) |lane| color[lane] = @bitCast(color_value.bits[lane]);
+        for (0..2) |lane| {
+            coordinate[lane] = @bitCast(coordinate_value.bits[lane]);
+            dx[lane] = @bitCast(coordinate_dx.bits[lane]);
+            dy[lane] = @bitCast(coordinate_dy.bits[lane]);
+        }
+        try analyticCoverageResolved(color, coordinate, dx, dy, output);
         return true;
     }
 
@@ -3913,7 +4062,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
         else => false,
     };
 }
@@ -3923,6 +4072,7 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .sample_coverage = .{ .coordinate_interface = 0, .coverage_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .analytic_coverage = .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 2 } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
@@ -4538,6 +4688,19 @@ test "captured Chromium constant black path is identity-gated and exact" {
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &output);
     source.identity.digest[0] ^= 1;
     try std.testing.expect(detectChromiumConstantBlack(&source) == null);
+}
+
+test "Chromium analytic coverage preserves the branch derivative and clamp order" {
+    const color = [_]f32{ 0.8, 0.4, 0.2, 1.0 };
+    var output: [16]u8 = undefined;
+    // The x==0 branch bypasses derivative arithmetic and uses y directly.
+    try Executor.analyticCoverageResolved(color, .{ 0, 0.25 }, .{ 1, 0 }, .{ 0, 1 }, &output);
+    for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * 0.25)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    // On the curved branch at x=2/y=0, the exact product-rule derivative of
+    // x * (x - 2) is two. Thus fwidth is two and coverage is one-half.
+    try Executor.analyticCoverageResolved(color, .{ 2, 0 }, .{ 1, 0 }, .{ 0, 1 }, &output);
+    for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * 0.5)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    try std.testing.expectError(error.InvalidOutput, Executor.analyticCoverageResolved(color, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 }, output[0..12]));
 }
 
 test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
