@@ -10044,6 +10044,24 @@ fn executeComputeDispatch(op: DispatchCommand) void {
 }
 const ProfileScreenVertex = struct { x: f32, y: f32, z: f32, w: f32 };
 const ProfileRowBounds = struct { min_x: i32, max_x: i32 };
+const ProfilePerspectiveWeights = struct { q0: f32, q1: f32, q2: f32, denominator: f32 };
+
+/// Resolve the perspective weights used by the scalar profile rasterizer.
+/// Chromium's full-screen compositor and video quads have an exactly-one
+/// clip-space W. Preserve the normal denominator and f32 operation order,
+/// but avoid issuing three data-dependent divisions by one for that verified
+/// affine case. Any other W follows the ordinary perspective form unchanged.
+fn profilePerspectiveWeights(vertices: [3]ProfileScreenVertex, b0: f32, b1: f32, b2: f32) ?ProfilePerspectiveWeights {
+    const affine = @as(u32, @bitCast(vertices[0].w)) == 0x3f80_0000 and
+        @as(u32, @bitCast(vertices[1].w)) == 0x3f80_0000 and
+        @as(u32, @bitCast(vertices[2].w)) == 0x3f80_0000;
+    const q0 = if (affine) b0 else b0 / vertices[0].w;
+    const q1 = if (affine) b1 else b1 / vertices[1].w;
+    const q2 = if (affine) b2 else b2 / vertices[2].w;
+    const denominator = q0 + q1 + q2;
+    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) return null;
+    return .{ .q0 = q0, .q1 = q1, .q2 = q2, .denominator = denominator };
+}
 
 fn diagnosticDarkPixelCount(image: *ImageObj) usize {
     var count: usize = 0;
@@ -10458,6 +10476,32 @@ test "scalar graphics profile expands triangle lists and strips" {
     try std.testing.expectEqual(@as(?u32, 1), profileTriangleVertex(4, 1, 1));
     try std.testing.expectEqual(@as(?u32, 3), profileTriangleVertex(4, 1, 2));
     try std.testing.expectEqual(@as(?u32, null), profileTriangleVertex(2, 0, 0));
+}
+
+test "profile perspective weights retain the exact affine and perspective forms" {
+    const affine = [3]ProfileScreenVertex{
+        .{ .x = 0, .y = 0, .z = 0, .w = 1 },
+        .{ .x = 1, .y = 0, .z = 0, .w = 1 },
+        .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+    };
+    const b0: f32 = 0.2;
+    const b1: f32 = 0.3;
+    const b2: f32 = 0.5;
+    const resolved_affine = profilePerspectiveWeights(affine, b0, b1, b2).?;
+    try std.testing.expectEqual(@as(u32, @bitCast(b0 / affine[0].w)), @as(u32, @bitCast(resolved_affine.q0)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b1 / affine[1].w)), @as(u32, @bitCast(resolved_affine.q1)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b2 / affine[2].w)), @as(u32, @bitCast(resolved_affine.q2)));
+    try std.testing.expectEqual(@as(u32, @bitCast((b0 / affine[0].w) + (b1 / affine[1].w) + (b2 / affine[2].w))), @as(u32, @bitCast(resolved_affine.denominator)));
+
+    const perspective = [3]ProfileScreenVertex{
+        .{ .x = 0, .y = 0, .z = 0, .w = 0.5 },
+        .{ .x = 1, .y = 0, .z = 0, .w = 2 },
+        .{ .x = 0, .y = 1, .z = 0, .w = 4 },
+    };
+    const resolved_perspective = profilePerspectiveWeights(perspective, b0, b1, b2).?;
+    try std.testing.expectEqual(@as(u32, @bitCast(b0 / perspective[0].w)), @as(u32, @bitCast(resolved_perspective.q0)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b1 / perspective[1].w)), @as(u32, @bitCast(resolved_perspective.q1)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b2 / perspective[2].w)), @as(u32, @bitCast(resolved_perspective.q2)));
 }
 
 /// Apply the Vulkan depth-bias equation for the bounded scalar raster profile.
@@ -11154,11 +11198,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     // feed its resolved f32 lanes directly to the exact VP9
                     // transform. This removes temporary byte packing/decoding
                     // and construction of a generic fragment binding table.
-                    const q0 = b0 / vertices[0].w;
-                    const q1 = b1 / vertices[1].w;
-                    const q2 = b2 / vertices[2].w;
-                    const denominator = q0 + q1 + q2;
-                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
                     const luma_varying = vp9_luma_coordinate_varying.?;
                     const chroma_varying = vp9_chroma_coordinate_varying.?;
                     var luma_coordinates: [2]f32 = undefined;
@@ -11167,29 +11207,25 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
                         const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
                         const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
-                        luma_coordinates[lane] = (q0 * luma_a + q1 * luma_b + q2 * luma_c) / denominator;
+                        luma_coordinates[lane] = (weights.q0 * luma_a + weights.q1 * luma_b + weights.q2 * luma_c) / weights.denominator;
                         const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
                         const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
                         const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
-                        chroma_coordinates[lane] = (q0 * chroma_a + q1 * chroma_b + q2 * chroma_c) / denominator;
+                        chroma_coordinates[lane] = (weights.q0 * chroma_a + weights.q1 * chroma_b + weights.q2 * chroma_c) / weights.denominator;
                     }
                     profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
                         if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                         return;
                     };
                 } else if (direct_texture_copy_coordinates) {
-                    const q0 = b0 / vertices[0].w;
-                    const q1 = b1 / vertices[1].w;
-                    const q2 = b2 / vertices[2].w;
-                    const denominator = q0 + q1 + q2;
-                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
                     const varying = texture_copy_coordinate_varying.?;
                     var coordinates: [2]f32 = undefined;
                     for (0..2) |lane| {
                         const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
                         const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
                         const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
-                        coordinates[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
+                        coordinates[lane] = (weights.q0 * a + weights.q1 * b + weights.q2 * c) / weights.denominator;
                     }
                     var coordinate_bytes: [8]u8 = undefined;
                     for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
