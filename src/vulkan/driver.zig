@@ -10173,10 +10173,10 @@ fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
 }
 
 /// Return a conservative horizontal bound for one right triangle whose two
-/// non-diagonal edges are axis-aligned. Chromium emits these for both video
-/// and ordinary texture-copy compositor quads. The caller still runs the
-/// ordinary edge test, so a rounding-boundary mistake can only retain extra
-/// work; it cannot add coverage.
+/// non-diagonal edges are axis-aligned.  Chromium's VP9 compositor emits two
+/// such triangles for each video quad.  The caller still runs the ordinary
+/// edge test, so a rounding-boundary mistake can only retain extra work; it
+/// cannot add coverage.
 fn profileAxisAlignedTriangleRowBounds(vertices: [3]ProfileScreenVertex, pixel_y: f32, minimum: i32, maximum: i32) ?ProfileRowBounds {
     var diagonal: ?struct { a: usize, b: usize } = null;
     for (0..3) |a| for (a + 1..3) |b| {
@@ -10204,7 +10204,7 @@ fn profileAxisAlignedTriangleRowBounds(vertices: [3]ProfileScreenVertex, pixel_y
     return .{ .min_x = @max(minimum, std.math.sub(i32, floored, 1) catch minimum), .max_x = maximum };
 }
 
-test "axis-aligned profile row bounds conservatively cover Chromium affine strips" {
+test "axis-aligned profile row bounds conservatively cover Chromium VP9 triangles" {
     const first = [_]ProfileScreenVertex{
         .{ .x = 102.00001, .y = 87, .z = 0, .w = 1 },
         .{ .x = 102.00001, .y = 272, .z = 0, .w = 1 },
@@ -11674,13 +11674,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
         if (max_x <= min_x or max_y <= min_y) continue;
         for (@intCast(min_y)..@intCast(max_y)) |y| {
-            // Chromium commonly represents both video and regular
-            // texture-copy quads as two axis-aligned right triangles. Shrink
-            // each triangle's rectangular scan to its diagonal without
-            // trusting the bound for coverage: the normal edge test below
-            // remains authoritative, including its shared-diagonal blend
-            // behavior.
-            const row: ProfileRowBounds = if (direct_vp9_coordinates or direct_texture_copy_coordinates)
+            // A video quad is represented as two axis-aligned right
+            // triangles.  Shrink each triangle's rectangular scan to its
+            // diagonal without trusting the bound for coverage: the normal
+            // edge test below remains authoritative.
+            const row: ProfileRowBounds = if (direct_vp9_coordinates)
                 profileAxisAlignedTriangleRowBounds(vertices, @as(f32, @floatFromInt(y)) + 0.5, min_x, max_x) orelse .{ .min_x = min_x, .max_x = max_x }
             else
                 .{ .min_x = min_x, .max_x = max_x };
