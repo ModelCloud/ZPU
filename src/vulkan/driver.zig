@@ -10184,6 +10184,61 @@ test "axis-aligned profile row bounds conservatively cover Chromium VP9 triangle
     }
 }
 
+/// An affine coordinate plane is equivalent to perspective interpolation when
+/// every vertex has unit w.  The VP9 path checks that precondition before it
+/// uses this helper; all perspective profiles retain the general raster path.
+const ProfileAffineVec2Plane = struct {
+    anchor: [2]f32,
+    anchor_x: f32,
+    anchor_y: f32,
+    dx: [2]f32,
+    dy: [2]f32,
+
+    fn init(vertices: [3]ProfileScreenVertex, values: [3][2]f32) ?ProfileAffineVec2Plane {
+        const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
+        if (!std.math.isFinite(area) or @abs(area) < 0.00001) return null;
+        // `profileEdge` uses the opposite sign of the conventional 2D cross
+        // product, so its area needs the matching inverse here.
+        const inverse_area = -1 / area;
+        var dx: [2]f32 = undefined;
+        var dy: [2]f32 = undefined;
+        for (0..2) |lane| {
+            const one_zero = values[1][lane] - values[0][lane];
+            const two_zero = values[2][lane] - values[0][lane];
+            dx[lane] = (one_zero * (vertices[2].y - vertices[0].y) - two_zero * (vertices[1].y - vertices[0].y)) * inverse_area;
+            dy[lane] = ((vertices[1].x - vertices[0].x) * two_zero - (vertices[2].x - vertices[0].x) * one_zero) * inverse_area;
+            if (!std.math.isFinite(dx[lane]) or !std.math.isFinite(dy[lane])) return null;
+        }
+        return .{ .anchor = values[0], .anchor_x = vertices[0].x, .anchor_y = vertices[0].y, .dx = dx, .dy = dy };
+    }
+
+    fn resolve(self: ProfileAffineVec2Plane, x: f32, y: f32) [2]f32 {
+        return .{
+            self.anchor[0] + self.dx[0] * (x - self.anchor_x) + self.dy[0] * (y - self.anchor_y),
+            self.anchor[1] + self.dx[1] * (x - self.anchor_x) + self.dy[1] * (y - self.anchor_y),
+        };
+    }
+};
+
+test "unit-w affine VP9 coordinate plane matches barycentric interpolation" {
+    const vertices = [_]ProfileScreenVertex{
+        .{ .x = 102.00001, .y = 87, .z = 0, .w = 1 },
+        .{ .x = 102.00001, .y = 272, .z = 0, .w = 1 },
+        .{ .x = 537, .y = 87, .z = 0, .w = 1 },
+    };
+    const values = [_][2]f32{ .{ 0, 0 }, .{ 0, 1 }, .{ 1, 0 } };
+    const plane = ProfileAffineVec2Plane.init(vertices, values) orelse unreachable;
+    const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
+    const inverse_area = 1 / area;
+    for ([_][2]f32{ .{ 102.5, 87.5 }, .{ 200.5, 120.5 }, .{ 350.5, 150.5 } }) |point| {
+        const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, point[0], point[1]) * inverse_area;
+        const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, point[0], point[1]) * inverse_area;
+        const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, point[0], point[1]) * inverse_area;
+        const result = plane.resolve(point[0], point[1]);
+        for (0..2) |lane| try std.testing.expectApproxEqAbs(values[0][lane] * b0 + values[1][lane] * b1 + values[2][lane] * b2, result[lane], 0.000001);
+    }
+}
+
 fn profileReadClip(bytes: []const u8) ?[4]f32 {
     if (bytes.len < 16) return null;
     var result: [4]f32 = undefined;
@@ -11094,6 +11149,27 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             (op.pipeline.color_blend_enable == 0 or
                 (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
                     op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0));
+        // The observed video quad has unit homogeneous coordinates.  Resolve
+        // its two affine vec2 planes once per triangle, avoiding repeated
+        // byte loads and perspective reconstruction for every covered pixel.
+        // The generic direct VP9 coordinate path remains the fallback for
+        // every non-unit-w or malformed draw.
+        var vp9_luma_plane: ?ProfileAffineVec2Plane = null;
+        var vp9_chroma_plane: ?ProfileAffineVec2Plane = null;
+        if (direct_vp9_coordinates and
+            @as(u32, @bitCast(vertices[0].w)) == 0x3f800000 and @as(u32, @bitCast(vertices[1].w)) == 0x3f800000 and @as(u32, @bitCast(vertices[2].w)) == 0x3f800000)
+        {
+            const luma_varying = vp9_luma_coordinate_varying.?;
+            const chroma_varying = vp9_chroma_coordinate_varying.?;
+            var luma_values: [3][2]f32 = undefined;
+            var chroma_values: [3][2]f32 = undefined;
+            for (0..3) |vertex| for (0..2) |lane| {
+                luma_values[vertex][lane] = @bitCast(std.mem.readInt(u32, varying_bytes[vertex][luma_varying][lane * 4 ..][0..4], .little));
+                chroma_values[vertex][lane] = @bitCast(std.mem.readInt(u32, varying_bytes[vertex][chroma_varying][lane * 4 ..][0..4], .little));
+            };
+            vp9_luma_plane = ProfileAffineVec2Plane.init(vertices, luma_values);
+            vp9_chroma_plane = ProfileAffineVec2Plane.init(vertices, chroma_values);
+        }
         // The canonical radial mask consumes exactly two perspective vec4
         // varyings. Its declared FrontFacing input is not data-dependent in
         // the validated program, and it needs neither derivatives nor
@@ -11142,20 +11218,25 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     const q2 = b2 / vertices[2].w;
                     const denominator = q0 + q1 + q2;
                     if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                    const luma_varying = vp9_luma_coordinate_varying.?;
-                    const chroma_varying = vp9_chroma_coordinate_varying.?;
-                    var luma_coordinates: [2]f32 = undefined;
-                    var chroma_coordinates: [2]f32 = undefined;
-                    for (0..2) |lane| {
-                        const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
-                        const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
-                        const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
-                        luma_coordinates[lane] = (q0 * luma_a + q1 * luma_b + q2 * luma_c) / denominator;
-                        const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
-                        const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
-                        const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
-                        chroma_coordinates[lane] = (q0 * chroma_a + q1 * chroma_b + q2 * chroma_c) / denominator;
-                    }
+                    const luma_coordinates, const chroma_coordinates = if (vp9_luma_plane != null and vp9_chroma_plane != null) blk: {
+                        break :blk .{ vp9_luma_plane.?.resolve(px, py), vp9_chroma_plane.?.resolve(px, py) };
+                    } else blk: {
+                        const luma_varying = vp9_luma_coordinate_varying.?;
+                        const chroma_varying = vp9_chroma_coordinate_varying.?;
+                        var luma_coordinates: [2]f32 = undefined;
+                        var chroma_coordinates: [2]f32 = undefined;
+                        for (0..2) |lane| {
+                            const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
+                            const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
+                            const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
+                            luma_coordinates[lane] = (q0 * luma_a + q1 * luma_b + q2 * luma_c) / denominator;
+                            const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
+                            const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
+                            const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
+                            chroma_coordinates[lane] = (q0 * chroma_a + q1 * chroma_b + q2 * chroma_c) / denominator;
+                        }
+                        break :blk .{ luma_coordinates, chroma_coordinates };
+                    };
                     profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
                         if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                         return;
