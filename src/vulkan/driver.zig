@@ -1992,6 +1992,10 @@ fn decodeChromiumVp9ColorTransformInline() [9_648]u8 {
 }
 
 fn profileShaderCaptureCandidate(program: *const render_ir.Program) bool {
+    // A full canonical-IR selector makes capture reproducible for a compact
+    // late hot profile. Without it, the bounded generic large-program window
+    // is often consumed during Chromium startup before the target is linked.
+    if (std.c.getenv("ZPU_DIAGNOSE_PROFILE_SHADER_IR_DIGEST")) |raw| return profileIrDigestSelectorMatches(std.mem.span(raw), &program.identity.digest);
     return program.instructions.len >= 200 or std.mem.eql(u8, &program.identity.digest, &chromium_vp9_composite_fragment_identity);
 }
 
