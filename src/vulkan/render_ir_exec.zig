@@ -1705,11 +1705,11 @@ pub const Executor = struct {
 
     /// A bounded lookup table for the exact Chromium sRGB transfer pair. The
     /// table is built once from the reference scalar functions and is only
-    /// used after their full uniform tuples matched bit-for-bit.  65,536
+    /// used after their full uniform tuples matched bit-for-bit.  8,192
     /// intervals over [0, 2] keep interpolation error well below an 8-bit
     /// presentation step while replacing the six per-pixel pow operations.
     const SrgbTransferLut = struct {
-        const intervals: usize = 65_536;
+        const intervals: usize = 8_192;
         const entries: usize = intervals + 1;
         const maximum: f32 = 2;
         var state = std.atomic.Value(u8).init(0);
