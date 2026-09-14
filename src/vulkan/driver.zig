@@ -10904,6 +10904,22 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
         _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
+    // Chromium also emits a distinct red-plane coverage profile. Keep its
+    // exact Render-IR identity and interface map separate from the full-RGBA
+    // sample-modulate path: channel replication is shader-visible behavior.
+    const sample_red_modulate_plan = profile.fragment.sampleRedModulatePlan();
+    var sample_red_modulate_color_varying: ?usize = null;
+    var sample_red_modulate_coordinate_varying: ?usize = null;
+    var sample_red_modulate_image: ?render_ir_exec.SampledImage = null;
+    if (sample_red_modulate_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) sample_red_modulate_color_varying = index;
+            if (varying.fragment_interface == plan.coordinate_interface) sample_red_modulate_coordinate_varying = index;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) sample_red_modulate_image = binding.sampled_image;
+        }
+    }
     // Resolve Chromium's exact full-screen texture-copy ABI once per draw.
     // The selected Render IR identity is stricter than a generic sampled
     // quad, so every other texture shader remains on the normal path.
@@ -11666,6 +11682,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                 &fragment_output_bytes,
                             ) catch |err| {
                                 if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (sample_red_modulate_plan != null) {
+                            const color_varying = sample_red_modulate_color_varying orelse break :direct false;
+                            const coordinate_varying = sample_red_modulate_coordinate_varying orelse break :direct false;
+                            const image = sample_red_modulate_image orelse break :direct false;
+                            break :direct profile.fragment.executeSampleRedModulateDirect(
+                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                image,
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct red-plane sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
                         }

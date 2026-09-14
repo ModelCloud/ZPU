@@ -830,6 +830,18 @@ pub const SampleModulatePlan = struct {
     bias_literal: [4]u8,
 };
 
+/// Exact ABI of Chromium's captured red-plane compositor profile. It samples
+/// channel zero and multiplies each component of the interpolated color by
+/// that scalar. This is deliberately distinct from `SampleModulatePlan`:
+/// changing the sampled swizzle or multiplication graph is observable.
+pub const SampleRedModulatePlan = struct {
+    color_interface: u32,
+    coordinate_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
 pub const TextureCopyPlan = struct {
     coordinate_interface: u32,
     image_interface: u32,
@@ -901,6 +913,7 @@ pub const Vp9ColorTransformPrepared = struct {
 
 const FastPath = union(enum) {
     sample_modulate: SampleModulatePlan,
+    sample_red_modulate: SampleRedModulatePlan,
     texture_copy: TextureCopyPlan,
     sample_coverage: SampleCoverageFastPath,
     vp9_color_transform: Vp9ColorTransformPlan,
@@ -948,6 +961,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
     if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
     if (detectChromiumConstantBlack(program)) |path| return .{ .constant_black = path };
+    if (detectChromiumSampleRedModulate(program)) |path| return .{ .sample_red_modulate = path };
     if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
@@ -1193,6 +1207,16 @@ const chromium_constant_black_identity = [_]u8{
     0xdf, 0x3a, 0x38, 0xd4, 0x07, 0xc4, 0xe0, 0x95,
 };
 
+/// Canonical identity of the red-plane coverage compositor fragment captured
+/// from the two-core Chromium workload. The profile samples channel zero and
+/// replicates it before multiplying the interpolated color.
+const chromium_sample_red_modulate_identity = [_]u8{
+    0xd7, 0x72, 0x74, 0x72, 0x2a, 0xfb, 0xbd, 0x79,
+    0x66, 0xe0, 0x8a, 0x6f, 0x08, 0xdd, 0xa8, 0xfa,
+    0x4e, 0x5f, 0xb8, 0x60, 0x21, 0xb5, 0x56, 0xb1,
+    0x8b, 0x9a, 0x42, 0x91, 0x58, 0x35, 0xe3, 0x84,
+};
+
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1418,6 +1442,45 @@ fn detectChromiumConstantBlack(program: *const ir.Program) ?ConstantBlackPlan {
     return .{ .output_interface = 2 };
 }
 
+fn detectChromiumSampleRedModulate(program: *const ir.Program) ?SampleRedModulatePlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 14 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_sample_red_modulate_identity)) return null;
+    const color = program.interfaces[0];
+    const coordinates = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const push_constants = program.interfaces[4];
+    const image = program.interfaces[5];
+    const instructions = program.instructions;
+    const bias = [_]u8{ 51, 51, 243, 190 };
+    const label = [_]u8{ 30, 0, 0, 0 };
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinates.storage != .input or !same(coordinates.ty, f32x2) or coordinates.location == null or coordinates.location.? != 1 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        push_constants.storage != .push_constant or !push_constants.block or push_constants.member_count != 1 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0 or
+        instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or !std.mem.eql(u8, instructions[0].literal, &bias) or
+        !exactInstruction(instructions[1], .local, f32x4, &.{}) or
+        !exactInstruction(instructions[2], .local, f32x4, &.{}) or
+        instructions[3].op != .label or !same(instructions[3].ty, .{ .scalar = .u32 }) or instructions[3].operands.len != 0 or !std.mem.eql(u8, instructions[3].literal, &label) or
+        !exactInstruction(instructions[4], .input, f32x4, &.{0}) or
+        !exactInstruction(instructions[5], .local_store, f32x4, &.{ 1, 4 }) or
+        !exactInstruction(instructions[6], .input, f32x2, &.{1}) or
+        !exactInstruction(instructions[7], .image_sample_implicit_lod, f32x4, &.{ 5, 6, 0 }) or
+        !exactInstruction(instructions[8], .extract, f32_scalar, &.{ 7, 0 }) or
+        !exactInstruction(instructions[9], .composite, f32x4, &.{ 8, 8, 8, 8 }) or
+        !exactInstruction(instructions[10], .local_store, f32x4, &.{ 2, 9 }) or
+        !exactInstruction(instructions[11], .fmul, f32x4, &.{ 4, 9 }) or
+        !exactInstruction(instructions[12], .output, f32x4, &.{ 3, 11 }) or
+        !exactInstruction(instructions[13], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    return .{ .color_interface = 0, .coordinate_interface = 1, .image_interface = 5, .output_interface = 3, .bias_literal = bias };
+}
+
 fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
     if (program.stage != .fragment or program.instructions.len != 27 or program.interfaces.len != 4 or
         !std.mem.eql(u8, &program.identity.digest, &chromium_circle_mask_identity)) return null;
@@ -1509,6 +1572,7 @@ pub const Executor = struct {
     pub fn prevalidatedPathName(self: *const Executor) []const u8 {
         return switch (self.fast_path orelse return "interpreter") {
             .sample_modulate => "sample_modulate",
+            .sample_red_modulate => "chromium_sample_red_modulate",
             .texture_copy => "chromium_texture_copy",
             .sample_coverage => "chromium_vp9_sample_coverage",
             .vp9_color_transform => "chromium_vp9_color_transform",
@@ -1540,6 +1604,15 @@ pub const Executor = struct {
     pub fn sampleModulatePlan(self: *const Executor) ?SampleModulatePlan {
         return switch (self.fast_path orelse return null) {
             .sample_modulate => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the ABI only for Chromium's captured red-plane coverage pass.
+    /// Any changed canonical IR remains on the ordinary executor path.
+    pub fn sampleRedModulatePlan(self: *const Executor) ?SampleRedModulatePlan {
+        return switch (self.fast_path orelse return null) {
+            .sample_red_modulate => |plan| plan,
             else => null,
         };
     }
@@ -2469,6 +2542,24 @@ pub const Executor = struct {
                     std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
                 }
             },
+            .sample_red_modulate => |path| {
+                const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+                const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+                const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+                const sampled = try sample(try findSampledImage(bindings, path.image_interface), coordinates, bias);
+                var output: ?[]u8 = null;
+                for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+                    if (output != null) return error.InvalidOutput;
+                    output = candidate.bytes;
+                };
+                const bytes = output orelse return error.InvalidOutput;
+                if (bytes.len < 16) return error.InvalidOutput;
+                const coverage: f32 = @bitCast(sampled.bits[0]);
+                for (0..4) |lane| {
+                    const color_value: f32 = @bitCast(color.bits[lane]);
+                    std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color_value * coverage)), .little);
+                }
+            },
             .texture_copy => |path| {
                 const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
                 const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
@@ -2538,6 +2629,24 @@ pub const Executor = struct {
             const sample_value: f32 = @bitCast(sampled.bits[lane]);
             const color_value: f32 = @bitCast(color.bits[lane]);
             std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
+        }
+        return true;
+    }
+
+    /// Execute Chromium's exact red-plane coverage composite after raster
+    /// interpolation has resolved its live inputs. The identity-gated ABI
+    /// retains normal sampler validation and canonical f32 output handling.
+    pub fn executeSampleRedModulateDirect(self: *const Executor, color_bytes: []const u8, coordinate_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.sampleRedModulatePlan() orelse return false;
+        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        const coverage: f32 = @bitCast(sampled.bits[0]);
+        for (0..4) |lane| {
+            const color_value: f32 = @bitCast(color.bits[lane]);
+            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(color_value * coverage)), .little);
         }
         return true;
     }
@@ -3913,13 +4022,14 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .circle_mask => true,
+        .sample_modulate, .sample_red_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .circle_mask => true,
         else => false,
     };
 }
 
 test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .sample_modulate = .{ .color_interface = 0, .coordinate_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .sample_red_modulate = .{ .color_interface = 0, .coordinate_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .sample_coverage = .{ .coordinate_interface = 0, .coverage_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
@@ -4538,6 +4648,68 @@ test "captured Chromium constant black path is identity-gated and exact" {
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &output);
     source.identity.digest[0] ^= 1;
     try std.testing.expect(detectChromiumConstantBlack(&source) == null);
+}
+
+test "captured Chromium red-plane modulation is identity-gated and exact" {
+    const bias = f32bytes(-0.475);
+    const label = [_]u8{ 30, 0, 0, 0 };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const boolean = ir.Type{ .scalar = .bool };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = f32x2, .location = 1 },
+        .{ .storage = .input, .ty = boolean, .builtin_front_facing = true },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .push_constant, .ty = .{ .scalar = .u32 }, .block = true, .member_count = 1 },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .input, .ty = f32x4, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 1, 4 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32x2, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 5, 6, 0 }, .literal = &.{} },
+        .{ .op = .extract, .ty = f32_scalar, .operands = &.{ 7, 0 }, .literal = &.{} },
+        .{ .op = .composite, .ty = f32x4, .operands = &.{ 8, 8, 8, 8 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 9 }, .literal = &.{} },
+        .{ .op = .fmul, .ty = f32x4, .operands = &.{ 4, 9 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 11 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_sample_red_modulate_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_sample_red_modulate", executor.prevalidatedPathName());
+    var color: [16]u8 = undefined;
+    const color_values = [_]f32{ 0.5, 0.25, 1, 0.75 };
+    for (color_values, 0..) |value, lane| std.mem.writeInt(u32, color[lane * 4 ..][0..4], @bitCast(value), .little);
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    const pixel = [_]u8{ 64, 128, 192, 255 };
+    const image = SampledImage{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    const bindings = [_]Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 5, .sampled_image = image },
+    };
+    var prevalidated_output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 3, .bytes = &prevalidated_output }}));
+    const coverage = @as(f32, @floatFromInt(pixel[0])) / 255;
+    for (color_values, 0..) |value, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(value * coverage)), std.mem.readInt(u32, prevalidated_output[lane * 4 ..][0..4], .little));
+    var direct_output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeSampleRedModulateDirect(&color, &coordinates, image, &direct_output));
+    try std.testing.expectEqualSlices(u8, &prevalidated_output, &direct_output);
+    try std.testing.expectError(error.Bounds, executor.executeSampleRedModulateDirect(color[0..12], &coordinates, image, &direct_output));
+    source.identity.digest[0] ^= 1;
+    try std.testing.expect(detectChromiumSampleRedModulate(&source) == null);
 }
 
 test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
