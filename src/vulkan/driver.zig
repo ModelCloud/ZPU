@@ -1841,6 +1841,7 @@ var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_affine_quads = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_affine_rejections = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
@@ -11042,8 +11043,8 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     };
     if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_affine_quads.load(.monotonic) == 0) {
         std.debug.print(
-            "ZPU VP9 affine candidate topology={d} vertices={d} instances={d} discard={d} cull={d} depth_test={d} depth_write={d} depth_bounds={d} depth_bias={d} depth_image={} fragment_bool={} derivatives={} frag_coord={} varyings={d} luma_lanes={d}/flat={} chroma_lanes={d}/flat={} input_attachments={d} color={} mask={x} blend={d}/{d}/{d}/{d}/{d}/{d}/{d}\n",
-            .{ op.primitive_topology, op.vertex_count, op.instance_count, op.rasterizer_discard_enable, op.cull_mode, op.depth_test_enable, op.depth_write_enable, op.depth_bounds_test_enable, op.depth_bias_enable, depth != null, profile.fragment_bool, profile.fragment_needs_derivatives, profile.fragment_frag_coord != null, profile.varying_count, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].flat else false, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].flat else false, profile.fragment_input_attachment_count, color != null, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, op.pipeline.color_blend_op, op.pipeline.src_alpha_blend_factor, op.pipeline.dst_alpha_blend_factor, op.pipeline.alpha_blend_op },
+            "ZPU VP9 affine candidate topology={d} vertices={d} instances={d} discard={d} cull={d} depth_test={d} depth_write={d} depth_bounds={d} depth_bias={d} depth_image={} fragment_bool={} derivatives={} frag_coord={} varyings={d} known_color={} luma_lanes={d}/flat={} chroma_lanes={d}/flat={} input_attachments={d} color={} mask={x} blend={d}/{d}/{d}/{d}/{d}/{d}/{d}\n",
+            .{ op.primitive_topology, op.vertex_count, op.instance_count, op.rasterizer_discard_enable, op.cull_mode, op.depth_test_enable, op.depth_write_enable, op.depth_bounds_test_enable, op.depth_bias_enable, depth != null, profile.fragment_bool, profile.fragment_needs_derivatives, profile.fragment_frag_coord != null, profile.varying_count, vp9_known_color_varying, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].flat else false, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].flat else false, profile.fragment_input_attachment_count, color != null, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, op.pipeline.color_blend_op, op.pipeline.src_alpha_blend_factor, op.pipeline.dst_alpha_blend_factor, op.pipeline.alpha_blend_op },
         );
     }
     const direct_vp9_affine_quad = blk: {
@@ -11072,10 +11073,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const c2 = profileEvaluatedVaryingVec2(&v2, chroma_varying) orelse break :blk false;
         const c3 = profileEvaluatedVaryingVec2(&v3, chroma_varying) orelse break :blk false;
         const unit_w = @as(u32, @bitCast(v0.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v1.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v2.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v3.screen.w)) == 0x3f80_0000;
-        if (!unit_w or v0.screen.x != v1.screen.x or v0.screen.y != v2.screen.y or v2.screen.x != v3.screen.x or v1.screen.y != v3.screen.y or
-            v0.screen.z != v1.screen.z or v0.screen.z != v2.screen.z or v0.screen.z != v3.screen.z or v2.screen.x <= v0.screen.x or v1.screen.y <= v0.screen.y or
-            l0[0] != l1[0] or l0[1] != l2[1] or l2[0] != l3[0] or l1[1] != l3[1] or
-            c0[0] != c1[0] or c0[1] != c2[1] or c2[0] != c3[0] or c1[1] != c3[1]) break :blk false;
+        const affine_geometry = unit_w and v0.screen.x == v1.screen.x and v0.screen.y == v2.screen.y and v2.screen.x == v3.screen.x and v1.screen.y == v3.screen.y and
+            v0.screen.z == v1.screen.z and v0.screen.z == v2.screen.z and v0.screen.z == v3.screen.z and v2.screen.x > v0.screen.x and v1.screen.y > v0.screen.y and
+            l0[0] == l1[0] and l0[1] == l2[1] and l2[0] == l3[0] and l1[1] == l3[1] and
+            c0[0] == c1[0] and c0[1] == c2[1] and c2[0] == c3[0] and c1[1] == c3[1];
+        if (!affine_geometry) {
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_vp9_affine_rejections.fetchAdd(1, .monotonic) < 4) std.debug.print(
+                "ZPU VP9 affine geometry rejected unit_w={} v0={d:.7},{d:.7},{d:.7} v1={d:.7},{d:.7},{d:.7} v2={d:.7},{d:.7},{d:.7} v3={d:.7},{d:.7},{d:.7} luma0={d:.7},{d:.7} luma1={d:.7},{d:.7} luma2={d:.7},{d:.7} luma3={d:.7},{d:.7} chroma0={d:.7},{d:.7} chroma1={d:.7},{d:.7} chroma2={d:.7},{d:.7} chroma3={d:.7},{d:.7}\n",
+                .{ unit_w, v0.screen.x, v0.screen.y, v0.screen.z, v1.screen.x, v1.screen.y, v1.screen.z, v2.screen.x, v2.screen.y, v2.screen.z, v3.screen.x, v3.screen.y, v3.screen.z, l0[0], l0[1], l1[0], l1[1], l2[0], l2[1], l3[0], l3[1], c0[0], c0[1], c1[0], c1[1], c2[0], c2[1], c3[0], c3[1] },
+            );
+            break :blk false;
+        }
         const min_x = @max(@as(i32, @intFromFloat(@floor(v0.screen.x))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(v0.screen.y))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(v2.screen.x))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
