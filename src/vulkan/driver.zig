@@ -12239,7 +12239,7 @@ test "profile Mosaic bands cover a 192 by 192 target exactly once" {
 /// stateless after setup, and these checks rule out all cross-tile state:
 /// queries, depth, input attachments, and self-sampling feedback.
 fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
-    if (batch_count < 2 or query_context.pool != null) return false;
+    if (batch_count == 0 or query_context.pool != null) return false;
     var cursor = start;
     for (0..batch_count) |_| {
         const raw = cursor.current() orelse return false;
@@ -12400,6 +12400,27 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             }
             if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
                 std.debug.print("ZPU Mosaic VP9 profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
+            cursor.* = candidate;
+            return 1;
+        }
+        // The exact scalar-coverage profile used while Chromium composites a
+        // decoded VP9 surface is stateless after its descriptor setup. Admit
+        // just this identity to the same disjoint worker bands as the native
+        // VP9 transform; `profileMosaicBatchTileParallelSafe` still rejects
+        // depth, queries, input attachments, and target feedback.
+        const single_sample_coverage = switch (first.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile.fragment.sampleCoveragePlan() != null,
+            else => false,
+        };
+        if (single_sample_coverage and executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context)) {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic VP9 coverage profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
+                std.debug.print("ZPU Mosaic VP9 coverage profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
             cursor.* = candidate;
             return 1;
         }

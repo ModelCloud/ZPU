@@ -3824,13 +3824,14 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .radial_mask, .passthrough, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .circle_mask => true,
         else => false,
     };
 }
 
 test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .sample_modulate = .{ .color_interface = 0, .coordinate_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .sample_coverage = .{ .coordinate_interface = 0, .coverage_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
