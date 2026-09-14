@@ -792,7 +792,7 @@ pub const SampleModulatePlan = struct {
     bias_literal: [4]u8,
 };
 
-const TextureCopyFastPath = struct {
+pub const TextureCopyPlan = struct {
     coordinate_interface: u32,
     image_interface: u32,
     output_interface: u32,
@@ -844,7 +844,7 @@ pub const Vp9ColorTransformPrepared = struct {
 
 const FastPath = union(enum) {
     sample_modulate: SampleModulatePlan,
-    texture_copy: TextureCopyFastPath,
+    texture_copy: TextureCopyPlan,
     sample_coverage: SampleCoverageFastPath,
     vp9_color_transform: Vp9ColorTransformPlan,
     radial_mask: RadialMaskPlan,
@@ -919,7 +919,7 @@ const chromium_texture_copy_identity = [_]u8{ 0x7c, 0x59, 0xf3, 0xc8, 0xe2, 0x40
 const chromium_vp9_sample_coverage_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
 const chromium_vp9_color_transform_identity = [_]u8{ 0xdd, 0xaa, 0x22, 0x5a, 0xa0, 0xad, 0x69, 0x75, 0x74, 0xe5, 0x69, 0xa5, 0xbb, 0xf0, 0xf2, 0x67, 0x88, 0xd2, 0xbb, 0x19, 0x54, 0x5b, 0xe0, 0x19, 0xe2, 0x23, 0x5e, 0x73, 0x4b, 0x38, 0xf0, 0xc9 };
 
-fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyFastPath {
+fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyPlan {
     if (program.stage != .fragment or program.instructions.len != 13 or !std.mem.eql(u8, &program.identity.digest, &chromium_texture_copy_identity)) return null;
     const instructions = program.instructions;
     if (instructions[1].op != .constant or instructions[1].literal.len != 4 or instructions[7].op != .input or instructions[7].operands.len != 1 or instructions[9].op != .image_sample_implicit_lod or instructions[9].operands.len != 3 or instructions[11].op != .output or instructions[11].operands.len != 2) return null;
@@ -1348,6 +1348,15 @@ pub const Executor = struct {
     pub fn sampleModulatePlan(self: *const Executor) ?SampleModulatePlan {
         return switch (self.fast_path orelse return null) {
             .sample_modulate => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the fully identity-gated ABI of Chromium's exact texture-copy
+    /// compositor profile. Altered shaders retain the normal executor path.
+    pub fn textureCopyPlan(self: *const Executor) ?TextureCopyPlan {
+        return switch (self.fast_path orelse return null) {
+            .texture_copy => |plan| plan,
             else => null,
         };
     }
@@ -2094,6 +2103,19 @@ pub const Executor = struct {
             const color_value: f32 = @bitCast(color.bits[lane]);
             std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
         }
+        return true;
+    }
+
+    /// Direct resolved-input form of Chromium's exact texture-copy profile.
+    /// It preserves the normal sampler and canonical output representation,
+    /// but bypasses binding/output discovery in the hot compositor loop.
+    pub fn executeTextureCopyDirect(self: *const Executor, coordinate_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.textureCopyPlan() orelse return false;
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(sampled.bits[lane]), .little);
         return true;
     }
 

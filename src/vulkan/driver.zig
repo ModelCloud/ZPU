@@ -10753,6 +10753,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
         _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
+    // Resolve Chromium's exact full-screen texture-copy ABI once per draw.
+    // The selected Render IR identity is stricter than a generic sampled
+    // quad, so every other texture shader remains on the normal path.
+    const texture_copy_plan = profile.fragment.textureCopyPlan();
+    var texture_copy_coordinate_varying: ?usize = null;
+    var texture_copy_image: ?render_ir_exec.SampledImage = null;
+    if (texture_copy_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.coordinate_interface) texture_copy_coordinate_varying = index;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) texture_copy_image = binding.sampled_image;
+        }
+    }
     // The captured VP9 video-surface composite differs from sample-modulate
     // only in the coverage ABI: its second varying is a scalar. Resolve the
     // exact validated plan once per draw so its hot pixels do not rebuild a
@@ -11297,6 +11311,18 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         fragment_binding_count += 1;
                     }
                     const fragment_fast = direct: {
+                        if (texture_copy_plan != null) {
+                            const coordinate_varying = texture_copy_coordinate_varying orelse break :direct false;
+                            const image = texture_copy_image orelse break :direct false;
+                            break :direct profile.fragment.executeTextureCopyDirect(
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                image,
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
                         if (sample_modulate_plan != null) {
                             const color_varying = sample_modulate_color_varying orelse break :direct false;
                             const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
