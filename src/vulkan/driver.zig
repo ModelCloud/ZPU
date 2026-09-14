@@ -12137,7 +12137,7 @@ test "profile Mosaic tile clips cover a 640 by 720 target exactly once" {
 }
 
 /// The parallel route is deliberately more restrictive than the generic
-/// profile scheduler. Exact texture-copy/sample-modulate fragments are
+/// profile scheduler. Exact texture-copy/sample-modulate/pass-through fragments are
 /// stateless after setup, and these checks rule out all cross-tile state:
 /// queries, depth, input attachments, and self-sampling feedback.
 fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
@@ -12149,7 +12149,13 @@ fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: u
             .cube_draw => |value| value,
             else => return false,
         };
-        if (op.instance_count != 1 or op.depth_image != null or op.framebuffer != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
+        // A framebuffer is only an attachment container. A color-only
+        // framebuffer has the same per-tile ownership as a directly bound
+        // color image; reject an actual resolved depth attachment instead of
+        // discarding this otherwise stateless path merely for using the
+        // framebuffer form of the Vulkan API.
+        const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+        if (op.instance_count != 1 or depth != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
         const profile = switch (op.pipeline.execution_abi) {
             .profile_v1_scalar_graphics => |*value| value,
             else => return false,

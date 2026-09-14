@@ -1467,10 +1467,7 @@ pub const Executor = struct {
     /// regions concurrently while retaining submission order within each
     /// region. Every other profile remains serial by construction.
     pub fn tileParallelSafe(self: *const Executor) bool {
-        return switch (self.fast_path orelse return false) {
-            .sample_modulate, .texture_copy => true,
-            else => false,
-        };
+        return fastPathTileParallelSafe(self.fast_path);
     }
 
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
@@ -3608,6 +3605,21 @@ pub const Executor = struct {
         };
     }
 };
+
+fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
+    return switch (fast_path orelse return false) {
+        .sample_modulate, .texture_copy, .passthrough => true,
+        else => false,
+    };
+}
+
+test "only stateless exact profiles are tile parallel safe" {
+    try std.testing.expect(fastPathTileParallelSafe(.{ .sample_modulate = .{ .color_interface = 0, .coordinate_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
+    try std.testing.expect(!fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(!fastPathTileParallelSafe(null));
+}
 
 test "Chromium clamped convolution coordinates preserve matrix order and shader clamp bounds" {
     // The live compositor profile transforms first and then applies `f_clamp`
