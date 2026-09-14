@@ -2188,22 +2188,21 @@ pub const Executor = struct {
         const offset10 = y0 * image.row_stride + x1 * image.bytes_per_texel;
         const offset01 = y1 * image.row_stride + x0 * image.bytes_per_texel;
         const offset11 = y1 * image.row_stride + x1 * image.bytes_per_texel;
-        var result: [4]f32 = undefined;
-        for (0..4) |lane| {
-            const source_lane: usize = if (image.format == .rgba8_unorm or lane == 1 or lane == 3) lane else if (lane == 0) 2 else 0;
-            // `unorm8_to_f32` is constructed with the generic sampler's
-            // exact conversion expression. Reusing it removes sixteen
-            // repeated integer-to-float conversions from each bilinear RGBA
-            // sample without changing the sampled f32 payload.
-            const p00 = unorm8_to_f32[image.pixels[offset00 + source_lane]];
-            const p10 = unorm8_to_f32[image.pixels[offset10 + source_lane]];
-            const p01 = unorm8_to_f32[image.pixels[offset01 + source_lane]];
-            const p11 = unorm8_to_f32[image.pixels[offset11 + source_lane]];
-            result[lane] =
-                (p00 * (1 - tx) + p10 * tx) * (1 - ty) +
-                (p01 * (1 - tx) + p11 * tx) * ty;
-        }
-        return result;
+        const source_lanes: [4]usize = if (image.format == .rgba8_unorm) .{ 0, 1, 2, 3 } else .{ 2, 1, 0, 3 };
+        // The four color lanes have independent arithmetic. Use a fixed
+        // vector only after the prepared contract has validated contiguous
+        // RGBA/BGRA bytes and identity swizzle; the scalar generic sampler
+        // remains the reference for every other image. The interpolation is
+        // deliberately written in the same two-stage order as `sample`.
+        const Vec4 = @Vector(4, f32);
+        const p00: Vec4 = .{ unorm8_to_f32[image.pixels[offset00 + source_lanes[0]]], unorm8_to_f32[image.pixels[offset00 + source_lanes[1]]], unorm8_to_f32[image.pixels[offset00 + source_lanes[2]]], unorm8_to_f32[image.pixels[offset00 + source_lanes[3]]] };
+        const p10: Vec4 = .{ unorm8_to_f32[image.pixels[offset10 + source_lanes[0]]], unorm8_to_f32[image.pixels[offset10 + source_lanes[1]]], unorm8_to_f32[image.pixels[offset10 + source_lanes[2]]], unorm8_to_f32[image.pixels[offset10 + source_lanes[3]]] };
+        const p01: Vec4 = .{ unorm8_to_f32[image.pixels[offset01 + source_lanes[0]]], unorm8_to_f32[image.pixels[offset01 + source_lanes[1]]], unorm8_to_f32[image.pixels[offset01 + source_lanes[2]]], unorm8_to_f32[image.pixels[offset01 + source_lanes[3]]] };
+        const p11: Vec4 = .{ unorm8_to_f32[image.pixels[offset11 + source_lanes[0]]], unorm8_to_f32[image.pixels[offset11 + source_lanes[1]]], unorm8_to_f32[image.pixels[offset11 + source_lanes[2]]], unorm8_to_f32[image.pixels[offset11 + source_lanes[3]]] };
+        const one: Vec4 = @splat(1);
+        const tx4: Vec4 = @splat(tx);
+        const ty4: Vec4 = @splat(ty);
+        return (p00 * (one - tx4) + p10 * tx4) * (one - ty4) + (p01 * (one - tx4) + p11 * tx4) * ty4;
     }
 
     fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
