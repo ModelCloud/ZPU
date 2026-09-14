@@ -1839,6 +1839,7 @@ var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
@@ -10889,6 +10890,23 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
             for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], vertex_output_bytes[varying.vertex_slot][0 .. varying.lanes * 4]);
+            if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_geometry.fetchAdd(1, .monotonic) < 6) {
+                std.debug.print(
+                    "ZPU VP9 geometry triangle={d} corner={d} screen={d:.5},{d:.5},{d:.5},w={d:.5} luma={d:.7},{d:.7} chroma={d:.7},{d:.7}\n",
+                    .{
+                        triangle_index,
+                        corner,
+                        vertices[corner].x,
+                        vertices[corner].y,
+                        vertices[corner].z,
+                        vertices[corner].w,
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_luma_coordinate_varying.?][0..4], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_luma_coordinate_varying.?][4..8], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_chroma_coordinate_varying.?][0..4], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_chroma_coordinate_varying.?][4..8], .little))),
+                    },
+                );
+            }
             if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
                 op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
                 target.width == 1280 and target.height == 256 and triangle_index < 2)
