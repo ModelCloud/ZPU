@@ -14336,13 +14336,41 @@ test "current Chromium VP9 color transform native path matches validated IR" {
         writeF32(&uniform, base + 64, 2); // linear branch for normalized samples
     }
     var coordinates = [_]u8{0} ** 8;
-    writeF32(&coordinates, 0, 0.5);
-    writeF32(&coordinates, 4, 0.5);
-    const luma_pixels = [_]u8{ 64, 0, 0, 255 };
-    const chroma_pixels = [_]u8{ 128, 192, 0, 255 };
-    const image_common = .{ .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = render_ir_exec.SampledImage.Format.rgba8_unorm, .filter = render_ir_exec.SampledImage.Filter.nearest, .address_u = render_ir_exec.SampledImage.AddressMode.clamp_to_edge, .address_v = render_ir_exec.SampledImage.AddressMode.clamp_to_edge };
-    const luma_image = render_ir_exec.SampledImage{ .pixels = &luma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
-    const chroma_image = render_ir_exec.SampledImage{ .pixels = &chroma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
+    writeF32(&coordinates, 0, 0.625);
+    writeF32(&coordinates, 4, 0.375);
+    // Match the video uploader's padded four-byte texel storage while using
+    // the R8/RG8 formats and linear clamp mode selected by the real VP9
+    // profile. The generic executor is the oracle for the prepared path.
+    const luma_pixels = [_]u8{
+        16,  0, 0, 0, 64,  0, 0, 0,
+        128, 0, 0, 0, 240, 0, 0, 0,
+    };
+    const chroma_pixels = [_]u8{
+        16,  192, 0, 0, 96,  160, 0, 0,
+        128, 64,  0, 0, 224, 32,  0, 0,
+    };
+    const luma_image = render_ir_exec.SampledImage{
+        .pixels = &luma_pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .bytes_per_texel = 4,
+        .format = .r8_unorm,
+        .filter = .linear,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    const chroma_image = render_ir_exec.SampledImage{
+        .pixels = &chroma_pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .bytes_per_texel = 4,
+        .format = .rg8_unorm,
+        .filter = .linear,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
     var color = [_]u8{0} ** 16;
     var facing = [_]u8{1};
     const bindings = [_]render_ir_exec.Binding{

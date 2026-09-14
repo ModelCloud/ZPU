@@ -1462,14 +1462,72 @@ pub const Executor = struct {
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
     }
 
+    /// Return the two channels used by Chromium's captured VP9 transform
+    /// without constructing a generic `Value` or four-channel sample.  This
+    /// deliberately accepts only the complete descriptor ABI emitted for the
+    /// transform: identity component mapping, linear filtering, and
+    /// clamp-to-edge addressing of an R8 or RG8 plane.  A caller that sees
+    /// `null` must use the ordinary sampler, preserving all other Vulkan
+    /// sampler semantics.
+    fn sampleVp9Plane(image: SampledImage, u: f32, v: f32) Error!?[2]f32 {
+        if ((image.format != .r8_unorm and image.format != .rg8_unorm) or
+            image.filter != .linear or image.address_u != .clamp_to_edge or image.address_v != .clamp_to_edge or
+            !std.mem.eql(i32, &image.swizzle, &.{ 0, 0, 0, 0 })) return null;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel or
+            !std.math.isFinite(u) or !std.math.isFinite(v)) return error.Bounds;
+
+        // Retain the generic sampler's arithmetic order: normalized clamp,
+        // scaled texel coordinate, floor, then bilinear interpolation.
+        const fx = std.math.clamp(u, @as(f32, 0), @as(f32, 1)) * @as(f32, @floatFromInt(image.width)) - 0.5;
+        const fy = std.math.clamp(v, @as(f32, 0), @as(f32, 1)) * @as(f32, @floatFromInt(image.height)) - 0.5;
+        const floor_x = @floor(fx);
+        const floor_y = @floor(fy);
+        const x0: u32 = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_x)), 0, @as(i32, @intCast(image.width - 1))));
+        const y0: u32 = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_y)), 0, @as(i32, @intCast(image.height - 1))));
+        const x1: u32 = @min(x0 + 1, image.width - 1);
+        const y1: u32 = @min(y0 + 1, image.height - 1);
+        const tx = fx - floor_x;
+        const ty = fy - floor_y;
+        const components: usize = if (image.format == .rg8_unorm) 2 else 1;
+        const pixel = struct {
+            fn at(sampled: SampledImage, x: u32, y: u32, lane: usize) Error!f32 {
+                const row = std.math.mul(usize, y, sampled.row_stride) catch return error.Bounds;
+                const column = std.math.mul(usize, x, sampled.bytes_per_texel) catch return error.Bounds;
+                const offset = std.math.add(usize, row, column) catch return error.Bounds;
+                const index = std.math.add(usize, offset, lane) catch return error.Bounds;
+                if (index >= sampled.pixels.len) return error.Bounds;
+                return @as(f32, @floatFromInt(sampled.pixels[index])) / 255;
+            }
+        }.at;
+        var result: [2]f32 = .{ 0, 0 };
+        for (0..components) |lane| {
+            const p00 = try pixel(image, x0, y0, lane);
+            const p10 = try pixel(image, x1, y0, lane);
+            const p01 = try pixel(image, x0, y1, lane);
+            const p11 = try pixel(image, x1, y1, lane);
+            result[lane] = (p00 * (1 - tx) + p10 * tx) * (1 - ty) + (p01 * (1 - tx) + p11 * tx) * ty;
+        }
+        return result;
+    }
+
     fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
         if (bytes.len < 16) return error.Bounds;
         const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
         const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
-        const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
-        const luma = try sample(prepared.luma_image, luma_coordinates, bias);
-        const chroma = try sample(prepared.chroma_image, chroma_coordinates, bias);
-        var source = [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
+        const luma_u: f32 = @bitCast(luma_coordinates.bits[0]);
+        const luma_v: f32 = @bitCast(luma_coordinates.bits[1]);
+        const chroma_u: f32 = @bitCast(chroma_coordinates.bits[0]);
+        const chroma_v: f32 = @bitCast(chroma_coordinates.bits[1]);
+        const luma_plane = try sampleVp9Plane(prepared.luma_image, luma_u, luma_v);
+        const chroma_plane = try sampleVp9Plane(prepared.chroma_image, chroma_u, chroma_v);
+        var source = if (luma_plane != null and chroma_plane != null)
+            [_]f32{ luma_plane.?[0], chroma_plane.?[0], chroma_plane.?[1] }
+        else blk: {
+            const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
+            const luma = try sample(prepared.luma_image, luma_coordinates, bias);
+            const chroma = try sample(prepared.chroma_image, chroma_coordinates, bias);
+            break :blk [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
+        };
         source = vectorTimesColorTransformMatrix(source, prepared.source_matrix);
         for (0..3) |lane| source[lane] = colorTransformClamp(canonicalF32(source[lane] + prepared.source_offset[lane]));
         for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);

@@ -151,7 +151,25 @@ def main() -> None:
         # message timing. requestVideoFrameCallback measures presented frames,
         # while getVideoPlaybackQuality exposes decoded/dropped frame counts.
         expression = f"""(async () => {{
-          const video = document.getElementById('v');
+          const video = await new Promise(resolve => {{
+            const deadline = performance.now() + 10000;
+            function findVideo() {{
+              const candidate = document.getElementById('v');
+              if (candidate || performance.now() >= deadline) {{
+                resolve(candidate);
+                return;
+              }}
+              setTimeout(findVideo, 25);
+            }}
+            findVideo();
+          }});
+          if (!video) return {{
+            loadState: 'missing-video', currentTime: 0, readyState: 0,
+            paused: true, ended: false, error: null, videoWidth: 0,
+            videoHeight: 0, callbacks: 0, callbackElapsedSeconds: 0,
+            presentedFramesPerSecond: 0, totalVideoFrames: 0,
+            droppedVideoFrames: 0, corruptedVideoFrames: 0,
+          }};
           const loadState = await new Promise(resolve => {{
             let finished = false;
             const finish = state => {{
