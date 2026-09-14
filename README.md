@@ -19,6 +19,23 @@ reproducible, scriptable, and explicit about what it does and does not support.
   <img src="docs/assets/zpu-intro.svg" alt="Introducing ZPU" width="100%">
 </p>
 
+## What runs where
+
+```text
+Vulkan application
+  → system Vulkan loader
+  → ZPU ICD
+  → validated SPIR-V / render IR
+  → Mosaic CPU renderer
+  → host-memory image
+  → headless or XCB presentation
+```
+
+There is no kernel DRM driver, hidden GPU service, or substitute Vulkan driver
+in that path. ZPU validates the admitted Vulkan work, executes it on the CPU,
+and presents its own images. The [Linux userspace driver guide](docs/linux-userspace-driver.md)
+describes the boundary in depth.
+
 ## Showcase: Chromium, Vulkan, and VP9
 
 ZPU drives the packaged Chromium browser inside a real SmolVM guest using the
@@ -42,6 +59,22 @@ The capture is evidence of the browser/video rendering path, not a claim of
 two-lane playback run presented 37.75 FPS. ZPU is CPU rendering, not hardware
 GPU acceleration.
 
+## Current capabilities
+
+| Area | What ZPU demonstrates |
+| --- | --- |
+| Vulkan entry points | A complete 234-command Vulkan 1.0–1.4 command ABI surface, with a truthful bounded runtime feature profile. |
+| Browser rendering | Packaged Chromium in SmolVM with ZPU as the only ICD, native Skia Ganesh Vulkan, GPU compositing, rasterization, and VP9 video presentation. |
+| CPU renderer | Validated graphics, transfer, swapchain, image, descriptor, and presentation paths running in userspace CPU memory. |
+| Mosaic | Packetized, cache-local tile rendering for eligible complex draw streams, with bounded worker lanes and correctness checks against the scalar path. |
+| Shader execution | Supported SPIR-V is lowered into render IR; current browser profiles include texture sampling, derivatives, matrices, uniforms, and video color transforms. |
+| Desktop automation | Virtual Linux mouse and keyboard devices can be controlled from Python for agent-driven UI testing. |
+| Optional CPU APIs | A bounded Metal-shaped CPU ABI and a CPU ML integration boundary for experimental cross-platform workflows. |
+
+The table is intentionally not a conformance claim. Consult the
+[API policy](docs/api-policy.md) and [Vulkan ABI status](docs/vulkan-abi.md)
+for what is advertised, tested, and still outside the profile.
+
 ## Why ZPU for agentic work?
 
 Agents can take a graphics task from source change to reproducible evidence in
@@ -56,6 +89,33 @@ one environment:
 
 The result is a practical sandbox for browser rendering, UI automation,
 graphics debugging, and CPU-first experimentation.
+
+## Drive a Linux desktop from an agent
+
+ZPU includes small `uinput` mouse and keyboard daemons plus Python bindings.
+An agent can use them to interact with a guest browser or desktop through Unix
+sockets instead of relying on physical input devices:
+
+```python
+from zpu import KeyboardClient, MouseClient
+
+with MouseClient("/run/zmouse.sock") as mouse:
+    mouse.move(100, 0)
+    mouse.click(1)
+
+with KeyboardClient("/run/zkeyboard.sock") as keyboard:
+    keyboard.key_tap(30)  # "a"
+```
+
+Build them with `zig build zinput`; see
+[`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh) for guest staging and
+[`test/zinput.sh`](test/zinput.sh) for the exercised interface.
+
+<p align="center">
+  <img src="docs/assets/zpu-fluid-desktop.png" alt="ZPU-powered SmolVM desktop with simulated pointer input" width="720">
+  <br>
+  <em>A SmolVM desktop driven by simulated input while ZPU presents Vulkan content.</em>
+</p>
 
 ## Mosaic and shader specialization
 
@@ -72,6 +132,26 @@ it.
 
 Read the design notes for [Mosaic](design/mosaic-renderer.md), the
 [render IR](design/render-ir.md), and [ISA dispatch](design/isa-tiers.md).
+
+## Measure, reproduce, and inspect
+
+Performance work is gated by repeatable workloads, checksums, and tail latency
+rather than headline FPS alone. The project contains 2D, 3D, Mosaic, Vulkan
+submission, and transfer benchmarks, plus scripts for guest staging and
+browser diagnostics. Start with:
+
+```sh
+tools/limited-cpus.sh zig build benchmark -Doptimize=ReleaseFast -- --json
+tools/limited-cpus.sh zig build benchmark-3d -Doptimize=ReleaseFast -- --json
+ZPU_MAX_THREADS=4 tools/limited-cpus.sh zig build benchmark-mosaic-scaling \
+  -Doptimize=ReleaseFast
+```
+
+See [benchmarking](docs/benchmarking.md),
+[3D application workloads](docs/3d-app-benchmarks.md),
+[Vulkan submission benchmarks](docs/vulkan-abi-benchmarks.md), and the
+[Mosaic scalability contract](design/mosaic-scalability.md) for methodology,
+limits, and recorded results.
 
 ## Quick start
 
@@ -117,10 +197,13 @@ Start here for the details kept out of this README:
   results.
 - [3D application workloads](docs/3d-app-benchmarks.md) and
   [Vulkan submission benchmarks](docs/vulkan-abi-benchmarks.md).
+- [Vulkan transfer benchmarks](docs/vulkan-transfer-benchmarks.md) and
+  [host-transfer benchmarks](docs/vulkan-host-transfer-benchmarks.md).
 - [Desktop readiness](docs/desktop-readiness.md) and the
   [SmolVM guest workflow](docs/smolvm-omarchy.md).
 - [CPU ML integration boundary](docs/cpu-ml-zml.md) and the optional
   [Metal-shaped ABI](docs/metal-abi.md).
+- [Project readiness](docs/pr-readiness.md), [implementation plan](docs/vulkan-1.4-implementation-plan.md), and [design backlog](design/todo.md).
 
 ## Scope and status
 
