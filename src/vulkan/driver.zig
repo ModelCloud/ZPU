@@ -1841,6 +1841,7 @@ var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_geometry = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_affine_quads = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_affine_candidates = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_affine_rejections = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
@@ -11033,18 +11034,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     // blended, or otherwise non-identical draws.
     var vp9_quad_bounds = emptyRect();
     var vp9_quad_pixels: usize = 0;
-    const vp9_known_color_varying = blk: {
-        if (vp9_luma_coordinate_varying == null or vp9_chroma_coordinate_varying == null or profile.varying_count != 3) break :blk false;
-        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
-            if (index == vp9_luma_coordinate_varying.? or index == vp9_chroma_coordinate_varying.?) continue;
-            if (varying.fragment_interface != 0 or varying.lanes != 4 or varying.flat) break :blk false;
-        }
-        break :blk true;
-    };
-    if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_affine_quads.load(.monotonic) == 0) {
+    // `detectChromiumVp9ColorTransform` recognizes the complete canonical
+    // fragment program. Its third varying is the declared color input, but
+    // that program's output depends only on its Y and UV coordinates. Do not
+    // add a second, potentially divergent interpretation of the dead input
+    // here: three linked varyings plus the exact fragment identity prove the
+    // complete ABI, while the direct executor consumes the two live values.
+    const vp9_varying_abi = vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and profile.varying_count == 3;
+    if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_affine_candidates.fetchAdd(1, .monotonic) < 4) {
         std.debug.print(
-            "ZPU VP9 affine candidate topology={d} vertices={d} instances={d} discard={d} cull={d} depth_test={d} depth_write={d} depth_bounds={d} depth_bias={d} depth_image={} fragment_bool={} derivatives={} frag_coord={} varyings={d} known_color={} luma_lanes={d}/flat={} chroma_lanes={d}/flat={} input_attachments={d} color={} mask={x} blend={d}/{d}/{d}/{d}/{d}/{d}/{d}\n",
-            .{ op.primitive_topology, op.vertex_count, op.instance_count, op.rasterizer_discard_enable, op.cull_mode, op.depth_test_enable, op.depth_write_enable, op.depth_bounds_test_enable, op.depth_bias_enable, depth != null, profile.fragment_bool, profile.fragment_needs_derivatives, profile.fragment_frag_coord != null, profile.varying_count, vp9_known_color_varying, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].flat else false, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].flat else false, profile.fragment_input_attachment_count, color != null, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, op.pipeline.color_blend_op, op.pipeline.src_alpha_blend_factor, op.pipeline.dst_alpha_blend_factor, op.pipeline.alpha_blend_op },
+            "ZPU VP9 affine candidate topology={d} vertices={d} instances={d} discard={d} cull={d} depth_test={d} depth_write={d} depth_bounds={d} depth_bias={d} depth_image={} fragment_bool={} derivatives={} frag_coord={} varyings={d} valid_abi={} luma_lanes={d}/flat={} chroma_lanes={d}/flat={} input_attachments={d} color={} mask={x} blend={d}/{d}/{d}/{d}/{d}/{d}/{d}\n",
+            .{ op.primitive_topology, op.vertex_count, op.instance_count, op.rasterizer_discard_enable, op.cull_mode, op.depth_test_enable, op.depth_write_enable, op.depth_bounds_test_enable, op.depth_bias_enable, depth != null, profile.fragment_bool, profile.fragment_needs_derivatives, profile.fragment_frag_coord != null, profile.varying_count, vp9_varying_abi, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].flat else false, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].flat else false, profile.fragment_input_attachment_count, color != null, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, op.pipeline.color_blend_op, op.pipeline.src_alpha_blend_factor, op.pipeline.dst_alpha_blend_factor, op.pipeline.alpha_blend_op },
         );
     }
     const direct_vp9_affine_quad = blk: {
@@ -11052,7 +11052,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
             op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
             depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
-            !vp9_known_color_varying or profile.varyings[vp9_luma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_luma_coordinate_varying.?].flat or
+            !vp9_varying_abi or profile.varyings[vp9_luma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_luma_coordinate_varying.?].flat or
             profile.varyings[vp9_chroma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_chroma_coordinate_varying.?].flat or
             profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or op.pipeline.color_write_mask != 0xf or
             !(op.pipeline.color_blend_enable == 0 or
