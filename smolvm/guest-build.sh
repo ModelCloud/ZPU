@@ -8,6 +8,7 @@ src=/mnt/zpu-source
 work=/var/tmp/zpu-build
 prefix=/opt/zpu
 cpu_tier=${ZPU_GUEST_CPU_TIER:-baseline}
+optimize=${ZPU_GUEST_OPTIMIZE:-ReleaseSafe}
 
 for program in zig vulkaninfo vkcube tar python3 git taskset lscpu; do
     command -v "$program" >/dev/null || { echo "required guest tool not found: $program" >&2; exit 2; }
@@ -36,15 +37,22 @@ case "$cpu_tier" in
         exit 2
         ;;
 esac
+case "$optimize" in
+    ReleaseSafe|ReleaseFast) ;;
+    *)
+        echo 'ZPU_GUEST_OPTIMIZE must be ReleaseSafe or ReleaseFast' >&2
+        exit 2
+        ;;
+esac
 rm -rf "$work"
 mkdir -p "$work" "$prefix/bin"
 cp -a "$src/." "$work/"
 cd "$work"
 tools/limited-cpus.sh zig fmt --check build.zig src tools
 if [ "$cpu_tier" = native ]; then
-    tools/limited-cpus.sh zig build -Doptimize=ReleaseSafe -Dcpu=native --prefix "$prefix"
+    tools/limited-cpus.sh zig build "-Doptimize=$optimize" -Dcpu=native --prefix "$prefix"
 else
-    tools/limited-cpus.sh zig build -Doptimize=ReleaseSafe --prefix "$prefix"
+    tools/limited-cpus.sh zig build "-Doptimize=$optimize" --prefix "$prefix"
 fi
 zig cc -O2 -std=c11 -Wall -Wextra -Werror smolvm/xcb-connect.c -lxcb -o "$prefix/bin/zpu-xcb-connect"
 zig cc -O2 -std=c11 -Wall -Wextra -Werror test/xcb_present.c -lvulkan -lxcb -o "$prefix/bin/zpu-xcb-present"
@@ -52,4 +60,4 @@ test -x /usr/bin/vulkaninfo
 test -x /usr/bin/vkcube
 test -r "$prefix/lib/libvulkan_zpu.so"
 test -r "$prefix/share/vulkan/icd.d/zpu_icd.x86_64.json"
-printf '%s\n' "guest ZPU build and install complete (cpu tier: $cpu_tier)"
+printf '%s\n' "guest ZPU build and install complete (cpu tier: $cpu_tier, optimize: $optimize)"
