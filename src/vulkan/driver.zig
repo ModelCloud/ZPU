@@ -11739,6 +11739,111 @@ fn profileMosaicEligible(op: anytype) bool {
         op.rasterizer_discard_enable == 0 and op.layer_count == 1;
 }
 
+/// Resolve one image-order Mosaic tile.  Tile ownership is static and a lane
+/// processes tile indexes `lane, lane + lanes, ...`; no two lanes can write
+/// the same pixel.
+fn profileMosaicTileClip(width: u32, height: u32, tile_index: usize) ?ProfileMosaicClip {
+    if (width == 0 or height == 0) return null;
+    const tiles_x = (@as(usize, width) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+    const tiles_y = (@as(usize, height) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+    const tile_count = std.math.mul(usize, tiles_x, tiles_y) catch return null;
+    if (tile_index >= tile_count) return null;
+    const tile_x = @as(u32, @intCast((tile_index % tiles_x) * profile_mosaic_tile_size));
+    const tile_y = @as(u32, @intCast((tile_index / tiles_x) * profile_mosaic_tile_size));
+    return .{
+        .min_x = tile_x,
+        .min_y = tile_y,
+        .max_x = @min(width, tile_x + profile_mosaic_tile_size),
+        .max_y = @min(height, tile_y + profile_mosaic_tile_size),
+    };
+}
+
+test "profile Mosaic tile clips cover a 640 by 720 target exactly once" {
+    var covered = [_]u8{0} ** (640 * 720);
+    var tile_index: usize = 0;
+    while (profileMosaicTileClip(640, 720, tile_index)) |clip| : (tile_index += 1) {
+        for (clip.min_y..clip.max_y) |y| for (clip.min_x..clip.max_x) |x| {
+            const index = @as(usize, y) * 640 + x;
+            try std.testing.expectEqual(@as(u8, 0), covered[index]);
+            covered[index] = 1;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 9), tile_index);
+    for (covered) |pixel| try std.testing.expectEqual(@as(u8, 1), pixel);
+}
+
+/// The parallel route is deliberately more restrictive than the generic
+/// profile scheduler. Exact texture-copy/sample-modulate fragments are
+/// stateless after setup, and these checks rule out all cross-tile state:
+/// queries, depth, input attachments, and self-sampling feedback.
+fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (batch_count < 2 or query_context.pool != null) return false;
+    var cursor = start;
+    for (0..batch_count) |_| {
+        const raw = cursor.current() orelse return false;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => return false,
+        };
+        if (op.instance_count != 1 or op.depth_image != null or op.framebuffer != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
+        const profile = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*value| value,
+            else => return false,
+        };
+        if (!profile.fragment.tileParallelSafe() or profile.fragment_input_attachment_count != 0) return false;
+        if (op.descriptors.texture == color) return false;
+        for (op.descriptors.sampled_images) |sampled| if (sampled.image == color) return false;
+        cursor.advance();
+    }
+    return true;
+}
+
+const ProfileMosaicLaneContext = struct {
+    start: MosaicCommandCursor,
+    batch_count: usize,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *ProfileMosaicLaneContext = @ptrCast(@alignCast(raw));
+        if (lane_count == 0 or lane_index >= lane_count) return;
+        const tiles_x = (@as(usize, context.width) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+        const tiles_y = (@as(usize, context.height) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+        const tile_count = std.math.mul(usize, tiles_x, tiles_y) catch return;
+        var tile_index = lane_index;
+        while (tile_index < tile_count) : (tile_index += lane_count) {
+            const clip = profileMosaicTileClip(context.width, context.height, tile_index) orelse return;
+            var draw_cursor = context.start;
+            for (0..context.batch_count) |_| {
+                const raw_command = draw_cursor.current() orelse return;
+                const op = switch (raw_command.*) {
+                    .cube_draw => |value| value,
+                    else => return,
+                };
+                const source = switch (op.pipeline.execution_abi) {
+                    .profile_v1_scalar_graphics => |*profile| profile,
+                    else => return,
+                };
+                const lane_profile = cachedProfileLane(source) orelse return;
+                executeProfileDraw(op, lane_profile, context.query_context, 0, clip, false);
+                draw_cursor.advance();
+            }
+        }
+    }
+};
+
+fn executeMosaicTileParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
+    var context = ProfileMosaicLaneContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicLaneContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+    return true;
+}
+
 /// Execute adjacent native Skia profile draws through the Vulkan command
 /// stream's Mosaic tile scheduler. Tiles are visited in image order, while
 /// draws remain in submission order inside every tile; this preserves depth,
@@ -11789,8 +11894,24 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         }
     }
     // Adjacent profiles still use ordered serial tiles: arbitrary executors
-    // own mutable scratch and cannot be parallelized safely.
+    // own mutable scratch and cannot be parallelized safely. The two exact
+    // stateless sampled profiles are the exception: execute their complete
+    // ordered draw list independently in each disjoint tile.
     if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
+    const parallel_start = cursor.*;
+    const parallel_operation_start = frame_pacing.monotonicNs();
+    if (executeMosaicTileParallelProfileBatch(parallel_start, batch_count, color_image, query_context)) {
+        color_image.last_draw_ns = frame_pacing.monotonicNs() - parallel_operation_start;
+        if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+        if (renderDiagnosticsEnabled()) {
+            const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
+        }
+        if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+            std.debug.print("ZPU Mosaic parallel profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns });
+        cursor.* = candidate;
+        return batch_count;
+    }
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
     const operation_start = frame_pacing.monotonicNs();
