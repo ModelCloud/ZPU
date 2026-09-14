@@ -1855,12 +1855,24 @@ pub const Executor = struct {
         const tx = fx - floor_x;
         const ty = fy - floor_y;
         const components: usize = if (image.format == .rg8_unorm) 2 else 1;
+        // The four bilinear texel locations are shared by Y and UV.  Resolve
+        // their bounded byte offsets once, before the component loop, rather
+        // than redoing the row/texel address arithmetic for each chroma lane.
+        // This preserves the exact component reads and interpolation order.
+        const row0 = @as(usize, y0) * image.row_stride;
+        const row1 = @as(usize, y1) * image.row_stride;
+        const column0 = @as(usize, x0) * image.bytes_per_texel;
+        const column1 = @as(usize, x1) * image.bytes_per_texel;
+        const offset00 = row0 + column0;
+        const offset10 = row0 + column1;
+        const offset01 = row1 + column0;
+        const offset11 = row1 + column1;
         var result: [2]f32 = .{ 0, 0 };
         for (0..components) |lane| {
-            const p00 = unorm8_to_f32[image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane]];
-            const p10 = unorm8_to_f32[image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane]];
-            const p01 = unorm8_to_f32[image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane]];
-            const p11 = unorm8_to_f32[image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane]];
+            const p00 = unorm8_to_f32[image.pixels[offset00 + lane]];
+            const p10 = unorm8_to_f32[image.pixels[offset10 + lane]];
+            const p01 = unorm8_to_f32[image.pixels[offset01 + lane]];
+            const p11 = unorm8_to_f32[image.pixels[offset11 + lane]];
             result[lane] = (p00 * (1 - tx) + p10 * tx) * (1 - ty) + (p01 * (1 - tx) + p11 * tx) * ty;
         }
         return result;
