@@ -11071,6 +11071,34 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         if (varying.fragment_interface == plan.color_interface) analytic_coverage_color_varying = index;
         if (varying.fragment_interface == plan.coordinate_interface) analytic_coverage_coordinate_varying = index;
     };
+    // Resolve the recurrent two-axis glyph coverage profile once per draw.
+    // Its push constants supply the signed-distance bounds and atlas matrix;
+    // all dynamic color and distance values still come from interpolation.
+    const two_axis_coverage_plan = profile.fragment.twoAxisCoveragePlan();
+    var two_axis_coverage_color_varying: ?usize = null;
+    var two_axis_coverage_distance_varying: ?usize = null;
+    var two_axis_coverage_push_constants: ?[]const u8 = null;
+    var two_axis_coverage_image: ?render_ir_exec.SampledImage = null;
+    if (two_axis_coverage_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) two_axis_coverage_color_varying = index;
+            if (varying.fragment_interface == plan.distance_interface) two_axis_coverage_distance_varying = index;
+        }
+        if (profile.fragment_push_constant) |push| {
+            if (push.interface == plan.uniform_interface and pushConstantBytesInitialized(op.push_constants, 4, push.byte_size))
+                two_axis_coverage_push_constants = op.push_constants.values[4][0..push.byte_size];
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) two_axis_coverage_image = binding.sampled_image;
+        }
+    }
+    var two_axis_coverage_prepared: ?render_ir_exec.TwoAxisCoveragePrepared = null;
+    if (two_axis_coverage_plan != null and two_axis_coverage_push_constants != null and two_axis_coverage_image != null) {
+        two_axis_coverage_prepared = profile.fragment.prepareTwoAxisCoverage(two_axis_coverage_push_constants.?, two_axis_coverage_image.?) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render two-axis coverage preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
+    }
     const circle_mask_plan = profile.fragment.circleMaskPlan();
     var circle_mask_circle_varying: ?usize = null;
     var circle_mask_color_varying: ?usize = null;
@@ -11690,6 +11718,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                 &fragment_output_bytes,
                             ) catch |err| {
                                 if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (two_axis_coverage_plan != null) {
+                            const color_varying = two_axis_coverage_color_varying orelse break :direct false;
+                            const distance_varying = two_axis_coverage_distance_varying orelse break :direct false;
+                            const prepared = two_axis_coverage_prepared orelse break :direct false;
+                            break :direct profile.fragment.executeTwoAxisCoveragePrepared(
+                                prepared,
+                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                fragment_binding_storage[distance_varying][0 .. profile.varyings[distance_varying].lanes * 4],
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct two-axis coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
                         }

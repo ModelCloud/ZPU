@@ -818,6 +818,26 @@ pub const AnalyticCoveragePlan = struct {
     output_interface: u32,
 };
 
+/// Exact ABI of Chromium's two-axis glyph/edge coverage profile. It maps two
+/// signed distances through a push-constant matrix, samples red twice, and
+/// modulates the input color by their product.
+pub const TwoAxisCoveragePlan = struct {
+    color_interface: u32,
+    distance_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+pub const TwoAxisCoveragePrepared = struct {
+    matrix: [3][3]f32,
+    bounds: [4]f32,
+    coordinate_transform: [2]f32,
+    image: SampledImage,
+    bias: Value,
+};
+
 /// Exact ABI of Chromium's small analytic circle-coverage profile. It is
 /// identity-gated: the direct form is not a generic replacement for GLSL
 /// Length or clamp programs.
@@ -917,6 +937,7 @@ const FastPath = union(enum) {
     passthrough: PassthroughPlan,
     constant_black: ConstantBlackPlan,
     analytic_coverage: AnalyticCoveragePlan,
+    two_axis_coverage: TwoAxisCoveragePlan,
     circle_mask: CircleMaskPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
@@ -959,6 +980,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
     if (detectChromiumConstantBlack(program)) |path| return .{ .constant_black = path };
     if (detectChromiumAnalyticCoverage(program)) |path| return .{ .analytic_coverage = path };
+    if (detectChromiumTwoAxisCoverage(program)) |path| return .{ .two_axis_coverage = path };
     if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
@@ -1211,6 +1233,15 @@ const chromium_analytic_coverage_identity = [_]u8{
     0xf0, 0x2b, 0x70, 0xae, 0xff, 0x30, 0xc3, 0x95,
     0x05, 0x45, 0xd8, 0x19, 0xfb, 0x8a, 0xe4, 0x96,
     0x6b, 0x60, 0xe6, 0xfe, 0x6e, 0x0a, 0x31, 0x9e,
+};
+
+/// Canonical identity of Chromium's recurring two-axis text/glyph coverage
+/// fragment captured from the two-core Mosaic compositor workload.
+const chromium_two_axis_coverage_identity = [_]u8{
+    0x95, 0x42, 0x22, 0x62, 0xcc, 0xa0, 0xc9, 0xfc,
+    0x6a, 0xb2, 0xec, 0x46, 0xd3, 0x45, 0x4d, 0xbd,
+    0xf2, 0x88, 0x18, 0x0b, 0xa7, 0xee, 0x1b, 0x0a,
+    0x90, 0xe2, 0xe7, 0xc9, 0x23, 0xbc, 0x05, 0x22,
 };
 
 /// Candidate classes which are permitted to cross the experimental
@@ -1486,6 +1517,31 @@ fn detectChromiumAnalyticCoverage(program: *const ir.Program) ?AnalyticCoverageP
     return .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 3 };
 }
 
+fn detectChromiumTwoAxisCoverage(program: *const ir.Program) ?TwoAxisCoveragePlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 80 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_two_axis_coverage_identity)) return null;
+    const color = program.interfaces[0];
+    const distance = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        distance.storage != .input or !same(distance.ty, f32x4) or distance.location != null or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .push_constant or !uniform.block or uniform.member_count != 3 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x4, 64, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x2, 80, 1, 0)) return null;
+    return .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 4, .image_interface = 5, .output_interface = 3, .bias_literal = .{ 51, 51, 243, 190 } };
+}
+
 fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
     if (program.stage != .fragment or program.instructions.len != 27 or program.interfaces.len != 4 or
         !std.mem.eql(u8, &program.identity.digest, &chromium_circle_mask_identity)) return null;
@@ -1584,6 +1640,7 @@ pub const Executor = struct {
             .passthrough => "chromium_passthrough",
             .constant_black => "chromium_constant_black",
             .analytic_coverage => "chromium_analytic_coverage",
+            .two_axis_coverage => "chromium_two_axis_coverage",
             .circle_mask => "chromium_circle_mask",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
@@ -1680,6 +1737,16 @@ pub const Executor = struct {
     pub fn analyticCoveragePlan(self: *const Executor) ?AnalyticCoveragePlan {
         return switch (self.fast_path orelse return null) {
             .analytic_coverage => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the push-constant ABI only for Chromium's exact two-axis glyph
+    /// coverage profile. Every other text/atlas shader remains interpreter
+    /// executed or selects its own exact specialization.
+    pub fn twoAxisCoveragePlan(self: *const Executor) ?TwoAxisCoveragePlan {
+        return switch (self.fast_path orelse return null) {
+            .two_axis_coverage => |plan| plan,
             else => null,
         };
     }
@@ -2543,6 +2610,72 @@ pub const Executor = struct {
         try analyticCoverageResolved(color, coordinate, dx, dy, output orelse return error.InvalidOutput);
     }
 
+    fn prepareTwoAxisCoverageResolved(path: TwoAxisCoveragePlan, uniform: []const u8, image: SampledImage) Error!TwoAxisCoveragePrepared {
+        // The canonical IR reaches the two-axis matrix through byte 60,
+        // bounds through 76, and the coordinate transform through 84.
+        if (uniform.len < 88) return error.Bounds;
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| {
+            for (0..3) |row| matrix[column][row] = try uniformF32(uniform, 16 + column * 16 + row * 4);
+        }
+        return .{
+            .matrix = matrix,
+            .bounds = .{ try uniformF32(uniform, 64), try uniformF32(uniform, 68), try uniformF32(uniform, 72), try uniformF32(uniform, 76) },
+            .coordinate_transform = .{ try uniformF32(uniform, 80), try uniformF32(uniform, 84) },
+            .image = image,
+            .bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal),
+        };
+    }
+
+    fn twoAxisSampleCoordinate(prepared: TwoAxisCoveragePrepared, distance: f32) Value {
+        // Preserve the generic matrix-times-vector accumulation order for a
+        // vec3(distance, 0.5, 1) and the two rows consumed by the IR.
+        var result = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        inline for (0..2) |row| {
+            var value: f32 = 0;
+            value += prepared.matrix[0][row] * distance;
+            value += prepared.matrix[1][row] * 0.5;
+            value += prepared.matrix[2][row];
+            result.bits[row] = canonicalFloat(@bitCast(value));
+        }
+        return result;
+    }
+
+    fn executeTwoAxisCoveragePreparedResolved(prepared: TwoAxisCoveragePrepared, color: [4]f32, distances: [4]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        const scaled_y = canonicalF32(prepared.coordinate_transform[1] * distances[1]);
+        const coordinate = [_]f32{ distances[0], canonicalF32(prepared.coordinate_transform[0] + scaled_y) };
+        const first_delta = [_]f32{ canonicalF32(prepared.bounds[0] - coordinate[0]), canonicalF32(prepared.bounds[1] - coordinate[1]) };
+        const second_delta = [_]f32{ canonicalF32(coordinate[0] - prepared.bounds[2]), canonicalF32(coordinate[1] - prepared.bounds[3]) };
+        const maximum = [_]f32{
+            if (first_delta[0] < second_delta[0]) second_delta[0] else first_delta[0],
+            if (first_delta[1] < second_delta[1]) second_delta[1] else first_delta[1],
+        };
+        const first_sample = try sample(prepared.image, twoAxisSampleCoordinate(prepared, maximum[0]), prepared.bias);
+        const second_sample = try sample(prepared.image, twoAxisSampleCoordinate(prepared, maximum[1]), prepared.bias);
+        const coverage = canonicalF32(@as(f32, @bitCast(first_sample.bits[0])) * @as(f32, @bitCast(second_sample.bits[0])));
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color[lane] * coverage)), .little);
+    }
+
+    fn executeTwoAxisCoverageFastPath(path: TwoAxisCoveragePlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        const distance_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.distance_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        var color: [4]f32 = undefined;
+        var distances: [4]f32 = undefined;
+        for (0..4) |lane| {
+            color[lane] = @bitCast(color_value.bits[lane]);
+            distances[lane] = @bitCast(distance_value.bits[lane]);
+        }
+        try executeTwoAxisCoveragePreparedResolved(try prepareTwoAxisCoverageResolved(path, uniform.bytes, try findSampledImage(bindings, path.image_interface)), color, distances, output orelse return error.InvalidOutput);
+    }
+
     /// Execute the exact circle profile in the same scalar operation order as
     /// its canonical Render IR: two-term Length, subtraction, multiply,
     /// clamp, then the final vec4 multiply. The caller has already validated
@@ -2640,6 +2773,7 @@ pub const Executor = struct {
             .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
             .constant_black => |path| try executeConstantBlackFastPath(path, outputs),
             .analytic_coverage => |path| try executeAnalyticCoverageFastPath(path, bindings, outputs),
+            .two_axis_coverage => |path| try executeTwoAxisCoverageFastPath(path, bindings, outputs),
             .circle_mask => |path| try executeCircleMaskFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
@@ -2688,6 +2822,30 @@ pub const Executor = struct {
             dy[lane] = @bitCast(coordinate_dy.bits[lane]);
         }
         try analyticCoverageResolved(color, coordinate, dx, dy, output);
+        return true;
+    }
+
+    /// Resolve the immutable push constants and atlas state once per draw for
+    /// Chromium's exact two-axis coverage program.
+    pub fn prepareTwoAxisCoverage(self: *const Executor, uniform: []const u8, image: SampledImage) Error!?TwoAxisCoveragePrepared {
+        const path = self.twoAxisCoveragePlan() orelse return null;
+        return try prepareTwoAxisCoverageResolved(path, uniform, image);
+    }
+
+    /// Execute the exact two-axis coverage program after the rasterizer has
+    /// resolved its two vec4 varyings. Sampler behavior and output encoding
+    /// remain shared with the ordinary executor.
+    pub fn executeTwoAxisCoveragePrepared(self: *const Executor, prepared: TwoAxisCoveragePrepared, color_bytes: []const u8, distance_bytes: []const u8, output: []u8) Error!bool {
+        const path = self.twoAxisCoveragePlan() orelse return false;
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const distance_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.distance_interface, .bytes = distance_bytes });
+        var color: [4]f32 = undefined;
+        var distances: [4]f32 = undefined;
+        for (0..4) |lane| {
+            color[lane] = @bitCast(color_value.bits[lane]);
+            distances[lane] = @bitCast(distance_value.bits[lane]);
+        }
+        try executeTwoAxisCoveragePreparedResolved(prepared, color, distances, output);
         return true;
     }
 
@@ -4062,7 +4220,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .two_axis_coverage, .circle_mask => true,
         else => false,
     };
 }
@@ -4073,6 +4231,7 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .analytic_coverage = .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 2 } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .two_axis_coverage = .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
@@ -4701,6 +4860,28 @@ test "Chromium analytic coverage preserves the branch derivative and clamp order
     try Executor.analyticCoverageResolved(color, .{ 2, 0 }, .{ 1, 0 }, .{ 0, 1 }, &output);
     for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * 0.5)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
     try std.testing.expectError(error.InvalidOutput, Executor.analyticCoverageResolved(color, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 }, output[0..12]));
+}
+
+test "Chromium two-axis coverage preserves push constants and red atlas product" {
+    var uniform = [_]u8{0} ** 88;
+    // Column-major identity transform for the two matrix rows consumed by
+    // the canonical shader. The third row is declared but not read.
+    std.mem.writeInt(u32, uniform[16..20], @bitCast(@as(f32, 1)), .little);
+    std.mem.writeInt(u32, uniform[36..40], @bitCast(@as(f32, 1)), .little);
+    for ([_]f32{ 1, 1, 2, 2 }, 0..) |value, index| std.mem.writeInt(u32, uniform[64 + index * 4 ..][0..4], @bitCast(value), .little);
+    std.mem.writeInt(u32, uniform[80..84], @bitCast(@as(f32, 0)), .little);
+    std.mem.writeInt(u32, uniform[84..88], @bitCast(@as(f32, 1)), .little);
+    const path = TwoAxisCoveragePlan{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 51, 51, 243, 190 } };
+    const pixel = [_]u8{ 128, 0, 0, 255 };
+    const image = SampledImage{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    const prepared = try Executor.prepareTwoAxisCoverageResolved(path, &uniform, image);
+    var output: [16]u8 = undefined;
+    const color = [_]f32{ 1, 0.5, 0.25, 1 };
+    try Executor.executeTwoAxisCoveragePreparedResolved(prepared, color, .{ 0.25, 0.5, 0, 0 }, &output);
+    const sampled = @as(f32, 128) / 255;
+    const coverage = Executor.canonicalF32(sampled * sampled);
+    for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * coverage)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    try std.testing.expectError(error.Bounds, Executor.prepareTwoAxisCoverageResolved(path, uniform[0..87], image));
 }
 
 test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
