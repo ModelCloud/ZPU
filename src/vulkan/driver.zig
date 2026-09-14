@@ -1876,6 +1876,7 @@ var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_modulate_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_texture_copy_quad_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_texture_copy_geometry = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_coverage_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_radial_gradient_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
@@ -11557,6 +11558,28 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_luma_coordinate_varying.?][4..8], .little))),
                         @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_chroma_coordinate_varying.?][0..4], .little))),
                         @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_chroma_coordinate_varying.?][4..8], .little))),
+                    },
+                );
+            }
+            // Keep the large Chromium compositor strip observable without
+            // turning the normal renderer into a benchmark-specific path.
+            // In particular, its shared diagonal is source-over visible when
+            // the sampled layer contains alpha, so an affine rectangle is not
+            // automatically equivalent to the two-triangle stream.
+            if (profileTimingDiagnosticsEnabled() and texture_copy_plan != null and target.width == 640 and target.height == 272 and
+                render_diagnostic_texture_copy_geometry.fetchAdd(1, .monotonic) < 12)
+            {
+                if (texture_copy_coordinate_varying) |coordinate| std.debug.print(
+                    "ZPU texture-copy geometry triangle={d} corner={d} screen={d:.7},{d:.7},{d:.7},w={d:.7} uv={d:.7},{d:.7}\n",
+                    .{
+                        triangle_index,
+                        corner,
+                        vertices[corner].x,
+                        vertices[corner].y,
+                        vertices[corner].z,
+                        vertices[corner].w,
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][coordinate][0..4], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][coordinate][4..8], .little))),
                     },
                 );
             }
