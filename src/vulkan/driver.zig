@@ -12472,8 +12472,24 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
             if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel-{s} profile batch seq={d} commands={d} target={x} {d}x{d}\n", .{ if (use_bands) "band" else "tile", diagnostic_batch, parallel_count, @intFromPtr(color_image), color_image.width, color_image.height });
         }
-        if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
-            std.debug.print("ZPU Mosaic parallel-{s} profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ if (use_bands) "band" else "tile", color_image.width, color_image.height, parallel_count, color_image.last_draw_ns });
+        if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128)) {
+            std.debug.print("ZPU Mosaic parallel-{s} profile timing target={d}x{d} commands={d} total_ns={d}", .{ if (use_bands) "band" else "tile", color_image.width, color_image.height, parallel_count, color_image.last_draw_ns });
+            var timing_cursor = parallel_start;
+            for (0..parallel_count) |index| {
+                const raw = timing_cursor.current() orelse break;
+                const op = switch (raw.*) {
+                    .cube_draw => |value| value,
+                    else => break,
+                };
+                const profile = switch (op.pipeline.execution_abi) {
+                    .profile_v1_scalar_graphics => |value| value,
+                    else => break,
+                };
+                std.debug.print(" path[{d}]={s} ir[{d}]={x}", .{ index, profile.fragment.prevalidatedPathName(), index, profile.fragment.program.identity.digest });
+                timing_cursor.advance();
+            }
+            std.debug.print("\n", .{});
+        }
         var parallel_end = cursor.*;
         for (0..parallel_count) |_| parallel_end.advance();
         cursor.* = parallel_end;
