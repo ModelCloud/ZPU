@@ -814,6 +814,11 @@ const FastPath = union(enum) {
     /// specialization, not a claim that arbitrary shader input is JITed;
     /// every other program uses the interpreter.
     convolution_8tap: ConvolutionFastPath,
+    /// Exact validated lowering of Chromium's clamped eight-tap convolution.
+    /// This is a separate canonical program and ABI from `convolution_8tap`:
+    /// the clamp is shader-visible behavior, so it must never be folded into
+    /// the unclamped profile or selected by a partial shape match.
+    clamped_convolution_8tap: ConvolutionFastPath,
     /// Semantics-first direct lowering for the current Chromium radial
     /// gradient. This remains normal ZPU code, not a JIT claim: it is the
     /// stable oracle the ORC path must match before runtime selection.
@@ -833,6 +838,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
+    if (detectChromiumClampedConvolution(program)) |path| return .{ .clamped_convolution_8tap = path };
     const instructions = program.instructions;
     if (instructions.len != 13 or instructions[0].literal.len != 4 or instructions[3].literal.len != 4) return null;
     if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or
@@ -979,6 +985,17 @@ const chromium_convolution_identity = [_]u8{
     0xa1, 0x05, 0xdc, 0xdc, 0x16, 0xaa, 0xaf, 0xc7,
 };
 
+/// Canonical identity of Chromium's clamped eight-tap convolution profile.
+/// The complete post-validation Render IR is captured from a live two-core
+/// compositor session. In particular, this is not a broad optimization for
+/// shaders that merely contain a loop, a clamp, and texture samples.
+const chromium_clamped_convolution_identity = [_]u8{
+    0x1a, 0x41, 0x35, 0x05, 0x2a, 0x60, 0x14, 0x05,
+    0x59, 0x90, 0x38, 0x72, 0xb2, 0x7a, 0xb4, 0x63,
+    0x1d, 0xc6, 0xca, 0x08, 0x4e, 0xb8, 0x2f, 0xb7,
+    0x02, 0x41, 0x5f, 0x43, 0x23, 0xcd, 0x25, 0xd5,
+};
+
 /// Canonical identity of the 2,004-word Chromium fragment program captured
 /// from the VP9 Mosaic workload.  A runtime compiler must select by this
 /// post-validation Render-IR identity, never by an untrusted SPIR-V module
@@ -1035,6 +1052,40 @@ fn detectChromiumConvolution(program: *const ir.Program) ?ConvolutionFastPath {
     if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
         !convolutionMemberMatches(uniform.members[1], f32x4, 64, 14, 16) or
         !convolutionMemberMatches(uniform.members[2], f32x2, 288, 1, 0)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{
+        .coordinate_interface = 1,
+        .uniform_interface = 4,
+        .image_interface = 5,
+        .output_interface = 3,
+        .bias_literal = .{ 51, 51, 243, 190 },
+    };
+}
+
+fn detectChromiumClampedConvolution(program: *const ir.Program) ?ConvolutionFastPath {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 139 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_clamped_convolution_identity) or program.interfaces.len != 6) return null;
+    const color = program.interfaces[0];
+    const coordinate = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinate.storage != .input or !same(coordinate.ty, f32x2) or coordinate.location == null or coordinate.location.? != 1 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or front_facing.location != null or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .uniform or !uniform.block or uniform.descriptor_set == null or uniform.descriptor_set.? != 0 or uniform.binding == null or uniform.binding.? != 0 or uniform.member_count != 5 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x4, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x3x3, 32, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x4, 80, 14, 16) or
+        !convolutionMemberMatches(uniform.members[3], f32x2, 304, 1, 0) or
+        !convolutionMemberMatches(uniform.members[4], f32x3x3, 320, 1, 0)) return null;
     for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
     return .{
         .coordinate_interface = 1,
@@ -1140,6 +1191,7 @@ pub const Executor = struct {
             .sample_coverage => "chromium_vp9_sample_coverage",
             .vp9_color_transform => "chromium_vp9_color_transform",
             .convolution_8tap => "convolution_8tap",
+            .clamped_convolution_8tap => "clamped_convolution_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
         };
     }
@@ -1250,6 +1302,21 @@ pub const Executor = struct {
         }
     }
 
+    fn convolutionCoordinateClamped(matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32, clamp: [4]f32) Error!Value {
+        var result = convolutionCoordinate(matrix, coordinates, direction, offset);
+        result.bits[0] = canonicalFloat(@bitCast(try radialClamp(@bitCast(result.bits[0]), clamp[0], clamp[2])));
+        result.bits[1] = canonicalFloat(@bitCast(try radialClamp(@bitCast(result.bits[1]), clamp[1], clamp[3])));
+        return result;
+    }
+
+    fn convolutionAccumulateClamped(sum: *[4]f32, image: SampledImage, matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32, clamp: [4]f32, weight: f32, bias: Value) Error!void {
+        const sampled = try sample(image, try convolutionCoordinateClamped(matrix, coordinates, direction, offset, clamp), bias);
+        for (0..4) |lane| {
+            const weighted: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(sampled.bits[lane])) * weight)));
+            sum[lane] = @bitCast(canonicalFloat(@bitCast(sum[lane] + weighted)));
+        }
+    }
+
     fn executeConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
         const uniform = try findBindingRecord(bindings, path.uniform_interface);
@@ -1281,6 +1348,47 @@ pub const Executor = struct {
             const second_weight = try uniformF32(uniform.bytes, base + 12);
             try convolutionAccumulate(&sum, image, matrix, coordinates, direction, first_offset, first_weight, bias);
             try convolutionAccumulate(&sum, image, matrix, coordinates, direction, second_offset, second_weight, bias);
+        }
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
+    }
+
+    fn executeClampedConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        // The full interface has a trailing matrix which this canonical IR
+        // never reads. Preserve generic behavior by requiring only the bytes
+        // reached by its actual access instructions, through direction.y.
+        if (uniform.bytes.len < 32 or uniform.bytes.len < 76 or uniform.bytes.len < 208 or uniform.bytes.len < 312) return error.Bounds;
+        const clamp = [_]f32{
+            try uniformF32(uniform.bytes, 16),
+            try uniformF32(uniform.bytes, 20),
+            try uniformF32(uniform.bytes, 24),
+            try uniformF32(uniform.bytes, 28),
+        };
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| for (0..3) |row| {
+            matrix[column][row] = try uniformF32(uniform.bytes, 32 + column * 16 + row * 4);
+        };
+        const direction = [_]f32{ try uniformF32(uniform.bytes, 304), try uniformF32(uniform.bytes, 308) };
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        var sum = [_]f32{ 0, 0, 0, 0 };
+        inline for (0..8) |tap| {
+            const base = 80 + tap * 16;
+            const first_offset = try uniformF32(uniform.bytes, base);
+            const first_weight = try uniformF32(uniform.bytes, base + 4);
+            const second_offset = try uniformF32(uniform.bytes, base + 8);
+            const second_weight = try uniformF32(uniform.bytes, base + 12);
+            try convolutionAccumulateClamped(&sum, image, matrix, coordinates, direction, first_offset, clamp, first_weight, bias);
+            try convolutionAccumulateClamped(&sum, image, matrix, coordinates, direction, second_offset, clamp, second_weight, bias);
         }
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
     }
@@ -1620,6 +1728,7 @@ pub const Executor = struct {
                 try executeVp9ColorTransformResolved(luma_coordinates.bytes, chroma_coordinates.bytes, uniform.bytes, try findSampledImage(bindings, path.luma_image_interface), try findSampledImage(bindings, path.chroma_image_interface), output orelse return error.InvalidOutput);
             },
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
+            .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
         }
     }
@@ -2859,6 +2968,24 @@ pub const Executor = struct {
         };
     }
 };
+
+test "Chromium clamped convolution coordinates preserve matrix order and shader clamp bounds" {
+    // The live compositor profile transforms first and then applies `f_clamp`
+    // to the two texture-coordinate lanes. Keeping that order prevents the
+    // specialization from sampling outside the shader-defined tile region.
+    const matrix = [3][3]f32{
+        .{ 1, 0, 0 },
+        .{ 0, 1, 0 },
+        .{ 0, 0, 0 },
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    const result = try Executor.convolutionCoordinateClamped(matrix, coordinates, .{ 1, -1 }, 2, .{ 0.25, 0.125, 0.75, 0.875 });
+    try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0.125), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectError(error.NumericDomain, Executor.convolutionCoordinateClamped(matrix, coordinates, .{ 0, 0 }, 0, .{ 1, 0, 0, 1 }));
+}
 
 fn convert(from: ir.Scalar, to: ir.Scalar, bits: u32) Error!u32 {
     if (from == to) return bits;
