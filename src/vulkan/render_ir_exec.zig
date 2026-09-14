@@ -2191,10 +2191,14 @@ pub const Executor = struct {
         var result: [4]f32 = undefined;
         for (0..4) |lane| {
             const source_lane: usize = if (image.format == .rgba8_unorm or lane == 1 or lane == 3) lane else if (lane == 0) 2 else 0;
-            const p00 = @as(f32, @floatFromInt(image.pixels[offset00 + source_lane])) / 255;
-            const p10 = @as(f32, @floatFromInt(image.pixels[offset10 + source_lane])) / 255;
-            const p01 = @as(f32, @floatFromInt(image.pixels[offset01 + source_lane])) / 255;
-            const p11 = @as(f32, @floatFromInt(image.pixels[offset11 + source_lane])) / 255;
+            // `unorm8_to_f32` is constructed with the generic sampler's
+            // exact conversion expression. Reusing it removes sixteen
+            // repeated integer-to-float conversions from each bilinear RGBA
+            // sample without changing the sampled f32 payload.
+            const p00 = unorm8_to_f32[image.pixels[offset00 + source_lane]];
+            const p10 = unorm8_to_f32[image.pixels[offset10 + source_lane]];
+            const p01 = unorm8_to_f32[image.pixels[offset01 + source_lane]];
+            const p11 = unorm8_to_f32[image.pixels[offset11 + source_lane]];
             result[lane] =
                 (p00 * (1 - tx) + p10 * tx) * (1 - ty) +
                 (p01 * (1 - tx) + p11 * tx) * ty;
