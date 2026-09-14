@@ -10907,7 +10907,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var sample_modulate_color_varying: ?usize = null;
     var sample_modulate_coordinate_varying: ?usize = null;
     var sample_modulate_image: ?render_ir_exec.SampledImage = null;
-    var sample_modulate_prepared: ?render_ir_exec.SampleModulatePrepared = null;
     if (sample_modulate_plan) |plan| {
         for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
             if (varying.fragment_interface == plan.color_interface) sample_modulate_color_varying = index;
@@ -10916,7 +10915,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.image_interface) sample_modulate_image = binding.sampled_image;
         }
-        if (sample_modulate_image) |image| sample_modulate_prepared = profile.fragment.prepareSampleModulate(image) catch null;
     }
     if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
         _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
@@ -11713,18 +11711,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             const color_varying = sample_modulate_color_varying orelse break :direct false;
                             const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
                             const image = sample_modulate_image orelse break :direct false;
-                            if (sample_modulate_prepared) |prepared| {
-                                profile.fragment.executeSampleModulatePrepared(
-                                    prepared,
-                                    fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
-                                    fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                    &fragment_output_bytes,
-                                ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render prepared sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                    return;
-                                };
-                                break :direct true;
-                            }
                             break :direct profile.fragment.executeSampleModulateDirect(
                                 fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
                                 fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
