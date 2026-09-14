@@ -810,6 +810,16 @@ pub const SampleCoverageFastPath = struct {
     bias_literal: [4]u8,
 };
 
+/// Draw-invariant sampling state for Chromium's exact scalar-coverage
+/// compositor.  `fast_rgba8_clamp_linear` is intentionally narrower than the
+/// Vulkan sampler contract: every unsupported image retains `sample`'s normal
+/// validation and execution at each pixel.
+pub const SampleCoveragePrepared = struct {
+    image: SampledImage,
+    bias: f32,
+    fast_rgba8_clamp_linear: bool,
+};
+
 /// Exact interface map for Chromium's VP9 Y/UV color-transform fragment.
 /// This is selected only after complete canonical-IR validation; it is not a
 /// pattern matcher for arbitrary color-management shaders.
@@ -1887,6 +1897,52 @@ pub const Executor = struct {
         return result;
     }
 
+    fn sampleCoverageImageIsFast(image: SampledImage) bool {
+        if ((image.format != .rgba8_unorm and image.format != .bgra8_unorm) or image.filter != .linear or
+            image.address_u != .clamp_to_edge or image.address_v != .clamp_to_edge or image.bytes_per_texel < 4 or
+            !std.mem.eql(i32, &image.swizzle, &.{ 0, 0, 0, 0 })) return false;
+        const row_bytes = std.math.mul(usize, image.width, image.bytes_per_texel) catch return false;
+        if (image.row_stride < row_bytes) return false;
+        const final_row = std.math.mul(usize, image.height - 1, image.row_stride) catch return false;
+        const final_pixel = std.math.mul(usize, image.width - 1, image.bytes_per_texel) catch return false;
+        const final_offset = std.math.add(usize, final_row, final_pixel) catch return false;
+        return final_offset <= image.pixels.len and image.pixels.len - final_offset >= 4;
+    }
+
+    /// This is the generic sampler's linear, identity-swizzled RGBA/BGRA
+    /// branch after immutable image state has been checked at draw setup.
+    /// Keep its f32 arithmetic order identical to `sample`.
+    fn sampleCoverageRgba8ClampLinearPrepared(image: SampledImage, u: f32, v: f32) [4]f32 {
+        const sample_u = std.math.clamp(u, @as(f32, 0), @as(f32, 1));
+        const sample_v = std.math.clamp(v, @as(f32, 0), @as(f32, 1));
+        const fx = sample_u * @as(f32, @floatFromInt(image.width)) - 0.5;
+        const fy = sample_v * @as(f32, @floatFromInt(image.height)) - 0.5;
+        const floor_x = @floor(fx);
+        const floor_y = @floor(fy);
+        const x0: usize = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_x)), 0, @as(i32, @intCast(image.width - 1))));
+        const y0: usize = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_y)), 0, @as(i32, @intCast(image.height - 1))));
+        const x1 = @min(x0 + 1, image.width - 1);
+        const y1 = @min(y0 + 1, image.height - 1);
+        const tx = fx - floor_x;
+        const ty = fy - floor_y;
+        const offset00 = y0 * image.row_stride + x0 * image.bytes_per_texel;
+        const offset10 = y0 * image.row_stride + x1 * image.bytes_per_texel;
+        const offset01 = y1 * image.row_stride + x0 * image.bytes_per_texel;
+        const offset11 = y1 * image.row_stride + x1 * image.bytes_per_texel;
+        var result: [4]f32 = undefined;
+        for (0..4) |lane| {
+            const source_lane: usize = if (image.format == .rgba8_unorm or lane == 1 or lane == 3) lane else if (lane == 0) 2 else 0;
+            const p00 = @as(f32, @floatFromInt(image.pixels[offset00 + source_lane])) / 255;
+            const p10 = @as(f32, @floatFromInt(image.pixels[offset10 + source_lane])) / 255;
+            const p01 = @as(f32, @floatFromInt(image.pixels[offset01 + source_lane])) / 255;
+            const p11 = @as(f32, @floatFromInt(image.pixels[offset11 + source_lane])) / 255;
+            result[lane] =
+                (p00 * (1 - tx) + p10 * tx) * (1 - ty) +
+                (p01 * (1 - tx) + p11 * tx) * ty;
+        }
+        return result;
+    }
+
     fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
         if (bytes.len < 16) return error.Bounds;
         var source = if (prepared.fast_planes) blk: {
@@ -2136,6 +2192,40 @@ pub const Executor = struct {
             std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * coverage_value)), .little);
         }
         return true;
+    }
+
+    /// Resolve the exact VP9 scalar-coverage profile's immutable sampler
+    /// state. A caller can use the prepared form only after the complete
+    /// canonical program identity has selected this path.
+    pub fn prepareSampleCoverage(self: *const Executor, image: SampledImage) Error!?SampleCoveragePrepared {
+        const path = self.sampleCoveragePlan() orelse return null;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        const bias: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, &path.bias_literal)).bits[0]);
+        if (!std.math.isFinite(bias)) return error.NumericDomain;
+        return .{ .image = image, .bias = bias, .fast_rgba8_clamp_linear = sampleCoverageImageIsFast(image) };
+    }
+
+    /// Prepared execution keeps the full generic sampler for every image
+    /// outside the exact fast storage contract.
+    pub fn executeSampleCoveragePrepared(_: *const Executor, prepared: SampleCoveragePrepared, coordinate_bytes: []const u8, coverage_bytes: []const u8, output: []u8) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = coordinate_bytes });
+        const coverage = try readInputValue(.{ .scalar = .f32 }, .{ .interface = 1, .bytes = coverage_bytes });
+        if (output.len < 16) return error.InvalidOutput;
+        const u: f32 = @bitCast(coordinates.bits[0]);
+        const v: f32 = @bitCast(coordinates.bits[1]);
+        if (!std.math.isFinite(u) or !std.math.isFinite(v)) return error.NumericDomain;
+        const sampled = if (prepared.fast_rgba8_clamp_linear)
+            sampleCoverageRgba8ClampLinearPrepared(prepared.image, u, v)
+        else blk: {
+            var bias = Value{ .ty = .{ .scalar = .f32 } };
+            bias.bits[0] = @bitCast(prepared.bias);
+            const generic = try sample(prepared.image, coordinates, bias);
+            var values: [4]f32 = undefined;
+            for (0..4) |lane| values[lane] = @bitCast(generic.bits[lane]);
+            break :blk values;
+        };
+        const coverage_value: f32 = @bitCast(coverage.bits[0]);
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sampled[lane] * coverage_value)), .little);
     }
 
     /// Resolve the invariant descriptor and std140 state of Chromium's exact
@@ -4092,6 +4182,23 @@ test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
     @memset(&output, 0);
     try std.testing.expect(try executor.executeSampleCoverageDirect(&coordinates, &coverage, bindings[2].sampled_image.?, &output));
     try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    const nearest_prepared = (try executor.prepareSampleCoverage(bindings[2].sampled_image.?)).?;
+    try std.testing.expect(!nearest_prepared.fast_rgba8_clamp_linear);
+    @memset(&output, 0);
+    try executor.executeSampleCoveragePrepared(nearest_prepared, &coordinates, &coverage, &output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    const fast_pixels = [_]u8{
+        10, 20,  30,  40,  50,  60,  70,  80,
+        90, 100, 110, 120, 130, 140, 150, 160,
+    };
+    const fast_image = SampledImage{ .pixels = &fast_pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var direct_fast_output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeSampleCoverageDirect(&coordinates, &coverage, fast_image, &direct_fast_output));
+    const fast_prepared = (try executor.prepareSampleCoverage(fast_image)).?;
+    try std.testing.expect(fast_prepared.fast_rgba8_clamp_linear);
+    @memset(&output, 0);
+    try executor.executeSampleCoveragePrepared(fast_prepared, &coordinates, &coverage, &output);
+    try std.testing.expectEqualSlices(u8, &direct_fast_output, &output);
     try std.testing.expectError(error.Bounds, executor.executeSampleCoverageDirect(coordinates[0..4], &coverage, bindings[2].sampled_image.?, &output));
 }
 

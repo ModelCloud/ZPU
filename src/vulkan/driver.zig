@@ -10882,6 +10882,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var sample_coverage_coordinate_varying: ?usize = null;
     var sample_coverage_scalar_varying: ?usize = null;
     var sample_coverage_image: ?render_ir_exec.SampledImage = null;
+    var sample_coverage_prepared: ?render_ir_exec.SampleCoveragePrepared = null;
     if (sample_coverage_plan) |plan| {
         for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
             if (varying.fragment_interface == plan.coordinate_interface) sample_coverage_coordinate_varying = index;
@@ -10890,6 +10891,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.image_interface) sample_coverage_image = binding.sampled_image;
         }
+        if (sample_coverage_image) |image| sample_coverage_prepared = profile.fragment.prepareSampleCoverage(image) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sample-coverage preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
     }
     if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
@@ -11557,16 +11562,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         if (sample_coverage_plan != null) {
                             const coordinate_varying = sample_coverage_coordinate_varying orelse break :direct false;
                             const scalar_varying = sample_coverage_scalar_varying orelse break :direct false;
-                            const image = sample_coverage_image orelse break :direct false;
-                            break :direct profile.fragment.executeSampleCoverageDirect(
+                            const prepared = sample_coverage_prepared orelse break :direct false;
+                            profile.fragment.executeSampleCoveragePrepared(
+                                prepared,
                                 fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
                                 fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
-                                image,
                                 &fragment_output_bytes,
                             ) catch |err| {
                                 if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
+                            break :direct true;
                         }
                         if (vp9_color_transform_plan != null) {
                             const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
