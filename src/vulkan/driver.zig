@@ -10749,6 +10749,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 prepared.destination_transfer[0],       prepared.destination_transfer[1], prepared.destination_transfer[2], prepared.destination_transfer[3], prepared.destination_transfer[4],       prepared.destination_transfer[5],          prepared.destination_transfer[6],
             },
         );
+        std.debug.print(
+            "ZPU VP9 profile matrices source={d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6} destination={d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6}\n",
+            .{ prepared.source_matrix[0][0], prepared.source_matrix[0][1], prepared.source_matrix[0][2], prepared.source_matrix[1][0], prepared.source_matrix[1][1], prepared.source_matrix[1][2], prepared.source_matrix[2][0], prepared.source_matrix[2][1], prepared.source_matrix[2][2], prepared.destination_matrix[0][0], prepared.destination_matrix[0][1], prepared.destination_matrix[0][2], prepared.destination_matrix[1][0], prepared.destination_matrix[1][1], prepared.destination_matrix[1][2], prepared.destination_matrix[2][0], prepared.destination_matrix[2][1], prepared.destination_matrix[2][2] },
+        );
     }
     // This dynamic radial-gradient profile has materially more arithmetic
     // than the video coverage composite, but its validated uniforms and
