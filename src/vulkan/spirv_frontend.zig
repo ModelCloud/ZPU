@@ -5403,6 +5403,46 @@ test "Chromium Skia circle fragment shader executes GLSL Length" {
     try std.testing.expectEqualSlices(u8, &reference, &direct);
 }
 
+test "Chromium clamped single convolution matches the validated interpreter" {
+    const encoded = std.mem.trimEnd(u8, @embedFile("fixtures/chromium_skia_fragment_clamped_single_convolution.spv.b64"), "\n");
+    var bytes: [1198 * 4]u8 align(4) = undefined;
+    try std.base64.standard.Decoder.decode(&bytes, encoded);
+    var program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 153), program.instructions.len);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("clamped_convolution_single_8tap", executor.prevalidatedPathName());
+
+    var fallback_program = try program.clone(std.testing.allocator);
+    defer fallback_program.deinit(std.testing.allocator);
+    fallback_program.identity.digest[0] ^= 1;
+    var fallback_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fallback_program);
+    defer fallback_executor.deinit();
+    try std.testing.expectEqualStrings("interpreter", fallback_executor.prevalidatedPathName());
+
+    var color = [_]f32{ 0.25, 0.5, 0.75, 1 };
+    var coordinates = [_]f32{ 0.25, 0.75 };
+    var front_facing = [_]u8{1};
+    var uniform = [_]u8{0} ** 480;
+    inline for ([_]struct { offset: usize, value: f32 }{
+        .{ .offset = 16, .value = 0 }, .{ .offset = 20, .value = 0 },  .{ .offset = 24, .value = 1 },  .{ .offset = 28, .value = 1 },
+        .{ .offset = 32, .value = 1 }, .{ .offset = 52, .value = 1 },  .{ .offset = 72, .value = 1 },  .{ .offset = 80, .value = 0 },
+        .{ .offset = 84, .value = 1 }, .{ .offset = 304, .value = 0 }, .{ .offset = 308, .value = 0 },
+    }) |entry| std.mem.writeInt(u32, uniform[entry.offset..][0..4], @bitCast(entry.value), .little);
+    const pixels = [_]u8{ 16, 32, 64, 255, 96, 128, 192, 255, 24, 48, 96, 255, 255, 255, 255, 255 };
+    const image = render_ir_exec.SampledImage{ .pixels = &pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var reference = [_]u8{0} ** 16;
+    var output = [_]u8{0} ** 16;
+    const bindings = [_]render_ir_exec.Binding{
+        .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&color) }, .{ .interface = 1, .bytes = std.mem.sliceAsBytes(&coordinates) }, .{ .interface = 2, .bytes = &front_facing },
+        .{ .interface = 4, .bytes = &uniform },                     .{ .interface = 5, .sampled_image = image },
+    };
+    try fallback_executor.execute(&bindings, &.{.{ .interface = 3, .bytes = &reference }});
+    try executor.execute(&bindings, &.{.{ .interface = 3, .bytes = &output }});
+    try std.testing.expectEqualSlices(u8, &reference, &output);
+}
+
 test "Chromium Skia sampled fragment shader executes combined image sampling" {
     const bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_sample.spv").*;
     const words = std.mem.bytesAsSlice(u32, &bytes);
