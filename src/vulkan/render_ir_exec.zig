@@ -825,6 +825,15 @@ pub const TextureCopyPlan = struct {
     bias_literal: [4]u8,
 };
 
+/// Draw-invariant sampling state for Chromium's exact texture-copy profile.
+/// The fast representation is admitted only for identity-swizzled RGBA/BGRA
+/// clamp-to-edge linear images; all other images retain `sample` unchanged.
+pub const TextureCopyPrepared = struct {
+    image: SampledImage,
+    bias: f32,
+    fast_rgba8_clamp_linear: bool,
+};
+
 /// Exact Chromium VP9 video-surface composite: sample a texture at the local
 /// coordinate and multiply every channel by scalar coverage.  This differs
 /// from sample_modulate only in the coverage ABI (scalar rather than vec4).
@@ -2458,6 +2467,40 @@ pub const Executor = struct {
         if (output.len < 16) return error.InvalidOutput;
         for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(sampled.bits[lane]), .little);
         return true;
+    }
+
+    /// Resolve immutable sampler state once for the exact texture-copy
+    /// profile. This mirrors `prepareSampleCoverage`, but has no coverage
+    /// input and therefore serves the full-frame Chromium compositor path.
+    pub fn prepareTextureCopy(self: *const Executor, image: SampledImage) Error!?TextureCopyPrepared {
+        const path = self.textureCopyPlan() orelse return null;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        const bias: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, &path.bias_literal)).bits[0]);
+        if (!std.math.isFinite(bias)) return error.NumericDomain;
+        return .{ .image = image, .bias = bias, .fast_rgba8_clamp_linear = sampleCoverageImageIsFast(image) };
+    }
+
+    /// Raster-side form that accepts the already interpolated coordinate.
+    /// This avoids serializing it to a temporary byte binding and removes
+    /// generic sampler validation from every pixel only for the prepared
+    /// immutable image contract above.
+    pub fn executeTextureCopyPreparedCoordinates(_: *const Executor, prepared: TextureCopyPrepared, coordinates: [2]f32, output: []u8) Error!void {
+        if (output.len < 16) return error.InvalidOutput;
+        if (!std.math.isFinite(coordinates[0]) or !std.math.isFinite(coordinates[1])) return error.NumericDomain;
+        const sampled = if (prepared.fast_rgba8_clamp_linear)
+            sampleCoverageRgba8ClampLinearPrepared(prepared.image, coordinates[0], coordinates[1])
+        else blk: {
+            var coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            coordinate_value.bits[0] = @bitCast(coordinates[0]);
+            coordinate_value.bits[1] = @bitCast(coordinates[1]);
+            var bias = Value{ .ty = .{ .scalar = .f32 } };
+            bias.bits[0] = @bitCast(prepared.bias);
+            const generic = try sample(prepared.image, coordinate_value, bias);
+            var values: [4]f32 = undefined;
+            for (0..4) |lane| values[lane] = @bitCast(generic.bits[lane]);
+            break :blk values;
+        };
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sampled[lane])), .little);
     }
 
     /// Direct resolved-input form of the exact VP9 scalar-coverage compositor.
@@ -4568,6 +4611,14 @@ test "Chromium unmodulated texture copy with dead scaffolding uses copy path" {
     var output: [16]u8 = undefined;
     try std.testing.expect(try executor.executeTextureCopyDirect(&coordinates, image, &output));
     for (pixel, 0..) |channel, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(@as(f32, @floatFromInt(channel)) / 255)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    const fast_pixels = [_]u8{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160 };
+    const fast_image = SampledImage{ .pixels = &fast_pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var generic_output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeTextureCopyDirect(&coordinates, fast_image, &generic_output));
+    const prepared = (try executor.prepareTextureCopy(fast_image)).?;
+    try std.testing.expect(prepared.fast_rgba8_clamp_linear);
+    try executor.executeTextureCopyPreparedCoordinates(prepared, .{ 0.5, 0.5 }, &output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
 }
 
 test "prepared Chromium radial gradient preserves the resolved pixel" {

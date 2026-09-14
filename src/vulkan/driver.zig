@@ -10902,6 +10902,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const texture_copy_plan = profile.fragment.textureCopyPlan();
     var texture_copy_coordinate_varying: ?usize = null;
     var texture_copy_image: ?render_ir_exec.SampledImage = null;
+    var texture_copy_prepared: ?render_ir_exec.TextureCopyPrepared = null;
     if (texture_copy_plan) |plan| {
         for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
             if (varying.fragment_interface == plan.coordinate_interface) texture_copy_coordinate_varying = index;
@@ -10909,6 +10910,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.image_interface) texture_copy_image = binding.sampled_image;
         }
+        if (texture_copy_image) |image| texture_copy_prepared = profile.fragment.prepareTextureCopy(image) catch null;
     }
     // The captured VP9 video-surface composite differs from sample-modulate
     // only in the coverage ABI: its second varying is a scalar. Resolve the
@@ -11451,12 +11453,19 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
                         coordinates[lane] = (weights.q0 * a + weights.q1 * b + weights.q2 * c) / weights.denominator;
                     }
-                    var coordinate_bytes: [8]u8 = undefined;
-                    for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
-                    _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                        return;
-                    };
+                    if (texture_copy_prepared) |prepared| {
+                        profile.fragment.executeTextureCopyPreparedCoordinates(prepared, coordinates, &fragment_output_bytes) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    } else {
+                        var coordinate_bytes: [8]u8 = undefined;
+                        for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
+                        _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
                 } else if (direct_radial_mask_coordinates) {
                     const q0 = b0 / vertices[0].w;
                     const q1 = b1 / vertices[1].w;
