@@ -2906,12 +2906,11 @@ pub const Executor = struct {
         return .{ .image = image, .bias = bias, .fast_rgba8_clamp_linear = sampleCoverageImageIsFast(image) };
     }
 
-    /// Raster-side form that accepts the already interpolated coordinate.
-    /// This avoids serializing it to a temporary byte binding and removes
-    /// generic sampler validation from every pixel only for the prepared
-    /// immutable image contract above.
-    pub fn executeTextureCopyPreparedCoordinates(_: *const Executor, prepared: TextureCopyPrepared, coordinates: [2]f32, output: []u8) Error!void {
-        if (output.len < 16) return error.InvalidOutput;
+    /// Resolve the exact texture-copy sample to its canonical fragment
+    /// components.  The rasterizer can pass these directly to the blend
+    /// writer, avoiding a per-pixel temporary shader-output byte round trip.
+    /// The values are canonicalized exactly as the byte-output ABI below.
+    pub fn executeTextureCopyPreparedCoordinatesColor(_: *const Executor, prepared: TextureCopyPrepared, coordinates: [2]f32) Error![4]f32 {
         if (!std.math.isFinite(coordinates[0]) or !std.math.isFinite(coordinates[1])) return error.NumericDomain;
         const sampled = if (prepared.fast_rgba8_clamp_linear)
             sampleCoverageRgba8ClampLinearPrepared(prepared.image, coordinates[0], coordinates[1])
@@ -2926,7 +2925,18 @@ pub const Executor = struct {
             for (0..4) |lane| values[lane] = @bitCast(generic.bits[lane]);
             break :blk values;
         };
-        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sampled[lane])), .little);
+        var result: [4]f32 = undefined;
+        for (&result, sampled) |*value, component| value.* = @bitCast(canonicalFloat(@bitCast(component)));
+        return result;
+    }
+
+    /// Raster-side byte-output compatibility form.  It shares the component
+    /// resolver with the direct blend route so both paths retain identical
+    /// sampler validation and canonical f32 output values.
+    pub fn executeTextureCopyPreparedCoordinates(self: *const Executor, prepared: TextureCopyPrepared, coordinates: [2]f32, output: []u8) Error!void {
+        if (output.len < 16) return error.InvalidOutput;
+        const sampled = try self.executeTextureCopyPreparedCoordinatesColor(prepared, coordinates);
+        for (sampled, 0..) |component, lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], @bitCast(component), .little);
     }
 
     /// Direct resolved-input form of the exact VP9 scalar-coverage compositor.
@@ -5122,6 +5132,10 @@ test "Chromium unmodulated texture copy with dead scaffolding uses copy path" {
     try std.testing.expect(prepared.fast_rgba8_clamp_linear);
     try executor.executeTextureCopyPreparedCoordinates(prepared, .{ 0.5, 0.5 }, &output);
     try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    const components = try executor.executeTextureCopyPreparedCoordinatesColor(prepared, .{ 0.5, 0.5 });
+    var component_output: [16]u8 = undefined;
+    for (components, 0..) |component, lane| std.mem.writeInt(u32, component_output[lane * 4 ..][0..4], @bitCast(component), .little);
+    try std.testing.expectEqualSlices(u8, &generic_output, &component_output);
 }
 
 test "prepared Chromium radial gradient preserves the resolved pixel" {

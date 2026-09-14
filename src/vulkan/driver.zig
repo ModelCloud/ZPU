@@ -11240,7 +11240,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         };
         fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
     }
-    var fragment_output_bytes: [16]u8 = undefined;
+    // A direct prepared texture-copy sample can now remain as f32 components
+    // through the blend writer.  Keep the legacy byte ABI initialized for
+    // opt-in diagnostics, which may still inspect it on that narrow route.
+    var fragment_output_bytes: [16]u8 = [_]u8{0} ** 16;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
 
     // Chromium's captured VP9 compositor is a four-vertex strip whose two
@@ -11730,7 +11733,12 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         coordinates[lane] = (weights.q0 * a + weights.q1 * b + weights.q2 * c) / weights.denominator;
                     }
                     if (texture_copy_prepared) |prepared| {
-                        profile.fragment.executeTextureCopyPreparedCoordinates(prepared, coordinates, &fragment_output_bytes) catch |err| {
+                        // The prepared texture-copy resolver returns the same
+                        // canonical f32 values that its byte-output ABI would
+                        // serialize. Keep them in registers through the
+                        // source-over writer instead of storing and decoding
+                        // four temporary f32 lanes for every compositor pixel.
+                        direct_fragment_color = profile.fragment.executeTextureCopyPreparedCoordinatesColor(prepared, coordinates) catch |err| {
                             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
