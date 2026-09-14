@@ -132,6 +132,16 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=8.0)
     parser.add_argument("--screenshot")
+    parser.add_argument(
+        "--compositor",
+        action="store_true",
+        help="measure requestAnimationFrame delivery on a changing compositor page",
+    )
+    parser.add_argument(
+        "--compositor-selector",
+        default=".scene",
+        help="selector that proves the compositor fixture has loaded",
+    )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
@@ -147,6 +157,52 @@ def main() -> None:
         devtools.call(
             "Page.navigate", {"url": args.page_url}, session_id=session_id
         )
+        if args.compositor:
+            expression = f"""(async () => {{
+              const ready = await new Promise(resolve => {{
+                const deadline = performance.now() + 10000;
+                function probe() {{
+                  if (document.querySelector({json.dumps(args.compositor_selector)}) || performance.now() >= deadline) {{
+                    resolve(Boolean(document.querySelector({json.dumps(args.compositor_selector)}))); return;
+                  }}
+                  setTimeout(probe, 25);
+                }}
+                probe();
+              }});
+              if (!ready) return {{ loadState: 'missing-scene', callbacks: 0, callbackElapsedSeconds: 0, framesPerSecond: 0 }};
+              let callbacks = 0, first = null, last = null;
+              const deadline = performance.now() + {args.duration * 1000:.3f};
+              await new Promise(resolve => {{
+                function frame(now) {{
+                  callbacks++; first ??= now; last = now;
+                  if (now < deadline) requestAnimationFrame(frame); else resolve();
+                }}
+                requestAnimationFrame(frame);
+              }});
+              return {{
+                loadState: 'ready', callbacks,
+                callbackElapsedSeconds: first === null || last === null ? 0 : (last - first) / 1000,
+                framesPerSecond: first === null || last === null ? 0 : (callbacks - 1) / ((last - first) / 1000),
+                sceneLabel: document.getElementById('frame-label')?.textContent || null,
+              }};
+            }})()"""
+            result = devtools.call(
+                "Runtime.evaluate",
+                {"expression": expression, "awaitPromise": True, "returnByValue": True},
+                session_id,
+                timeout=args.duration + 15,
+            )
+            if "exceptionDetails" in result:
+                raise RuntimeError(json.dumps(result["exceptionDetails"], indent=2))
+            telemetry = result["result"].get("value")
+            if not isinstance(telemetry, dict):
+                raise RuntimeError(f"unexpected compositor telemetry: {result}")
+            if args.screenshot:
+                capture = devtools.call("Page.captureScreenshot", {"format": "png"}, session_id)
+                with open(args.screenshot, "wb") as output:
+                    output.write(base64.b64decode(capture["data"]))
+            print(json.dumps(telemetry, indent=2, sort_keys=True))
+            return
         # `awaitPromise` makes the sample duration independent of DevTools
         # message timing. requestVideoFrameCallback measures presented frames,
         # while getVideoPlaybackQuality exposes decoded/dropped frame counts.
