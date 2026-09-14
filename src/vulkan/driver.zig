@@ -1189,12 +1189,6 @@ const ImageObj = struct {
     layout: i32,
     memory: ?*MemoryObj = null,
     owned_bytes: ?[]align(64) u8 = null,
-    // R8/R8G8 images retain the historic four-byte sampled representation
-    // for general Vulkan paths.  The exact VP9 profile may additionally use
-    // this compact mirror, maintained by buffer uploads, to avoid fourfold
-    // cache-line amplification while sampling video planes.
-    packed_sample_bytes: ?[]align(64) u8 = null,
-    packed_sample_valid: bool = false,
     shared_bytes: bool = false,
     offset: u64 = 0,
     clear_pattern: ?u32 = null,
@@ -1765,8 +1759,6 @@ var buffer_view_objects: [max_child_objects]BufferViewObj = undefined;
 var buffer_view_state = [_]SlotState{.never} ** max_child_objects;
 var image_objects: [max_image_objects]ImageObj = undefined;
 var image_state = [_]SlotState{.never} ** max_image_objects;
-const max_packed_video_sample_bytes: usize = 32 * 1024 * 1024;
-var packed_video_sample_bytes = std.atomic.Value(usize).init(0);
 var fence_objects: [max_child_objects]FenceObj = undefined;
 var fence_state = [_]SlotState{.never} ** max_child_objects;
 var event_objects: [max_child_objects]EventObj = undefined;
@@ -5280,36 +5272,11 @@ fn maybeRetireSwapchainTransportLocked(handle: usize) void {
 fn retireImageStorageLocked(image: *ImageObj) void {
     if (!image.retire_pending or image.active_users.load(.acquire) != 0) return;
     if (!image.shared_bytes) if (image.owned_bytes) |bytes| allocator.free(bytes);
-    if (image.packed_sample_bytes) |bytes| {
-        allocator.free(bytes);
-        _ = packed_video_sample_bytes.fetchSub(bytes.len, .acq_rel);
-    }
     if (image.dirty_tiles) |tiles| allocator.free(tiles);
     image.owned_bytes = null;
-    image.packed_sample_bytes = null;
-    image.packed_sample_valid = false;
     image.dirty_tiles = null;
     image.retire_pending = false;
     maybeRetireSwapchainTransportLocked(image.shared_owner);
-}
-
-fn ensurePackedVideoSampleBytes(image: *ImageObj) ?[]align(64) u8 {
-    if (image.packed_sample_bytes) |bytes| return bytes;
-    if ((image.format != 9 and image.format != 16) or image.mip_levels != 1 or image.array_layers != 1 or image.width == 0 or image.height == 0) return null;
-    const bytes_per_texel: usize = if (image.format == 16) 2 else 1;
-    const size = std.math.mul(usize, @as(usize, image.width) * image.height, bytes_per_texel) catch return null;
-    if (size == 0 or size > max_packed_video_sample_bytes) return null;
-    while (true) {
-        const used = packed_video_sample_bytes.load(.acquire);
-        if (used > max_packed_video_sample_bytes - size) return null;
-        if (packed_video_sample_bytes.cmpxchgWeak(used, used + size, .acq_rel, .acquire) == null) break;
-    }
-    const bytes = allocateBytes(size) catch {
-        _ = packed_video_sample_bytes.fetchSub(size, .acq_rel);
-        return null;
-    };
-    image.packed_sample_bytes = bytes;
-    return bytes;
 }
 
 fn releaseImageUserLocked(image: *ImageObj) void {
@@ -10012,7 +9979,6 @@ fn executeResolveImage(item: ResolveImageCommand) void {
 }
 
 fn invalidateImageContents(image: *ImageObj) void {
-    image.packed_sample_valid = false;
     image.clear_pattern = null;
     image.content_bounds = .{ .x = 0, .y = 0, .width = image.width, .height = image.height };
     image.force_full_present = true;
@@ -10589,14 +10555,12 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
             .ycbcr_range = range,
         };
     }
-    const sampled_bytes = if (image.packed_sample_valid) image.packed_sample_bytes.? else bytes;
-    const packed_texels = image.packed_sample_valid;
     return .{
-        .pixels = sampled_bytes,
+        .pixels = bytes,
         .width = image.width,
         .height = image.height,
-        .row_stride = image.width * @as(u32, if (packed_texels) (if (format == .rg8_unorm) 2 else 1) else 4),
-        .bytes_per_texel = @as(u32, if (packed_texels) (if (format == .rg8_unorm) 2 else 1) else 4),
+        .row_stride = image.width * 4,
+        .bytes_per_texel = 4,
         .format = format,
         .swizzle = sampled.components,
         .filter = filter,
@@ -12417,8 +12381,8 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     .{ op.src.size, op.region.buffer_offset, op.region.buffer_row_length, op.region.buffer_image_height, op.region.image_extent.width, op.region.image_extent.height, sample },
                 );
             }
-            invalidateImageContents(op.dst);
             copyBufferImage(op.src, op.dst, op.region, true);
+            invalidateImageContents(op.dst);
         },
         .image_to_buffer => |op| {
             if (renderDiagnosticsEnabled() and render_diagnostic_copies.load(.monotonic) < 256) {
@@ -12739,17 +12703,6 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     const bytes_per_texel = bufferImageBytesPerTexel(image.format).?;
     const layer_stride = bufferImageLayerStrideForBpp(region, bytes_per_texel).?;
     const len = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
-    // Establish a mirror only from a complete base-level upload. Partial
-    // writes leave the normal four-byte representation authoritative so an
-    // uninitialized compact plane can never be sampled.
-    const full_packed_upload = to_image and region.image_subresource.mip_level == 0 and region.image_subresource.base_array_layer == 0 and region.image_subresource.layer_count == 1 and
-        region.image_offset.x == 0 and region.image_offset.y == 0 and region.image_extent.width == image.width and region.image_extent.height == image.height;
-    const packed_mirror = if (to_image and image.format != 9 and image.format != 16)
-        null
-    else if (full_packed_upload)
-        ensurePackedVideoSampleBytes(image)
-    else
-        null;
     var layer: u32 = 0;
     while (layer < region.image_subresource.layer_count) : (layer += 1) {
         const image_layer_offset = imageSubresourceOffset(image, region.image_subresource.mip_level, region.image_subresource.base_array_layer + layer).?;
@@ -12777,12 +12730,6 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
                         pixels[image_row + x * 4 + 1] = if (image.format == 16) b[source_row + x * 2 + 1] else 0;
                         pixels[image_row + x * 4 + 2] = 0;
                         pixels[image_row + x * 4 + 3] = 255;
-                        if (packed_mirror) |compact_bytes| {
-                            const packed_row = y * @as(usize, image.width) * @as(usize, @intCast(bytes_per_texel));
-                            const packed_texel = packed_row + x * @as(usize, @intCast(bytes_per_texel));
-                            compact_bytes[packed_texel] = b[source_row + x * @as(usize, @intCast(bytes_per_texel))];
-                            if (image.format == 16) compact_bytes[packed_texel + 1] = b[source_row + x * 2 + 1];
-                        }
                     } else {
                         b[source_row + x * @as(usize, @intCast(bytes_per_texel))] = pixels[image_row + x * 4];
                         if (image.format == 16) b[source_row + x * 2 + 1] = pixels[image_row + x * 4 + 1];
@@ -12791,7 +12738,6 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
             }
         }
     }
-    if (full_packed_upload and packed_mirror != null) image.packed_sample_valid = true;
 }
 
 test "R8 buffer image transfers preserve packed rows and expand sampled storage" {
@@ -12801,10 +12747,6 @@ test "R8 buffer image transfers preserve packed rows and expand sampled storage"
     var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
     var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
     var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .owned_bytes = image_storage[0..] };
-    defer if (image.packed_sample_bytes) |bytes| {
-        allocator.free(bytes);
-        _ = packed_video_sample_bytes.fetchSub(bytes.len, .acq_rel);
-    };
     const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 4, .buffer_image_height = 2, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
 
     copyBufferImage(&buffer, &image, region, true);
@@ -12814,7 +12756,6 @@ test "R8 buffer image transfers preserve packed rows and expand sampled storage"
         0x20, 0, 0, 255,
         0x21, 0, 0, 255,
     }, &image_storage);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x11, 0x20, 0x21 }, image.packed_sample_bytes.?);
 
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
@@ -12828,14 +12769,9 @@ test "R8G8 buffer image transfers preserve Chromium UV plane pairs" {
     var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
     var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
     var image = ImageObj{ .owner = owner, .width = 2, .height = 1, .array_layers = 1, .samples = 1, .format = 16, .usage = 7, .layout = 1, .owned_bytes = image_storage[0..] };
-    defer if (image.packed_sample_bytes) |bytes| {
-        allocator.free(bytes);
-        _ = packed_video_sample_bytes.fetchSub(bytes.len, .acq_rel);
-    };
     const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 2, .buffer_image_height = 1, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 1, .depth = 1 } };
     copyBufferImage(&buffer, &image, region, true);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 0, 255, 110, 100, 0, 255 }, &image_storage);
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 110, 100 }, image.packed_sample_bytes.?);
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 90, 240, 110, 100 }, &buffer_storage);
