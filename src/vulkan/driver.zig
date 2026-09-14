@@ -10376,21 +10376,13 @@ fn colorStorageIndices(format: i32) ?[4]usize {
     };
 }
 
-fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
-    var source: [4]f32 = undefined;
-    if (fragment_bool) {
-        if (output.len < 4) return null;
-        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
-        source = .{ if (value) 1 else 0, if (value) 1 else 0, if (value) 1 else 0, 1 };
-    } else {
-        if (output.len < 16) return null;
-        for (&source, 0..) |*value, index| {
-            const component: f32 = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
-            if (!std.math.isFinite(component)) return null;
-            value.* = std.math.clamp(component, 0, 1);
-        }
+    var source = source_values;
+    for (&source) |*value| {
+        if (!std.math.isFinite(value.*)) return null;
+        value.* = std.math.clamp(value.*, 0, 1);
     }
     var destination: [4]f32 = undefined;
     for (&destination, 0..) |*value, channel| value.* = @as(f32, @floatFromInt(bytes[storage_indices[channel]])) / 255.0;
@@ -10411,6 +10403,19 @@ fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []co
         if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) bytes[storage_index] = rgba[channel];
     }
     return 1;
+}
+
+fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+    var source: [4]f32 = undefined;
+    if (fragment_bool) {
+        if (output.len < 4) return null;
+        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
+        source = .{ if (value) 1 else 0, if (value) 1 else 0, if (value) 1 else 0, 1 };
+    } else {
+        if (output.len < 16) return null;
+        for (&source, 0..) |*value, index| value.* = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
+    }
+    return profileWriteColorComponents(bytes, format, source, color_write_mask, blend);
 }
 
 /// Write an opaque RGBA fragment without loading destination color.  This is
@@ -11052,6 +11057,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     if (passthrough_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
         if (varying.fragment_interface == plan.input_interface) passthrough_varying = index;
     };
+    // This identity emits a literal transparent-black vec4. It has no live
+    // input or descriptor dependency, but the ordinary bounded blend writer
+    // remains responsible for its destination-visible effect.
+    const constant_black_plan = profile.fragment.constantBlackPlan();
     const circle_mask_plan = profile.fragment.circleMaskPlan();
     var circle_mask_circle_varying: ?usize = null;
     var circle_mask_color_varying: ?usize = null;
@@ -11393,6 +11402,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const direct_passthrough_coordinates = passthrough_plan != null and passthrough_varying != null and
             profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
             profile.varyings[passthrough_varying.?].lanes == 4 and !profile.varyings[passthrough_varying.?].flat;
+        const direct_constant_black = constant_black_plan != null and !profile.fragment_bool;
         const direct_circle_mask_coordinates = circle_mask_plan != null and
             circle_mask_circle_varying != null and circle_mask_color_varying != null and
             profile.varying_count == 2 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
@@ -11422,7 +11432,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 if (b0 < 0 or b1 < 0 or b2 < 0) continue;
                 const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
                 if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
-                if (direct_vp9_coordinates) {
+                var direct_fragment_color: ?[4]f32 = null;
+                if (direct_constant_black) {
+                    direct_fragment_color = .{ 0, 0, 0, 0 };
+                } else if (direct_vp9_coordinates) {
                     // Preserve the normal perspective interpolation order, but
                     // feed its resolved f32 lanes directly to the exact VP9
                     // transform. This removes temporary byte packing/decoding
@@ -11768,19 +11781,22 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
                 }
                 if (color_bytes) |color_storage| {
+                    const blend = ProfileBlendState{
+                        .enable = op.pipeline.color_blend_enable,
+                        .src_color_factor = op.pipeline.src_color_blend_factor,
+                        .dst_color_factor = op.pipeline.dst_color_blend_factor,
+                        .color_op = op.pipeline.color_blend_op,
+                        .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+                        .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+                        .alpha_op = op.pipeline.alpha_blend_op,
+                        .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
+                    };
                     const wrote = if (direct_vp9_opaque_write)
                         profileWriteOpaqueColor(color_storage[offset..][0..4], color.?.format, &fragment_output_bytes)
+                    else if (direct_fragment_color) |components|
+                        profileWriteColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask, blend)
                     else
-                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, .{
-                            .enable = op.pipeline.color_blend_enable,
-                            .src_color_factor = op.pipeline.src_color_blend_factor,
-                            .dst_color_factor = op.pipeline.dst_color_blend_factor,
-                            .color_op = op.pipeline.color_blend_op,
-                            .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
-                            .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
-                            .alpha_op = op.pipeline.alpha_blend_op,
-                            .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
-                        });
+                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, blend);
                     if (wrote == null) return;
                 }
                 if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);

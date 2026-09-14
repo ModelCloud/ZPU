@@ -802,6 +802,13 @@ pub const PassthroughPlan = struct {
     output_interface: u32,
 };
 
+/// Exact ABI of Chromium's captured constant-transparent-black fragment. It
+/// is identity-gated because a constant output may still be blended against a
+/// live destination by the rasterizer.
+pub const ConstantBlackPlan = struct {
+    output_interface: u32,
+};
+
 /// Exact ABI of Chromium's small analytic circle-coverage profile. It is
 /// identity-gated: the direct form is not a generic replacement for GLSL
 /// Length or clamp programs.
@@ -899,6 +906,7 @@ const FastPath = union(enum) {
     vp9_color_transform: Vp9ColorTransformPlan,
     radial_mask: RadialMaskPlan,
     passthrough: PassthroughPlan,
+    constant_black: ConstantBlackPlan,
     circle_mask: CircleMaskPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
@@ -939,6 +947,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
     if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
+    if (detectChromiumConstantBlack(program)) |path| return .{ .constant_black = path };
     if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
@@ -1174,6 +1183,16 @@ const chromium_circle_mask_identity = [_]u8{
     0xc0, 0xc2, 0xe6, 0x28, 0x9d, 0xc0, 0x9e, 0x53,
 };
 
+/// Canonical identity of Chromium's constant transparent-black clear
+/// fragment, captured in the two-core compositor workload. Its three-instruction
+/// program is complete and produces `vec4(0)` independently of both inputs.
+const chromium_constant_black_identity = [_]u8{
+    0xd9, 0xb1, 0x3e, 0x75, 0x3a, 0x10, 0xc1, 0xb7,
+    0xb0, 0x36, 0x47, 0x68, 0xb5, 0xe5, 0x39, 0xa5,
+    0xe0, 0xc3, 0x69, 0x4b, 0x46, 0x13, 0x25, 0x27,
+    0xdf, 0x3a, 0x38, 0xd4, 0x07, 0xc4, 0xe0, 0x95,
+};
+
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1380,6 +1399,25 @@ fn detectChromiumPassthrough(program: *const ir.Program) ?PassthroughPlan {
     return .{ .input_interface = 0, .output_interface = 2 };
 }
 
+fn detectChromiumConstantBlack(program: *const ir.Program) ?ConstantBlackPlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 3 or program.interfaces.len != 3 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_constant_black_identity)) return null;
+    const input = program.interfaces[0];
+    const front_facing = program.interfaces[1];
+    const output = program.interfaces[2];
+    const instructions = program.instructions;
+    if (input.storage != .input or !same(input.ty, f32x4) or input.location == null or input.location.? != 0 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or instructions[0].literal.len != 4 or std.mem.readInt(u32, instructions[0].literal[0..4], .little) != 0 or
+        !exactInstruction(instructions[1], .constant_composite, f32x4, &.{ 0, 0, 0, 0 }) or
+        !exactInstruction(instructions[2], .output, f32x4, &.{ 2, 1 })) return null;
+    return .{ .output_interface = 2 };
+}
+
 fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
     if (program.stage != .fragment or program.instructions.len != 27 or program.interfaces.len != 4 or
         !std.mem.eql(u8, &program.identity.digest, &chromium_circle_mask_identity)) return null;
@@ -1476,6 +1514,7 @@ pub const Executor = struct {
             .vp9_color_transform => "chromium_vp9_color_transform",
             .radial_mask => "chromium_radial_mask",
             .passthrough => "chromium_passthrough",
+            .constant_black => "chromium_constant_black",
             .circle_mask => "chromium_circle_mask",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
@@ -1555,6 +1594,14 @@ pub const Executor = struct {
     pub fn passthroughPlan(self: *const Executor) ?PassthroughPlan {
         return switch (self.fast_path orelse return null) {
             .passthrough => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the constant-black ABI only for the captured canonical program.
+    pub fn constantBlackPlan(self: *const Executor) ?ConstantBlackPlan {
+        return switch (self.fast_path orelse return null) {
+            .constant_black => |plan| plan,
             else => null,
         };
     }
@@ -2359,6 +2406,17 @@ pub const Executor = struct {
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(value.bits[lane]), .little);
     }
 
+    fn executeConstantBlackFastPath(path: ConstantBlackPlan, outputs: []const Output) Error!void {
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        @memset(bytes[0..16], 0);
+    }
+
     /// Execute the exact circle profile in the same scalar operation order as
     /// its canonical Render IR: two-term Length, subtraction, multiply,
     /// clamp, then the final vec4 multiply. The caller has already validated
@@ -2454,6 +2512,7 @@ pub const Executor = struct {
             },
             .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
             .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
+            .constant_black => |path| try executeConstantBlackFastPath(path, outputs),
             .circle_mask => |path| try executeCircleMaskFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
@@ -3854,7 +3913,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .circle_mask => true,
         else => false,
     };
 }
@@ -4450,6 +4509,35 @@ fn f32bytes(x: f32) [4]u8 {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, @bitCast(x), .little);
     return b;
+}
+
+test "captured Chromium constant black path is identity-gated and exact" {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const boolean = ir.Type{ .scalar = .bool };
+    const zero = [_]u8{ 0, 0, 0, 0 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = boolean, .builtin_front_facing = true },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &zero },
+        .{ .op = .constant_composite, .ty = f32x4, .operands = &.{ 0, 0, 0, 0 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 2, 1 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_constant_black_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_constant_black", executor.prevalidatedPathName());
+    var output = [_]u8{0xff} ** 16;
+    _ = try executor.executePrevalidated(&.{}, &.{.{ .interface = 2, .bytes = &output }});
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &output);
+    source.identity.digest[0] ^= 1;
+    try std.testing.expect(detectChromiumConstantBlack(&source) == null);
 }
 
 test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
