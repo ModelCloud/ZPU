@@ -1618,22 +1618,22 @@ pub const Executor = struct {
         return result;
     }
 
-    fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
+    fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
         if (bytes.len < 16) return error.Bounds;
-        const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
-        const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
-        const luma_u: f32 = @bitCast(luma_coordinates.bits[0]);
-        const luma_v: f32 = @bitCast(luma_coordinates.bits[1]);
-        const chroma_u: f32 = @bitCast(chroma_coordinates.bits[0]);
-        const chroma_v: f32 = @bitCast(chroma_coordinates.bits[1]);
-        const luma_plane = try sampleVp9Plane(prepared.luma_image, luma_u, luma_v);
-        const chroma_plane = try sampleVp9Plane(prepared.chroma_image, chroma_u, chroma_v);
+        const luma_plane = try sampleVp9Plane(prepared.luma_image, luma_coordinates[0], luma_coordinates[1]);
+        const chroma_plane = try sampleVp9Plane(prepared.chroma_image, chroma_coordinates[0], chroma_coordinates[1]);
         var source = if (luma_plane != null and chroma_plane != null)
             [_]f32{ luma_plane.?[0], chroma_plane.?[0], chroma_plane.?[1] }
         else blk: {
             const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
-            const luma = try sample(prepared.luma_image, luma_coordinates, bias);
-            const chroma = try sample(prepared.chroma_image, chroma_coordinates, bias);
+            var luma_coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            luma_coordinate_value.bits[0] = @bitCast(luma_coordinates[0]);
+            luma_coordinate_value.bits[1] = @bitCast(luma_coordinates[1]);
+            var chroma_coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            chroma_coordinate_value.bits[0] = @bitCast(chroma_coordinates[0]);
+            chroma_coordinate_value.bits[1] = @bitCast(chroma_coordinates[1]);
+            const luma = try sample(prepared.luma_image, luma_coordinate_value, bias);
+            const chroma = try sample(prepared.chroma_image, chroma_coordinate_value, bias);
             break :blk [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
         };
         source = vectorTimesColorTransformMatrix(source, prepared.source_matrix);
@@ -1643,6 +1643,12 @@ pub const Executor = struct {
         for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
         for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+    }
+
+    fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
+        const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
+        const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
+        try executeVp9ColorTransformPreparedCoordinatesResolved(prepared, .{ @bitCast(luma_coordinates.bits[0]), @bitCast(luma_coordinates.bits[1]) }, .{ @bitCast(chroma_coordinates.bits[0]), @bitCast(chroma_coordinates.bits[1]) }, bytes);
     }
 
     fn executeRadialGradientReference(path: RadialGradientPlan, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -1797,6 +1803,16 @@ pub const Executor = struct {
     /// method only removes repeated immutable std140 reads from each pixel.
     pub fn executeVp9ColorTransformPrepared(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, output: []u8) Error!void {
         try executeVp9ColorTransformPreparedResolved(prepared, luma_coordinate_bytes, chroma_coordinate_bytes, output);
+    }
+
+    /// Raster-side form of the prepared VP9 transform. The caller has already
+    /// performed the exact perspective interpolation used by the profile, so
+    /// avoid serializing the two vec2 varyings into temporary byte arrays only
+    /// to decode them again. This does not broaden the shader specialization:
+    /// it remains unavailable unless `prepareVp9ColorTransform` accepted the
+    /// complete canonical VP9 program and descriptor ABI.
+    pub fn executeVp9ColorTransformPreparedCoordinates(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, output: []u8) Error!void {
+        try executeVp9ColorTransformPreparedCoordinatesResolved(prepared, luma_coordinates, chroma_coordinates, output);
     }
 
     /// Direct resolved-input compatibility form. It remains useful to tests

@@ -10914,6 +10914,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             };
         }
         const inverse_area = 1.0 / area;
+        // This is deliberately stricter than merely having a prepared VP9
+        // transform. The direct coordinate form is valid only for the exact
+        // two non-flat vec2 varyings with no fragment-coordinate, derivative,
+        // or front-facing input. Any other shader keeps the ordinary
+        // per-pixel binding and interpolation path below.
+        const direct_vp9_coordinates = vp9_color_transform_prepared != null and
+            vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and
+            profile.varying_count == 2 and !profile.fragment_needs_derivatives and
+            profile.fragment_frag_coord == null and profile.fragment_front_facing == null and
+            profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
+            profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
@@ -10928,7 +10939,35 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (b0 < 0 or b1 < 0 or b2 < 0) continue;
             const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
             if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
-            if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
+            if (direct_vp9_coordinates) {
+                // Preserve the normal perspective interpolation order, but
+                // feed its resolved f32 lanes directly to the exact VP9
+                // transform. This removes temporary byte packing/decoding
+                // and construction of a generic fragment binding table.
+                const q0 = b0 / vertices[0].w;
+                const q1 = b1 / vertices[1].w;
+                const q2 = b2 / vertices[2].w;
+                const denominator = q0 + q1 + q2;
+                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                const luma_varying = vp9_luma_coordinate_varying.?;
+                const chroma_varying = vp9_chroma_coordinate_varying.?;
+                var luma_coordinates: [2]f32 = undefined;
+                var chroma_coordinates: [2]f32 = undefined;
+                for (0..2) |lane| {
+                    const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
+                    const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
+                    const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
+                    luma_coordinates[lane] = (q0 * luma_a + q1 * luma_b + q2 * luma_c) / denominator;
+                    const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
+                    const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
+                    const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
+                    chroma_coordinates[lane] = (q0 * chroma_a + q1 * chroma_b + q2 * chroma_c) / denominator;
+                }
+                profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
+                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                    return;
+                };
+            } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
                 const q0 = b0 / vertices[0].w;
                 const q1 = b1 / vertices[1].w;
                 const q2 = b2 / vertices[2].w;
@@ -14389,13 +14428,16 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     var generic_output = [_]u8{0} ** 16;
     var direct_output = [_]u8{0} ** 16;
     var prepared_output = [_]u8{0} ** 16;
+    var coordinate_output = [_]u8{0} ** 16;
     const outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &generic_output }};
     try executor.execute(&bindings, &outputs);
     try std.testing.expect(try executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, &uniform, luma_image, chroma_image, &direct_output));
     const prepared = (try executor.prepareVp9ColorTransform(&uniform, luma_image, chroma_image)).?;
     try executor.executeVp9ColorTransformPrepared(prepared, &coordinates, &coordinates, &prepared_output);
+    try executor.executeVp9ColorTransformPreparedCoordinates(prepared, .{ 0.625, 0.375 }, .{ 0.625, 0.375 }, &coordinate_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_output);
     try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
     try std.testing.expectError(error.Bounds, executor.prepareVp9ColorTransform(uniform[0..483], luma_image, chroma_image));
 }
