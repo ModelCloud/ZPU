@@ -859,6 +859,15 @@ pub const SampleModulatePlan = struct {
     bias_literal: [4]u8,
 };
 
+/// Draw-invariant sampling state for Chromium's exact final-composite
+/// profile.  It is deliberately the same narrow image contract as the
+/// texture-copy fast path; unsupported images continue through `sample`.
+pub const SampleModulatePrepared = struct {
+    image: SampledImage,
+    bias: f32,
+    fast_rgba8_clamp_linear: bool,
+};
+
 pub const TextureCopyPlan = struct {
     coordinate_interface: u32,
     image_interface: u32,
@@ -2834,6 +2843,46 @@ pub const Executor = struct {
             std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sample_value * color_value)), .little);
         }
         return true;
+    }
+
+    /// Resolve immutable sampler state once per draw for the exact
+    /// sample-modulate profile.  This does not admit a new shader or sampler
+    /// form: identity, dimensions, and the Vulkan image contract are still
+    /// checked before the raster loop begins.
+    pub fn prepareSampleModulate(self: *const Executor, image: SampledImage) Error!?SampleModulatePrepared {
+        const path = self.sampleModulatePlan() orelse return null;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        const bias: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, &path.bias_literal)).bits[0]);
+        if (!std.math.isFinite(bias)) return error.NumericDomain;
+        return .{ .image = image, .bias = bias, .fast_rgba8_clamp_linear = sampleCoverageImageIsFast(image) };
+    }
+
+    /// Raster-side prepared form of the exact sampled-color compositor. It
+    /// retains the ordinary byte decoding and canonical output policy while
+    /// bypassing repeated sampler-state validation for accepted RGBA/BGRA
+    /// clamp-linear images.
+    pub fn executeSampleModulatePrepared(_: *const Executor, prepared: SampleModulatePrepared, color_bytes: []const u8, coordinate_bytes: []const u8, output: []u8) Error!void {
+        if (output.len < 16) return error.InvalidOutput;
+        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = color_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = coordinate_bytes });
+        const u: f32 = @bitCast(coordinates.bits[0]);
+        const v: f32 = @bitCast(coordinates.bits[1]);
+        if (!std.math.isFinite(u) or !std.math.isFinite(v)) return error.NumericDomain;
+        const sampled = if (prepared.fast_rgba8_clamp_linear)
+            sampleCoverageRgba8ClampLinearPrepared(prepared.image, u, v)
+        else blk: {
+            var coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            coordinate_value.bits[0] = coordinates.bits[0];
+            coordinate_value.bits[1] = coordinates.bits[1];
+            var bias = Value{ .ty = .{ .scalar = .f32 } };
+            bias.bits[0] = @bitCast(prepared.bias);
+            const generic = try sample(prepared.image, coordinate_value, bias);
+            break :blk [_]f32{ @bitCast(generic.bits[0]), @bitCast(generic.bits[1]), @bitCast(generic.bits[2]), @bitCast(generic.bits[3]) };
+        };
+        for (0..4) |lane| {
+            const color_value: f32 = @bitCast(color.bits[lane]);
+            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sampled[lane] * color_value)), .little);
+        }
     }
 
     /// Execute the exact derivative-aware analytic coverage program after the
@@ -4974,6 +5023,10 @@ test "exact sampled-color modulation fast path preserves Chromium compositing se
     const generic_output = output;
     @memset(&output, 0);
     try std.testing.expect(try executor.executeSampleModulateDirect(&color, &coordinates, bindings[2].sampled_image.?, &output));
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    const prepared = (try executor.prepareSampleModulate(bindings[2].sampled_image.?)).?;
+    @memset(&output, 0);
+    try executor.executeSampleModulatePrepared(prepared, &color, &coordinates, &output);
     try std.testing.expectEqualSlices(u8, &generic_output, &output);
     // The direct ABI remains fail-closed on malformed resolved inputs and
     // must not be mistaken for a broad fast path.
