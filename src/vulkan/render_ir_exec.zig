@@ -1887,8 +1887,13 @@ pub const Executor = struct {
         return result;
     }
 
-    fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
-        if (bytes.len < 16) return error.Bounds;
+    /// Evaluate the exact validated VP9 transform through its final floating
+    /// point RGB values.  Both public output forms below use this one helper:
+    /// the normal Render-IR ABI writes f32 values, while the framebuffer fast
+    /// path quantizes directly to RGBA8.  Keeping the sampling, matrices and
+    /// transfer functions here prevents the storage optimization from growing
+    /// into a second shader implementation.
+    fn vp9ColorTransformPreparedRgb(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32) Error![3]f32 {
         var source = if (prepared.fast_planes) blk: {
             if (!std.math.isFinite(luma_coordinates[0]) or !std.math.isFinite(luma_coordinates[1]) or
                 !std.math.isFinite(chroma_coordinates[0]) or !std.math.isFinite(chroma_coordinates[1])) return error.Bounds;
@@ -1916,6 +1921,12 @@ pub const Executor = struct {
         if (prepared.fast_srgb_transfers) {
             for (0..3) |lane| source[lane] = srgbTransferLut(source[lane], &SrgbTransferLut.to_srgb) orelse try linearToSrgbPrepared(source[lane]);
         } else for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
+        return source;
+    }
+
+    fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.Bounds;
+        const source = try vp9ColorTransformPreparedRgb(prepared, luma_coordinates, chroma_coordinates);
         for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
     }
@@ -2183,6 +2194,25 @@ pub const Executor = struct {
     /// complete canonical VP9 program and descriptor ABI.
     pub fn executeVp9ColorTransformPreparedCoordinates(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, output: []u8) Error!void {
         try executeVp9ColorTransformPreparedCoordinatesResolved(prepared, luma_coordinates, chroma_coordinates, output);
+    }
+
+    /// Framebuffer-side output form of the exact prepared VP9 transform.
+    /// The caller may use this only when Vulkan state has already proven that
+    /// all four channels are overwritten by an opaque fragment.  It avoids
+    /// staging RGBA as sixteen bytes of f32 only to decode and quantize it in
+    /// the immediately following color-write step.  Quantization deliberately
+    /// mirrors `profileWriteOpaqueColor`: clamp each finite RGB component,
+    /// multiply by 255, and truncate to UNORM8; alpha is the profile's fixed
+    /// one.  Every non-opaque or otherwise unsupported draw keeps the f32
+    /// output path above.
+    pub fn executeVp9ColorTransformPreparedCoordinatesRgba8(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32) Error![4]u8 {
+        const source = try vp9ColorTransformPreparedRgb(prepared, luma_coordinates, chroma_coordinates);
+        var result: [4]u8 = .{ 0, 0, 0, 255 };
+        for (0..3) |lane| {
+            if (!std.math.isFinite(source[lane])) return error.NumericDomain;
+            result[lane] = @intFromFloat(std.math.clamp(source[lane], @as(f32, 0), @as(f32, 1)) * @as(f32, 255));
+        }
+        return result;
     }
 
     /// Direct resolved-input compatibility form. It remains useful to tests
