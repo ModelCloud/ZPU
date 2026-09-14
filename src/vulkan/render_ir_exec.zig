@@ -906,6 +906,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
     if (detectChromiumTextureCopy(program)) |path| return .{ .texture_copy = path };
+    if (detectChromiumUnmodulatedTextureCopy(program)) |path| return .{ .texture_copy = path };
     if (detectChromiumVp9SampleCoverage(program)) |path| return .{ .sample_coverage = path };
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
@@ -943,6 +944,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
 }
 
 const chromium_texture_copy_identity = [_]u8{ 0x7c, 0x59, 0xf3, 0xc8, 0xe2, 0x40, 0xd5, 0x24, 0xee, 0xa2, 0xe0, 0x83, 0x5c, 0x86, 0xf2, 0x62, 0x3b, 0xf3, 0x05, 0xcb, 0x81, 0x88, 0xba, 0x25, 0x3d, 0x20, 0x6c, 0x09, 0xcf, 0x89, 0xbf, 0x9c };
+const chromium_unmodulated_texture_copy_identity = [_]u8{ 0xa1, 0x34, 0xf3, 0x5b, 0xa3, 0x3a, 0x21, 0xcd, 0x41, 0x6c, 0x03, 0xd1, 0xe6, 0xc7, 0xf7, 0xca, 0xfd, 0xa7, 0x89, 0x54, 0xb4, 0xd9, 0x96, 0x4d, 0xc2, 0xfb, 0x87, 0xc7, 0x7d, 0x49, 0x2e, 0xd7 };
 const chromium_vp9_sample_coverage_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
 const chromium_vp9_color_transform_identity = [_]u8{ 0xdd, 0xaa, 0x22, 0x5a, 0xa0, 0xad, 0x69, 0x75, 0x74, 0xe5, 0x69, 0xa5, 0xbb, 0xf0, 0xf2, 0x67, 0x88, 0xd2, 0xbb, 0x19, 0x54, 0x5b, 0xe0, 0x19, 0xe2, 0x23, 0x5e, 0x73, 0x4b, 0x38, 0xf0, 0xc9 };
 
@@ -951,6 +953,33 @@ fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyPlan {
     const instructions = program.instructions;
     if (instructions[1].op != .constant or instructions[1].literal.len != 4 or instructions[7].op != .input or instructions[7].operands.len != 1 or instructions[9].op != .image_sample_implicit_lod or instructions[9].operands.len != 3 or instructions[11].op != .output or instructions[11].operands.len != 2) return null;
     return .{ .coordinate_interface = instructions[7].operands[0], .image_interface = instructions[9].operands[0], .output_interface = instructions[11].operands[0], .bias_literal = instructions[1].literal[0..4].* };
+}
+
+/// Chromium also emits this exact copy profile with dead color, front-facing
+/// and push-constant scaffolding. Its complete canonical identity and all
+/// live interface positions are checked before sharing the texture-copy
+/// lowering; a merely similar sampled shader remains interpreter-only.
+fn detectChromiumUnmodulatedTextureCopy(program: *const ir.Program) ?TextureCopyPlan {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 14 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_unmodulated_texture_copy_identity)) return null;
+    const instructions = program.instructions;
+    if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or instructions[0].literal.len != 4 or
+        !exactInstruction(instructions[1], .local, f32x4, &.{}) or !exactInstruction(instructions[2], .local, f32x4, &.{}) or !exactInstruction(instructions[3], .local, f32x4, &.{}) or
+        instructions[4].op != .label or !same(instructions[4].ty, .{ .scalar = .u32 }) or instructions[4].operands.len != 0 or instructions[4].literal.len != 4 or
+        !exactInstruction(instructions[5], .input, f32x4, &.{0}) or !exactInstruction(instructions[6], .local_store, f32x4, &.{ 1, 5 }) or
+        !exactInstruction(instructions[7], .local_store, f32x4, &.{ 2, 5 }) or !exactInstruction(instructions[8], .input, f32x2, &.{1}) or
+        !exactInstruction(instructions[9], .image_sample_implicit_lod, f32x4, &.{ 5, 8, 0 }) or !exactInstruction(instructions[10], .local_store, f32x4, &.{ 2, 9 }) or
+        !exactInstruction(instructions[11], .local_store, f32x4, &.{ 3, 9 }) or !exactInstruction(instructions[12], .output, f32x4, &.{ 3, 9 }) or
+        !exactInstruction(instructions[13], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    if (program.interfaces[0].storage != .input or !same(program.interfaces[0].ty, f32x4) or program.interfaces[0].location == null or program.interfaces[0].location.? != 0 or
+        program.interfaces[1].storage != .input or !same(program.interfaces[1].ty, f32x2) or program.interfaces[1].location == null or program.interfaces[1].location.? != 1 or
+        program.interfaces[3].storage != .output or !same(program.interfaces[3].ty, f32x4) or program.interfaces[3].location == null or program.interfaces[3].location.? != 0 or
+        program.interfaces[5].storage != .sampled_image or !same(program.interfaces[5].ty, f32x4) or program.interfaces[5].descriptor_set == null or program.interfaces[5].descriptor_set.? != 1 or
+        program.interfaces[5].binding == null or program.interfaces[5].binding.? != 0) return null;
+    return .{ .coordinate_interface = 1, .image_interface = 5, .output_interface = 3, .bias_literal = instructions[0].literal[0..4].* };
 }
 
 fn detectChromiumVp9SampleCoverage(program: *const ir.Program) ?SampleCoverageFastPath {
@@ -4311,6 +4340,52 @@ test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
     try executor.executeSampleCoveragePrepared(fast_prepared, &coordinates, &coverage, &output);
     try std.testing.expectEqualSlices(u8, &direct_fast_output, &output);
     try std.testing.expectError(error.Bounds, executor.executeSampleCoverageDirect(coordinates[0..4], &coverage, bindings[2].sampled_image.?, &output));
+}
+
+test "Chromium unmodulated texture copy with dead scaffolding uses copy path" {
+    const bias = f32bytes(-0.475);
+    const label = [_]u8{ 30, 0, 0, 0 };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = f32x2, .location = 1 },
+        .{ .storage = .input, .ty = .{ .scalar = .bool } },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .push_constant, .ty = .{ .scalar = .u32 } },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .input, .ty = f32x4, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 1, 5 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 5 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32x2, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 5, 8, 0 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 9 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_unmodulated_texture_copy_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_texture_copy", executor.prevalidatedPathName());
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    const pixel = [_]u8{ 17, 34, 51, 68 };
+    const image = SampledImage{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeTextureCopyDirect(&coordinates, image, &output));
+    for (pixel, 0..) |channel, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(@as(f32, @floatFromInt(channel)) / 255)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
 }
 
 test "prepared Chromium radial gradient preserves the resolved pixel" {
