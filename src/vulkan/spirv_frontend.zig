@@ -5443,6 +5443,62 @@ test "Chromium clamped single convolution matches the validated interpreter" {
     try std.testing.expectEqualSlices(u8, &reference, &output);
 }
 
+test "Chromium derivative coverage profile is identity-gated" {
+    const encoded = std.mem.trimEnd(u8, @embedFile("fixtures/chromium_skia_fragment_derivative_coverage.spv.b64"), "\n");
+    var bytes: [396 * 4]u8 align(4) = undefined;
+    try std.base64.standard.Decoder.decode(&bytes, encoded);
+    var program = try compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 46), program.instructions.len);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_derivative_coverage", executor.prevalidatedPathName());
+    try std.testing.expect(executor.derivativeCoveragePlan() != null);
+    var fallback = try program.clone(std.testing.allocator);
+    defer fallback.deinit(std.testing.allocator);
+    fallback.identity.digest[0] ^= 1;
+    var fallback_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fallback);
+    defer fallback_executor.deinit();
+    try std.testing.expectEqualStrings("interpreter", fallback_executor.prevalidatedPathName());
+
+    const Case = struct {
+        color: [4]f32,
+        coordinates: [2]f32,
+        dpdx: [2]f32,
+        dpdy: [2]f32,
+    };
+    // Exercise both sides of the profile's structured branch. The output of
+    // the exact direct lowering must remain byte-identical to the generic
+    // interpreter, including its derivative propagation and canonical-f32
+    // stores.
+    const cases = [_]Case{
+        .{ .color = .{ 0.1, 0.3, 0.7, 1 }, .coordinates = .{ 0, 0.625 }, .dpdx = .{ 0.25, 0.125 }, .dpdy = .{ -0.125, 0.375 } },
+        .{ .color = .{ 0.9, 0.4, 0.2, 0.75 }, .coordinates = .{ 0.35, 0.8 }, .dpdx = .{ 0.015625, -0.03125 }, .dpdy = .{ -0.0625, 0.125 } },
+    };
+    for (cases) |case| {
+        var reference = [_]u8{0} ** 16;
+        var direct = [_]u8{0} ** 16;
+        var prevalidated = [_]u8{0} ** 16;
+        const front_facing = [_]u8{1};
+        const bindings = [_]render_ir_exec.Binding{
+            .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&case.color) },
+            .{ .interface = 1, .bytes = std.mem.sliceAsBytes(&case.coordinates), .dpdx_bytes = std.mem.sliceAsBytes(&case.dpdx), .dpdy_bytes = std.mem.sliceAsBytes(&case.dpdy) },
+            .{ .interface = 2, .bytes = &front_facing },
+        };
+        try fallback_executor.execute(&bindings, &.{.{ .interface = 3, .bytes = &reference }});
+        try std.testing.expect(try executor.executeDerivativeCoverageDirect(
+            std.mem.sliceAsBytes(&case.color),
+            std.mem.sliceAsBytes(&case.coordinates),
+            std.mem.sliceAsBytes(&case.dpdx),
+            std.mem.sliceAsBytes(&case.dpdy),
+            &direct,
+        ));
+        try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 3, .bytes = &prevalidated }}));
+        try std.testing.expectEqualSlices(u8, &reference, &direct);
+        try std.testing.expectEqualSlices(u8, &reference, &prevalidated);
+    }
+}
+
 test "Chromium Skia sampled fragment shader executes combined image sampling" {
     const bytes align(4) = @embedFile("fixtures/chromium_skia_fragment_sample.spv").*;
     const words = std.mem.bytesAsSlice(u32, &bytes);
