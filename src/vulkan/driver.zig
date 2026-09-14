@@ -12172,6 +12172,35 @@ test "profile Mosaic tile clips cover a 640 by 720 target exactly once" {
     for (covered) |pixel| try std.testing.expectEqual(@as(u8, 1), pixel);
 }
 
+/// Resolve a horizontal band for a profile batch.  A band establishes a
+/// draw's geometry once per worker instead of once per 64x64 tile.  It is
+/// admitted only through the strict stateless/no-feedback safety gate below.
+fn profileMosaicBandClip(width: u32, height: u32, lane_index: usize, lane_count: usize) ?ProfileMosaicClip {
+    if (width == 0 or height == 0 or lane_count == 0 or lane_index >= lane_count) return null;
+    const min_y = (@as(u64, height) * lane_index) / lane_count;
+    const max_y = (@as(u64, height) * (lane_index + 1)) / lane_count;
+    if (min_y >= max_y or max_y > height) return null;
+    return .{
+        .min_x = 0,
+        .min_y = @intCast(min_y),
+        .max_x = width,
+        .max_y = @intCast(max_y),
+    };
+}
+
+test "profile Mosaic bands cover a 192 by 192 target exactly once" {
+    var covered = [_]u8{0} ** (192 * 192);
+    for (0..2) |lane_index| {
+        const clip = profileMosaicBandClip(192, 192, lane_index, 2) orelse return error.TestUnexpectedResult;
+        for (clip.min_y..clip.max_y) |y| for (clip.min_x..clip.max_x) |x| {
+            const index = @as(usize, y) * 192 + x;
+            try std.testing.expectEqual(@as(u8, 0), covered[index]);
+            covered[index] = 1;
+        };
+    }
+    for (covered) |pixel| try std.testing.expectEqual(@as(u8, 1), pixel);
+}
+
 /// The parallel route is deliberately more restrictive than the generic
 /// profile scheduler. Exact texture-copy/sample-modulate/pass-through fragments are
 /// stateless after setup, and these checks rule out all cross-tile state:
@@ -12243,6 +12272,49 @@ fn executeMosaicTileParallelProfileBatch(start: MosaicCommandCursor, batch_count
     if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
     var context = ProfileMosaicLaneContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
     if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicLaneContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+    return true;
+}
+
+const ProfileMosaicBandContext = struct {
+    start: MosaicCommandCursor,
+    batch_count: usize,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *ProfileMosaicBandContext = @ptrCast(@alignCast(raw));
+        const clip = profileMosaicBandClip(context.width, context.height, lane_index, lane_count) orelse return;
+        var draw_cursor = context.start;
+        for (0..context.batch_count) |_| {
+            const raw_command = draw_cursor.current() orelse return;
+            const op = switch (raw_command.*) {
+                .cube_draw => |value| value,
+                else => return,
+            };
+            const source = switch (op.pipeline.execution_abi) {
+                .profile_v1_scalar_graphics => |*profile| profile,
+                else => return,
+            };
+            const lane_profile = cachedProfileLane(source) orelse return;
+            executeProfileDraw(op, lane_profile, context.query_context, 0, clip, false);
+            draw_cursor.advance();
+        }
+    }
+};
+
+/// Small, dense profile targets are dominated by repeated geometry setup when
+/// split into 64-pixel tiles. Give each worker one horizontal band instead.
+/// The tile safety gate rules out target reads, depth, queries, and fragment
+/// state shared across pixels, so bands preserve exact per-pixel draw order.
+fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
+    var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
     color.content_bounds = unionRect(color.content_bounds, full_target);
     color.complex_3d_content = true;
@@ -12326,15 +12398,20 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     while (parallel_count >= 2) : (parallel_count -= 1) {
         const parallel_start = cursor.*;
         const parallel_operation_start = frame_pacing.monotonicNs();
-        if (!executeMosaicTileParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)) continue;
+        const use_bands = @as(u64, color_image.width) * color_image.height <= 192 * 192;
+        const parallel_executed = if (use_bands)
+            executeMosaicBandParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)
+        else
+            executeMosaicTileParallelProfileBatch(parallel_start, parallel_count, color_image, query_context);
+        if (!parallel_executed) continue;
         color_image.last_draw_ns = frame_pacing.monotonicNs() - parallel_operation_start;
         if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
         if (renderDiagnosticsEnabled()) {
             const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
-            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, parallel_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
+            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel-{s} profile batch seq={d} commands={d} target={x} {d}x{d}\n", .{ if (use_bands) "band" else "tile", diagnostic_batch, parallel_count, @intFromPtr(color_image), color_image.width, color_image.height });
         }
         if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
-            std.debug.print("ZPU Mosaic parallel profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ color_image.width, color_image.height, parallel_count, color_image.last_draw_ns });
+            std.debug.print("ZPU Mosaic parallel-{s} profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ if (use_bands) "band" else "tile", color_image.width, color_image.height, parallel_count, color_image.last_draw_ns });
         var parallel_end = cursor.*;
         for (0..parallel_count) |_| parallel_end.advance();
         cursor.* = parallel_end;
