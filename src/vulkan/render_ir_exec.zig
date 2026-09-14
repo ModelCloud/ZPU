@@ -1264,6 +1264,14 @@ test "Chromium sRGB transfer specialization is bit exact" {
     try std.testing.expect(!Executor.isChromiumSrgbTransferPair(altered, destination));
 }
 
+test "VP9 UNORM byte table preserves generic f32 conversion" {
+    for (0..256) |index| {
+        const byte: u8 = @intCast(index);
+        const generic = @as(f32, @floatFromInt(byte)) / 255;
+        try std.testing.expectEqual(@as(u32, @bitCast(generic)), @as(u32, @bitCast(Executor.unorm8_to_f32[byte])));
+    }
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
@@ -1818,6 +1826,15 @@ pub const Executor = struct {
         if (image.pixels.len < required) return error.Bounds;
     }
 
+    // Retain the generic UNORM conversion's f32 payload exactly while
+    // avoiding twelve integer-to-float divisions for each bilinear Y/UV
+    // sample. The table is immutable and fits comfortably in L1 cache.
+    const unorm8_to_f32 = blk: {
+        var values: [256]f32 = undefined;
+        for (0..values.len) |index| values[index] = @as(f32, @floatFromInt(index)) / 255;
+        break :blk values;
+    };
+
     /// Bilinearly sample a plane whose format, dimensions, row stride and
     /// backing storage were accepted by `validateVp9Plane`.  It deliberately
     /// retains the generic sampler's f32 arithmetic order.  The only omitted
@@ -1840,10 +1857,10 @@ pub const Executor = struct {
         const components: usize = if (image.format == .rg8_unorm) 2 else 1;
         var result: [2]f32 = .{ 0, 0 };
         for (0..components) |lane| {
-            const p00 = @as(f32, @floatFromInt(image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane])) / 255;
-            const p10 = @as(f32, @floatFromInt(image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane])) / 255;
-            const p01 = @as(f32, @floatFromInt(image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane])) / 255;
-            const p11 = @as(f32, @floatFromInt(image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane])) / 255;
+            const p00 = unorm8_to_f32[image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane]];
+            const p10 = unorm8_to_f32[image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane]];
+            const p01 = unorm8_to_f32[image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane]];
+            const p11 = unorm8_to_f32[image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane]];
             result[lane] = (p00 * (1 - tx) + p10 * tx) * (1 - ty) + (p01 * (1 - tx) + p11 * tx) * ty;
         }
         return result;
