@@ -10537,6 +10537,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
                 .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
             );
+            for (profile.fragment.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
+                "ZPU selected profile member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
+                .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
+            );
             for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
                 "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
                 .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
