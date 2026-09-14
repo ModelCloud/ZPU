@@ -742,6 +742,18 @@ pub const RadialGradientPlan = struct {
     output_interface: u32,
 };
 
+/// Exact ABI of Chromium's two-distance-field radial mask. The profile is
+/// selected by the complete canonical IR digest below, not by its arithmetic
+/// shape or a shader name.
+pub const RadialMaskPlan = struct {
+    color_interface: u32,
+    coordinates_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
 /// Fully validated interface map for Chromium's simple final-composite
 /// shader.  The driver may resolve these interfaces once per triangle and
 /// invoke the direct form for every covered pixel, avoiding repeated generic
@@ -805,6 +817,7 @@ const FastPath = union(enum) {
     texture_copy: TextureCopyFastPath,
     sample_coverage: SampleCoverageFastPath,
     vp9_color_transform: Vp9ColorTransformPlan,
+    radial_mask: RadialMaskPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -837,6 +850,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumTextureCopy(program)) |path| return .{ .texture_copy = path };
     if (detectChromiumVp9SampleCoverage(program)) |path| return .{ .sample_coverage = path };
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
+    if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     if (detectChromiumClampedConvolution(program)) |path| return .{ .clamped_convolution_8tap = path };
@@ -1008,6 +1022,13 @@ const chromium_radial_gradient_identity = [_]u8{
     0xed, 0xad, 0x76, 0x0e, 0x37, 0xc3, 0x5d, 0x41,
 };
 
+const chromium_radial_mask_identity = [_]u8{
+    0xb0, 0x4d, 0xfa, 0xb7, 0x86, 0x4c, 0xe1, 0xbd,
+    0xd5, 0x5f, 0xd4, 0x91, 0x06, 0x08, 0x0a, 0x14,
+    0xd2, 0xc8, 0x2e, 0x79, 0xfb, 0xe6, 0xd8, 0xa8,
+    0x2d, 0xdc, 0x07, 0xc5, 0x5a, 0x1d, 0xcb, 0xa5,
+};
+
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1140,6 +1161,32 @@ fn detectChromiumRadialGradient(program: *const ir.Program) ?RadialGradientPlan 
     return if (circle_found and coordinates_found and frag_coord_found and uniform_found and image_found and output_found) result else null;
 }
 
+fn detectChromiumRadialMask(program: *const ir.Program) ?RadialMaskPlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 110 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_radial_mask_identity)) return null;
+    const color = program.interfaces[0];
+    const coordinates = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinates.storage != .input or !same(coordinates.ty, f32x4) or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .push_constant or !uniform.block or uniform.member_count != 4 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x4, 64, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x4, 80, 1, 0) or
+        !convolutionMemberMatches(uniform.members[3], f32x2, 96, 1, 0)) return null;
+    return .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 4, .image_interface = 5, .output_interface = 3, .bias_literal = .{ 51, 51, 243, 190 } };
+}
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     program: ir.Program,
@@ -1191,6 +1238,7 @@ pub const Executor = struct {
             .texture_copy => "chromium_texture_copy",
             .sample_coverage => "chromium_vp9_sample_coverage",
             .vp9_color_transform => "chromium_vp9_color_transform",
+            .radial_mask => "chromium_radial_mask",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
@@ -1678,6 +1726,52 @@ pub const Executor = struct {
         try executeRadialGradientResolved(&circle_storage, &coordinate_storage, &frag_coord_storage, uniform.bytes, image, bytes);
     }
 
+    fn executeRadialMaskFastPath(path: RadialMaskPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.coordinates_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 104) return error.Bounds;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        const coordinate = [_]f32{ @bitCast(coordinates.bits[0]), @bitCast(coordinates.bits[1]), @bitCast(coordinates.bits[2]), @bitCast(coordinates.bits[3]) };
+        const color_values = [_]f32{ @bitCast(color.bits[0]), @bitCast(color.bits[1]), @bitCast(color.bits[2]), @bitCast(color.bits[3]) };
+        const transform = [_]f32{ try uniformF32(uniform.bytes, 96), try uniformF32(uniform.bytes, 100) };
+        const first_center = [_]f32{ try uniformF32(uniform.bytes, 64), try uniformF32(uniform.bytes, 68) };
+        const first_scale = try uniformF32(uniform.bytes, 76);
+        const first_inset = try uniformF32(uniform.bytes, 72);
+        const first_x = canonicalF32(coordinate[0] - first_center[0]);
+        const first_y = canonicalF32(canonicalF32(transform[0] + canonicalF32(transform[1] * coordinate[1])) - first_center[1]);
+        const first_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(first_x * first_x) + canonicalF32(first_y * first_y))));
+        const radius = canonicalF32(first_length + canonicalF32(canonicalF32(1 - first_inset) * first_scale));
+        const matrix = [_][2]f32{
+            .{ try uniformF32(uniform.bytes, 16), try uniformF32(uniform.bytes, 20) },
+            .{ try uniformF32(uniform.bytes, 32), try uniformF32(uniform.bytes, 36) },
+            .{ try uniformF32(uniform.bytes, 48), try uniformF32(uniform.bytes, 52) },
+        };
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(canonicalF32(canonicalF32(matrix[0][0] * radius) + matrix[2][0]));
+        sample_coordinates.bits[1] = @bitCast(canonicalF32(canonicalF32(matrix[0][1] * radius) + matrix[2][1]));
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, sample_coordinates, bias);
+        const sampled_alpha: f32 = @bitCast(sampled.bits[0]);
+        const second_center = [_]f32{ try uniformF32(uniform.bytes, 80), try uniformF32(uniform.bytes, 84) };
+        const second_scale = try uniformF32(uniform.bytes, 92);
+        const second_edge = try uniformF32(uniform.bytes, 88);
+        const second_y = canonicalF32(coordinate[1] + canonicalF32(coordinate[2] * coordinate[3]));
+        const second_x = canonicalF32(second_center[0] - coordinate[0]);
+        const second_delta_y = canonicalF32(second_center[1] - second_y);
+        const second_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(canonicalF32(second_x * second_scale) * canonicalF32(second_x * second_scale)) + canonicalF32(canonicalF32(second_delta_y * second_scale) * canonicalF32(second_delta_y * second_scale)))));
+        const mask = canonicalF32(std.math.clamp(canonicalF32(canonicalF32(second_length - 1) * second_edge), @as(f32, 0), @as(f32, 1)));
+        const coverage = canonicalF32(sampled_alpha * mask);
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(color_values[lane] * coverage))), .little);
+    }
+
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
             .sample_modulate => |path| {
@@ -1738,6 +1832,7 @@ pub const Executor = struct {
                 };
                 try executeVp9ColorTransformResolved(luma_coordinates.bytes, chroma_coordinates.bytes, uniform.bytes, try findSampledImage(bindings, path.luma_image_interface), try findSampledImage(bindings, path.chroma_image_interface), output orelse return error.InvalidOutput);
             },
+            .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
