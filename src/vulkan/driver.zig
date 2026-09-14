@@ -10205,6 +10205,60 @@ fn profileAxisAlignedTriangleRowBounds(vertices: [3]ProfileScreenVertex, pixel_y
     return .{ .min_x = @max(minimum, std.math.sub(i32, floored, 1) catch minimum), .max_x = maximum };
 }
 
+/// A one-time form of the conservative right-triangle bound above. Chromium's
+/// ordered compositor pass repeatedly rasterizes axis-aligned texture strips
+/// into the same large target. The direct texture path still runs every
+/// covered pixel through the normal edge, interpolation, sampling, and blend
+/// calculations; this plan merely avoids re-discovering the diagonal for
+/// every scanline.
+const ProfileTextureCopyRowPlan = struct {
+    origin_x: f32,
+    origin_y: f32,
+    delta_x: f32,
+    delta_y: f32,
+    left_side: bool,
+};
+
+fn profilePrepareTextureCopyRowPlan(vertices: [3]ProfileScreenVertex) ?ProfileTextureCopyRowPlan {
+    var diagonal: ?struct { a: usize, b: usize } = null;
+    for (0..3) |a| for (a + 1..3) |b| {
+        if (vertices[a].x != vertices[b].x and vertices[a].y != vertices[b].y) {
+            if (diagonal != null) return null;
+            diagonal = .{ .a = a, .b = b };
+        }
+    };
+    const edge = diagonal orelse return null;
+    const third = 3 - edge.a - edge.b;
+    const origin_x = vertices[edge.a].x;
+    const origin_y = vertices[edge.a].y;
+    const delta_x = vertices[edge.b].x - origin_x;
+    const delta_y = vertices[edge.b].y - origin_y;
+    if (!std.math.isFinite(delta_y) or @abs(delta_y) < 0.00001) return null;
+    const centroid_y = (vertices[0].y + vertices[1].y + vertices[2].y) / 3;
+    const centroid_line_x = origin_x + (centroid_y - origin_y) * delta_x / delta_y;
+    if (!std.math.isFinite(centroid_line_x)) return null;
+    return .{
+        .origin_x = origin_x,
+        .origin_y = origin_y,
+        .delta_x = delta_x,
+        .delta_y = delta_y,
+        .left_side = vertices[third].x < centroid_line_x,
+    };
+}
+
+fn profileTextureCopyRowBounds(plan: ProfileTextureCopyRowPlan, pixel_y: f32, minimum: i32, maximum: i32) ?ProfileRowBounds {
+    const line_x = plan.origin_x + (pixel_y - plan.origin_y) * plan.delta_x / plan.delta_y;
+    if (!std.math.isFinite(line_x)) return null;
+    if (plan.left_side) {
+        if (@ceil(line_x) < @as(f32, @floatFromInt(std.math.minInt(i32))) or @ceil(line_x) > @as(f32, @floatFromInt(std.math.maxInt(i32)))) return null;
+        const capped: i32 = @intFromFloat(@ceil(line_x));
+        return .{ .min_x = minimum, .max_x = @min(maximum, std.math.add(i32, capped, 1) catch maximum) };
+    }
+    if (@floor(line_x) < @as(f32, @floatFromInt(std.math.minInt(i32))) or @floor(line_x) > @as(f32, @floatFromInt(std.math.maxInt(i32)))) return null;
+    const floored: i32 = @intFromFloat(@floor(line_x));
+    return .{ .min_x = @max(minimum, std.math.sub(i32, floored, 1) catch minimum), .max_x = maximum };
+}
+
 test "axis-aligned profile row bounds conservatively cover Chromium VP9 triangles" {
     const first = [_]ProfileScreenVertex{
         .{ .x = 102.00001, .y = 87, .z = 0, .w = 1 },
@@ -10232,6 +10286,28 @@ test "axis-aligned profile row bounds conservatively cover Chromium VP9 triangle
                     try std.testing.expect(@as(i32, @intCast(x)) < bounds.max_x);
                 }
             }
+        }
+    }
+}
+
+test "prepared texture-copy row bounds preserve the scalar triangle bound" {
+    const first = [_]ProfileScreenVertex{
+        .{ .x = 17.125, .y = 8.75, .z = 0, .w = 1 },
+        .{ .x = 17.125, .y = 29.5, .z = 0, .w = 1 },
+        .{ .x = 48.875, .y = 8.75, .z = 0, .w = 1 },
+    };
+    const second = [_]ProfileScreenVertex{
+        .{ .x = 48.875, .y = 8.75, .z = 0, .w = 1 },
+        .{ .x = 17.125, .y = 29.5, .z = 0, .w = 1 },
+        .{ .x = 48.875, .y = 29.5, .z = 0, .w = 1 },
+    };
+    for ([_][3]ProfileScreenVertex{ first, second }) |triangle| {
+        const plan = profilePrepareTextureCopyRowPlan(triangle) orelse unreachable;
+        for (8..30) |y| {
+            const pixel_y = @as(f32, @floatFromInt(y)) + 0.5;
+            const scalar = profileAxisAlignedTriangleRowBounds(triangle, pixel_y, 16, 50) orelse unreachable;
+            const prepared = profileTextureCopyRowBounds(plan, pixel_y, 16, 50) orelse unreachable;
+            try std.testing.expectEqual(scalar, prepared);
         }
     }
 }
@@ -11696,6 +11772,16 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
         if (max_x <= min_x or max_y <= min_y) continue;
+        // Restrict the planned row form to the large Mosaic source-over
+        // batches seen in Chromium composition. It keeps tiny standalone
+        // texture draws on their compact scalar path, while every admitted
+        // pixel continues through the unchanged coverage and blend code.
+        const texture_copy_row_plan = if (direct_texture_copy_coordinates and direct_source_over_write and mosaic_clip != null and
+            op.primitive_topology == 4 and op.vertex_count == 4 and op.instance_count == 1 and op.indexed == null and
+            @as(u64, target.width) * target.height >= @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size)
+            profilePrepareTextureCopyRowPlan(vertices)
+        else
+            null;
         for (@intCast(min_y)..@intCast(max_y)) |y| {
             // A video quad is represented as two axis-aligned right
             // triangles.  Shrink each triangle's rectangular scan to its
@@ -11703,6 +11789,8 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             // edge test below remains authoritative.
             const row: ProfileRowBounds = if (direct_vp9_coordinates)
                 profileAxisAlignedTriangleRowBounds(vertices, @as(f32, @floatFromInt(y)) + 0.5, min_x, max_x) orelse .{ .min_x = min_x, .max_x = max_x }
+            else if (texture_copy_row_plan) |plan|
+                profileTextureCopyRowBounds(plan, @as(f32, @floatFromInt(y)) + 0.5, min_x, max_x) orelse .{ .min_x = min_x, .max_x = max_x }
             else
                 .{ .min_x = min_x, .max_x = max_x };
             if (row.max_x <= row.min_x) continue;
