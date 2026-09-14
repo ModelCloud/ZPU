@@ -10449,6 +10449,20 @@ fn profileBlendStateSupported(blend: ProfileBlendState) bool {
     return true;
 }
 
+fn profileTextureCopyPreparedIsOpaque(prepared: render_ir_exec.TextureCopyPrepared) bool {
+    const image = prepared.image;
+    if (!prepared.fast_rgba8_clamp_linear or image.bytes_per_texel != 4 or (image.format != .rgba8_unorm and image.format != .bgra8_unorm)) return false;
+    const rows = std.math.mul(u64, @as(u64, image.row_stride), image.height - 1) catch return false;
+    const tail = std.math.mul(u64, @as(u64, image.width), 4) catch return false;
+    const required = std.math.add(u64, rows, tail) catch return false;
+    if (required > image.pixels.len) return false;
+    for (0..image.height) |y| for (0..image.width) |x| {
+        const offset = @as(usize, @intCast(@as(u64, y) * image.row_stride + @as(u64, x) * 4));
+        if (image.pixels[offset + 3] != 255) return false;
+    };
+    return true;
+}
+
 /// Write an opaque RGBA fragment without loading destination color.  This is
 /// equivalent to `profileWriteColor` only when the caller has established a
 /// complete write mask and either blending is disabled or the fixed-function
@@ -10546,6 +10560,15 @@ test "scalar profile blend-state preflight accepts only supported finite state" 
     try std.testing.expect(profileBlendStateSupported(.{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 }));
     try std.testing.expect(!profileBlendStateSupported(.{ .enable = 1, .src_color_factor = 15 }));
     try std.testing.expect(!profileBlendStateSupported(.{ .constants = .{ std.math.nan(f32), 0, 0, 0 } }));
+}
+
+test "prepared opaque Chromium texture copy requires complete RGBA alpha" {
+    const opaque_bytes = [_]u8{ 1, 2, 3, 255, 4, 5, 6, 255 };
+    const transparent = [_]u8{ 1, 2, 3, 255, 4, 5, 6, 127 };
+    const image = render_ir_exec.SampledImage{ .pixels = &opaque_bytes, .width = 2, .height = 1, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    try std.testing.expect(profileTextureCopyPreparedIsOpaque(.{ .image = image, .bias = 0, .fast_rgba8_clamp_linear = true }));
+    try std.testing.expect(!profileTextureCopyPreparedIsOpaque(.{ .image = .{ .pixels = &transparent, .width = 2, .height = 1, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, .bias = 0, .fast_rgba8_clamp_linear = true }));
+    try std.testing.expect(!profileTextureCopyPreparedIsOpaque(.{ .image = image, .bias = 0, .fast_rgba8_clamp_linear = false }));
 }
 
 fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
@@ -11285,6 +11308,13 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
         };
         if (!profileBlendStateSupported(blend)) break :blk false;
+        const source_over = blend.enable == 1 and blend.src_color_factor == 1 and blend.dst_color_factor == 7 and blend.color_op == 0 and
+            blend.src_alpha_factor == 1 and blend.dst_alpha_factor == 7 and blend.alpha_op == 0;
+        // The scalar strip rasterizer includes its shared diagonal in both
+        // triangles. A single rectangle is therefore equivalent only with
+        // blending disabled, or when the sampled source is demonstrably
+        // opaque and source-over makes the second write idempotent.
+        if (blend.enable != 0 and !(source_over and profileTextureCopyPreparedIsOpaque(texture_copy_prepared.?))) break :blk false;
         const v0 = profileEvaluateVertex(op, profile, 0, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
         const v1 = profileEvaluateVertex(op, profile, 1, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
         const v2 = profileEvaluateVertex(op, profile, 2, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
