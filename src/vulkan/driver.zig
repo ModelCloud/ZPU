@@ -1837,6 +1837,7 @@ var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
@@ -10695,6 +10696,18 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
+    }
+    if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_profile_state.fetchAdd(1, .monotonic) == 0) {
+        const prepared = vp9_color_transform_prepared.?;
+        std.debug.print(
+            "ZPU VP9 profile state luma={s} {d}x{d} stride={d} filter={s} address={s}/{s} chroma={s} {d}x{d} stride={d} filter={s} address={s}/{s} source_transfer={d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6} destination_transfer={d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6}\n",
+            .{
+                @tagName(prepared.luma_image.format),   prepared.luma_image.width,        prepared.luma_image.height,       prepared.luma_image.row_stride,   @tagName(prepared.luma_image.filter),   @tagName(prepared.luma_image.address_u),   @tagName(prepared.luma_image.address_v),
+                @tagName(prepared.chroma_image.format), prepared.chroma_image.width,      prepared.chroma_image.height,     prepared.chroma_image.row_stride, @tagName(prepared.chroma_image.filter), @tagName(prepared.chroma_image.address_u), @tagName(prepared.chroma_image.address_v),
+                prepared.source_transfer[0],            prepared.source_transfer[1],      prepared.source_transfer[2],      prepared.source_transfer[3],      prepared.source_transfer[4],            prepared.source_transfer[5],               prepared.source_transfer[6],
+                prepared.destination_transfer[0],       prepared.destination_transfer[1], prepared.destination_transfer[2], prepared.destination_transfer[3], prepared.destination_transfer[4],       prepared.destination_transfer[5],          prepared.destination_transfer[6],
+            },
+        );
     }
     // This dynamic radial-gradient profile has materially more arithmetic
     // than the video coverage composite, but its validated uniforms and
