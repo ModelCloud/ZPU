@@ -11596,17 +11596,28 @@ const ProfileLaneCache = struct {
     fragment_identity: [32]u8,
     clone: ProfileGraphicsClone,
 };
-threadlocal var profile_lane_cache: ?ProfileLaneCache = null;
+const profile_lane_cache_capacity: usize = 8;
+threadlocal var profile_lane_caches: [profile_lane_cache_capacity]?ProfileLaneCache = [_]?ProfileLaneCache{null} ** profile_lane_cache_capacity;
 
 fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
-    if (profile_lane_cache) |*entry| {
-        if (entry.source == source and std.mem.eql(u8, &entry.vertex_identity, &source.vertex.program.identity.digest) and std.mem.eql(u8, &entry.fragment_identity, &source.fragment.program.identity.digest)) return &entry.clone.graphics;
-        entry.clone.deinit();
-        profile_lane_cache = null;
+    for (&profile_lane_caches) |*slot| {
+        if (slot.*) |*entry| {
+            if (entry.source == source and std.mem.eql(u8, &entry.vertex_identity, &source.vertex.program.identity.digest) and std.mem.eql(u8, &entry.fragment_identity, &source.fragment.program.identity.digest)) return &entry.clone.graphics;
+        }
     }
     const clone = ProfileGraphicsClone.init(source) catch return null;
-    profile_lane_cache = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
-    return &profile_lane_cache.?.clone.graphics;
+    for (&profile_lane_caches) |*slot| {
+        if (slot.* == null) {
+            slot.* = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
+            return &slot.*.?.clone.graphics;
+        }
+    }
+    // Eight pipeline-local executors cover the observed compositor batches.
+    // On a genuinely wider batch, recycle one lane-local clone rather than
+    // allocating unbounded per-worker state.
+    profile_lane_caches[0].?.clone.deinit();
+    profile_lane_caches[0] = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
+    return &profile_lane_caches[0].?.clone.graphics;
 }
 
 /// The VP9 color-transform specialization has no mutable fragment state once
