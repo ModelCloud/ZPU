@@ -10776,6 +10776,35 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
         _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
+    // The exact two-distance-field radial mask is another common Chromium
+    // tile profile. Its push constants and sampled image are immutable for a
+    // draw, so resolve them once before the pixel loop rather than rebuilding
+    // a generic binding table for every covered fragment.
+    const radial_mask_plan = profile.fragment.radialMaskPlan();
+    var radial_mask_color_varying: ?usize = null;
+    var radial_mask_coordinate_varying: ?usize = null;
+    var radial_mask_push_constants: ?[]const u8 = null;
+    var radial_mask_image: ?render_ir_exec.SampledImage = null;
+    if (radial_mask_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) radial_mask_color_varying = index;
+            if (varying.fragment_interface == plan.coordinates_interface) radial_mask_coordinate_varying = index;
+        }
+        if (profile.fragment_push_constant) |push| {
+            if (push.interface == plan.uniform_interface and pushConstantBytesInitialized(op.push_constants, 4, push.byte_size))
+                radial_mask_push_constants = op.push_constants.values[4][0..push.byte_size];
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) radial_mask_image = binding.sampled_image;
+        }
+    }
+    var radial_mask_prepared: ?render_ir_exec.RadialMaskPrepared = null;
+    if (radial_mask_plan != null and radial_mask_push_constants != null and radial_mask_image != null) {
+        radial_mask_prepared = profile.fragment.prepareRadialMask(radial_mask_push_constants.?, radial_mask_image.?) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-mask preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
+    }
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
@@ -10992,6 +11021,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             (op.pipeline.color_blend_enable == 0 or
                 (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
                     op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0));
+        // The canonical radial mask consumes exactly two perspective vec4
+        // varyings. Its declared FrontFacing input is not data-dependent in
+        // the validated program, and it needs neither derivatives nor
+        // fragment coordinates. All other shader shapes keep the generic
+        // interpolation/binding path below.
+        const direct_radial_mask_coordinates = radial_mask_prepared != null and
+            radial_mask_color_varying != null and radial_mask_coordinate_varying != null and
+            profile.varying_count == 2 and !profile.fragment_needs_derivatives and
+            profile.fragment_frag_coord == null and
+            profile.varyings[radial_mask_color_varying.?].lanes == 4 and !profile.varyings[radial_mask_color_varying.?].flat and
+            profile.varyings[radial_mask_coordinate_varying.?].lanes == 4 and !profile.varyings[radial_mask_coordinate_varying.?].flat;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
@@ -11032,6 +11072,30 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 }
                 profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
                     if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                    return;
+                };
+            } else if (direct_radial_mask_coordinates) {
+                const q0 = b0 / vertices[0].w;
+                const q1 = b1 / vertices[1].w;
+                const q2 = b2 / vertices[2].w;
+                const denominator = q0 + q1 + q2;
+                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                const color_varying = radial_mask_color_varying.?;
+                const coordinate_varying = radial_mask_coordinate_varying.?;
+                var radial_color: [4]f32 = undefined;
+                var radial_coordinates: [4]f32 = undefined;
+                for (0..4) |lane| {
+                    const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
+                    const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
+                    const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
+                    radial_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
+                    const coordinate_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][coordinate_varying][lane * 4 ..][0..4], .little));
+                    const coordinate_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][coordinate_varying][lane * 4 ..][0..4], .little));
+                    const coordinate_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][coordinate_varying][lane * 4 ..][0..4], .little));
+                    radial_coordinates[lane] = (q0 * coordinate_a + q1 * coordinate_b + q2 * coordinate_c) / denominator;
+                }
+                profile.fragment.executeRadialMaskPreparedCoordinates(radial_mask_prepared.?, radial_color, radial_coordinates, &fragment_output_bytes) catch |err| {
+                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                     return;
                 };
             } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {

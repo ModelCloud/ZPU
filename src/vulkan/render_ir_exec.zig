@@ -754,6 +754,24 @@ pub const RadialMaskPlan = struct {
     bias_literal: [4]u8,
 };
 
+/// Draw-invariant state for Chromium's exact two-distance-field radial mask.
+/// The profile is still selected exclusively by its complete canonical Render
+/// IR identity.  Preparing this record only moves bounded push-constant reads
+/// and descriptor resolution out of the per-pixel raster loop.
+pub const RadialMaskPrepared = struct {
+    image: SampledImage,
+    matrix_column0: [2]f32,
+    matrix_column2: [2]f32,
+    transform: [2]f32,
+    first_center: [2]f32,
+    first_inset: f32,
+    first_scale: f32,
+    second_center: [2]f32,
+    second_edge: f32,
+    second_scale: f32,
+    bias: f32,
+};
+
 /// Fully validated interface map for Chromium's simple final-composite
 /// shader.  The driver may resolve these interfaces once per triangle and
 /// invoke the direct form for every covered pixel, avoiding repeated generic
@@ -1294,6 +1312,15 @@ pub const Executor = struct {
         };
     }
 
+    /// Return the exact ABI of Chromium's captured two-distance-field radial
+    /// mask. Any changed canonical instruction stays on the general path.
+    pub fn radialMaskPlan(self: *const Executor) ?RadialMaskPlan {
+        return switch (self.fast_path orelse return null) {
+            .radial_mask => |plan| plan,
+            else => null,
+        };
+    }
+
     /// These exact paths use no mutable executor values, locals, or
     /// derivative scratch after setup. A driver may execute disjoint pixel
     /// regions concurrently while retaining submission order within each
@@ -1726,50 +1753,61 @@ pub const Executor = struct {
         try executeRadialGradientResolved(&circle_storage, &coordinate_storage, &frag_coord_storage, uniform.bytes, image, bytes);
     }
 
+    fn executeRadialMaskPreparedCoordinatesResolved(prepared: RadialMaskPrepared, color_values: [4]f32, coordinate: [4]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        const first_x = canonicalF32(coordinate[0] - prepared.first_center[0]);
+        const first_y = canonicalF32(canonicalF32(prepared.transform[0] + canonicalF32(prepared.transform[1] * coordinate[1])) - prepared.first_center[1]);
+        const first_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(first_x * first_x) + canonicalF32(first_y * first_y))));
+        const radius = canonicalF32(first_length + canonicalF32(canonicalF32(1 - prepared.first_inset) * prepared.first_scale));
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(canonicalF32(canonicalF32(prepared.matrix_column0[0] * radius) + prepared.matrix_column2[0]));
+        sample_coordinates.bits[1] = @bitCast(canonicalF32(canonicalF32(prepared.matrix_column0[1] * radius) + prepared.matrix_column2[1]));
+        var bias = Value{ .ty = .{ .scalar = .f32 } };
+        bias.bits[0] = @bitCast(prepared.bias);
+        const sampled = try sample(prepared.image, sample_coordinates, bias);
+        const sampled_alpha: f32 = @bitCast(sampled.bits[0]);
+        const second_y = canonicalF32(coordinate[1] + canonicalF32(coordinate[2] * coordinate[3]));
+        const second_x = canonicalF32(prepared.second_center[0] - coordinate[0]);
+        const second_delta_y = canonicalF32(prepared.second_center[1] - second_y);
+        const second_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(canonicalF32(second_x * prepared.second_scale) * canonicalF32(second_x * prepared.second_scale)) + canonicalF32(canonicalF32(second_delta_y * prepared.second_scale) * canonicalF32(second_delta_y * prepared.second_scale)))));
+        const mask = canonicalF32(std.math.clamp(canonicalF32(canonicalF32(second_length - 1) * prepared.second_edge), @as(f32, 0), @as(f32, 1)));
+        const coverage = canonicalF32(sampled_alpha * mask);
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(color_values[lane] * coverage))), .little);
+    }
+
+    fn prepareRadialMaskResolved(path: RadialMaskPlan, uniform: []const u8, image: SampledImage) Error!RadialMaskPrepared {
+        if (uniform.len < 104) return error.Bounds;
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        return .{
+            .image = image,
+            .matrix_column0 = .{ try uniformF32(uniform, 16), try uniformF32(uniform, 20) },
+            .matrix_column2 = .{ try uniformF32(uniform, 48), try uniformF32(uniform, 52) },
+            .transform = .{ try uniformF32(uniform, 96), try uniformF32(uniform, 100) },
+            .first_center = .{ try uniformF32(uniform, 64), try uniformF32(uniform, 68) },
+            .first_inset = try uniformF32(uniform, 72),
+            .first_scale = try uniformF32(uniform, 76),
+            .second_center = .{ try uniformF32(uniform, 80), try uniformF32(uniform, 84) },
+            .second_edge = try uniformF32(uniform, 88),
+            .second_scale = try uniformF32(uniform, 92),
+            .bias = @bitCast(bias.bits[0]),
+        };
+    }
+
     fn executeRadialMaskFastPath(path: RadialMaskPlan, bindings: []const Binding, outputs: []const Output) Error!void {
         const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
         const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.coordinates_interface));
         const uniform = try findBindingRecord(bindings, path.uniform_interface);
-        if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 104) return error.Bounds;
-        const image = try findSampledImage(bindings, path.image_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const prepared = try prepareRadialMaskResolved(path, uniform.bytes, try findSampledImage(bindings, path.image_interface));
         var output: ?[]u8 = null;
         for (outputs) |candidate| if (candidate.interface == path.output_interface) {
             if (output != null) return error.InvalidOutput;
             output = candidate.bytes;
         };
         const bytes = output orelse return error.InvalidOutput;
-        if (bytes.len < 16) return error.InvalidOutput;
         const coordinate = [_]f32{ @bitCast(coordinates.bits[0]), @bitCast(coordinates.bits[1]), @bitCast(coordinates.bits[2]), @bitCast(coordinates.bits[3]) };
         const color_values = [_]f32{ @bitCast(color.bits[0]), @bitCast(color.bits[1]), @bitCast(color.bits[2]), @bitCast(color.bits[3]) };
-        const transform = [_]f32{ try uniformF32(uniform.bytes, 96), try uniformF32(uniform.bytes, 100) };
-        const first_center = [_]f32{ try uniformF32(uniform.bytes, 64), try uniformF32(uniform.bytes, 68) };
-        const first_scale = try uniformF32(uniform.bytes, 76);
-        const first_inset = try uniformF32(uniform.bytes, 72);
-        const first_x = canonicalF32(coordinate[0] - first_center[0]);
-        const first_y = canonicalF32(canonicalF32(transform[0] + canonicalF32(transform[1] * coordinate[1])) - first_center[1]);
-        const first_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(first_x * first_x) + canonicalF32(first_y * first_y))));
-        const radius = canonicalF32(first_length + canonicalF32(canonicalF32(1 - first_inset) * first_scale));
-        const matrix = [_][2]f32{
-            .{ try uniformF32(uniform.bytes, 16), try uniformF32(uniform.bytes, 20) },
-            .{ try uniformF32(uniform.bytes, 32), try uniformF32(uniform.bytes, 36) },
-            .{ try uniformF32(uniform.bytes, 48), try uniformF32(uniform.bytes, 52) },
-        };
-        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
-        sample_coordinates.bits[0] = @bitCast(canonicalF32(canonicalF32(matrix[0][0] * radius) + matrix[2][0]));
-        sample_coordinates.bits[1] = @bitCast(canonicalF32(canonicalF32(matrix[0][1] * radius) + matrix[2][1]));
-        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
-        const sampled = try sample(image, sample_coordinates, bias);
-        const sampled_alpha: f32 = @bitCast(sampled.bits[0]);
-        const second_center = [_]f32{ try uniformF32(uniform.bytes, 80), try uniformF32(uniform.bytes, 84) };
-        const second_scale = try uniformF32(uniform.bytes, 92);
-        const second_edge = try uniformF32(uniform.bytes, 88);
-        const second_y = canonicalF32(coordinate[1] + canonicalF32(coordinate[2] * coordinate[3]));
-        const second_x = canonicalF32(second_center[0] - coordinate[0]);
-        const second_delta_y = canonicalF32(second_center[1] - second_y);
-        const second_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(canonicalF32(second_x * second_scale) * canonicalF32(second_x * second_scale)) + canonicalF32(canonicalF32(second_delta_y * second_scale) * canonicalF32(second_delta_y * second_scale)))));
-        const mask = canonicalF32(std.math.clamp(canonicalF32(canonicalF32(second_length - 1) * second_edge), @as(f32, 0), @as(f32, 1)));
-        const coverage = canonicalF32(sampled_alpha * mask);
-        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(color_values[lane] * coverage))), .little);
+        try executeRadialMaskPreparedCoordinatesResolved(prepared, color_values, coordinate, bytes);
     }
 
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -1937,6 +1975,20 @@ pub const Executor = struct {
         _ = self.radialGradientPlan() orelse return false;
         try executeRadialGradientResolved(circle_bytes, coordinate_bytes, frag_coord_bytes, uniform_bytes, image, output);
         return true;
+    }
+
+    /// Resolve the immutable push constants and sampled image for the exact
+    /// radial-mask profile.  It cannot select any other program.
+    pub fn prepareRadialMask(self: *const Executor, uniform: []const u8, image: SampledImage) Error!?RadialMaskPrepared {
+        const path = self.radialMaskPlan() orelse return null;
+        return try prepareRadialMaskResolved(path, uniform, image);
+    }
+
+    /// Raster-side form of the prepared radial-mask specialization. The
+    /// caller supplies the already interpolated two vec4 inputs, avoiding
+    /// transient binding records and repeated push-constant decoding.
+    pub fn executeRadialMaskPreparedCoordinates(_: *const Executor, prepared: RadialMaskPrepared, color: [4]f32, coordinates: [4]f32, output: []u8) Error!void {
+        try executeRadialMaskPreparedCoordinatesResolved(prepared, color, coordinates, output);
     }
 
     /// Execute an exact prevalidated specialization for the driver's hot
