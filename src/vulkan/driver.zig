@@ -1840,6 +1840,7 @@ var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0
 var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_geometry = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_affine_quads = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
@@ -10243,6 +10244,68 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
     return storage[0..input.byte_size];
 }
 
+const ProfileVertexEvaluation = struct {
+    screen: ProfileScreenVertex,
+    varyings: [8][16]u8,
+};
+
+/// Run one bounded profile vertex exactly as the scalar triangle path does,
+/// but retain its screen-space position and declared varying outputs in a
+/// compact value.  Narrow quad specializations use this only to validate all
+/// four vertices before replacing the triangle scan conversion; all ordinary
+/// draws continue through the original per-triangle setup below.
+fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, uniform_bindings: []const render_ir_exec.Binding) ?ProfileVertexEvaluation {
+    var bindings: [21]render_ir_exec.Binding = undefined;
+    var binding_storage: [16][16]u8 = undefined;
+    var output_storage: [16][16]u8 = undefined;
+    var outputs: [16]render_ir_exec.Output = undefined;
+    for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| outputs[slot] = .{ .interface = interface, .bytes = &output_storage[slot] };
+    var binding_count: usize = 0;
+    for (profile.inputs[0..profile.input_count]) |input| {
+        const buffer = op.vertex_bindings.buffers[input.binding] orelse return null;
+        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
+        const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return null) else std.math.add(u64, op.base_vertex, emitted) catch return null;
+        const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
+        const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return null) catch return null;
+        const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return null;
+        const source = bufferBytes(buffer);
+        if (start > source.len or source.len - start < input.source_byte_size or binding_count == bindings.len) return null;
+        const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &binding_storage[binding_count]) orelse return null;
+        bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
+        binding_count += 1;
+    }
+    for (uniform_bindings) |uniform| {
+        if (binding_count == bindings.len) return null;
+        bindings[binding_count] = uniform;
+        binding_count += 1;
+    }
+    profile.vertex.execute(bindings[0..binding_count], outputs[0..profile.vertex_output_count]) catch return null;
+    const clip = profileReadClip(&output_storage[profile.vertex_position_slot]) orelse return null;
+    if (@abs(clip[3]) < 0.000001) return null;
+    const inverse_w = 1.0 / clip[3];
+    const ndc_x = clip[0] * inverse_w;
+    const ndc_y = clip[1] * inverse_w;
+    const ndc_z = clip[2] * inverse_w;
+    const screen = ProfileScreenVertex{
+        .x = op.viewport.x + (ndc_x * 0.5 + 0.5) * op.viewport.width,
+        .y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height,
+        .z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth),
+        .w = clip[3],
+    };
+    if (!std.math.isFinite(screen.x) or !std.math.isFinite(screen.y) or !std.math.isFinite(screen.z)) return null;
+    var result = ProfileVertexEvaluation{ .screen = screen, .varyings = undefined };
+    for (profile.varyings[0..profile.varying_count], 0..) |varying, index| @memcpy(result.varyings[index][0 .. varying.lanes * 4], output_storage[varying.vertex_slot][0 .. varying.lanes * 4]);
+    return result;
+}
+
+fn profileEvaluatedVaryingVec2(vertex: *const ProfileVertexEvaluation, varying: usize) ?[2]f32 {
+    if (varying >= vertex.varyings.len) return null;
+    const x: f32 = @bitCast(std.mem.readInt(u32, vertex.varyings[varying][0..4], .little));
+    const y: f32 = @bitCast(std.mem.readInt(u32, vertex.varyings[varying][4..8], .little));
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return null;
+    return .{ x, y };
+}
+
 const ProfileBlendState = struct {
     enable: u32 = 0,
     src_color_factor: i32 = 1,
@@ -10948,6 +11011,101 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
+
+    // Chromium's captured VP9 compositor is a four-vertex strip whose two
+    // triangles form one axis-aligned, affine rectangle. Validate all four
+    // vertex executions and every relevant Vulkan state before replacing the
+    // triangle edge scan with a single rectangular row loop. This preserves
+    // the generic path for transformed, clipped-feedback, depth-tested,
+    // blended, or otherwise non-identical draws.
+    var vp9_quad_bounds = emptyRect();
+    var vp9_quad_pixels: usize = 0;
+    const vp9_known_color_varying = blk: {
+        if (vp9_luma_coordinate_varying == null or vp9_chroma_coordinate_varying == null or profile.varying_count != 3) break :blk false;
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (index == vp9_luma_coordinate_varying.? or index == vp9_chroma_coordinate_varying.?) continue;
+            if (varying.fragment_interface != 0 or varying.lanes != 4 or varying.flat) break :blk false;
+        }
+        break :blk true;
+    };
+    if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_affine_quads.load(.monotonic) == 0) {
+        std.debug.print(
+            "ZPU VP9 affine candidate topology={d} vertices={d} instances={d} discard={d} cull={d} depth_test={d} depth_write={d} depth_bounds={d} depth_bias={d} depth_image={} fragment_bool={} derivatives={} frag_coord={} varyings={d} luma_lanes={d}/flat={} chroma_lanes={d}/flat={} input_attachments={d} color={} mask={x} blend={d}/{d}/{d}/{d}/{d}/{d}/{d}\n",
+            .{ op.primitive_topology, op.vertex_count, op.instance_count, op.rasterizer_discard_enable, op.cull_mode, op.depth_test_enable, op.depth_write_enable, op.depth_bounds_test_enable, op.depth_bias_enable, depth != null, profile.fragment_bool, profile.fragment_needs_derivatives, profile.fragment_frag_coord != null, profile.varying_count, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].flat else false, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].flat else false, profile.fragment_input_attachment_count, color != null, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, op.pipeline.color_blend_op, op.pipeline.src_alpha_blend_factor, op.pipeline.dst_alpha_blend_factor, op.pipeline.alpha_blend_op },
+        );
+    }
+    const direct_vp9_affine_quad = blk: {
+        if (vp9_color_transform_prepared == null or vp9_luma_coordinate_varying == null or vp9_chroma_coordinate_varying == null or
+            op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
+            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
+            !vp9_known_color_varying or profile.varyings[vp9_luma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_luma_coordinate_varying.?].flat or
+            profile.varyings[vp9_chroma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_chroma_coordinate_varying.?].flat or
+            profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or op.pipeline.color_write_mask != 0xf or
+            !(op.pipeline.color_blend_enable == 0 or
+                (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
+                    op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0))) break :blk false;
+        const v0 = profileEvaluateVertex(op, profile, 0, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v1 = profileEvaluateVertex(op, profile, 1, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v2 = profileEvaluateVertex(op, profile, 2, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v3 = profileEvaluateVertex(op, profile, 3, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const luma_varying = vp9_luma_coordinate_varying.?;
+        const chroma_varying = vp9_chroma_coordinate_varying.?;
+        const l0 = profileEvaluatedVaryingVec2(&v0, luma_varying) orelse break :blk false;
+        const l1 = profileEvaluatedVaryingVec2(&v1, luma_varying) orelse break :blk false;
+        const l2 = profileEvaluatedVaryingVec2(&v2, luma_varying) orelse break :blk false;
+        const l3 = profileEvaluatedVaryingVec2(&v3, luma_varying) orelse break :blk false;
+        const c0 = profileEvaluatedVaryingVec2(&v0, chroma_varying) orelse break :blk false;
+        const c1 = profileEvaluatedVaryingVec2(&v1, chroma_varying) orelse break :blk false;
+        const c2 = profileEvaluatedVaryingVec2(&v2, chroma_varying) orelse break :blk false;
+        const c3 = profileEvaluatedVaryingVec2(&v3, chroma_varying) orelse break :blk false;
+        const unit_w = @as(u32, @bitCast(v0.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v1.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v2.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v3.screen.w)) == 0x3f80_0000;
+        if (!unit_w or v0.screen.x != v1.screen.x or v0.screen.y != v2.screen.y or v2.screen.x != v3.screen.x or v1.screen.y != v3.screen.y or
+            v0.screen.z != v1.screen.z or v0.screen.z != v2.screen.z or v0.screen.z != v3.screen.z or v2.screen.x <= v0.screen.x or v1.screen.y <= v0.screen.y or
+            l0[0] != l1[0] or l0[1] != l2[1] or l2[0] != l3[0] or l1[1] != l3[1] or
+            c0[0] != c1[0] or c0[1] != c2[1] or c2[0] != c3[0] or c1[1] != c3[1]) break :blk false;
+        const min_x = @max(@as(i32, @intFromFloat(@floor(v0.screen.x))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(v0.screen.y))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(v2.screen.x))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(v1.screen.y))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
+        if (max_x <= min_x or max_y <= min_y) break :blk false;
+        const inverse_width = 1.0 / (v2.screen.x - v0.screen.x);
+        const inverse_height = 1.0 / (v1.screen.y - v0.screen.y);
+        for (@intCast(min_y)..@intCast(max_y)) |y| {
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            const vertical = (py - v0.screen.y) * inverse_height;
+            for (@intCast(min_x)..@intCast(max_x)) |x| {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const horizontal = (px - v0.screen.x) * inverse_width;
+                const luma_coordinates = [2]f32{
+                    l0[0] + horizontal * (l2[0] - l0[0]),
+                    l0[1] + vertical * (l1[1] - l0[1]),
+                };
+                const chroma_coordinates = [2]f32{
+                    c0[0] + horizontal * (c2[0] - c0[0]),
+                    c0[1] + vertical * (c1[1] - c0[1]),
+                };
+                profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch break :blk false;
+                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                if (profileWriteOpaqueColor(color_bytes.?[offset..][0..4], color.?.format, &fragment_output_bytes) == null) break :blk false;
+            }
+        }
+        vp9_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
+        vp9_quad_pixels = @as(usize, @intCast(max_x - min_x)) * @as(usize, @intCast(max_y - min_y));
+        break :blk true;
+    };
+    if (direct_vp9_affine_quad) {
+        if (profileTimingDiagnosticsEnabled() and render_diagnostic_vp9_affine_quads.fetchAdd(1, .monotonic) < 4)
+            std.debug.print("ZPU VP9 affine Mosaic quad target={d}x{d} bounds={d},{d} {d}x{d}\n", .{ target.width, target.height, vp9_quad_bounds.x, vp9_quad_bounds.y, vp9_quad_bounds.width, vp9_quad_bounds.height });
+        if (!publish_metadata) return;
+        if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(vp9_quad_pixels, .monotonic);
+        if (color) |color_image| {
+            color_image.content_bounds = unionRect(color_image.content_bounds, vp9_quad_bounds);
+            color_image.complex_3d_content = true;
+            color_image.force_full_present = true;
+        }
+        return;
+    }
     var vertices: [3]ProfileScreenVertex = undefined;
     for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
