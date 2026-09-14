@@ -5373,18 +5373,34 @@ test "Chromium Skia circle fragment shader executes GLSL Length" {
 
     var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
     defer executor.deinit();
-    var circle_edge = [_]f32{ 0, 0, 1, 0 };
+    try std.testing.expectEqualStrings("chromium_circle_mask", executor.prevalidatedPathName());
+    try std.testing.expect(executor.circleMaskPlan() != null);
+    try std.testing.expect(executor.tileParallelSafe());
+    var circle_edge = [_]f32{ 0.25, -0.5, 0.75, 0 };
     var color = [_]f32{ 0.25, 0.5, 0.75, 1 };
     var front_facing = [_]u8{1};
+    var fallback_program = try program.clone(std.testing.allocator);
+    defer fallback_program.deinit(std.testing.allocator);
+    fallback_program.identity.digest[0] ^= 1;
+    var fallback_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fallback_program);
+    defer fallback_executor.deinit();
+    try std.testing.expectEqualStrings("interpreter", fallback_executor.prevalidatedPathName());
+    var reference = [_]u8{0} ** 16;
+    try fallback_executor.execute(&.{
+        .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&circle_edge) },
+        .{ .interface = 1, .bytes = std.mem.sliceAsBytes(&color) },
+        .{ .interface = 2, .bytes = &front_facing },
+    }, &.{.{ .interface = 3, .bytes = &reference }});
     var output = [_]u8{0} ** 16;
     try executor.execute(&.{
         .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&circle_edge) },
         .{ .interface = 1, .bytes = std.mem.sliceAsBytes(&color) },
         .{ .interface = 2, .bytes = &front_facing },
     }, &.{.{ .interface = 3, .bytes = &output }});
-    for (color, 0..) |expected, index| {
-        try std.testing.expectEqual(expected, @as(f32, @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little))));
-    }
+    try std.testing.expectEqualSlices(u8, &reference, &output);
+    var direct = [_]u8{0} ** 16;
+    try std.testing.expect(try executor.executeCircleMaskCoordinates(circle_edge, color, &direct));
+    try std.testing.expectEqualSlices(u8, &reference, &direct);
 }
 
 test "Chromium Skia sampled fragment shader executes combined image sampling" {

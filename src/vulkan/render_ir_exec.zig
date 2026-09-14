@@ -797,6 +797,15 @@ pub const PassthroughPlan = struct {
     output_interface: u32,
 };
 
+/// Exact ABI of Chromium's small analytic circle-coverage profile. It is
+/// identity-gated: the direct form is not a generic replacement for GLSL
+/// Length or clamp programs.
+pub const CircleMaskPlan = struct {
+    circle_interface: u32,
+    color_interface: u32,
+    output_interface: u32,
+};
+
 /// Fully validated interface map for Chromium's simple final-composite
 /// shader.  The driver may resolve these interfaces once per triangle and
 /// invoke the direct form for every covered pixel, avoiding repeated generic
@@ -876,6 +885,7 @@ const FastPath = union(enum) {
     vp9_color_transform: Vp9ColorTransformPlan,
     radial_mask: RadialMaskPlan,
     passthrough: PassthroughPlan,
+    circle_mask: CircleMaskPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -911,6 +921,7 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
     if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
+    if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     if (detectChromiumClampedConvolution(program)) |path| return .{ .clamped_convolution_8tap = path };
@@ -1124,6 +1135,16 @@ const chromium_passthrough_identity = [_]u8{
     0xbd, 0x7d, 0xa4, 0x11, 0xca, 0xd6, 0x05, 0x3a,
 };
 
+/// Canonical identity of Chromium's analytic circle coverage fragment,
+/// captured from the two-core compositor fixture. The identity includes its
+/// precise floating-point instruction graph and interface ABI.
+const chromium_circle_mask_identity = [_]u8{
+    0xbe, 0xb2, 0x92, 0xed, 0xd4, 0xef, 0x3d, 0x0b,
+    0x27, 0x73, 0x1b, 0x1e, 0x86, 0x38, 0x9c, 0x45,
+    0x40, 0x8a, 0xca, 0x30, 0x19, 0x0c, 0x68, 0x2f,
+    0xc0, 0xc2, 0xe6, 0x28, 0x9d, 0xc0, 0x9e, 0x53,
+};
+
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1296,6 +1317,17 @@ fn detectChromiumPassthrough(program: *const ir.Program) ?PassthroughPlan {
     return .{ .input_interface = 0, .output_interface = 2 };
 }
 
+fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
+    if (program.stage != .fragment or program.instructions.len != 27 or program.interfaces.len != 4 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_circle_mask_identity)) return null;
+    // The canonical digest is generated only after frontend validation and
+    // serializes every instruction, interface, decoration, type, member and
+    // entry record. It is therefore the complete ABI guard for this precise
+    // live shader; duplicating selected metadata here made an otherwise
+    // identical frontend representation needlessly miss the lowering.
+    return .{ .circle_interface = 0, .color_interface = 1, .output_interface = 3 };
+}
+
 test "Chromium sRGB transfer specialization is bit exact" {
     const source = [_]f32{ 2.4, 0.9478673, 0.0521327, 0.07739938, 0.04045, 0, 0 };
     const destination = [_]f32{ 1.0 / 2.4, 1.137283, -0.0, 12.92, 0.0031308, -0.0549698, -0.0 };
@@ -1381,6 +1413,7 @@ pub const Executor = struct {
             .vp9_color_transform => "chromium_vp9_color_transform",
             .radial_mask => "chromium_radial_mask",
             .passthrough => "chromium_passthrough",
+            .circle_mask => "chromium_circle_mask",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
@@ -1458,6 +1491,14 @@ pub const Executor = struct {
     pub fn passthroughPlan(self: *const Executor) ?PassthroughPlan {
         return switch (self.fast_path orelse return null) {
             .passthrough => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the exact ABI of Chromium's analytic circle coverage profile.
+    pub fn circleMaskPlan(self: *const Executor) ?CircleMaskPlan {
+        return switch (self.fast_path orelse return null) {
+            .circle_mask => |plan| plan,
             else => null,
         };
     }
@@ -2198,6 +2239,39 @@ pub const Executor = struct {
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(value.bits[lane]), .little);
     }
 
+    /// Execute the exact circle profile in the same scalar operation order as
+    /// its canonical Render IR: two-term Length, subtraction, multiply,
+    /// clamp, then the final vec4 multiply. The caller has already validated
+    /// its identity and f32 input ABI.
+    fn executeCircleMaskCoordinatesResolved(circle: [4]f32, color: [4]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        var squared: f32 = 0;
+        for (circle[0..2]) |component| squared += component * component;
+        const distance = @as(f32, @bitCast(canonicalFloat(@bitCast(std.math.sqrt(squared)))));
+        const distance_to_outer_edge = @as(f32, 1) - distance;
+        const edge_alpha = circle[2] * distance_to_outer_edge;
+        const lower = if (edge_alpha < 0) @as(f32, 0) else edge_alpha;
+        const coverage = @as(f32, @bitCast(canonicalFloat(@bitCast(if (1 < lower) @as(f32, 1) else lower))));
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color[lane] * coverage)), .little);
+    }
+
+    fn executeCircleMaskFastPath(path: CircleMaskPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const circle_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.circle_interface));
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        var circle: [4]f32 = undefined;
+        var color: [4]f32 = undefined;
+        for (0..4) |lane| {
+            circle[lane] = @bitCast(circle_value.bits[lane]);
+            color[lane] = @bitCast(color_value.bits[lane]);
+        }
+        try executeCircleMaskCoordinatesResolved(circle, color, output orelse return error.InvalidOutput);
+    }
+
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
             .sample_modulate => |path| {
@@ -2260,6 +2334,7 @@ pub const Executor = struct {
             },
             .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
             .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
+            .circle_mask => |path| try executeCircleMaskFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
@@ -2451,6 +2526,15 @@ pub const Executor = struct {
         _ = self.passthroughPlan() orelse return false;
         if (output.len < 16) return error.InvalidOutput;
         for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(value[lane])), .little);
+        return true;
+    }
+
+    /// Raster-side form of the exact analytic circle mask. The driver passes
+    /// perspective-resolved vec4 varyings and retains the canonical executor
+    /// for every other fragment identity.
+    pub fn executeCircleMaskCoordinates(self: *const Executor, circle: [4]f32, color: [4]f32, output: []u8) Error!bool {
+        _ = self.circleMaskPlan() orelse return false;
+        try executeCircleMaskCoordinatesResolved(circle, color, output);
         return true;
     }
 
@@ -3608,7 +3692,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .radial_mask, .passthrough => true,
+        .sample_modulate, .texture_copy, .radial_mask, .passthrough, .circle_mask => true,
         else => false,
     };
 }
@@ -3618,6 +3702,7 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
 }
 
