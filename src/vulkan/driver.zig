@@ -11449,6 +11449,8 @@ const Vp9MosaicLaneContext = struct {
     query_context: *QueryExecutionContext,
     width: u32,
     height: u32,
+    content_min_y: u32,
+    content_max_y: u32,
 
     fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
         const context: *Vp9MosaicLaneContext = @ptrCast(@alignCast(raw));
@@ -11463,12 +11465,62 @@ const Vp9MosaicLaneContext = struct {
         };
         if (source.fragment.vp9ColorTransformPlan() == null) return;
         const lane_profile = cachedProfileLane(source) orelse return;
-        const min_y: u32 = @intCast((@as(u64, context.height) * lane_index) / lane_count);
-        const max_y: u32 = @intCast((@as(u64, context.height) * (lane_index + 1)) / lane_count);
+        const range = vp9MosaicLaneRange(context.height, context.content_min_y, context.content_max_y, lane_index, lane_count);
+        const min_y = range.min_y;
+        const max_y = range.max_y;
         if (min_y == max_y) return;
         executeProfileDraw(op, lane_profile, context.query_context, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y }, false);
     }
 };
+
+const Vp9MosaicLaneRange = struct { min_y: u32, max_y: u32 };
+
+/// Partition the target at equal intervals inside the viewport that contains
+/// the video quad, while retaining the target's outer rows in the first and
+/// last lanes.  Thus every target pixel is still visited exactly once, but a
+/// bottom- or top-aligned video rect does not strand almost all useful work on
+/// one two-core Mosaic lane.
+fn vp9MosaicLaneRange(target_height: u32, content_min_y: u32, content_max_y: u32, lane_index: usize, lane_count: usize) Vp9MosaicLaneRange {
+    if (lane_count == 0 or lane_index >= lane_count) return .{ .min_y = 0, .max_y = 0 };
+    const minimum = @min(content_min_y, target_height);
+    const maximum = @max(minimum, @min(content_max_y, target_height));
+    const span = maximum - minimum;
+    const interiorBoundary = struct {
+        fn at(minimum_y: u32, span_y: u32, lane: usize, lanes: usize) u32 {
+            return minimum_y + @as(u32, @intCast((@as(u64, span_y) * lane) / lanes));
+        }
+    }.at;
+    return .{
+        .min_y = if (lane_index == 0) 0 else interiorBoundary(minimum, span, lane_index, lane_count),
+        .max_y = if (lane_index + 1 == lane_count) target_height else interiorBoundary(minimum, span, lane_index + 1, lane_count),
+    };
+}
+
+test "VP9 Mosaic lane ranges balance an offset viewport and cover the target" {
+    try std.testing.expectEqual(Vp9MosaicLaneRange{ .min_y = 0, .max_y = 179 }, vp9MosaicLaneRange(272, 87, 272, 0, 2));
+    try std.testing.expectEqual(Vp9MosaicLaneRange{ .min_y = 179, .max_y = 272 }, vp9MosaicLaneRange(272, 87, 272, 1, 2));
+    var previous: u32 = 0;
+    for (0..4) |lane| {
+        const range = vp9MosaicLaneRange(272, 87, 272, lane, 4);
+        try std.testing.expectEqual(previous, range.min_y);
+        try std.testing.expect(range.max_y >= range.min_y);
+        previous = range.max_y;
+    }
+    try std.testing.expectEqual(@as(u32, 272), previous);
+}
+
+fn vp9MosaicContentY(op: anytype, target_height: u32) struct { min_y: u32, max_y: u32 } {
+    if (target_height == 0 or !std.math.isFinite(op.viewport.y) or !std.math.isFinite(op.viewport.height) or op.viewport.height <= 0) return .{ .min_y = 0, .max_y = target_height };
+    const target_height_f32: f32 = @floatFromInt(target_height);
+    const viewport_end = op.viewport.y + op.viewport.height;
+    if (!std.math.isFinite(viewport_end)) return .{ .min_y = 0, .max_y = target_height };
+    const first = std.math.clamp(op.viewport.y, @as(f32, 0), target_height_f32);
+    const last = std.math.clamp(viewport_end, @as(f32, 0), target_height_f32);
+    const min_y: u32 = @intFromFloat(@floor(first));
+    const max_y: u32 = @intFromFloat(@ceil(last));
+    if (max_y <= min_y) return .{ .min_y = 0, .max_y = target_height };
+    return .{ .min_y = min_y, .max_y = max_y };
+}
 
 fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExecutionContext) bool {
     const op = switch (command.*) {
@@ -11483,7 +11535,8 @@ fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExec
     if (profile.fragment.vp9ColorTransformPlan() == null) return false;
     const color = op.color_image orelse (if (op.framebuffer) |framebuffer| framebuffer.color_image else null) orelse return false;
     if (@as(u64, color.width) * color.height < @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size) return false;
-    var context = Vp9MosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height };
+    const content_y = vp9MosaicContentY(op, color.height);
+    var context = Vp9MosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height, .content_min_y = content_y.min_y, .content_max_y = content_y.max_y };
     if (!cpu_cube.dispatchParallelLanes(&context, Vp9MosaicLaneContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
     color.content_bounds = unionRect(color.content_bounds, full_target);
