@@ -131,6 +131,12 @@ def main() -> None:
         "--page-url", default="http://127.0.0.1:8000/chromium_vp9_playback.html"
     )
     parser.add_argument("--duration", type=float, default=8.0)
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=0.0,
+        help="seconds of active playback to exclude before collecting telemetry",
+    )
     parser.add_argument("--screenshot")
     parser.add_argument(
         "--keep-existing-pages",
@@ -150,6 +156,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
+    if args.warmup < 0:
+        parser.error("--warmup must not be negative")
 
     devtools = DevTools(args.port)
     try:
@@ -265,6 +273,12 @@ def main() -> None:
             totalVideoFrames: 0, droppedVideoFrames: 0, corruptedVideoFrames: 0,
           }};
           await video.play();
+          // GPU-process initialization, media decoder setup, and the first
+          // compositor upload are real activity, but do not describe steady
+          // playback throughput. Keep warm-up explicit and bounded so callers
+          // can report both cold-start and sustained presentation rates.
+          if ({args.warmup * 1000:.3f} > 0) await new Promise(resolve => setTimeout(resolve, {args.warmup * 1000:.3f}));
+          const initialQuality = video.getVideoPlaybackQuality();
           let callbacks = 0, first = null, last = null;
           const deadline = performance.now() + {args.duration * 1000:.3f};
           await new Promise(resolve => {{
@@ -292,10 +306,11 @@ def main() -> None:
             paused: video.paused, ended: video.ended, error: video.error && video.error.code,
             videoWidth: video.videoWidth, videoHeight: video.videoHeight,
             callbacks, callbackElapsedSeconds: elapsed,
+            warmupSeconds: {args.warmup:.3f},
             presentedFramesPerSecond: elapsed > 0 ? (callbacks - 1) / elapsed : 0,
-            totalVideoFrames: quality.totalVideoFrames,
-            droppedVideoFrames: quality.droppedVideoFrames,
-            corruptedVideoFrames: quality.corruptedVideoFrames,
+            totalVideoFrames: quality.totalVideoFrames - initialQuality.totalVideoFrames,
+            droppedVideoFrames: quality.droppedVideoFrames - initialQuality.droppedVideoFrames,
+            corruptedVideoFrames: quality.corruptedVideoFrames - initialQuality.corruptedVideoFrames,
           }};
         }})()"""
         try:
@@ -303,7 +318,7 @@ def main() -> None:
                 "Runtime.evaluate",
                 {"expression": expression, "awaitPromise": True, "returnByValue": True},
                 session_id,
-                timeout=args.duration + 15,
+                timeout=args.duration + args.warmup + 15,
             )
         except TimeoutError:
             print(json.dumps({
