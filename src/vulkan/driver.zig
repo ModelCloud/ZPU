@@ -10768,6 +10768,26 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             std.debug.print("ZPU selected profile canonical IR end\n", .{});
         }
     }
+    // A selected identity is an explicit diagnostic request, not part of the
+    // bounded discovery sample. Keep its one full dump available after noisy
+    // Chromium startup has consumed that sample, otherwise a late hot shader
+    // cannot be turned into a precise regression candidate.
+    if (profileIrDiagnosticsEnabled() and profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+        std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
+        for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
+            "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
+            .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
+        );
+        for (profile.fragment.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
+            "ZPU selected profile member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
+            .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
+        );
+        for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+        std.debug.print("ZPU selected profile canonical IR end\n", .{});
+    }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
