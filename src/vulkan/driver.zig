@@ -11056,17 +11056,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         if (varying.fragment_interface == plan.circle_interface) circle_mask_circle_varying = index;
         if (varying.fragment_interface == plan.color_interface) circle_mask_color_varying = index;
     };
-    // This captured analytic edge profile is derivative-heavy but has no
-    // resources or mutable state. Resolve its two exact varyings once so the
-    // hot Mosaic loop can use the identity-gated direct executor after the
-    // ordinary perspective interpolation has supplied both derivatives.
-    const derivative_coverage_plan = profile.fragment.derivativeCoveragePlan();
-    var derivative_coverage_color_varying: ?usize = null;
-    var derivative_coverage_coordinate_varying: ?usize = null;
-    if (derivative_coverage_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
-        if (varying.fragment_interface == plan.color_interface) derivative_coverage_color_varying = index;
-        if (varying.fragment_interface == plan.coordinate_interface) derivative_coverage_coordinate_varying = index;
-    };
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
@@ -11406,11 +11395,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             profile.varying_count == 2 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
             profile.varyings[circle_mask_circle_varying.?].lanes == 4 and !profile.varyings[circle_mask_circle_varying.?].flat and
             profile.varyings[circle_mask_color_varying.?].lanes == 4 and !profile.varyings[circle_mask_color_varying.?].flat;
-        const direct_derivative_coverage = derivative_coverage_plan != null and
-            derivative_coverage_color_varying != null and derivative_coverage_coordinate_varying != null and
-            profile.varying_count == 2 and profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
-            profile.varyings[derivative_coverage_color_varying.?].lanes == 4 and !profile.varyings[derivative_coverage_color_varying.?].flat and
-            profile.varyings[derivative_coverage_coordinate_varying.?].lanes == 2 and !profile.varyings[derivative_coverage_coordinate_varying.?].flat;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
@@ -11643,20 +11627,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         fragment_binding_count += 1;
                     }
                     const fragment_fast = direct: {
-                        if (direct_derivative_coverage) {
-                            const color_varying = derivative_coverage_color_varying orelse break :direct false;
-                            const coordinate_varying = derivative_coverage_coordinate_varying orelse break :direct false;
-                            break :direct profile.fragment.executeDerivativeCoverageDirect(
-                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
-                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                fragment_dpdx_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                fragment_dpdy_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct derivative-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                        }
                         if (texture_copy_plan != null) {
                             const coordinate_varying = texture_copy_coordinate_varying orelse break :direct false;
                             const image = texture_copy_image orelse break :direct false;

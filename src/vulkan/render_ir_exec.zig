@@ -806,15 +806,6 @@ pub const CircleMaskPlan = struct {
     output_interface: u32,
 };
 
-/// Exact ABI for Chromium's derivative-based analytic edge coverage profile.
-/// It is selected only by the full canonical IR identity below; arbitrary
-/// `fwidth` shaders continue through the interpreter.
-pub const DerivativeCoveragePlan = struct {
-    color_interface: u32,
-    coordinate_interface: u32,
-    output_interface: u32,
-};
-
 /// Fully validated interface map for Chromium's simple final-composite
 /// shader.  The driver may resolve these interfaces once per triangle and
 /// invoke the direct form for every covered pixel, avoiding repeated generic
@@ -904,7 +895,6 @@ const FastPath = union(enum) {
     radial_mask: RadialMaskPlan,
     passthrough: PassthroughPlan,
     circle_mask: CircleMaskPlan,
-    derivative_coverage: DerivativeCoveragePlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -945,7 +935,6 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
     if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
     if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
-    if (detectChromiumDerivativeCoverage(program)) |path| return .{ .derivative_coverage = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
     if (detectChromiumClampedConvolution(program)) |path| return .{ .clamped_convolution_8tap = path };
@@ -1180,13 +1169,6 @@ const chromium_circle_mask_identity = [_]u8{
     0xc0, 0xc2, 0xe6, 0x28, 0x9d, 0xc0, 0x9e, 0x53,
 };
 
-const chromium_derivative_coverage_identity = [_]u8{
-    0xcb, 0x55, 0x63, 0x18, 0x4b, 0xb2, 0x2a, 0xc7,
-    0xf0, 0x2b, 0x70, 0xae, 0xff, 0x30, 0xc3, 0x95,
-    0x05, 0x45, 0xd8, 0x19, 0xfb, 0x8a, 0xe4, 0x96,
-    0x6b, 0x60, 0xe6, 0xfe, 0x6e, 0x0a, 0x31, 0x9e,
-};
-
 /// Candidate classes which are permitted to cross the experimental
 /// Render-IR-to-ORC ABI.  Being a candidate does not select native code: the
 /// interpreter remains authoritative until the C ABI has independently
@@ -1404,23 +1386,6 @@ fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
     return .{ .circle_interface = 0, .color_interface = 1, .output_interface = 3 };
 }
 
-fn detectChromiumDerivativeCoverage(program: *const ir.Program) ?DerivativeCoveragePlan {
-    const boolean = ir.Type{ .scalar = .bool };
-    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
-    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
-    if (program.stage != .fragment or program.instructions.len != 46 or program.interfaces.len != 4 or
-        !std.mem.eql(u8, &program.identity.digest, &chromium_derivative_coverage_identity)) return null;
-    const color = program.interfaces[0];
-    const coordinates = program.interfaces[1];
-    const front_facing = program.interfaces[2];
-    const output = program.interfaces[3];
-    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
-        coordinates.storage != .input or !same(coordinates.ty, f32x2) or coordinates.location == null or coordinates.location.? != 1 or
-        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
-        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0) return null;
-    return .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 3 };
-}
-
 test "Chromium sRGB transfer specialization is bit exact" {
     const source = [_]f32{ 2.4, 0.9478673, 0.0521327, 0.07739938, 0.04045, 0, 0 };
     const destination = [_]f32{ 1.0 / 2.4, 1.137283, -0.0, 12.92, 0.0031308, -0.0549698, -0.0 };
@@ -1507,7 +1472,6 @@ pub const Executor = struct {
             .radial_mask => "chromium_radial_mask",
             .passthrough => "chromium_passthrough",
             .circle_mask => "chromium_circle_mask",
-            .derivative_coverage => "chromium_derivative_coverage",
             .convolution_8tap => "convolution_8tap",
             .clamped_convolution_8tap => "clamped_convolution_8tap",
             .clamped_convolution_single_8tap => "clamped_convolution_single_8tap",
@@ -1594,14 +1558,6 @@ pub const Executor = struct {
     pub fn circleMaskPlan(self: *const Executor) ?CircleMaskPlan {
         return switch (self.fast_path orelse return null) {
             .circle_mask => |plan| plan,
-            else => null,
-        };
-    }
-
-    /// Return the ABI only for Chromium's exact derivative coverage profile.
-    pub fn derivativeCoveragePlan(self: *const Executor) ?DerivativeCoveragePlan {
-        return switch (self.fast_path orelse return null) {
-            .derivative_coverage => |plan| plan,
             else => null,
         };
     }
@@ -2413,54 +2369,6 @@ pub const Executor = struct {
         try executeCircleMaskCoordinatesResolved(circle, color, output orelse return error.InvalidOutput);
     }
 
-    /// Execute Chromium's exact derivative-coverage profile in the same
-    /// instruction and derivative propagation order as the validated Render
-    /// IR. This is deliberately not a general `fwidth` lowering: selection
-    /// remains bound to the canonical program identity and ABI.
-    fn executeDerivativeCoverageResolved(color_bytes: []const u8, coordinate_bytes: []const u8, coordinate_dpdx_bytes: []const u8, coordinate_dpdy_bytes: []const u8, output: []u8) Error!void {
-        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = color_bytes });
-        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 1, .bytes = coordinate_bytes });
-        const coordinate_dpdx = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 1, .bytes = coordinate_dpdx_bytes });
-        const coordinate_dpdy = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 1, .bytes = coordinate_dpdy_bytes });
-        if (output.len < 16) return error.InvalidOutput;
-
-        const x: f32 = @bitCast(coordinates.bits[0]);
-        const y: f32 = @bitCast(coordinates.bits[1]);
-        const x_dx: f32 = @bitCast(coordinate_dpdx.bits[0]);
-        const y_dx: f32 = @bitCast(coordinate_dpdx.bits[1]);
-        const x_dy: f32 = @bitCast(coordinate_dpdy.bits[0]);
-        const y_dy: f32 = @bitCast(coordinate_dpdy.bits[1]);
-        const coverage = if (x == 0) y else blk: {
-            const x_minus_two = canonicalF32(x - 2);
-            const quadratic = canonicalF32(x * x_minus_two);
-            const quadratic_dx = canonicalF32(x_dx * x_minus_two + x * x_dx);
-            const quadratic_dy = canonicalF32(x_dy * x_minus_two + x * x_dy);
-            const distance_squared = canonicalF32(@mulAdd(f32, y, y, quadratic));
-            const distance_squared_dx = canonicalF32(y_dx * y + y * y_dx + quadratic_dx);
-            const distance_squared_dy = canonicalF32(y_dy * y + y * y_dy + quadratic_dy);
-            const width = canonicalF32(@abs(distance_squared_dx) + @abs(distance_squared_dy));
-            const ratio = canonicalF32(distance_squared / width);
-            // The canonical IR uses its 0.5 literal here (not one):
-            // `clamp(0.5 - distance_squared / fwidth(...), 0, 1)`.
-            break :blk try radialClamp(canonicalF32(0.5 - ratio), 0, 1);
-        };
-        for (0..4) |lane| {
-            const channel: f32 = @bitCast(color.bits[lane]);
-            std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(channel * coverage))), .little);
-        }
-    }
-
-    fn executeDerivativeCoverageFastPath(path: DerivativeCoveragePlan, bindings: []const Binding, outputs: []const Output) Error!void {
-        const color = try findBindingRecord(bindings, path.color_interface);
-        const coordinates = try findBindingRecord(bindings, path.coordinate_interface);
-        var output: ?[]u8 = null;
-        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
-            if (output != null) return error.InvalidOutput;
-            output = candidate.bytes;
-        };
-        try executeDerivativeCoverageResolved(color.bytes, coordinates.bytes, coordinates.dpdx_bytes, coordinates.dpdy_bytes, output orelse return error.InvalidOutput);
-    }
-
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
             .sample_modulate => |path| {
@@ -2524,7 +2432,6 @@ pub const Executor = struct {
             .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
             .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
             .circle_mask => |path| try executeCircleMaskFastPath(path, bindings, outputs),
-            .derivative_coverage => |path| try executeDerivativeCoverageFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
             .clamped_convolution_single_8tap => |path| try executeClampedSingleConvolutionFastPath(path, bindings, outputs),
@@ -2760,16 +2667,6 @@ pub const Executor = struct {
     pub fn executeCircleMaskCoordinates(self: *const Executor, circle: [4]f32, color: [4]f32, output: []u8) Error!bool {
         _ = self.circleMaskPlan() orelse return false;
         try executeCircleMaskCoordinatesResolved(circle, color, output);
-        return true;
-    }
-
-    /// Raster-side form of the exact analytic derivative-coverage profile.
-    /// Varying interpolation has already produced the value and derivatives;
-    /// this avoids rebuilding binding tables and interpreting 46 operations
-    /// for every Mosaic fragment.
-    pub fn executeDerivativeCoverageDirect(self: *const Executor, color_bytes: []const u8, coordinate_bytes: []const u8, coordinate_dpdx_bytes: []const u8, coordinate_dpdy_bytes: []const u8, output: []u8) Error!bool {
-        _ = self.derivativeCoveragePlan() orelse return false;
-        try executeDerivativeCoverageResolved(color_bytes, coordinate_bytes, coordinate_dpdx_bytes, coordinate_dpdy_bytes, output);
         return true;
     }
 
@@ -3927,7 +3824,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .circle_mask, .derivative_coverage => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .circle_mask => true,
         else => false,
     };
 }
@@ -3939,7 +3836,6 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
-    try std.testing.expect(fastPathTileParallelSafe(.{ .derivative_coverage = .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 3 } }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
 }
 
