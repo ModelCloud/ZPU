@@ -14440,6 +14440,31 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_output);
+
+    // A descriptor that is still valid for the shader but outside the narrow
+    // linear-clamp plane contract must retain the ordinary sampler.  The
+    // prepared VP9 state is allowed to skip its repeated bounds checks only
+    // after both planes pass that complete immutable validation.
+    var nearest_luma = luma_image;
+    var nearest_chroma = chroma_image;
+    nearest_luma.filter = .nearest;
+    nearest_chroma.filter = .nearest;
+    const fallback_bindings = [_]render_ir_exec.Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 2, .bytes = &coordinates },
+        .{ .interface = 3, .bytes = &facing },
+        .{ .interface = 5, .bytes = &uniform },
+        .{ .interface = 6, .sampled_image = nearest_luma },
+        .{ .interface = 7, .sampled_image = nearest_chroma },
+    };
+    var fallback_generic_output = [_]u8{0} ** 16;
+    var fallback_prepared_output = [_]u8{0} ** 16;
+    const fallback_outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &fallback_generic_output }};
+    try executor.execute(&fallback_bindings, &fallback_outputs);
+    const fallback_prepared = (try executor.prepareVp9ColorTransform(&uniform, nearest_luma, nearest_chroma)).?;
+    try executor.executeVp9ColorTransformPrepared(fallback_prepared, &coordinates, &coordinates, &fallback_prepared_output);
+    try std.testing.expectEqualSlices(u8, &fallback_generic_output, &fallback_prepared_output);
     try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
     try std.testing.expectError(error.Bounds, executor.prepareVp9ColorTransform(uniform[0..483], luma_image, chroma_image));
 }

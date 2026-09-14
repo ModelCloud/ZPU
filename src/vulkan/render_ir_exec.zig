@@ -792,6 +792,7 @@ pub const Vp9ColorTransformPlan = struct {
 pub const Vp9ColorTransformPrepared = struct {
     luma_image: SampledImage,
     chroma_image: SampledImage,
+    fast_planes: bool,
     source_matrix: [3][3]f32,
     source_offset: [3]f32,
     source_transfer: [7]f32,
@@ -1570,19 +1571,31 @@ pub const Executor = struct {
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
     }
 
-    /// Return the two channels used by Chromium's captured VP9 transform
-    /// without constructing a generic `Value` or four-channel sample.  This
-    /// deliberately accepts only the complete descriptor ABI emitted for the
-    /// transform: identity component mapping, linear filtering, and
-    /// clamp-to-edge addressing of an R8 or RG8 plane.  A caller that sees
-    /// `null` must use the ordinary sampler, preserving all other Vulkan
-    /// sampler semantics.
-    fn sampleVp9Plane(image: SampledImage, u: f32, v: f32) Error!?[2]f32 {
+    /// Validate the immutable storage contract of a plane used by the exact
+    /// VP9 compositor profile.  This runs while a draw is prepared, not once
+    /// for every output pixel.  It establishes the bounds invariant consumed
+    /// by `sampleVp9PlanePrepared` below.
+    fn validateVp9Plane(image: SampledImage) Error!void {
         if ((image.format != .r8_unorm and image.format != .rg8_unorm) or
             image.filter != .linear or image.address_u != .clamp_to_edge or image.address_v != .clamp_to_edge or
-            !std.mem.eql(i32, &image.swizzle, &.{ 0, 0, 0, 0 })) return null;
-        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel or
-            !std.math.isFinite(u) or !std.math.isFinite(v)) return error.Bounds;
+            !std.mem.eql(i32, &image.swizzle, &.{ 0, 0, 0, 0 })) return error.InvalidStorage;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0) return error.Bounds;
+        const row_bytes = std.math.mul(usize, image.width, image.bytes_per_texel) catch return error.Bounds;
+        if (image.row_stride < row_bytes) return error.Bounds;
+        const final_row = std.math.mul(usize, image.height - 1, image.row_stride) catch return error.Bounds;
+        const final_texel = std.math.mul(usize, image.width - 1, image.bytes_per_texel) catch return error.Bounds;
+        const final_component: usize = if (image.format == .rg8_unorm) 1 else 0;
+        const last = std.math.add(usize, final_row, final_texel) catch return error.Bounds;
+        const required = std.math.add(usize, last, final_component + 1) catch return error.Bounds;
+        if (image.pixels.len < required) return error.Bounds;
+    }
+
+    /// Bilinearly sample a plane whose format, dimensions, row stride and
+    /// backing storage were accepted by `validateVp9Plane`.  It deliberately
+    /// retains the generic sampler's f32 arithmetic order.  The only omitted
+    /// work is repeated immutable descriptor and bounds validation, which is
+    /// material for a 174k-pixel video frame on two Mosaic workers.
+    fn sampleVp9PlanePrepared(image: SampledImage, u: f32, v: f32) [2]f32 {
 
         // Retain the generic sampler's arithmetic order: normalized clamp,
         // scaled texel coordinate, floor, then bilinear interpolation.
@@ -1597,22 +1610,12 @@ pub const Executor = struct {
         const tx = fx - floor_x;
         const ty = fy - floor_y;
         const components: usize = if (image.format == .rg8_unorm) 2 else 1;
-        const pixel = struct {
-            fn at(sampled: SampledImage, x: u32, y: u32, lane: usize) Error!f32 {
-                const row = std.math.mul(usize, y, sampled.row_stride) catch return error.Bounds;
-                const column = std.math.mul(usize, x, sampled.bytes_per_texel) catch return error.Bounds;
-                const offset = std.math.add(usize, row, column) catch return error.Bounds;
-                const index = std.math.add(usize, offset, lane) catch return error.Bounds;
-                if (index >= sampled.pixels.len) return error.Bounds;
-                return @as(f32, @floatFromInt(sampled.pixels[index])) / 255;
-            }
-        }.at;
         var result: [2]f32 = .{ 0, 0 };
         for (0..components) |lane| {
-            const p00 = try pixel(image, x0, y0, lane);
-            const p10 = try pixel(image, x1, y0, lane);
-            const p01 = try pixel(image, x0, y1, lane);
-            const p11 = try pixel(image, x1, y1, lane);
+            const p00 = @as(f32, @floatFromInt(image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane])) / 255;
+            const p10 = @as(f32, @floatFromInt(image.pixels[@as(usize, y0) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane])) / 255;
+            const p01 = @as(f32, @floatFromInt(image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x0) * image.bytes_per_texel + lane])) / 255;
+            const p11 = @as(f32, @floatFromInt(image.pixels[@as(usize, y1) * image.row_stride + @as(usize, x1) * image.bytes_per_texel + lane])) / 255;
             result[lane] = (p00 * (1 - tx) + p10 * tx) * (1 - ty) + (p01 * (1 - tx) + p11 * tx) * ty;
         }
         return result;
@@ -1620,11 +1623,13 @@ pub const Executor = struct {
 
     fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
         if (bytes.len < 16) return error.Bounds;
-        const luma_plane = try sampleVp9Plane(prepared.luma_image, luma_coordinates[0], luma_coordinates[1]);
-        const chroma_plane = try sampleVp9Plane(prepared.chroma_image, chroma_coordinates[0], chroma_coordinates[1]);
-        var source = if (luma_plane != null and chroma_plane != null)
-            [_]f32{ luma_plane.?[0], chroma_plane.?[0], chroma_plane.?[1] }
-        else blk: {
+        var source = if (prepared.fast_planes) blk: {
+            if (!std.math.isFinite(luma_coordinates[0]) or !std.math.isFinite(luma_coordinates[1]) or
+                !std.math.isFinite(chroma_coordinates[0]) or !std.math.isFinite(chroma_coordinates[1])) return error.Bounds;
+            const luma_plane = sampleVp9PlanePrepared(prepared.luma_image, luma_coordinates[0], luma_coordinates[1]);
+            const chroma_plane = sampleVp9PlanePrepared(prepared.chroma_image, chroma_coordinates[0], chroma_coordinates[1]);
+            break :blk [_]f32{ luma_plane[0], chroma_plane[0], chroma_plane[1] };
+        } else blk: {
             const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
             var luma_coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
             luma_coordinate_value.bits[0] = @bitCast(luma_coordinates[0]);
@@ -1785,11 +1790,17 @@ pub const Executor = struct {
     pub fn prepareVp9ColorTransform(self: *const Executor, uniform: []const u8, luma_image: SampledImage, chroma_image: SampledImage) Error!?Vp9ColorTransformPrepared {
         _ = self.vp9ColorTransformPlan() orelse return null;
         if (uniform.len < 484) return error.Bounds;
+        const fast_planes = blk: {
+            validateVp9Plane(luma_image) catch break :blk false;
+            validateVp9Plane(chroma_image) catch break :blk false;
+            break :blk true;
+        };
         var source_offset: [3]f32 = undefined;
         for (0..source_offset.len) |lane| source_offset[lane] = try uniformF32(uniform, 160 + lane * 4);
         return .{
             .luma_image = luma_image,
             .chroma_image = chroma_image,
+            .fast_planes = fast_planes,
             .source_matrix = try loadColorTransformMatrix(uniform, 112),
             .source_offset = source_offset,
             .source_transfer = try loadColorTransformTransfer(uniform, 224),
