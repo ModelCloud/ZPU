@@ -11796,13 +11796,7 @@ fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: u
             .cube_draw => |value| value,
             else => return false,
         };
-        // A render-pass framebuffer is only an alternate spelling of the
-        // color/depth attachments for this already-validated command.  The
-        // enclosing batch has proved that all draws resolve to `color`, so it
-        // does not introduce shared state across disjoint tiles.  Chromium's
-        // ordinary compositor path uses framebuffers rather than dynamic
-        // rendering; rejecting it here made the safe parallel route dead.
-        if (op.instance_count != 1 or op.depth_image != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
+        if (op.instance_count != 1 or op.depth_image != null or op.framebuffer != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
         const profile = switch (op.pipeline.execution_abi) {
             .profile_v1_scalar_graphics => |*value| value,
             else => return false,
