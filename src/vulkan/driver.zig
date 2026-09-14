@@ -12422,7 +12422,15 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     while (parallel_count >= 2) : (parallel_count -= 1) {
         const parallel_start = cursor.*;
         const parallel_operation_start = frame_pacing.monotonicNs();
-        const use_bands = @as(u64, color_image.width) * color_image.height <= 192 * 192;
+        // Large full-target Skia composite runs repeat the same profile
+        // vertex setup for every 64-pixel tile. They are already admitted
+        // only after proving every command is stateless and feedback-free, so
+        // two horizontal bands preserve each pixel's ordered draw list while
+        // establishing geometry once per worker. Keep the tile route for
+        // medium, potentially sparse targets where its work stealing is more
+        // useful; very short targets are likewise better as bands.
+        const area = @as(u64, color_image.width) * color_image.height;
+        const use_bands = area <= 192 * 192 or area >= 640 * 256;
         const parallel_executed = if (use_bands)
             executeMosaicBandParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)
         else
