@@ -1901,6 +1901,7 @@ const TraceRecord = extern struct {
 const max_trace_frames = 7_200;
 var trace_records: [max_trace_frames]TraceRecord = undefined;
 var trace_count: usize = 0;
+var trace_skipped: usize = 0;
 var trace_written = false;
 
 extern fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
@@ -1910,6 +1911,15 @@ extern fn close(fd: c_int) c_int;
 fn traceLimit() usize {
     const raw = std.c.getenv("ZPU_TRACE_FRAMES") orelse return 0;
     return @min(std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0, max_trace_frames);
+}
+
+/// Ignore a bounded number of early presents before retaining a frame trace.
+/// Chromium's process startup is deliberately noisy; this lets an operator
+/// capture a steady-state page or video interval without allocating or
+/// continually writing from the ICD.
+fn traceSkip() usize {
+    const raw = std.c.getenv("ZPU_TRACE_SKIP_FRAMES") orelse return 0;
+    return std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0;
 }
 
 fn failureDiagnosticsEnabled() bool {
@@ -2158,6 +2168,10 @@ fn objectPoolExhausted(comptime object_name: []const u8) Result {
 fn recordTrace(record_value: TraceRecord) void {
     const limit = traceLimit();
     if (limit == 0 or trace_written or trace_count >= limit) return;
+    if (trace_skipped < traceSkip()) {
+        trace_skipped += 1;
+        return;
+    }
     trace_records[trace_count] = record_value;
     trace_count += 1;
     if (trace_count != limit) return;
