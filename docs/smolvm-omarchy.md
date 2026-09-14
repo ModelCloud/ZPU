@@ -13,7 +13,7 @@ does not build, install, discover, load, or execute ZPU.
 
 The supported host is Omarchy on x86-64 Linux with KVM, its normal Hyprland
 session, Xwayland enabled, `DISPLAY=:0`, an Xauthority cookie, and
-`smol-machines/smolvm` exactly 1.15.0. The exact pin makes the guest workflow
+`smol-machines/smolvm` exactly 1.7.1. The exact pin makes the guest workflow
 reproducible while its CLI provides `--mount-socket HOST_PATH:GUEST_PATH`,
 `--smolfile`, and `machine cp`. SmolVM runs as the
 invoking host user;
@@ -26,7 +26,7 @@ directory.
 
 Networking is enabled only for bootstrap package installation. Immediately
 after `pacman` completes, the launcher stops the machine, runs the documented
-SmolVM 1.15.0 `machine update --name NAME --no-net` operation while it is
+SmolVM 1.7.1 `machine update --name NAME --no-net` operation while it is
 stopped, positively proves both `state: stopped` and `network: false`, and only
 then restarts it. Every build, package, stage, and launch independently
 reads `machine ls --json` and fails unless the unique persisted record has
@@ -187,7 +187,7 @@ Preflight is fail-closed and reports the first remediation:
 
 - Linux x86-64, because the checked-in ICD manifest is x86-64;
 - `/dev/kvm` readable and writable by the invoking user;
-- SmolVM exactly 1.15.0 available as `smolvm`, with help output proving
+- SmolVM exactly 1.7.1 available as `smolvm`, with help output proving
   `--mount-socket HOST_PATH:GUEST_PATH`, `--smolfile`, and `machine cp`;
 - Omarchy's Xwayland socket at `/tmp/.X11-unix/X0`, `DISPLAY=:0`, and a usable
   Xauthority cookie;
