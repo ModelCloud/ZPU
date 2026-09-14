@@ -742,6 +742,23 @@ pub const RadialGradientPlan = struct {
     output_interface: u32,
 };
 
+/// Immutable values read by Chromium's exact radial-gradient profile. The
+/// dynamic circle, coordinate and fragment-position inputs remain per-pixel;
+/// this merely moves bounded std140 loads out of the raster loop.
+pub const RadialGradientPrepared = struct {
+    image: SampledImage,
+    phase_bias: f32,
+    phase_scale: f32,
+    thresholds: [3]f32,
+    color_scales: [4][4]f32,
+    color_biases: [4][4]f32,
+    lower_color: [4]f32,
+    upper_color: [4]f32,
+    range: [2]f32,
+    sample_matrix: [6]f32,
+    contrast: f32,
+};
+
 /// Exact ABI of Chromium's two-distance-field radial mask. The profile is
 /// selected by the complete canonical IR digest below, not by its arithmetic
 /// shape or a shader name.
@@ -1640,6 +1657,88 @@ pub const Executor = struct {
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(result[lane] * edge_alpha))), .little);
     }
 
+    fn prepareRadialGradientResolved(uniform: []const u8, image: SampledImage) Error!RadialGradientPrepared {
+        if (uniform.len < 480) return error.Bounds;
+        var result = RadialGradientPrepared{
+            .image = image,
+            .phase_bias = try uniformF32(uniform, 320),
+            .phase_scale = try uniformF32(uniform, 324),
+            .thresholds = .{ try uniformF32(uniform, 32), try uniformF32(uniform, 36), try uniformF32(uniform, 40) },
+            .color_scales = undefined,
+            .color_biases = undefined,
+            .lower_color = undefined,
+            .upper_color = undefined,
+            .range = .{ try uniformF32(uniform, 472), try uniformF32(uniform, 476) },
+            .sample_matrix = .{
+                try uniformF32(uniform, 416), try uniformF32(uniform, 420), try uniformF32(uniform, 432),
+                try uniformF32(uniform, 436), try uniformF32(uniform, 448), try uniformF32(uniform, 452),
+            },
+            .contrast = try uniformF32(uniform, 464),
+        };
+        for (0..4) |position| for (0..4) |lane| {
+            result.color_scales[position][lane] = try uniformF32(uniform, 64 + position * 16 + lane * 4);
+            result.color_biases[position][lane] = try uniformF32(uniform, 192 + position * 16 + lane * 4);
+            result.lower_color[lane] = try uniformF32(uniform, 384 + lane * 4);
+            result.upper_color[lane] = try uniformF32(uniform, 400 + lane * 4);
+        };
+        return result;
+    }
+
+    fn executeRadialGradientPreparedResolved(prepared: RadialGradientPrepared, circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, bytes: []u8) Error!void {
+        const circle = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = circle_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = coordinate_bytes });
+        const frag_coord = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = frag_coord_bytes });
+        if (bytes.len < 16) return error.InvalidOutput;
+
+        const circle_x: f32 = @bitCast(circle.bits[0]);
+        const circle_y: f32 = @bitCast(circle.bits[1]);
+        const circle_z: f32 = @bitCast(circle.bits[2]);
+        var length_squared = canonicalF32(circle_x * circle_x);
+        length_squared = canonicalF32(length_squared + canonicalF32(circle_y * circle_y));
+        const distance = canonicalF32(std.math.sqrt(length_squared));
+        const edge_distance = canonicalF32(circle_z * canonicalF32(1 - distance));
+        const edge_alpha = try radialClamp(edge_distance, 0, 1);
+
+        const coordinate_x: f32 = @bitCast(coordinates.bits[0]);
+        const coordinate_y: f32 = @bitCast(coordinates.bits[1]);
+        const angle = if (coordinate_x != 0)
+            canonicalF32(std.math.atan2(-coordinate_y, -coordinate_x))
+        else blk: {
+            const sign: f32 = if (std.math.isNan(coordinate_y)) 0 else if (coordinate_y > 0) 1 else if (coordinate_y < 0) -1 else @bitCast(coordinates.bits[1] & 0x80000000);
+            break :blk canonicalF32(sign * -1.57079637);
+        };
+        var t = canonicalF32(angle * 0.159154937);
+        t = canonicalF32(t + 0.5);
+        t = canonicalF32(t + prepared.phase_bias);
+        t = canonicalF32(t * prepared.phase_scale);
+
+        var color: [4]f32 = undefined;
+        if (t < 0) color = prepared.lower_color else if (t > 1) color = prepared.upper_color else {
+            const position: usize = if (t < prepared.thresholds[1])
+                if (t < prepared.thresholds[0]) 0 else 1
+            else if (t < prepared.thresholds[2]) 2 else 3;
+            for (0..4) |lane| color[lane] = canonicalF32(canonicalF32(prepared.color_scales[position][lane] * t) + prepared.color_biases[position][lane]);
+        }
+
+        const fragment_x: f32 = @bitCast(frag_coord.bits[0]);
+        const fragment_y: f32 = @bitCast(frag_coord.bits[1]);
+        const transformed_y = canonicalF32(prepared.range[0] + canonicalF32(prepared.range[1] * fragment_y));
+        const sample_x = canonicalF32(canonicalF32(prepared.sample_matrix[0] * fragment_x) + canonicalF32(prepared.sample_matrix[2] * transformed_y) + prepared.sample_matrix[4]);
+        const sample_y = canonicalF32(canonicalF32(prepared.sample_matrix[1] * fragment_x) + canonicalF32(prepared.sample_matrix[3] * transformed_y) + prepared.sample_matrix[5]);
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(sample_x);
+        sample_coordinates.bits[1] = @bitCast(sample_y);
+        const sample_bias = Value{ .ty = .{ .scalar = .f32 }, .bits = .{0xbef33333} ++ .{0} ** 15 };
+        const sampled = try sample(prepared.image, sample_coordinates, sample_bias);
+        const sampled_red: f32 = @bitCast(sampled.bits[0]);
+        const sample_value = canonicalF32(sampled_red - 0.5);
+        const alpha = color[3];
+        var result: [4]f32 = undefined;
+        for (0..3) |lane| result[lane] = try radialClamp(canonicalF32(color[lane] + canonicalF32(sample_value * prepared.contrast)), 0, alpha);
+        result[3] = alpha;
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(result[lane] * edge_alpha))), .little);
+    }
+
     fn colorTransformTransfer(value: f32, uniform: []const u8, base: usize) Error!f32 {
         // Match the captured helper's FSign/FAbs, branch, Pow, and multiply
         // order exactly. The uniform array is std140 (`float[7]`, stride 16).
@@ -2291,6 +2390,18 @@ pub const Executor = struct {
         _ = self.radialGradientPlan() orelse return false;
         try executeRadialGradientResolved(circle_bytes, coordinate_bytes, frag_coord_bytes, uniform_bytes, image, output);
         return true;
+    }
+
+    /// Resolve the immutable inputs of the exact canonical radial-gradient
+    /// profile once per draw. Every non-identical fragment program remains on
+    /// the reference executor.
+    pub fn prepareRadialGradient(self: *const Executor, uniform: []const u8, image: SampledImage) Error!?RadialGradientPrepared {
+        _ = self.radialGradientPlan() orelse return null;
+        return try prepareRadialGradientResolved(uniform, image);
+    }
+
+    pub fn executeRadialGradientPrepared(_: *const Executor, prepared: RadialGradientPrepared, circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, output: []u8) Error!void {
+        try executeRadialGradientPreparedResolved(prepared, circle_bytes, coordinate_bytes, frag_coord_bytes, output);
     }
 
     /// Resolve the immutable push constants and sampled image for the exact
@@ -4200,6 +4311,39 @@ test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
     try executor.executeSampleCoveragePrepared(fast_prepared, &coordinates, &coverage, &output);
     try std.testing.expectEqualSlices(u8, &direct_fast_output, &output);
     try std.testing.expectError(error.Bounds, executor.executeSampleCoverageDirect(coordinates[0..4], &coverage, bindings[2].sampled_image.?, &output));
+}
+
+test "prepared Chromium radial gradient preserves the resolved pixel" {
+    var uniform = [_]u8{0} ** 480;
+    const write = struct {
+        fn value(bytes: []u8, offset: usize, item: f32) void {
+            std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(item), .little);
+        }
+    }.value;
+    write(&uniform, 32, 0.25);
+    write(&uniform, 36, 0.5);
+    write(&uniform, 40, 0.75);
+    write(&uniform, 320, 0.1);
+    write(&uniform, 324, 0.8);
+    write(&uniform, 464, 0.4);
+    for (0..4) |position| for (0..4) |lane| {
+        write(&uniform, 64 + position * 16 + lane * 4, 0.25 + @as(f32, @floatFromInt(position)) * 0.1);
+        write(&uniform, 192 + position * 16 + lane * 4, @as(f32, @floatFromInt(lane)) * 0.05);
+    };
+    const pixels = [_]u8{ 90, 120, 150, 255 };
+    const image = SampledImage{ .pixels = &pixels, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var circle: [16]u8 = undefined;
+    var coordinates: [8]u8 = undefined;
+    var frag_coord: [16]u8 = undefined;
+    for ([_]f32{ 0.25, 0.5, 0.75, 1 }, 0..) |value, lane| std.mem.writeInt(u32, circle[lane * 4 ..][0..4], @bitCast(value), .little);
+    for ([_]f32{ 0.3, -0.4 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    for ([_]f32{ 3, 7, 0, 1 }, 0..) |value, lane| std.mem.writeInt(u32, frag_coord[lane * 4 ..][0..4], @bitCast(value), .little);
+    var reference: [16]u8 = undefined;
+    var prepared_output: [16]u8 = undefined;
+    try Executor.executeRadialGradientResolved(&circle, &coordinates, &frag_coord, &uniform, image, &reference);
+    const prepared = try Executor.prepareRadialGradientResolved(&uniform, image);
+    try Executor.executeRadialGradientPreparedResolved(prepared, &circle, &coordinates, &frag_coord, &prepared_output);
+    try std.testing.expectEqualSlices(u8, &reference, &prepared_output);
 }
 
 test "forward branches execute local stores and select phi predecessors" {

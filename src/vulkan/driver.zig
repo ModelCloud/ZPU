@@ -10954,6 +10954,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var radial_gradient_coordinate_varying: ?usize = null;
     var radial_gradient_uniform: ?[]const u8 = null;
     var radial_gradient_image: ?render_ir_exec.SampledImage = null;
+    var radial_gradient_prepared: ?render_ir_exec.RadialGradientPrepared = null;
     var radial_gradient_frag_coord = false;
     if (radial_gradient_plan) |plan| {
         for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
@@ -10967,6 +10968,12 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) radial_gradient_image = binding.sampled_image;
         }
         radial_gradient_frag_coord = profile.fragment_frag_coord != null and profile.fragment_frag_coord.? == plan.frag_coord_interface;
+        if (radial_gradient_uniform) |uniform| {
+            if (radial_gradient_image) |image| radial_gradient_prepared = profile.fragment.prepareRadialGradient(uniform, image) catch |err| {
+                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-gradient preparation failed err={s}\n", .{@errorName(err)});
+                return;
+            } orelse return;
+        }
     }
     if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
         _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
@@ -11592,20 +11599,19 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         if (radial_gradient_plan != null) {
                             const circle_varying = radial_gradient_circle_varying orelse break :direct false;
                             const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
-                            const uniform = radial_gradient_uniform orelse break :direct false;
-                            const image = radial_gradient_image orelse break :direct false;
+                            const prepared = radial_gradient_prepared orelse break :direct false;
                             if (!radial_gradient_frag_coord_ready) break :direct false;
-                            break :direct profile.fragment.executeRadialGradientDirect(
+                            profile.fragment.executeRadialGradientPrepared(
+                                prepared,
                                 fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
                                 fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
                                 &frag_coord_bytes,
-                                uniform,
-                                image,
                                 &fragment_output_bytes,
                             ) catch |err| {
                                 if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
+                            break :direct true;
                         }
                         break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
                             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
