@@ -1837,6 +1837,7 @@ var render_diagnostic_cube_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_mosaic_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
@@ -1965,6 +1966,26 @@ fn profileShaderCaptureEnabled() bool {
 // an execution fast path: this opt-in capture gate exists solely to preserve
 // the exact live SPIR-V before any specialization or ORC lowering is written.
 const chromium_vp9_composite_fragment_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
+
+// Chromium 152's VP9 color-transform fragment uses two one-parameter helper
+// functions.  Profile v1 deliberately does not claim arbitrary function-call
+// execution.  This exact raw-module identity is instead paired with the
+// deterministic output of `spirv-opt --inline-entry-points-exhaustive
+// --eliminate-dead-functions`: it is a semantics-preserving, call-free module
+// which the bounded frontend already validates and executes.  Do not broaden
+// this bridge by word count, name, or a partial interface match.
+const chromium_vp9_color_transform_raw_identity = [_]u8{ 0x93, 0x60, 0x74, 0x77, 0x7d, 0x15, 0xc2, 0x06, 0x3e, 0x00, 0x85, 0x68, 0x42, 0xef, 0xa1, 0x65, 0xea, 0xa8, 0xc7, 0xb7, 0x69, 0xac, 0x48, 0xb9, 0x2c, 0x5e, 0x9e, 0xc7, 0xdf, 0xd1, 0x59, 0xd8 };
+const chromium_vp9_color_transform_inline_bytes: [9_648]u8 align(4) = decodeChromiumVp9ColorTransformInline();
+
+fn decodeChromiumVp9ColorTransformInline() [9_648]u8 {
+    @setEvalBranchQuota(100_000);
+    const encoded = std.mem.trimEnd(u8, @embedFile("fixtures/chromium_vp9_color_transform_inline.spv.b64"), "\n");
+    var bytes: [9_648]u8 = undefined;
+    const decoded_size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch @compileError("invalid Chromium VP9 inline shader base64");
+    if (decoded_size != bytes.len) @compileError("unexpected Chromium VP9 inline shader size");
+    std.base64.standard.Decoder.decode(&bytes, encoded) catch @compileError("could not decode Chromium VP9 inline shader");
+    return bytes;
+}
 
 fn profileShaderCaptureCandidate(program: *const render_ir.Program) bool {
     return program.instructions.len >= 200 or std.mem.eql(u8, &program.identity.digest, &chromium_vp9_composite_fragment_identity);
@@ -10478,7 +10499,7 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
 
 const ProfileMosaicClip = struct { min_x: u32, min_y: u32, max_x: u32, max_y: u32 };
 
-fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip) void {
+fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_context: *QueryExecutionContext, layer: u32, mosaic_clip: ?ProfileMosaicClip, publish_metadata: bool) void {
     const profile = profile_override orelse switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
@@ -10646,6 +10667,48 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
+    // The VP9 decoder supplies separate Y and UV planes. Chromium's exact
+    // color-transform fragment combines them through its validated transfer
+    // functions and matrices; resolve its bounded ABI once per draw so Mosaic
+    // does not enter the general IR executor for every output pixel.
+    const vp9_color_transform_plan = profile.fragment.vp9ColorTransformPlan();
+    var vp9_luma_coordinate_varying: ?usize = null;
+    var vp9_chroma_coordinate_varying: ?usize = null;
+    var vp9_uniform: ?[]const u8 = null;
+    var vp9_luma_image: ?render_ir_exec.SampledImage = null;
+    var vp9_chroma_image: ?render_ir_exec.SampledImage = null;
+    if (vp9_color_transform_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.luma_coordinate_interface) vp9_luma_coordinate_varying = index;
+            if (varying.fragment_interface == plan.chroma_coordinate_interface) vp9_chroma_coordinate_varying = index;
+        }
+        for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+            if (uniform.interface == plan.uniform_interface) vp9_uniform = uniform_bytes;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.luma_image_interface) vp9_luma_image = binding.sampled_image;
+            if (binding.interface == plan.chroma_image_interface) vp9_chroma_image = binding.sampled_image;
+        }
+    }
+    var vp9_color_transform_prepared: ?render_ir_exec.Vp9ColorTransformPrepared = null;
+    if (vp9_color_transform_plan != null and vp9_uniform != null and vp9_luma_image != null and vp9_chroma_image != null) {
+        vp9_color_transform_prepared = profile.fragment.prepareVp9ColorTransform(vp9_uniform.?, vp9_luma_image.?, vp9_chroma_image.?) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
+    }
+    if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_profile_state.fetchAdd(1, .monotonic) == 0) {
+        const prepared = vp9_color_transform_prepared.?;
+        std.debug.print(
+            "ZPU VP9 profile state luma={s} {d}x{d} stride={d} filter={s} address={s}/{s} chroma={s} {d}x{d} stride={d} filter={s} address={s}/{s} source_transfer={d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6} destination_transfer={d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6},{d:.6}\n",
+            .{
+                @tagName(prepared.luma_image.format),   prepared.luma_image.width,        prepared.luma_image.height,       prepared.luma_image.row_stride,   @tagName(prepared.luma_image.filter),   @tagName(prepared.luma_image.address_u),   @tagName(prepared.luma_image.address_v),
+                @tagName(prepared.chroma_image.format), prepared.chroma_image.width,      prepared.chroma_image.height,     prepared.chroma_image.row_stride, @tagName(prepared.chroma_image.filter), @tagName(prepared.chroma_image.address_u), @tagName(prepared.chroma_image.address_v),
+                prepared.source_transfer[0],            prepared.source_transfer[1],      prepared.source_transfer[2],      prepared.source_transfer[3],      prepared.source_transfer[4],            prepared.source_transfer[5],               prepared.source_transfer[6],
+                prepared.destination_transfer[0],       prepared.destination_transfer[1], prepared.destination_transfer[2], prepared.destination_transfer[3], prepared.destination_transfer[4],       prepared.destination_transfer[5],          prepared.destination_transfer[6],
+            },
+        );
+    }
     // This dynamic radial-gradient profile has materially more arithmetic
     // than the video coverage composite, but its validated uniforms and
     // sampled image are likewise invariant across a draw. Resolve its narrow
@@ -10984,6 +11047,21 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             return;
                         };
                     }
+                    if (vp9_color_transform_plan != null) {
+                        const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
+                        const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
+                        const prepared = vp9_color_transform_prepared orelse break :direct false;
+                        profile.fragment.executeVp9ColorTransformPrepared(
+                            prepared,
+                            fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
+                            fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
+                            &fragment_output_bytes,
+                        ) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                        break :direct true;
+                    }
                     if (radial_gradient_plan != null) {
                         const circle_varying = radial_gradient_circle_varying orelse break :direct false;
                         const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
@@ -11081,6 +11159,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             pixels_written += 1;
         };
     }
+    // A parallel Mosaic lane owns disjoint pixels but must not race on image
+    // content metadata. Its caller publishes a conservative whole-target
+    // envelope after every lane has completed.
+    if (!publish_metadata) return;
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
     if (color) |color_image| {
         color_image.content_bounds = unionRect(color_image.content_bounds, bounds);
@@ -11242,6 +11324,59 @@ fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
     return &profile_lane_cache.?.clone.graphics;
 }
 
+/// The VP9 color-transform specialization has no mutable fragment state once
+/// its descriptor ABI is resolved. Give its one large video quad to Mosaic's
+/// established worker lanes by horizontal bands. Every lane writes disjoint
+/// pixels; metadata is published once after the worker barrier.
+const Vp9MosaicLaneContext = struct {
+    command: *const Command,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *Vp9MosaicLaneContext = @ptrCast(@alignCast(raw));
+        if (lane_count == 0 or lane_index >= lane_count) return;
+        const op = switch (context.command.*) {
+            .cube_draw => |value| value,
+            else => return,
+        };
+        const source = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile,
+            else => return,
+        };
+        if (source.fragment.vp9ColorTransformPlan() == null) return;
+        const lane_profile = cachedProfileLane(source) orelse return;
+        const min_y: u32 = @intCast((@as(u64, context.height) * lane_index) / lane_count);
+        const max_y: u32 = @intCast((@as(u64, context.height) * (lane_index + 1)) / lane_count);
+        if (min_y == max_y) return;
+        executeProfileDraw(op, lane_profile, context.query_context, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y }, false);
+    }
+};
+
+fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExecutionContext) bool {
+    const op = switch (command.*) {
+        .cube_draw => |value| value,
+        else => return false,
+    };
+    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null) return false;
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    if (profile.fragment.vp9ColorTransformPlan() == null) return false;
+    const color = op.color_image orelse (if (op.framebuffer) |framebuffer| framebuffer.color_image else null) orelse return false;
+    if (@as(u64, color.width) * color.height < @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size) return false;
+    var context = Vp9MosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, Vp9MosaicLaneContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+    if (op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null) |depth| depth.content_bounds = unionRect(depth.content_bounds, full_target);
+    return true;
+}
+
 /// Mosaic is worthwhile for a group of profile draws that share a target.
 /// A one-command "batch" repeats that draw's complete vertex setup for every
 /// target tile; sparse Skia UI quads then pay a framebuffer-sized cost even
@@ -11296,11 +11431,27 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         batch_count += 1;
         candidate.advance();
     }
-    // Chromium's video composite is often one large textured quad. Route it
-    // through the same ordered Mosaic tile scheduler as adjacent profile
-    // draws; execution stays serial because profile executors own mutable
-    // scratch, but every tile is explicit and auditable. Small draws retain
-    // the direct path so UI glyphs do not pay scheduler overhead.
+    // Chromium's video transform is a single large quad. Its exact native
+    // path has no mutable fragment state, so it may use Mosaic's disjoint
+    // worker bands even though the ordinary profile scheduler requires two
+    // adjacent draws. All other one-draw profiles retain the direct path.
+    if (batch_count == 1) {
+        const operation_start = frame_pacing.monotonicNs();
+        if (executeMosaicSingleVp9Draw(first_raw, query_context)) {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic VP9 profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+                std.debug.print("ZPU Mosaic VP9 profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
+            cursor.* = candidate;
+            return 1;
+        }
+    }
+    // Adjacent profiles still use ordered serial tiles: arbitrary executors
+    // own mutable scratch and cannot be parallelized safely.
     if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
@@ -11327,7 +11478,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                     else => return null,
                 };
                 const command_start = if (timing_enabled) frame_pacing.monotonicNs() else 0;
-                executeProfileDraw(op, null, query_context, 0, clip);
+                executeProfileDraw(op, null, query_context, 0, clip, true);
                 if (timing_enabled) command_elapsed_ns[draw_index] += frame_pacing.monotonicNs() - command_start;
                 draw_cursor.advance();
             }
@@ -11621,7 +11772,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 while (instance < instance_count) : (instance += 1) {
                     draw.instance_index = std.math.add(u32, op.instance_index, instance) catch return;
                     var layer: u32 = 0;
-                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null);
+                    while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null, true);
                 }
                 if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < 512) {
                     const target = color orelse depth;
@@ -14115,6 +14266,12 @@ fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) voi
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
     if (cpuCubeShaderCompatible(shader, stage, name, specs.len)) return null;
+    if (stage == .fragment and specs.len == 0 and std.mem.eql(u8, name, "main") and std.mem.eql(u8, &shader.module.identity.digest, &chromium_vp9_color_transform_raw_identity)) {
+        return spirv_frontend.compile(stage_allocator, std.mem.bytesAsSlice(u32, &chromium_vp9_color_transform_inline_bytes), stage, name, specs) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.Invalid,
+        };
+    }
     return spirv_frontend.compile(stage_allocator, shader.module.words, stage, name, specs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => {
@@ -14127,6 +14284,88 @@ fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const Shade
             return error.Invalid;
         },
     };
+}
+
+test "current Chromium VP9 color transform bridge is exact and call-free" {
+    var transformed_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&chromium_vp9_color_transform_inline_bytes, &transformed_digest, .{});
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x07, 0x5e, 0xb9, 0x34, 0x7c, 0x44, 0x62, 0xd7, 0x26, 0x1c, 0x9d, 0x9f, 0x28, 0x65, 0x70, 0x98, 0x51, 0x9c, 0xe0, 0x96, 0xcf, 0x72, 0x6f, 0x77, 0xb7, 0xad, 0x9d, 0xdf, 0x9f, 0x64, 0xad, 0xe9 }, &transformed_digest);
+    var words: [2_412]u32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&words), &chromium_vp9_color_transform_inline_bytes);
+    var shader = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = chromium_vp9_color_transform_raw_identity,
+    } } };
+    var program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(render_ir.Stage.fragment, program.stage);
+    try std.testing.expect(program.instructions.len > 100);
+    shader.module.identity.digest[0] ^= 1;
+    var generic_program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
+    defer generic_program.deinit(std.testing.allocator);
+}
+
+test "current Chromium VP9 color transform native path matches validated IR" {
+    var words: [2_412]u32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&words), &chromium_vp9_color_transform_inline_bytes);
+    const shader = ShaderModuleObj{ .owner = undefined, .module = .{ .words = &words, .identity = .{
+        .ingestion = 1,
+        .serialization = 1,
+        .digest = chromium_vp9_color_transform_raw_identity,
+    } } };
+    var program = (try compileFrontendStage(std.testing.allocator, &shader, .fragment, "main", &.{})).?;
+    defer program.deinit(std.testing.allocator);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_vp9_color_transform", executor.prevalidatedPathName());
+
+    var uniform = [_]u8{0} ** 484;
+    const writeF32 = struct {
+        fn at(bytes: []u8, offset: usize, value: f32) void {
+            std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
+        }
+    }.at;
+    for ([_]usize{ 112, 336 }) |base| for (0..3) |column| for (0..3) |row| {
+        writeF32(&uniform, base + column * 16 + row * 4, if (column == row) 1 else 0);
+    };
+    for ([_]usize{ 224, 384 }) |base| {
+        writeF32(&uniform, base, 1); // exponent
+        writeF32(&uniform, base + 16, 1); // nonlinear scale
+        writeF32(&uniform, base + 48, 1); // linear scale
+        writeF32(&uniform, base + 64, 2); // linear branch for normalized samples
+    }
+    var coordinates = [_]u8{0} ** 8;
+    writeF32(&coordinates, 0, 0.5);
+    writeF32(&coordinates, 4, 0.5);
+    const luma_pixels = [_]u8{ 64, 0, 0, 255 };
+    const chroma_pixels = [_]u8{ 128, 192, 0, 255 };
+    const image_common = .{ .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = render_ir_exec.SampledImage.Format.rgba8_unorm, .filter = render_ir_exec.SampledImage.Filter.nearest, .address_u = render_ir_exec.SampledImage.AddressMode.clamp_to_edge, .address_v = render_ir_exec.SampledImage.AddressMode.clamp_to_edge };
+    const luma_image = render_ir_exec.SampledImage{ .pixels = &luma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
+    const chroma_image = render_ir_exec.SampledImage{ .pixels = &chroma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
+    var color = [_]u8{0} ** 16;
+    var facing = [_]u8{1};
+    const bindings = [_]render_ir_exec.Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 2, .bytes = &coordinates },
+        .{ .interface = 3, .bytes = &facing },
+        .{ .interface = 5, .bytes = &uniform },
+        .{ .interface = 6, .sampled_image = luma_image },
+        .{ .interface = 7, .sampled_image = chroma_image },
+    };
+    var generic_output = [_]u8{0} ** 16;
+    var direct_output = [_]u8{0} ** 16;
+    var prepared_output = [_]u8{0} ** 16;
+    const outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &generic_output }};
+    try executor.execute(&bindings, &outputs);
+    try std.testing.expect(try executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, &uniform, luma_image, chroma_image, &direct_output));
+    const prepared = (try executor.prepareVp9ColorTransform(&uniform, luma_image, chroma_image)).?;
+    try executor.executeVp9ColorTransformPrepared(prepared, &coordinates, &coordinates, &prepared_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
+    try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
+    try std.testing.expectError(error.Bounds, executor.prepareVp9ColorTransform(uniform[0..483], luma_image, chroma_image));
 }
 
 test "cpu_cube_v1 shader compatibility bridge is exact" {

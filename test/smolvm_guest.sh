@@ -128,7 +128,18 @@ ln -sfn "$repo/test/fixtures/smolvm/v1.6.9/smolvm" "$tmp/bin/smolvm"
 if "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     echo 'SmolVM 1.6.9 unexpectedly satisfied the exact version pin' >&2; exit 1
 fi
-grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.15.0' "$tmp/err"
+grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.7.1' "$tmp/err"
+ln -sfn "$fixture" "$tmp/bin/smolvm"
+if SMOLVM_VM_UID_DROP=off SMOLVM_FIXTURE_EXPECT_UID_DROP=unset "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
+    :
+else
+    echo 'default SmolVM UID isolation did not clear inherited opt-out' >&2; exit 1
+fi
+if ZPU_SMOLVM_UID_DROP=off SMOLVM_FIXTURE_EXPECT_UID_DROP=off "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
+    :
+else
+    echo 'explicit SmolVM UID isolation opt-out did not reach the CLI' >&2; exit 1
+fi
 for capability in missing-mount-socket missing-smolfile missing-cp missing-stop-name missing-update-no-net; do
     ln -sfn "$repo/test/fixtures/smolvm/negative/$capability" "$tmp/bin/smolvm"
     if "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
@@ -553,5 +564,5 @@ if compgen -G "$tmp/runtime/zpu-smolvm/zpu-source.tar.part.*" >/dev/null; then
     echo 'host source archive part remained after transfer' >&2
     exit 1
 fi
-grep -F 'rm -f /var/tmp/zpu-source.tar' <<<"$out" >/dev/null || { echo 'dry-run omitted guest source archive cleanup' >&2; exit 1; }
+grep -F 'rm -f /workspace/.zpu-source-transfer/zpu-source.tar' <<<"$out" >/dev/null || { echo 'dry-run omitted guest source archive cleanup' >&2; exit 1; }
 printf '%s\n' 'SmolVM guest isolation contract passed'
