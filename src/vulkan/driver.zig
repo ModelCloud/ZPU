@@ -11775,59 +11775,6 @@ fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExec
     return true;
 }
 
-/// The exact Chromium texture-copy profile is stateless after descriptor
-/// resolution. Unlike arbitrary profile batches, one full-screen copy can be
-/// split into disjoint horizontal bands without repeating the draw per tile.
-const TextureCopyMosaicLaneContext = struct {
-    command: *const Command,
-    query_context: *QueryExecutionContext,
-    width: u32,
-    height: u32,
-
-    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
-        const context: *TextureCopyMosaicLaneContext = @ptrCast(@alignCast(raw));
-        if (lane_count == 0 or lane_index >= lane_count) return;
-        const op = switch (context.command.*) {
-            .cube_draw => |value| value,
-            else => return,
-        };
-        const source = switch (op.pipeline.execution_abi) {
-            .profile_v1_scalar_graphics => |*profile| profile,
-            else => return,
-        };
-        if (source.fragment.textureCopyPlan() == null) return;
-        const lane_profile = cachedProfileLane(source) orelse return;
-        const min_y: u32 = @intCast((@as(u64, context.height) * lane_index) / lane_count);
-        const max_y: u32 = @intCast((@as(u64, context.height) * (lane_index + 1)) / lane_count);
-        if (min_y == max_y) return;
-        executeProfileDraw(op, lane_profile, context.query_context, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y }, false);
-    }
-};
-
-fn executeMosaicSingleTextureCopyDraw(command: *const Command, query_context: *QueryExecutionContext) bool {
-    const op = switch (command.*) {
-        .cube_draw => |value| value,
-        else => return false,
-    };
-    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null or op.depth_image != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
-    const profile = switch (op.pipeline.execution_abi) {
-        .profile_v1_scalar_graphics => |*value| value,
-        else => return false,
-    };
-    if (profile.fragment.textureCopyPlan() == null or profile.fragment_input_attachment_count != 0) return false;
-    const color = op.color_image orelse (if (op.framebuffer) |framebuffer| framebuffer.color_image else null) orelse return false;
-    if (@as(u64, color.width) * color.height < @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size) return false;
-    if (op.descriptors.texture == color) return false;
-    for (op.descriptors.sampled_images) |sampled| if (sampled.image == color) return false;
-    var context = TextureCopyMosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height };
-    if (!cpu_cube.dispatchParallelLanes(&context, TextureCopyMosaicLaneContext.run)) return false;
-    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
-    color.content_bounds = unionRect(color.content_bounds, full_target);
-    color.complex_3d_content = true;
-    color.force_full_present = true;
-    return true;
-}
-
 /// Mosaic is worthwhile for a group of profile draws that share a target.
 /// A one-command "batch" repeats that draw's complete vertex setup for every
 /// target tile; sparse Skia UI quads then pay a framebuffer-sized cost even
@@ -12002,16 +11949,6 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             }
             if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
                 std.debug.print("ZPU Mosaic VP9 profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
-            cursor.* = candidate;
-            return 1;
-        }
-        if (executeMosaicSingleTextureCopyDraw(first_raw, query_context)) {
-            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
-            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
-            if (renderDiagnosticsEnabled()) {
-                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
-                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic texture-copy profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
-            }
             cursor.* = candidate;
             return 1;
         }
