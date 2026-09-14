@@ -836,6 +836,10 @@ pub const Vp9ColorTransformPrepared = struct {
     source_transfer: [7]f32,
     destination_matrix: [3][3]f32,
     destination_transfer: [7]f32,
+    /// Set only for the exact IEC 61966-2-1 parameter tuples emitted by the
+    /// observed Chromium VP9 profile. This preserves the generic path for
+    /// every other transfer function.
+    fast_srgb_transfers: bool,
 };
 
 const FastPath = union(enum) {
@@ -1234,6 +1238,20 @@ fn detectChromiumPassthrough(program: *const ir.Program) ?PassthroughPlan {
         front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
         output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0) return null;
     return .{ .input_interface = 0, .output_interface = 2 };
+}
+
+test "Chromium sRGB transfer specialization is bit exact" {
+    const source = [_]f32{ 2.4, 0.9478673, 0.0521327, 0.07739938, 0.04045, 0, 0 };
+    const destination = [_]f32{ 1.0 / 2.4, 1.137283, -0.0, 12.92, 0.0031308, -0.0549698, -0.0 };
+    try std.testing.expect(Executor.isChromiumSrgbTransferPair(source, destination));
+    const values = [_]f32{ -1, -0.5, -0.04045, -0.0031308, -0.0, 0, 0.0031308, 0.04045, 0.25, 0.5, 1 };
+    for (values) |value| {
+        try std.testing.expectEqual(@as(u32, @bitCast(try Executor.colorTransformTransferPrepared(value, source))), @as(u32, @bitCast(try Executor.srgbToLinearPrepared(value))));
+        try std.testing.expectEqual(@as(u32, @bitCast(try Executor.colorTransformTransferPrepared(value, destination))), @as(u32, @bitCast(try Executor.linearToSrgbPrepared(value))));
+    }
+    var altered = source;
+    altered[0] = 2.2;
+    try std.testing.expect(!Executor.isChromiumSrgbTransferPair(altered, destination));
 }
 
 pub const Executor = struct {
@@ -1635,6 +1653,46 @@ pub const Executor = struct {
         return canonicalF32(sign * transformed);
     }
 
+    fn transferParametersEqual(actual: [7]f32, expected: [7]f32) bool {
+        for (actual, expected) |left, right| if (@as(u32, @bitCast(left)) != @as(u32, @bitCast(right))) return false;
+        return true;
+    }
+
+    fn isChromiumSrgbTransferPair(source: [7]f32, destination: [7]f32) bool {
+        return transferParametersEqual(source, .{ 2.4, 0.9478673, 0.0521327, 0.07739938, 0.04045, 0, 0 }) and
+            transferParametersEqual(destination, .{ 1.0 / 2.4, 1.137283, -0.0, 12.92, 0.0031308, -0.0549698, -0.0 });
+    }
+
+    /// Exact constant-specialized forms of the two sRGB transfer helpers.
+    /// Their operation order deliberately matches `colorTransformTransferPrepared`.
+    /// The constants are selected only after their source uniform bit patterns
+    /// matched `isChromiumSrgbTransferPair` above.
+    fn srgbToLinearPrepared(value: f32) Error!f32 {
+        const sign: f32 = if (std.math.isNan(value)) 0 else if (value > 0) 1 else if (value < 0) -1 else @bitCast(@as(u32, @bitCast(value)) & 0x80000000);
+        const absolute = canonicalF32(@abs(value));
+        const transformed = if (absolute < @as(f32, 0.04045))
+            canonicalF32(canonicalF32(@as(f32, 0.07739938) * absolute) + @as(f32, 0))
+        else blk: {
+            const pow_base = canonicalF32(canonicalF32(@as(f32, 0.9478673) * absolute) + @as(f32, 0.0521327));
+            if (pow_base < 0 or (pow_base == 0 and @as(f32, 2.4) <= 0)) return error.NumericDomain;
+            break :blk canonicalF32(canonicalF32(std.math.pow(f32, pow_base, @as(f32, 2.4))) + @as(f32, 0));
+        };
+        return canonicalF32(sign * transformed);
+    }
+
+    fn linearToSrgbPrepared(value: f32) Error!f32 {
+        const sign: f32 = if (std.math.isNan(value)) 0 else if (value > 0) 1 else if (value < 0) -1 else @bitCast(@as(u32, @bitCast(value)) & 0x80000000);
+        const absolute = canonicalF32(@abs(value));
+        const transformed = if (absolute < @as(f32, 0.0031308))
+            canonicalF32(canonicalF32(@as(f32, 12.92) * absolute) + @as(f32, -0.0))
+        else blk: {
+            const pow_base = canonicalF32(canonicalF32(@as(f32, 1.137283) * absolute) + @as(f32, -0.0));
+            if (pow_base < 0 or (pow_base == 0 and @as(f32, 1.0 / 2.4) <= 0)) return error.NumericDomain;
+            break :blk canonicalF32(canonicalF32(std.math.pow(f32, pow_base, @as(f32, 1.0 / 2.4))) + @as(f32, -0.0549698));
+        };
+        return canonicalF32(sign * transformed);
+    }
+
     fn colorTransformClamp(value: f32) f32 {
         const lower = if (value < 0) @as(f32, 0) else value;
         return canonicalF32(if (1 < lower) @as(f32, 1) else lower);
@@ -1758,9 +1816,13 @@ pub const Executor = struct {
         };
         source = vectorTimesColorTransformMatrix(source, prepared.source_matrix);
         for (0..3) |lane| source[lane] = colorTransformClamp(canonicalF32(source[lane] + prepared.source_offset[lane]));
-        for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);
+        if (prepared.fast_srgb_transfers) {
+            for (0..3) |lane| source[lane] = try srgbToLinearPrepared(source[lane]);
+        } else for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);
         source = colorTransformMatrixTimesVector(prepared.destination_matrix, source);
-        for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
+        if (prepared.fast_srgb_transfers) {
+            for (0..3) |lane| source[lane] = try linearToSrgbPrepared(source[lane]);
+        } else for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
         for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
     }
@@ -1983,15 +2045,18 @@ pub const Executor = struct {
         };
         var source_offset: [3]f32 = undefined;
         for (0..source_offset.len) |lane| source_offset[lane] = try uniformF32(uniform, 160 + lane * 4);
+        const source_transfer = try loadColorTransformTransfer(uniform, 224);
+        const destination_transfer = try loadColorTransformTransfer(uniform, 384);
         return .{
             .luma_image = luma_image,
             .chroma_image = chroma_image,
             .fast_planes = fast_planes,
             .source_matrix = try loadColorTransformMatrix(uniform, 112),
             .source_offset = source_offset,
-            .source_transfer = try loadColorTransformTransfer(uniform, 224),
+            .source_transfer = source_transfer,
             .destination_matrix = try loadColorTransformMatrix(uniform, 336),
-            .destination_transfer = try loadColorTransformTransfer(uniform, 384),
+            .destination_transfer = destination_transfer,
+            .fast_srgb_transfers = isChromiumSrgbTransferPair(source_transfer, destination_transfer),
         };
     }
 
