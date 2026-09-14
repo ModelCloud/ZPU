@@ -11097,6 +11097,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             profile.fragment_frag_coord == null and
             profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
             profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
+        const direct_texture_copy_coordinates = texture_copy_plan != null and texture_copy_coordinate_varying != null and texture_copy_image != null and
+            profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+            profile.varyings[texture_copy_coordinate_varying.?].lanes == 2 and !profile.varyings[texture_copy_coordinate_varying.?].flat;
         // The VP9 transform's canonical IR unconditionally writes alpha one.
         // Therefore Chromium's normal source-over state is provably opaque,
         // provided every component is written and its fixed factors are the
@@ -11172,6 +11175,26 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     }
                     profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
                         if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                        return;
+                    };
+                } else if (direct_texture_copy_coordinates) {
+                    const q0 = b0 / vertices[0].w;
+                    const q1 = b1 / vertices[1].w;
+                    const q2 = b2 / vertices[2].w;
+                    const denominator = q0 + q1 + q2;
+                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const varying = texture_copy_coordinate_varying.?;
+                    var coordinates: [2]f32 = undefined;
+                    for (0..2) |lane| {
+                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
+                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
+                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
+                        coordinates[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
+                    }
+                    var coordinate_bytes: [8]u8 = undefined;
+                    for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
+                    _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                         return;
                     };
                 } else if (direct_radial_mask_coordinates) {
