@@ -2211,8 +2211,7 @@ pub const Executor = struct {
         return result;
     }
 
-    fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
-        if (bytes.len < 16) return error.Bounds;
+    fn executeVp9ColorTransformPreparedCoordinatesColorResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32) Error![4]f32 {
         var source = if (prepared.fast_planes) blk: {
             if (!std.math.isFinite(luma_coordinates[0]) or !std.math.isFinite(luma_coordinates[1]) or
                 !std.math.isFinite(chroma_coordinates[0]) or !std.math.isFinite(chroma_coordinates[1])) return error.Bounds;
@@ -2240,8 +2239,18 @@ pub const Executor = struct {
         if (prepared.fast_srgb_transfers) {
             for (0..3) |lane| source[lane] = srgbTransferLut(source[lane], &SrgbTransferLut.to_srgb) orelse try linearToSrgbPrepared(source[lane]);
         } else for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
-        for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
-        std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+        return .{
+            @bitCast(canonicalFloat(@bitCast(source[0]))),
+            @bitCast(canonicalFloat(@bitCast(source[1]))),
+            @bitCast(canonicalFloat(@bitCast(source[2]))),
+            1,
+        };
+    }
+
+    fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.Bounds;
+        const color = try executeVp9ColorTransformPreparedCoordinatesColorResolved(prepared, luma_coordinates, chroma_coordinates);
+        for (color, 0..) |component, lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], @bitCast(component), .little);
     }
 
     fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
@@ -2619,6 +2628,13 @@ pub const Executor = struct {
     /// complete canonical VP9 program and descriptor ABI.
     pub fn executeVp9ColorTransformPreparedCoordinates(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, output: []u8) Error!void {
         try executeVp9ColorTransformPreparedCoordinatesResolved(prepared, luma_coordinates, chroma_coordinates, output);
+    }
+
+    /// Raster-side color form of the exact prepared VP9 transform. This
+    /// avoids materializing a temporary shader-output byte buffer when the
+    /// caller can consume the four fragment components immediately.
+    pub fn executeVp9ColorTransformPreparedCoordinatesColor(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32) Error![4]f32 {
+        return executeVp9ColorTransformPreparedCoordinatesColorResolved(prepared, luma_coordinates, chroma_coordinates);
     }
 
     /// Direct resolved-input compatibility form. It remains useful to tests

@@ -10420,18 +10420,21 @@ fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []co
 /// exact Chromium VP9 transform always produces alpha one, so that blend
 /// state has no destination contribution.  Other pipelines remain on the
 /// general bounded blend implementation above.
-fn profileWriteOpaqueColor(bytes: []u8, format: i32, output: []const u8) ?u32 {
-    if (bytes.len < 4 or output.len < 16) return null;
+fn profileWriteOpaqueColorComponents(bytes: []u8, format: i32, components: [4]f32) ?u32 {
+    if (bytes.len < 4) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
-    for (0..3) |channel| {
-        const component: f32 = @bitCast(std.mem.readInt(u32, output[channel * 4 ..][0..4], .little));
+    for (components, 0..) |component, channel| {
         if (!std.math.isFinite(component)) return null;
         bytes[storage_indices[channel]] = @intFromFloat(std.math.clamp(component, 0, 1) * 255.0);
     }
-    const alpha: f32 = @bitCast(std.mem.readInt(u32, output[12..16], .little));
-    if (!std.math.isFinite(alpha)) return null;
-    bytes[storage_indices[3]] = @intFromFloat(std.math.clamp(alpha, 0, 1) * 255.0);
     return 1;
+}
+
+fn profileWriteOpaqueColor(bytes: []u8, format: i32, output: []const u8) ?u32 {
+    if (output.len < 16) return null;
+    var components: [4]f32 = undefined;
+    for (&components, 0..) |*component, channel| component.* = @bitCast(std.mem.readInt(u32, output[channel * 4 ..][0..4], .little));
+    return profileWriteOpaqueColorComponents(bytes, format, components);
 }
 
 test "scalar profile color write mask preserves disabled channels" {
@@ -11148,9 +11151,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     c0[0] + horizontal * (c2[0] - c0[0]),
                     c0[1] + vertical * (c1[1] - c0[1]),
                 };
-                profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch break :blk false;
+                const fragment_color = profile.fragment.executeVp9ColorTransformPreparedCoordinatesColor(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates) catch break :blk false;
                 const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                if (profileWriteOpaqueColor(color_bytes.?[offset..][0..4], color.?.format, &fragment_output_bytes) == null) break :blk false;
+                if (profileWriteOpaqueColorComponents(color_bytes.?[offset..][0..4], color.?.format, fragment_color) == null) break :blk false;
             }
         }
         vp9_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
@@ -15448,9 +15451,13 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     const prepared = (try executor.prepareVp9ColorTransform(&uniform, luma_image, chroma_image)).?;
     try executor.executeVp9ColorTransformPrepared(prepared, &coordinates, &coordinates, &prepared_output);
     try executor.executeVp9ColorTransformPreparedCoordinates(prepared, .{ 0.625, 0.375 }, .{ 0.625, 0.375 }, &coordinate_output);
+    const coordinate_color = try executor.executeVp9ColorTransformPreparedCoordinatesColor(prepared, .{ 0.625, 0.375 }, .{ 0.625, 0.375 });
+    var coordinate_color_output = [_]u8{0} ** 16;
+    for (coordinate_color, 0..) |component, lane| std.mem.writeInt(u32, coordinate_color_output[lane * 4 ..][0..4], @bitCast(component), .little);
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_color_output);
 
     // A descriptor that is still valid for the shader but outside the narrow
     // linear-clamp plane contract must retain the ordinary sampler.  The
