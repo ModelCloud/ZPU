@@ -4220,7 +4220,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .two_axis_coverage, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
         else => false,
     };
 }
@@ -4231,7 +4231,10 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .analytic_coverage = .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 2 } }));
-    try std.testing.expect(fastPathTileParallelSafe(.{ .two_axis_coverage = .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    // Two-axis glyph coverage is fast per pixel but commonly issued in small,
+    // ordered text batches. On a two-core Mosaic runtime its worker handoff
+    // costs more than parallel bands save, so it remains serial by design.
+    try std.testing.expect(!fastPathTileParallelSafe(.{ .two_axis_coverage = .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
