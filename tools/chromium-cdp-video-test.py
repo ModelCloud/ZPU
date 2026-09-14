@@ -133,6 +133,11 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=8.0)
     parser.add_argument("--screenshot")
     parser.add_argument(
+        "--keep-existing-pages",
+        action="store_true",
+        help="leave pre-existing Chromium page targets open during the probe",
+    )
+    parser.add_argument(
         "--compositor",
         action="store_true",
         help="measure requestAnimationFrame delivery on a changing compositor page",
@@ -149,6 +154,19 @@ def main() -> None:
     devtools = DevTools(args.port)
     try:
         target = devtools.call("Target.createTarget", {"url": "about:blank"})
+        # Chromium starts a New Tab page even in headless mode. Keeping it
+        # alive turns a focused video measurement into a concurrent browser-UI
+        # compositor workload, so retire only other ordinary page targets once
+        # the probe target exists. Browser, service-worker, and DevTools
+        # targets are intentionally untouched.
+        if not args.keep_existing_pages:
+            targets = devtools.call("Target.getTargets").get("targetInfos", [])
+            for candidate in targets:
+                if (
+                    candidate.get("type") == "page"
+                    and candidate.get("targetId") != target["targetId"]
+                ):
+                    devtools.call("Target.closeTarget", {"targetId": candidate["targetId"]})
         attached = devtools.call(
             "Target.attachToTarget", {"targetId": target["targetId"], "flatten": True}
         )
