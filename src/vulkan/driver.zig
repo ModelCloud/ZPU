@@ -10337,17 +10337,6 @@ fn profileWriteOpaqueColor(bytes: []u8, format: i32, output: []const u8) ?u32 {
     return 1;
 }
 
-/// Store the already-quantized output of the exact opaque VP9 profile.  This
-/// intentionally accepts only the two color attachment formats supported by
-/// `profileWriteOpaqueColor`; the caller has already established the complete
-/// write mask and alpha-one blend equivalence before choosing this path.
-fn profileWriteOpaqueRgba8(bytes: []u8, format: i32, rgba: [4]u8) ?u32 {
-    if (bytes.len < 4) return null;
-    const storage_indices = colorStorageIndices(format) orelse return null;
-    for (storage_indices, 0..) |storage_index, channel| bytes[storage_index] = rgba[channel];
-    return 1;
-}
-
 test "scalar profile color write mask preserves disabled channels" {
     var bytes = [_]u8{ 11, 22, 33, 44 };
     var output = [_]u8{0} ** 16;
@@ -11183,17 +11172,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
                         const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
                         chroma_coordinates[lane] = (q0 * chroma_a + q1 * chroma_b + q2 * chroma_c) / denominator;
-                    }
-                    if (direct_vp9_opaque_write) {
-                        const rgba = profile.fragment.executeVp9ColorTransformPreparedCoordinatesRgba8(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 RGBA8 transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                        const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                        if (profileWriteOpaqueRgba8(color_bytes.?[offset..][0..4], color.?.format, rgba) == null) return;
-                        bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
-                        pixels_written += 1;
-                        continue;
                     }
                     profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
                         if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
@@ -14936,22 +14914,6 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_output);
-
-    // The opaque framebuffer form must be byte-identical to the established
-    // f32 Render-IR result followed by the ordinary opaque color writer.
-    // Exercise both attachment channel orders because the fast form is used
-    // directly by the native VP9 Mosaic path.
-    const direct_rgba8 = try executor.executeVp9ColorTransformPreparedCoordinatesRgba8(prepared, .{ 0.625, 0.375 }, .{ 0.625, 0.375 });
-    var expected_rgba = [_]u8{ 19, 29, 37, 43 };
-    var actual_rgba = expected_rgba;
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueColor(&expected_rgba, 37, &coordinate_output));
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueRgba8(&actual_rgba, 37, direct_rgba8));
-    try std.testing.expectEqualSlices(u8, &expected_rgba, &actual_rgba);
-    var expected_bgra = [_]u8{ 19, 29, 37, 43 };
-    var actual_bgra = expected_bgra;
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueColor(&expected_bgra, 44, &coordinate_output));
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueRgba8(&actual_bgra, 44, direct_rgba8));
-    try std.testing.expectEqualSlices(u8, &expected_bgra, &actual_bgra);
 
     // A descriptor that is still valid for the shader but outside the narrow
     // linear-clamp plane contract must retain the ordinary sampler.  The
