@@ -777,6 +777,11 @@ pub const RadialMaskPlan = struct {
 /// and descriptor resolution out of the per-pixel raster loop.
 pub const RadialMaskPrepared = struct {
     image: SampledImage,
+    /// The radial-mask shader consumes only sampled red. When the image is a
+    /// validated linear R8/RG8 clamp plane, reuse the exact prepared-plane
+    /// sampler shared with the VP9 path rather than repeat generic sampler
+    /// state and bounds validation for every covered fragment.
+    fast_red_plane: bool,
     matrix_column0: [2]f32,
     matrix_column2: [2]f32,
     transform: [2]f32,
@@ -2278,8 +2283,12 @@ pub const Executor = struct {
         sample_coordinates.bits[1] = @bitCast(canonicalF32(canonicalF32(prepared.matrix_column0[1] * radius) + prepared.matrix_column2[1]));
         var bias = Value{ .ty = .{ .scalar = .f32 } };
         bias.bits[0] = @bitCast(prepared.bias);
-        const sampled = try sample(prepared.image, sample_coordinates, bias);
-        const sampled_alpha: f32 = @bitCast(sampled.bits[0]);
+        const sampled_alpha = if (prepared.fast_red_plane)
+            sampleVp9PlanePrepared(prepared.image, @bitCast(sample_coordinates.bits[0]), @bitCast(sample_coordinates.bits[1]))[0]
+        else blk: {
+            const sampled = try sample(prepared.image, sample_coordinates, bias);
+            break :blk @as(f32, @bitCast(sampled.bits[0]));
+        };
         const second_y = canonicalF32(coordinate[1] + canonicalF32(coordinate[2] * coordinate[3]));
         const second_x = canonicalF32(prepared.second_center[0] - coordinate[0]);
         const second_delta_y = canonicalF32(prepared.second_center[1] - second_y);
@@ -2292,8 +2301,13 @@ pub const Executor = struct {
     fn prepareRadialMaskResolved(path: RadialMaskPlan, uniform: []const u8, image: SampledImage) Error!RadialMaskPrepared {
         if (uniform.len < 104) return error.Bounds;
         const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const fast_red_plane = blk: {
+            validateVp9Plane(image) catch break :blk false;
+            break :blk true;
+        };
         return .{
             .image = image,
+            .fast_red_plane = fast_red_plane,
             .matrix_column0 = .{ try uniformF32(uniform, 16), try uniformF32(uniform, 20) },
             .matrix_column2 = .{ try uniformF32(uniform, 48), try uniformF32(uniform, 52) },
             .transform = .{ try uniformF32(uniform, 96), try uniformF32(uniform, 100) },
@@ -4657,6 +4671,33 @@ test "prepared Chromium radial gradient preserves the resolved pixel" {
     const prepared = try Executor.prepareRadialGradientResolved(&uniform, image);
     try Executor.executeRadialGradientPreparedResolved(prepared, &circle, &coordinates, &frag_coord, &prepared_output);
     try std.testing.expectEqualSlices(u8, &reference, &prepared_output);
+}
+
+test "prepared Chromium radial mask red plane preserves generic sampling" {
+    const pixels = [_]u8{ 12, 91, 173, 249 };
+    const image = SampledImage{ .pixels = &pixels, .width = 2, .height = 2, .row_stride = 2, .bytes_per_texel = 1, .format = .r8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var generic = RadialMaskPrepared{
+        .image = image,
+        .fast_red_plane = false,
+        .matrix_column0 = .{ 0.75, 0.25 },
+        .matrix_column2 = .{ 0.1, 0.2 },
+        .transform = .{ 0.05, 0.8 },
+        .first_center = .{ 0.2, 0.3 },
+        .first_inset = 0.1,
+        .first_scale = 0.6,
+        .second_center = .{ 0.4, 0.6 },
+        .second_edge = 0.9,
+        .second_scale = 0.5,
+        .bias = -0.475,
+    };
+    const color = [_]f32{ 0.2, 0.5, 0.8, 1 };
+    const coordinates = [_]f32{ 0.35, 0.6, 0.15, 0.4 };
+    var reference: [16]u8 = undefined;
+    var prepared: [16]u8 = undefined;
+    try Executor.executeRadialMaskPreparedCoordinatesResolved(generic, color, coordinates, &reference);
+    generic.fast_red_plane = true;
+    try Executor.executeRadialMaskPreparedCoordinatesResolved(generic, color, coordinates, &prepared);
+    try std.testing.expectEqualSlices(u8, &reference, &prepared);
 }
 
 test "forward branches execute local stores and select phi predecessors" {
