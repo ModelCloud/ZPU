@@ -10390,19 +10390,6 @@ fn colorStorageIndices(format: i32) ?[4]usize {
     };
 }
 
-/// A positive-zero premultiplied source is an exact no-op for Chromium's
-/// source-over state.  Keep this deliberately narrower than the algebraic
-/// identity: other blend states may use source zero in their factors or
-/// operations, and negative zero must still flow through the normal Vulkan
-/// conversion path.
-fn profileZeroSourceLeavesDestinationUnchanged(source: [4]f32, blend: ProfileBlendState) bool {
-    if (blend.enable == 0 or
-        blend.src_color_factor != 1 or blend.dst_color_factor != 7 or blend.color_op != 0 or
-        blend.src_alpha_factor != 1 or blend.dst_alpha_factor != 7 or blend.alpha_op != 0) return false;
-    for (source) |value| if (@as(u32, @bitCast(value)) != 0) return false;
-    return true;
-}
-
 fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
@@ -10411,7 +10398,6 @@ fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, 
         if (!std.math.isFinite(value.*)) return null;
         value.* = std.math.clamp(value.*, 0, 1);
     }
-    if (profileZeroSourceLeavesDestinationUnchanged(source, blend)) return 1;
     var destination: [4]f32 = undefined;
     for (&destination, 0..) |*value, channel| value.* = @as(f32, @floatFromInt(bytes[storage_indices[channel]])) / 255.0;
     var result = source;
@@ -10536,22 +10522,6 @@ test "scalar profile color blending uses source and destination factors" {
         bytes = .{ 0, 0, 0, 255 };
         try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0xf, blend));
     }
-}
-
-test "scalar profile source-over skips only positive-zero premultiplied fragments" {
-    const source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
-    const source_zero = [_]f32{ 0, 0, 0, 0 };
-    try std.testing.expect(profileZeroSourceLeavesDestinationUnchanged(source_zero, source_over));
-    var bytes = [_]u8{ 11, 22, 33, 44 };
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteColorComponents(&bytes, 44, source_zero, 0xf, source_over));
-    try std.testing.expectEqual([_]u8{ 11, 22, 33, 44 }, bytes);
-
-    const non_premultiplied = [_]f32{ 1, 0, 0, 0 };
-    try std.testing.expect(!profileZeroSourceLeavesDestinationUnchanged(non_premultiplied, source_over));
-    const negative_zero = [_]f32{ @bitCast(@as(u32, 0x80000000)), 0, 0, 0 };
-    try std.testing.expect(!profileZeroSourceLeavesDestinationUnchanged(negative_zero, source_over));
-    const non_source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 6, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
-    try std.testing.expect(!profileZeroSourceLeavesDestinationUnchanged(source_zero, non_source_over));
 }
 
 fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
