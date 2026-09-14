@@ -12253,16 +12253,6 @@ fn executeMosaicSingleRadialGradientDraw(command: *const Command, query_context:
 /// when their actual raster bounds are only a few pixels. Execute one draw
 /// directly instead: it has identical raster ordering and clip semantics,
 /// but establishes its vertices once and scans only its natural bounds.
-const single_texture_copy_mosaic_min_pixels: u64 = 320 * 256;
-
-/// A full-frame exact texture copy has no mutable fragment state, feedback,
-/// depth, or query work after the normal parallel-safety validation. At video
-/// scale its per-pixel sampling outweighs a two-lane handoff; small Skia UI
-/// quads retain the direct path so they do not pay a framebuffer-sized scan.
-fn singleTextureCopyMosaicTargetEligible(width: u32, height: u32) bool {
-    return @as(u64, width) * height >= single_texture_copy_mosaic_min_pixels;
-}
-
 fn profileMosaicBatchEligible(batch_count: usize, width: u32, height: u32) bool {
     _ = width;
     _ = height;
@@ -12530,26 +12520,6 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             }
             if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
                 std.debug.print("ZPU Mosaic VP9 coverage profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
-            cursor.* = candidate;
-            return 1;
-        }
-        // Chromium's exact unmodulated texture-copy profile is also
-        // read-only and per-pixel after descriptor preparation. Admit only a
-        // video-sized target to disjoint bands; small compositor quads remain
-        // direct, preserving their lower setup cost.
-        const single_texture_copy = switch (first.pipeline.execution_abi) {
-            .profile_v1_scalar_graphics => |*profile| profile.fragment.textureCopyPlan() != null,
-            else => false,
-        };
-        if (single_texture_copy and singleTextureCopyMosaicTargetEligible(color_image.width, color_image.height) and executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context)) {
-            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
-            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
-            if (renderDiagnosticsEnabled()) {
-                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
-                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic texture-copy profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
-            }
-            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
-                std.debug.print("ZPU Mosaic texture-copy profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
             cursor.* = candidate;
             return 1;
         }
@@ -32236,13 +32206,6 @@ test "Mosaic batches only ordered groups of profile draws" {
     try std.testing.expect(!profileMosaicBatchEligible(1, 256, 256));
     try std.testing.expect(!profileMosaicBatchEligible(1, 780, 580));
     try std.testing.expect(profileMosaicBatchEligible(2, 32, 32));
-}
-
-test "single texture-copy Mosaic admission keeps small UI quads direct" {
-    try std.testing.expect(!singleTextureCopyMosaicTargetEligible(319, 256));
-    try std.testing.expect(!singleTextureCopyMosaicTargetEligible(320, 255));
-    try std.testing.expect(singleTextureCopyMosaicTargetEligible(320, 256));
-    try std.testing.expect(singleTextureCopyMosaicTargetEligible(640, 272));
 }
 
 test "pinned Vulkan 1.4 core command inventory resolves through the ICD dispatch" {
