@@ -1875,6 +1875,7 @@ var render_diagnostic_pipeline_creations = std.atomic.Value(u64).init(0);
 var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_modulate_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_texture_copy_quad_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_coverage_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_radial_gradient_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
@@ -2127,13 +2128,14 @@ fn emitRenderDiagnosticSession(presents: u64) void {
     const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
     if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
-        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_sample_coverage_draws={d} direct_radial_gradient_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
+        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_texture_copy_quad_draws={d} direct_sample_coverage_draws={d} direct_radial_gradient_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
         .{
             renderDiagnosticSessionId(),
             render_diagnostic_pipeline_creations.load(.acquire),
             render_diagnostic_recorded_draws.load(.acquire),
             render_diagnostic_executed_profile_draws.load(.acquire),
             render_diagnostic_direct_sample_modulate_draws.load(.acquire),
+            render_diagnostic_direct_texture_copy_quad_draws.load(.acquire),
             render_diagnostic_direct_sample_coverage_draws.load(.acquire),
             render_diagnostic_direct_radial_gradient_draws.load(.acquire),
             render_diagnostic_executed_transitions.load(.acquire),
@@ -11356,6 +11358,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         break :blk true;
     };
     if (direct_texture_copy_affine_quad) {
+        if (renderDiagnosticsEnabled()) _ = render_diagnostic_direct_texture_copy_quad_draws.fetchAdd(1, .monotonic);
         if (!publish_metadata) return;
         if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(texture_copy_quad_pixels, .monotonic);
         if (color) |color_image| {
