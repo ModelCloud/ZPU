@@ -10916,13 +10916,15 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const inverse_area = 1.0 / area;
         // This is deliberately stricter than merely having a prepared VP9
         // transform. The direct coordinate form is valid only for the exact
-        // two non-flat vec2 varyings with no fragment-coordinate, derivative,
-        // or front-facing input. Any other shader keeps the ordinary
+        // two non-flat vec2 varyings with no fragment-coordinate or
+        // derivatives. The exact VP9 identity may declare FrontFacing, but
+        // its already-validated direct transform does not consume that input.
+        // Any other shader keeps the ordinary
         // per-pixel binding and interpolation path below.
         const direct_vp9_coordinates = vp9_color_transform_prepared != null and
             vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and
             profile.varying_count == 2 and !profile.fragment_needs_derivatives and
-            profile.fragment_frag_coord == null and profile.fragment_front_facing == null and
+            profile.fragment_frag_coord == null and
             profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
             profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
