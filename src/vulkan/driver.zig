@@ -10251,6 +10251,27 @@ fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []co
     return 1;
 }
 
+/// Write an opaque RGBA fragment without loading destination color.  This is
+/// equivalent to `profileWriteColor` only when the caller has established a
+/// complete write mask and either blending is disabled or the fixed-function
+/// state is `ONE, ONE_MINUS_SRC_ALPHA, ADD` for both color and alpha.  The
+/// exact Chromium VP9 transform always produces alpha one, so that blend
+/// state has no destination contribution.  Other pipelines remain on the
+/// general bounded blend implementation above.
+fn profileWriteOpaqueColor(bytes: []u8, format: i32, output: []const u8) ?u32 {
+    if (bytes.len < 4 or output.len < 16) return null;
+    const storage_indices = colorStorageIndices(format) orelse return null;
+    for (0..3) |channel| {
+        const component: f32 = @bitCast(std.mem.readInt(u32, output[channel * 4 ..][0..4], .little));
+        if (!std.math.isFinite(component)) return null;
+        bytes[storage_indices[channel]] = @intFromFloat(std.math.clamp(component, 0, 1) * 255.0);
+    }
+    const alpha: f32 = @bitCast(std.mem.readInt(u32, output[12..16], .little));
+    if (!std.math.isFinite(alpha)) return null;
+    bytes[storage_indices[3]] = @intFromFloat(std.math.clamp(alpha, 0, 1) * 255.0);
+    return 1;
+}
+
 test "scalar profile color write mask preserves disabled channels" {
     var bytes = [_]u8{ 11, 22, 33, 44 };
     var output = [_]u8{0} ** 16;
@@ -10274,6 +10295,21 @@ test "scalar profile color writes preserve RGBA and BGRA storage order" {
     var bgra = [_]u8{0} ** 4;
     try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, 44, false, &output, 0xf, .{}));
     try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
+}
+
+test "opaque profile color write matches disabled and alpha-one source blending" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 0.75, 0.5, 0.25, 1 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    for ([_]i32{ 37, 44 }) |format| {
+        var opaque_bytes = [_]u8{ 11, 22, 33, 44 };
+        var disabled = opaque_bytes;
+        var blended = opaque_bytes;
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueColor(&opaque_bytes, format, &output));
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&disabled, format, false, &output, 0xf, .{}));
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&blended, format, false, &output, 0xf, .{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 }));
+        try std.testing.expectEqualSlices(u8, &disabled, &opaque_bytes);
+        try std.testing.expectEqualSlices(u8, &blended, &opaque_bytes);
+    }
 }
 
 test "scalar profile color writes preserve R8 red storage" {
@@ -10927,6 +10963,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             profile.fragment_frag_coord == null and
             profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
             profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
+        // The VP9 transform's canonical IR unconditionally writes alpha one.
+        // Therefore Chromium's normal source-over state is provably opaque,
+        // provided every component is written and its fixed factors are the
+        // exact alpha-one source-over combination.  Keep all other blend
+        // states on the general path: a similar-looking configuration is not
+        // sufficient to skip destination reads.
+        const direct_vp9_opaque_write = direct_vp9_coordinates and color != null and !profile.fragment_bool and
+            op.pipeline.color_write_mask == 0xf and
+            (op.pipeline.color_blend_enable == 0 or
+                (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
+                    op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0));
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
@@ -11189,16 +11236,22 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
                 if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
             }
-            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, .{
-                .enable = op.pipeline.color_blend_enable,
-                .src_color_factor = op.pipeline.src_color_blend_factor,
-                .dst_color_factor = op.pipeline.dst_color_blend_factor,
-                .color_op = op.pipeline.color_blend_op,
-                .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
-                .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
-                .alpha_op = op.pipeline.alpha_blend_op,
-                .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
-            }) == null) return;
+            if (color_bytes) |color_storage| {
+                const wrote = if (direct_vp9_opaque_write)
+                    profileWriteOpaqueColor(color_storage[offset..][0..4], color.?.format, &fragment_output_bytes)
+                else
+                    profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, .{
+                        .enable = op.pipeline.color_blend_enable,
+                        .src_color_factor = op.pipeline.src_color_blend_factor,
+                        .dst_color_factor = op.pipeline.dst_color_blend_factor,
+                        .color_op = op.pipeline.color_blend_op,
+                        .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+                        .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+                        .alpha_op = op.pipeline.alpha_blend_op,
+                        .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
+                    });
+                if (wrote == null) return;
+            }
             if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
             bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
             pixels_written += 1;
