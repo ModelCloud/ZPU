@@ -11970,12 +11970,15 @@ fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExec
 }
 
 /// Mosaic is worthwhile for a group of profile draws that share a target.
-/// A one-command "batch" is normally direct: sparse Skia UI quads should not
-/// pay a framebuffer-sized tile walk. The exception is a target spanning
-/// multiple tiles, provided its exact fragment profile proves tile safety.
-/// This is needed for Chromium's large VP9 scalar-coverage composite.
+/// A one-command "batch" repeats that draw's complete vertex setup for every
+/// target tile; sparse Skia UI quads then pay a framebuffer-sized cost even
+/// when their actual raster bounds are only a few pixels. Execute one draw
+/// directly instead: it has identical raster ordering and clip semantics,
+/// but establishes its vertices once and scans only its natural bounds.
 fn profileMosaicBatchEligible(batch_count: usize, width: u32, height: u32) bool {
-    return batch_count > 1 or (batch_count == 1 and (width > profile_mosaic_tile_size or height > profile_mosaic_tile_size));
+    _ = width;
+    _ = height;
+    return batch_count > 1;
 }
 
 fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageObj } {
@@ -12028,7 +12031,7 @@ test "profile Mosaic tile clips cover a 640 by 720 target exactly once" {
 /// stateless after setup, and these checks rule out all cross-tile state:
 /// queries, depth, input attachments, and self-sampling feedback.
 fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
-    if (batch_count == 0 or query_context.pool != null) return false;
+    if (batch_count < 2 or query_context.pool != null) return false;
     var cursor = start;
     for (0..batch_count) |_| {
         const raw = cursor.current() orelse return false;
@@ -31755,7 +31758,7 @@ test "Mosaic batches only ordered groups of profile draws" {
     try std.testing.expect(!profileMosaicBatchEligible(0, 1920, 1080));
     try std.testing.expect(!profileMosaicBatchEligible(1, 255, 256));
     try std.testing.expect(!profileMosaicBatchEligible(1, 256, 256));
-    try std.testing.expect(profileMosaicBatchEligible(1, 780, 580));
+    try std.testing.expect(!profileMosaicBatchEligible(1, 780, 580));
     try std.testing.expect(profileMosaicBatchEligible(2, 32, 32));
 }
 

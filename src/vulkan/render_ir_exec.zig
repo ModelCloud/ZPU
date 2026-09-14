@@ -1412,7 +1412,7 @@ pub const Executor = struct {
     /// region. Every other profile remains serial by construction.
     pub fn tileParallelSafe(self: *const Executor) bool {
         return switch (self.fast_path orelse return false) {
-            .sample_modulate, .texture_copy, .sample_coverage => true,
+            .sample_modulate, .texture_copy => true,
             else => false,
         };
     }
