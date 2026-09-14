@@ -12280,19 +12280,29 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     // stateless sampled profiles are the exception: execute their complete
     // ordered draw list independently in each disjoint tile.
     if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
-    const parallel_start = cursor.*;
-    const parallel_operation_start = frame_pacing.monotonicNs();
-    if (executeMosaicTileParallelProfileBatch(parallel_start, batch_count, color_image, query_context)) {
+    // A later profile in an ordered target run can require serial execution
+    // without invalidating an earlier stateless prefix. Execute the longest
+    // safe prefix through disjoint Mosaic tiles, then resume the stream at
+    // the first serial command. Each tile still evaluates that prefix in
+    // command order, and no admitted command reads the target, so this is
+    // equivalent to whole-surface ordered execution.
+    var parallel_count = batch_count;
+    while (parallel_count >= 2) : (parallel_count -= 1) {
+        const parallel_start = cursor.*;
+        const parallel_operation_start = frame_pacing.monotonicNs();
+        if (!executeMosaicTileParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)) continue;
         color_image.last_draw_ns = frame_pacing.monotonicNs() - parallel_operation_start;
         if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
         if (renderDiagnosticsEnabled()) {
             const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
-            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
+            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, parallel_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
         }
         if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
-            std.debug.print("ZPU Mosaic parallel profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns });
-        cursor.* = candidate;
-        return batch_count;
+            std.debug.print("ZPU Mosaic parallel profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ color_image.width, color_image.height, parallel_count, color_image.last_draw_ns });
+        var parallel_end = cursor.*;
+        for (0..parallel_count) |_| parallel_end.advance();
+        cursor.* = parallel_end;
+        return parallel_count;
     }
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
