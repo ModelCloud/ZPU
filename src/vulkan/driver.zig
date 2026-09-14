@@ -2018,6 +2018,16 @@ fn profileTimingDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+/// Keep profile timing output bounded by default, while allowing a focused
+/// Chromium investigation to retain enough records to outlive GPU-process
+/// startup. This is queried only after diagnostics have been enabled, so the
+/// normal render path does not acquire environment or parsing overhead.
+fn profileTimingDiagnosticLimit(default_limit: u32) u32 {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_TIMING_LIMIT") orelse return default_limit;
+    const parsed = std.fmt.parseInt(u32, std.mem.span(raw), 10) catch return default_limit;
+    return if (parsed == 0) default_limit else @min(parsed, 65_536);
+}
+
 /// Cache this process-wide diagnostic choice on first use. Chromium supplies
 /// its environment before it loads the ICD, and caching avoids a getenv for
 /// every accepted command in the normal disabled configuration.
@@ -12241,7 +12251,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                 const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
                 if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic VP9 profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
             }
-            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
                 std.debug.print("ZPU Mosaic VP9 profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
             cursor.* = candidate;
             return 1;
@@ -12253,7 +12263,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                 const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
                 if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic radial-gradient profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
             }
-            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
                 std.debug.print("ZPU Mosaic radial-gradient profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
             cursor.* = candidate;
             return 1;
@@ -12273,7 +12283,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
             if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel profile batch seq={d} commands={d} target={x} {d}x{d} tile={d}\n", .{ diagnostic_batch, batch_count, @intFromPtr(color_image), color_image.width, color_image.height, profile_mosaic_tile_size });
         }
-        if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+        if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
             std.debug.print("ZPU Mosaic parallel profile timing target={d}x{d} commands={d} total_ns={d}\n", .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns });
         cursor.* = candidate;
         return batch_count;
@@ -12326,7 +12336,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     // A Chromium startup can consume several samples before animated content
     // begins. Keep the opt-in window long enough to include steady-state
     // video composition while still bounding log volume.
-    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128) {
+    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128)) {
         std.debug.print(
             "ZPU Mosaic profile timing target={d}x{d} commands={d} total_ns={d}",
             .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
@@ -12599,7 +12609,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     var layer: u32 = 0;
                     while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null, true);
                 }
-                if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < 512) {
+                if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(512)) {
                     const target = color orelse depth;
                     std.debug.print(
                         "ZPU direct profile timing target={d}x{d} topology={d} vertices={d} fragment_path={s} fragment_ir={x} total_ns={d}\n",
