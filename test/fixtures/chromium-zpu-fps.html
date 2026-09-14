@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ZPU Chromium compositor FPS probe</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #101820; }
+  #dot { position: absolute; width: 84px; height: 84px; border-radius: 50%; background: #68d6ff; box-shadow: 0 0 28px #68d6ffaa; }
+  #label { position: absolute; left: 24px; top: 24px; color: white; font: 18px sans-serif; }
+</style>
+<div id="dot"></div><div id="label">Frame 0</div>
+<script>
+  const dot = document.querySelector('#dot');
+  const label = document.querySelector('#label');
+  let frame = 0;
+  function tick(now) {
+    frame++;
+    const x = 260 + Math.sin(now / 360) * 180;
+    const y = 180 + Math.cos(now / 490) * 120;
+    dot.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    if ((frame % 30) === 0) label.textContent = `Frame ${frame}`;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+</script>

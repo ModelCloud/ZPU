@@ -1839,6 +1839,10 @@ var render_diagnostic_profile_timing_batches = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_timing_direct_draws = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_state = std.atomic.Value(u32).init(0);
 var render_diagnostic_vp9_profile_ir_dump = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_geometry = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_affine_quads = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_affine_candidates = std.atomic.Value(u32).init(0);
+var render_diagnostic_vp9_affine_rejections = std.atomic.Value(u32).init(0);
 var render_diagnostic_profile_target_ir_dump = std.atomic.Value(u32).init(0);
 // Command-family timing is intentionally independent of the verbose render
 // diagnostic.  It is a bounded, opt-in attribution tool for Chromium traces:
@@ -1871,6 +1875,8 @@ var render_diagnostic_pipeline_creations = std.atomic.Value(u64).init(0);
 var render_diagnostic_recorded_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_profile_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_modulate_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_direct_texture_copy_quad_draws = std.atomic.Value(u64).init(0);
+var render_diagnostic_texture_copy_geometry = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_sample_coverage_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_direct_radial_gradient_draws = std.atomic.Value(u64).init(0);
 var render_diagnostic_executed_transitions = std.atomic.Value(u64).init(0);
@@ -1897,6 +1903,7 @@ const TraceRecord = extern struct {
 const max_trace_frames = 7_200;
 var trace_records: [max_trace_frames]TraceRecord = undefined;
 var trace_count: usize = 0;
+var trace_skipped: usize = 0;
 var trace_written = false;
 
 extern fn open(path: [*:0]const u8, flags: c_int, mode: c_uint) c_int;
@@ -1906,6 +1913,15 @@ extern fn close(fd: c_int) c_int;
 fn traceLimit() usize {
     const raw = std.c.getenv("ZPU_TRACE_FRAMES") orelse return 0;
     return @min(std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0, max_trace_frames);
+}
+
+/// Ignore a bounded number of early presents before retaining a frame trace.
+/// Chromium's process startup is deliberately noisy; this lets an operator
+/// capture a steady-state page or video interval without allocating or
+/// continually writing from the ICD.
+fn traceSkip() usize {
+    const raw = std.c.getenv("ZPU_TRACE_SKIP_FRAMES") orelse return 0;
+    return std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 0;
 }
 
 fn failureDiagnosticsEnabled() bool {
@@ -1988,6 +2004,10 @@ fn decodeChromiumVp9ColorTransformInline() [9_648]u8 {
 }
 
 fn profileShaderCaptureCandidate(program: *const render_ir.Program) bool {
+    // A full canonical-IR selector makes capture reproducible for a compact
+    // late hot profile. Without it, the bounded generic large-program window
+    // is often consumed during Chromium startup before the target is linked.
+    if (std.c.getenv("ZPU_DIAGNOSE_PROFILE_SHADER_IR_DIGEST")) |raw| return profileIrDigestSelectorMatches(std.mem.span(raw), &program.identity.digest);
     return program.instructions.len >= 200 or std.mem.eql(u8, &program.identity.digest, &chromium_vp9_composite_fragment_identity);
 }
 
@@ -2012,6 +2032,16 @@ test "VP9 shader capture is identity-gated below the generic large-program thres
 fn profileTimingDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_TIMING") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+/// Keep profile timing output bounded by default, while allowing a focused
+/// Chromium investigation to retain enough records to outlive GPU-process
+/// startup. This is queried only after diagnostics have been enabled, so the
+/// normal render path does not acquire environment or parsing overhead.
+fn profileTimingDiagnosticLimit(default_limit: u32) u32 {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PROFILE_TIMING_LIMIT") orelse return default_limit;
+    const parsed = std.fmt.parseInt(u32, std.mem.span(raw), 10) catch return default_limit;
+    return if (parsed == 0) default_limit else @min(parsed, 65_536);
 }
 
 /// Cache this process-wide diagnostic choice on first use. Chromium supplies
@@ -2099,13 +2129,14 @@ fn emitRenderDiagnosticSession(presents: u64) void {
     const sequence = render_diagnostic_session_summaries.fetchAdd(1, .monotonic);
     if (!shouldEmitRenderDiagnosticSession(sequence)) return;
     std.debug.print(
-        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_sample_coverage_draws={d} direct_radial_gradient_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
+        "ZPU native session id={d} graphics_pipelines={d} recorded_draws={d} profile_draws={d} direct_sample_modulate_draws={d} direct_texture_copy_quad_draws={d} direct_sample_coverage_draws={d} direct_radial_gradient_draws={d} image_transitions={d} queue_submissions={d} mosaic_batches={d} presents={d}\n",
         .{
             renderDiagnosticSessionId(),
             render_diagnostic_pipeline_creations.load(.acquire),
             render_diagnostic_recorded_draws.load(.acquire),
             render_diagnostic_executed_profile_draws.load(.acquire),
             render_diagnostic_direct_sample_modulate_draws.load(.acquire),
+            render_diagnostic_direct_texture_copy_quad_draws.load(.acquire),
             render_diagnostic_direct_sample_coverage_draws.load(.acquire),
             render_diagnostic_direct_radial_gradient_draws.load(.acquire),
             render_diagnostic_executed_transitions.load(.acquire),
@@ -2140,6 +2171,10 @@ fn objectPoolExhausted(comptime object_name: []const u8) Result {
 fn recordTrace(record_value: TraceRecord) void {
     const limit = traceLimit();
     if (limit == 0 or trace_written or trace_count >= limit) return;
+    if (trace_skipped < traceSkip()) {
+        trace_skipped += 1;
+        return;
+    }
     trace_records[trace_count] = record_value;
     trace_count += 1;
     if (trace_count != limit) return;
@@ -10042,6 +10077,25 @@ fn executeComputeDispatch(op: DispatchCommand) void {
     }
 }
 const ProfileScreenVertex = struct { x: f32, y: f32, z: f32, w: f32 };
+const ProfileRowBounds = struct { min_x: i32, max_x: i32 };
+const ProfilePerspectiveWeights = struct { q0: f32, q1: f32, q2: f32, denominator: f32 };
+
+/// Resolve the perspective weights used by the scalar profile rasterizer.
+/// Chromium's full-screen compositor and video quads have an exactly-one
+/// clip-space W. Preserve the normal denominator and f32 operation order,
+/// but avoid issuing three data-dependent divisions by one for that verified
+/// affine case. Any other W follows the ordinary perspective form unchanged.
+fn profilePerspectiveWeights(vertices: [3]ProfileScreenVertex, b0: f32, b1: f32, b2: f32) ?ProfilePerspectiveWeights {
+    const affine = @as(u32, @bitCast(vertices[0].w)) == 0x3f80_0000 and
+        @as(u32, @bitCast(vertices[1].w)) == 0x3f80_0000 and
+        @as(u32, @bitCast(vertices[2].w)) == 0x3f80_0000;
+    const q0 = if (affine) b0 else b0 / vertices[0].w;
+    const q1 = if (affine) b1 else b1 / vertices[1].w;
+    const q2 = if (affine) b2 else b2 / vertices[2].w;
+    const denominator = q0 + q1 + q2;
+    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) return null;
+    return .{ .q0 = q0, .q1 = q1, .q2 = q2, .denominator = denominator };
+}
 
 fn diagnosticDarkPixelCount(image: *ImageObj) usize {
     var count: usize = 0;
@@ -10119,6 +10173,69 @@ fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
 
+/// Return a conservative horizontal bound for one right triangle whose two
+/// non-diagonal edges are axis-aligned.  Chromium's VP9 compositor emits two
+/// such triangles for each video quad.  The caller still runs the ordinary
+/// edge test, so a rounding-boundary mistake can only retain extra work; it
+/// cannot add coverage.
+fn profileAxisAlignedTriangleRowBounds(vertices: [3]ProfileScreenVertex, pixel_y: f32, minimum: i32, maximum: i32) ?ProfileRowBounds {
+    var diagonal: ?struct { a: usize, b: usize } = null;
+    for (0..3) |a| for (a + 1..3) |b| {
+        if (vertices[a].x != vertices[b].x and vertices[a].y != vertices[b].y) {
+            if (diagonal != null) return null;
+            diagonal = .{ .a = a, .b = b };
+        }
+    };
+    const edge = diagonal orelse return null;
+    const third = 3 - edge.a - edge.b;
+    const dy = vertices[edge.b].y - vertices[edge.a].y;
+    if (!std.math.isFinite(dy) or @abs(dy) < 0.00001) return null;
+    const line_x = vertices[edge.a].x + (pixel_y - vertices[edge.a].y) * (vertices[edge.b].x - vertices[edge.a].x) / dy;
+    if (!std.math.isFinite(line_x)) return null;
+    const centroid_y = (vertices[0].y + vertices[1].y + vertices[2].y) / 3;
+    const centroid_line_x = vertices[edge.a].x + (centroid_y - vertices[edge.a].y) * (vertices[edge.b].x - vertices[edge.a].x) / dy;
+    const left_side = vertices[third].x < centroid_line_x;
+    if (left_side) {
+        if (@ceil(line_x) < @as(f32, @floatFromInt(std.math.minInt(i32))) or @ceil(line_x) > @as(f32, @floatFromInt(std.math.maxInt(i32)))) return null;
+        const capped: i32 = @intFromFloat(@ceil(line_x));
+        return .{ .min_x = minimum, .max_x = @min(maximum, std.math.add(i32, capped, 1) catch maximum) };
+    }
+    if (@floor(line_x) < @as(f32, @floatFromInt(std.math.minInt(i32))) or @floor(line_x) > @as(f32, @floatFromInt(std.math.maxInt(i32)))) return null;
+    const floored: i32 = @intFromFloat(@floor(line_x));
+    return .{ .min_x = @max(minimum, std.math.sub(i32, floored, 1) catch minimum), .max_x = maximum };
+}
+
+test "axis-aligned profile row bounds conservatively cover Chromium VP9 triangles" {
+    const first = [_]ProfileScreenVertex{
+        .{ .x = 102.00001, .y = 87, .z = 0, .w = 1 },
+        .{ .x = 102.00001, .y = 272, .z = 0, .w = 1 },
+        .{ .x = 537, .y = 87, .z = 0, .w = 1 },
+    };
+    const second = [_]ProfileScreenVertex{
+        .{ .x = 537, .y = 87, .z = 0, .w = 1 },
+        .{ .x = 102.00001, .y = 272, .z = 0, .w = 1 },
+        .{ .x = 537, .y = 272, .z = 0, .w = 1 },
+    };
+    for ([_][3]ProfileScreenVertex{ first, second }) |triangle| {
+        const area = profileEdge(triangle[0].x, triangle[0].y, triangle[1].x, triangle[1].y, triangle[2].x, triangle[2].y);
+        const inverse_area = 1 / area;
+        for (87..272) |y| {
+            const bounds = profileAxisAlignedTriangleRowBounds(triangle, @as(f32, @floatFromInt(y)) + 0.5, 102, 537) orelse unreachable;
+            for (102..537) |x| {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const py = @as(f32, @floatFromInt(y)) + 0.5;
+                const b0 = profileEdge(triangle[1].x, triangle[1].y, triangle[2].x, triangle[2].y, px, py) * inverse_area;
+                const b1 = profileEdge(triangle[2].x, triangle[2].y, triangle[0].x, triangle[0].y, px, py) * inverse_area;
+                const b2 = profileEdge(triangle[0].x, triangle[0].y, triangle[1].x, triangle[1].y, px, py) * inverse_area;
+                if (b0 >= 0 and b1 >= 0 and b2 >= 0) {
+                    try std.testing.expect(@as(i32, @intCast(x)) >= bounds.min_x);
+                    try std.testing.expect(@as(i32, @intCast(x)) < bounds.max_x);
+                }
+            }
+        }
+    }
+}
+
 fn profileReadClip(bytes: []const u8) ?[4]f32 {
     if (bytes.len < 16) return null;
     var result: [4]f32 = undefined;
@@ -10158,6 +10275,68 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
         else => return null,
     }
     return storage[0..input.byte_size];
+}
+
+const ProfileVertexEvaluation = struct {
+    screen: ProfileScreenVertex,
+    varyings: [8][16]u8,
+};
+
+/// Run one bounded profile vertex exactly as the scalar triangle path does,
+/// but retain its screen-space position and declared varying outputs in a
+/// compact value.  Narrow quad specializations use this only to validate all
+/// four vertices before replacing the triangle scan conversion; all ordinary
+/// draws continue through the original per-triangle setup below.
+fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, uniform_bindings: []const render_ir_exec.Binding) ?ProfileVertexEvaluation {
+    var bindings: [21]render_ir_exec.Binding = undefined;
+    var binding_storage: [16][16]u8 = undefined;
+    var output_storage: [16][16]u8 = undefined;
+    var outputs: [16]render_ir_exec.Output = undefined;
+    for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| outputs[slot] = .{ .interface = interface, .bytes = &output_storage[slot] };
+    var binding_count: usize = 0;
+    for (profile.inputs[0..profile.input_count]) |input| {
+        const buffer = op.vertex_bindings.buffers[input.binding] orelse return null;
+        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
+        const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return null) else std.math.add(u64, op.base_vertex, emitted) catch return null;
+        const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
+        const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return null) catch return null;
+        const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return null;
+        const source = bufferBytes(buffer);
+        if (start > source.len or source.len - start < input.source_byte_size or binding_count == bindings.len) return null;
+        const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &binding_storage[binding_count]) orelse return null;
+        bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
+        binding_count += 1;
+    }
+    for (uniform_bindings) |uniform| {
+        if (binding_count == bindings.len) return null;
+        bindings[binding_count] = uniform;
+        binding_count += 1;
+    }
+    profile.vertex.execute(bindings[0..binding_count], outputs[0..profile.vertex_output_count]) catch return null;
+    const clip = profileReadClip(&output_storage[profile.vertex_position_slot]) orelse return null;
+    if (@abs(clip[3]) < 0.000001) return null;
+    const inverse_w = 1.0 / clip[3];
+    const ndc_x = clip[0] * inverse_w;
+    const ndc_y = clip[1] * inverse_w;
+    const ndc_z = clip[2] * inverse_w;
+    const screen = ProfileScreenVertex{
+        .x = op.viewport.x + (ndc_x * 0.5 + 0.5) * op.viewport.width,
+        .y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height,
+        .z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth),
+        .w = clip[3],
+    };
+    if (!std.math.isFinite(screen.x) or !std.math.isFinite(screen.y) or !std.math.isFinite(screen.z)) return null;
+    var result = ProfileVertexEvaluation{ .screen = screen, .varyings = undefined };
+    for (profile.varyings[0..profile.varying_count], 0..) |varying, index| @memcpy(result.varyings[index][0 .. varying.lanes * 4], output_storage[varying.vertex_slot][0 .. varying.lanes * 4]);
+    return result;
+}
+
+fn profileEvaluatedVaryingVec2(vertex: *const ProfileVertexEvaluation, varying: usize) ?[2]f32 {
+    if (varying >= vertex.varyings.len) return null;
+    const x: f32 = @bitCast(std.mem.readInt(u32, vertex.varyings[varying][0..4], .little));
+    const y: f32 = @bitCast(std.mem.readInt(u32, vertex.varyings[varying][4..8], .little));
+    if (!std.math.isFinite(x) or !std.math.isFinite(y)) return null;
+    return .{ x, y };
 }
 
 const ProfileBlendState = struct {
@@ -10214,21 +10393,13 @@ fn colorStorageIndices(format: i32) ?[4]usize {
     };
 }
 
-fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
-    var source: [4]f32 = undefined;
-    if (fragment_bool) {
-        if (output.len < 4) return null;
-        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
-        source = .{ if (value) 1 else 0, if (value) 1 else 0, if (value) 1 else 0, 1 };
-    } else {
-        if (output.len < 16) return null;
-        for (&source, 0..) |*value, index| {
-            const component: f32 = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
-            if (!std.math.isFinite(component)) return null;
-            value.* = std.math.clamp(component, 0, 1);
-        }
+    var source = source_values;
+    for (&source) |*value| {
+        if (!std.math.isFinite(value.*)) return null;
+        value.* = std.math.clamp(value.*, 0, 1);
     }
     var destination: [4]f32 = undefined;
     for (&destination, 0..) |*value, channel| value.* = @as(f32, @floatFromInt(bytes[storage_indices[channel]])) / 255.0;
@@ -10249,6 +10420,116 @@ fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []co
         if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) bytes[storage_index] = rgba[channel];
     }
     return 1;
+}
+
+/// Exact specialization of the source-over blend state Chromium uses for
+/// compositor layers. It intentionally preserves the scalar path's f32
+/// operation order and u8 conversion; it only removes repeated factor and
+/// equation dispatch after the caller has selected this exact fixed state.
+fn profileWriteSourceOverColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32) ?u32 {
+    if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+    const storage_indices = colorStorageIndices(format) orelse return null;
+    var source = source_values;
+    for (&source) |*value| {
+        if (!std.math.isFinite(value.*)) return null;
+        value.* = std.math.clamp(value.*, 0, 1);
+    }
+    var destination: [4]f32 = undefined;
+    for (&destination, 0..) |*value, channel| value.* = @as(f32, @floatFromInt(bytes[storage_indices[channel]])) / 255.0;
+    const destination_factor = 1 - source[3];
+    var result: [4]f32 = undefined;
+    for (&result, 0..) |*value, channel| {
+        value.* = source[channel] + destination[channel] * destination_factor;
+        if (!std.math.isFinite(value.*)) return null;
+        value.* = std.math.clamp(value.*, 0, 1);
+    }
+    var rgba: [4]u8 = undefined;
+    for (&rgba, 0..) |*value, index| value.* = @intFromFloat(std.math.clamp(result[index], 0, 1) * 255.0);
+    for (storage_indices, 0..) |storage_index, channel| {
+        if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) bytes[storage_index] = rgba[channel];
+    }
+    return 1;
+}
+
+fn profileWriteColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+    var source: [4]f32 = undefined;
+    if (fragment_bool) {
+        if (output.len < 4) return null;
+        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
+        source = .{ if (value) 1 else 0, if (value) 1 else 0, if (value) 1 else 0, 1 };
+    } else {
+        if (output.len < 16) return null;
+        for (&source, 0..) |*value, index| value.* = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
+    }
+    return profileWriteColorComponents(bytes, format, source, color_write_mask, blend);
+}
+
+fn profileWriteSourceOverColor(bytes: []u8, format: i32, fragment_bool: bool, output: []const u8, color_write_mask: u32) ?u32 {
+    var source: [4]f32 = undefined;
+    if (fragment_bool) {
+        if (output.len < 4) return null;
+        const value = std.mem.readInt(u32, output[0..4], .little) != 0;
+        source = .{ if (value) 1 else 0, if (value) 1 else 0, if (value) 1 else 0, 1 };
+    } else {
+        if (output.len < 16) return null;
+        for (&source, 0..) |*value, index| value.* = @bitCast(std.mem.readInt(u32, output[index * 4 ..][0..4], .little));
+    }
+    return profileWriteSourceOverColorComponents(bytes, format, source, color_write_mask);
+}
+
+/// Check draw-invariant blend state before a direct profile loop starts
+/// writing.  A direct loop must never discover an unsupported blend factor
+/// after updating only part of its rectangle: the ordinary scalar path
+/// remains the fallback until this narrow precondition is proved.
+fn profileBlendStateSupported(blend: ProfileBlendState) bool {
+    for (blend.constants) |value| if (!std.math.isFinite(value)) return false;
+    if (blend.enable == 0) return true;
+    const zero = [_]f32{ 0, 0, 0, 0 };
+    for (0..4) |channel| {
+        const alpha = channel == 3;
+        if (profileBlendFactor(if (alpha) blend.src_alpha_factor else blend.src_color_factor, zero, zero, blend.constants, channel, alpha) == null or
+            profileBlendFactor(if (alpha) blend.dst_alpha_factor else blend.dst_color_factor, zero, zero, blend.constants, channel, alpha) == null or
+            profileBlendEquation(if (alpha) blend.alpha_op else blend.color_op, 0, 0) == null) return false;
+    }
+    return true;
+}
+
+fn profileTextureCopyPreparedIsOpaque(prepared: render_ir_exec.TextureCopyPrepared) bool {
+    const image = prepared.image;
+    if (!prepared.fast_rgba8_clamp_linear or image.bytes_per_texel != 4 or (image.format != .rgba8_unorm and image.format != .bgra8_unorm)) return false;
+    const rows = std.math.mul(u64, @as(u64, image.row_stride), image.height - 1) catch return false;
+    const tail = std.math.mul(u64, @as(u64, image.width), 4) catch return false;
+    const required = std.math.add(u64, rows, tail) catch return false;
+    if (required > image.pixels.len) return false;
+    for (0..image.height) |y| for (0..image.width) |x| {
+        const offset = @as(usize, @intCast(@as(u64, y) * image.row_stride + @as(u64, x) * 4));
+        if (image.pixels[offset + 3] != 255) return false;
+    };
+    return true;
+}
+
+/// Write an opaque RGBA fragment without loading destination color.  This is
+/// equivalent to `profileWriteColor` only when the caller has established a
+/// complete write mask and either blending is disabled or the fixed-function
+/// state is `ONE, ONE_MINUS_SRC_ALPHA, ADD` for both color and alpha.  The
+/// exact Chromium VP9 transform always produces alpha one, so that blend
+/// state has no destination contribution.  Other pipelines remain on the
+/// general bounded blend implementation above.
+fn profileWriteOpaqueColorComponents(bytes: []u8, format: i32, components: [4]f32) ?u32 {
+    if (bytes.len < 4) return null;
+    const storage_indices = colorStorageIndices(format) orelse return null;
+    for (components, 0..) |component, channel| {
+        if (!std.math.isFinite(component)) return null;
+        bytes[storage_indices[channel]] = @intFromFloat(std.math.clamp(component, 0, 1) * 255.0);
+    }
+    return 1;
+}
+
+fn profileWriteOpaqueColor(bytes: []u8, format: i32, output: []const u8) ?u32 {
+    if (output.len < 16) return null;
+    var components: [4]f32 = undefined;
+    for (&components, 0..) |*component, channel| component.* = @bitCast(std.mem.readInt(u32, output[channel * 4 ..][0..4], .little));
+    return profileWriteOpaqueColorComponents(bytes, format, components);
 }
 
 test "scalar profile color write mask preserves disabled channels" {
@@ -10274,6 +10555,21 @@ test "scalar profile color writes preserve RGBA and BGRA storage order" {
     var bgra = [_]u8{0} ** 4;
     try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, 44, false, &output, 0xf, .{}));
     try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
+}
+
+test "opaque profile color write matches disabled and alpha-one source blending" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 0.75, 0.5, 0.25, 1 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    for ([_]i32{ 37, 44 }) |format| {
+        var opaque_bytes = [_]u8{ 11, 22, 33, 44 };
+        var disabled = opaque_bytes;
+        var blended = opaque_bytes;
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueColor(&opaque_bytes, format, &output));
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&disabled, format, false, &output, 0xf, .{}));
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&blended, format, false, &output, 0xf, .{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 }));
+        try std.testing.expectEqualSlices(u8, &disabled, &opaque_bytes);
+        try std.testing.expectEqualSlices(u8, &blended, &opaque_bytes);
+    }
 }
 
 test "scalar profile color writes preserve R8 red storage" {
@@ -10302,6 +10598,41 @@ test "scalar profile color blending uses source and destination factors" {
         bytes = .{ 0, 0, 0, 255 };
         try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bytes, 44, false, &output, 0xf, blend));
     }
+}
+
+test "specialized source-over color write matches the generic scalar blend" {
+    const source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
+    var seed: u32 = 0x9e37_79b9;
+    for ([_]i32{ 9, 37, 44 }) |format| for ([_]u32{ 0, 1, 5, 0xf }) |mask| for (0..1024) |_| {
+        seed = seed *% 1_664_525 +% 1_013_904_223;
+        var generic = [_]u8{ @truncate(seed), @truncate(seed >> 8), @truncate(seed >> 16), @truncate(seed >> 24) };
+        var specialized = generic;
+        seed = seed *% 1_664_525 +% 1_013_904_223;
+        const source = [_]f32{
+            @as(f32, @floatFromInt(seed & 0x3ff)) / 768 - 0.25,
+            @as(f32, @floatFromInt((seed >> 10) & 0x3ff)) / 768 - 0.25,
+            @as(f32, @floatFromInt((seed >> 20) & 0x3ff)) / 768 - 0.25,
+            @as(f32, @floatFromInt((seed >> 2) & 0x3ff)) / 768 - 0.25,
+        };
+        try std.testing.expectEqual(profileWriteColorComponents(&generic, format, source, mask, source_over), profileWriteSourceOverColorComponents(&specialized, format, source, mask));
+        try std.testing.expectEqualSlices(u8, &generic, &specialized);
+    };
+}
+
+test "scalar profile blend-state preflight accepts only supported finite state" {
+    try std.testing.expect(profileBlendStateSupported(.{}));
+    try std.testing.expect(profileBlendStateSupported(.{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 }));
+    try std.testing.expect(!profileBlendStateSupported(.{ .enable = 1, .src_color_factor = 15 }));
+    try std.testing.expect(!profileBlendStateSupported(.{ .constants = .{ std.math.nan(f32), 0, 0, 0 } }));
+}
+
+test "prepared opaque Chromium texture copy requires complete RGBA alpha" {
+    const opaque_bytes = [_]u8{ 1, 2, 3, 255, 4, 5, 6, 255 };
+    const transparent = [_]u8{ 1, 2, 3, 255, 4, 5, 6, 127 };
+    const image = render_ir_exec.SampledImage{ .pixels = &opaque_bytes, .width = 2, .height = 1, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    try std.testing.expect(profileTextureCopyPreparedIsOpaque(.{ .image = image, .bias = 0, .fast_rgba8_clamp_linear = true }));
+    try std.testing.expect(!profileTextureCopyPreparedIsOpaque(.{ .image = .{ .pixels = &transparent, .width = 2, .height = 1, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, .bias = 0, .fast_rgba8_clamp_linear = true }));
+    try std.testing.expect(!profileTextureCopyPreparedIsOpaque(.{ .image = image, .bias = 0, .fast_rgba8_clamp_linear = false }));
 }
 
 fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
@@ -10357,6 +10688,32 @@ test "scalar graphics profile expands triangle lists and strips" {
     try std.testing.expectEqual(@as(?u32, 1), profileTriangleVertex(4, 1, 1));
     try std.testing.expectEqual(@as(?u32, 3), profileTriangleVertex(4, 1, 2));
     try std.testing.expectEqual(@as(?u32, null), profileTriangleVertex(2, 0, 0));
+}
+
+test "profile perspective weights retain the exact affine and perspective forms" {
+    const affine = [3]ProfileScreenVertex{
+        .{ .x = 0, .y = 0, .z = 0, .w = 1 },
+        .{ .x = 1, .y = 0, .z = 0, .w = 1 },
+        .{ .x = 0, .y = 1, .z = 0, .w = 1 },
+    };
+    const b0: f32 = 0.2;
+    const b1: f32 = 0.3;
+    const b2: f32 = 0.5;
+    const resolved_affine = profilePerspectiveWeights(affine, b0, b1, b2).?;
+    try std.testing.expectEqual(@as(u32, @bitCast(b0 / affine[0].w)), @as(u32, @bitCast(resolved_affine.q0)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b1 / affine[1].w)), @as(u32, @bitCast(resolved_affine.q1)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b2 / affine[2].w)), @as(u32, @bitCast(resolved_affine.q2)));
+    try std.testing.expectEqual(@as(u32, @bitCast((b0 / affine[0].w) + (b1 / affine[1].w) + (b2 / affine[2].w))), @as(u32, @bitCast(resolved_affine.denominator)));
+
+    const perspective = [3]ProfileScreenVertex{
+        .{ .x = 0, .y = 0, .z = 0, .w = 0.5 },
+        .{ .x = 1, .y = 0, .z = 0, .w = 2 },
+        .{ .x = 0, .y = 1, .z = 0, .w = 4 },
+    };
+    const resolved_perspective = profilePerspectiveWeights(perspective, b0, b1, b2).?;
+    try std.testing.expectEqual(@as(u32, @bitCast(b0 / perspective[0].w)), @as(u32, @bitCast(resolved_perspective.q0)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b1 / perspective[1].w)), @as(u32, @bitCast(resolved_perspective.q1)));
+    try std.testing.expectEqual(@as(u32, @bitCast(b2 / perspective[2].w)), @as(u32, @bitCast(resolved_perspective.q2)));
 }
 
 /// Apply the Vulkan depth-bias equation for the bounded scalar raster profile.
@@ -10537,12 +10894,36 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
                 .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
             );
+            for (profile.fragment.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
+                "ZPU selected profile member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
+                .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
+            );
             for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
                 "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
                 .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
             );
             std.debug.print("ZPU selected profile canonical IR end\n", .{});
         }
+    }
+    // A selected identity is an explicit diagnostic request, not part of the
+    // bounded discovery sample. Keep its one full dump available after noisy
+    // Chromium startup has consumed that sample, otherwise a late hot shader
+    // cannot be turned into a precise regression candidate.
+    if (profileIrDiagnosticsEnabled() and profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+        std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
+        for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
+            "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
+            .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
+        );
+        for (profile.fragment.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
+            "ZPU selected profile member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
+            .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
+        );
+        for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+        std.debug.print("ZPU selected profile canonical IR end\n", .{});
     }
     if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
@@ -10648,6 +11029,22 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
         _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
+    // Resolve Chromium's exact full-screen texture-copy ABI once per draw.
+    // The selected Render IR identity is stricter than a generic sampled
+    // quad, so every other texture shader remains on the normal path.
+    const texture_copy_plan = profile.fragment.textureCopyPlan();
+    var texture_copy_coordinate_varying: ?usize = null;
+    var texture_copy_image: ?render_ir_exec.SampledImage = null;
+    var texture_copy_prepared: ?render_ir_exec.TextureCopyPrepared = null;
+    if (texture_copy_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.coordinate_interface) texture_copy_coordinate_varying = index;
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) texture_copy_image = binding.sampled_image;
+        }
+        if (texture_copy_image) |image| texture_copy_prepared = profile.fragment.prepareTextureCopy(image) catch null;
+    }
     // The captured VP9 video-surface composite differs from sample-modulate
     // only in the coverage ABI: its second varying is a scalar. Resolve the
     // exact validated plan once per draw so its hot pixels do not rebuild a
@@ -10656,6 +11053,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var sample_coverage_coordinate_varying: ?usize = null;
     var sample_coverage_scalar_varying: ?usize = null;
     var sample_coverage_image: ?render_ir_exec.SampledImage = null;
+    var sample_coverage_prepared: ?render_ir_exec.SampleCoveragePrepared = null;
     if (sample_coverage_plan) |plan| {
         for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
             if (varying.fragment_interface == plan.coordinate_interface) sample_coverage_coordinate_varying = index;
@@ -10664,6 +11062,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.image_interface) sample_coverage_image = binding.sampled_image;
         }
+        if (sample_coverage_image) |image| sample_coverage_prepared = profile.fragment.prepareSampleCoverage(image) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sample-coverage preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
     }
     if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
@@ -10708,6 +11110,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 prepared.destination_transfer[0],       prepared.destination_transfer[1], prepared.destination_transfer[2], prepared.destination_transfer[3], prepared.destination_transfer[4],       prepared.destination_transfer[5],          prepared.destination_transfer[6],
             },
         );
+        std.debug.print(
+            "ZPU VP9 profile matrices source={d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6} destination={d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6};{d:.6},{d:.6},{d:.6}\n",
+            .{ prepared.source_matrix[0][0], prepared.source_matrix[0][1], prepared.source_matrix[0][2], prepared.source_matrix[1][0], prepared.source_matrix[1][1], prepared.source_matrix[1][2], prepared.source_matrix[2][0], prepared.source_matrix[2][1], prepared.source_matrix[2][2], prepared.destination_matrix[0][0], prepared.destination_matrix[0][1], prepared.destination_matrix[0][2], prepared.destination_matrix[1][0], prepared.destination_matrix[1][1], prepared.destination_matrix[1][2], prepared.destination_matrix[2][0], prepared.destination_matrix[2][1], prepared.destination_matrix[2][2] },
+        );
     }
     // This dynamic radial-gradient profile has materially more arithmetic
     // than the video coverage composite, but its validated uniforms and
@@ -10719,6 +11125,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var radial_gradient_coordinate_varying: ?usize = null;
     var radial_gradient_uniform: ?[]const u8 = null;
     var radial_gradient_image: ?render_ir_exec.SampledImage = null;
+    var radial_gradient_prepared: ?render_ir_exec.RadialGradientPrepared = null;
     var radial_gradient_frag_coord = false;
     if (radial_gradient_plan) |plan| {
         for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
@@ -10732,9 +11139,98 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) radial_gradient_image = binding.sampled_image;
         }
         radial_gradient_frag_coord = profile.fragment_frag_coord != null and profile.fragment_frag_coord.? == plan.frag_coord_interface;
+        if (radial_gradient_uniform) |uniform| {
+            if (radial_gradient_image) |image| radial_gradient_prepared = profile.fragment.prepareRadialGradient(uniform, image) catch |err| {
+                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-gradient preparation failed err={s}\n", .{@errorName(err)});
+                return;
+            } orelse return;
+        }
     }
     if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
         _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
+    // The exact two-distance-field radial mask is another common Chromium
+    // tile profile. Its push constants and sampled image are immutable for a
+    // draw, so resolve them once before the pixel loop rather than rebuilding
+    // a generic binding table for every covered fragment.
+    const radial_mask_plan = profile.fragment.radialMaskPlan();
+    var radial_mask_color_varying: ?usize = null;
+    var radial_mask_coordinate_varying: ?usize = null;
+    var radial_mask_push_constants: ?[]const u8 = null;
+    var radial_mask_image: ?render_ir_exec.SampledImage = null;
+    if (radial_mask_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) radial_mask_color_varying = index;
+            if (varying.fragment_interface == plan.coordinates_interface) radial_mask_coordinate_varying = index;
+        }
+        if (profile.fragment_push_constant) |push| {
+            if (push.interface == plan.uniform_interface and pushConstantBytesInitialized(op.push_constants, 4, push.byte_size))
+                radial_mask_push_constants = op.push_constants.values[4][0..push.byte_size];
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) radial_mask_image = binding.sampled_image;
+        }
+    }
+    var radial_mask_prepared: ?render_ir_exec.RadialMaskPrepared = null;
+    if (radial_mask_plan != null and radial_mask_push_constants != null and radial_mask_image != null) {
+        radial_mask_prepared = profile.fragment.prepareRadialMask(radial_mask_push_constants.?, radial_mask_image.?) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-mask preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
+    }
+    const passthrough_plan = profile.fragment.passthroughPlan();
+    var passthrough_varying: ?usize = null;
+    if (passthrough_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+        if (varying.fragment_interface == plan.input_interface) passthrough_varying = index;
+    };
+    // This identity emits a literal transparent-black vec4. It has no live
+    // input or descriptor dependency, but the ordinary bounded blend writer
+    // remains responsible for its destination-visible effect.
+    const constant_black_plan = profile.fragment.constantBlackPlan();
+    // This identity's fwidth is evaluated from the ordinary perspective-
+    // resolved varying gradients below. Keep that direct ABI separate from
+    // simpler color-only profiles: its derivative order is shader-visible.
+    const analytic_coverage_plan = profile.fragment.analyticCoveragePlan();
+    var analytic_coverage_color_varying: ?usize = null;
+    var analytic_coverage_coordinate_varying: ?usize = null;
+    if (analytic_coverage_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+        if (varying.fragment_interface == plan.color_interface) analytic_coverage_color_varying = index;
+        if (varying.fragment_interface == plan.coordinate_interface) analytic_coverage_coordinate_varying = index;
+    };
+    // Resolve the recurrent two-axis glyph coverage profile once per draw.
+    // Its push constants supply the signed-distance bounds and atlas matrix;
+    // all dynamic color and distance values still come from interpolation.
+    const two_axis_coverage_plan = profile.fragment.twoAxisCoveragePlan();
+    var two_axis_coverage_color_varying: ?usize = null;
+    var two_axis_coverage_distance_varying: ?usize = null;
+    var two_axis_coverage_push_constants: ?[]const u8 = null;
+    var two_axis_coverage_image: ?render_ir_exec.SampledImage = null;
+    if (two_axis_coverage_plan) |plan| {
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+            if (varying.fragment_interface == plan.color_interface) two_axis_coverage_color_varying = index;
+            if (varying.fragment_interface == plan.distance_interface) two_axis_coverage_distance_varying = index;
+        }
+        if (profile.fragment_push_constant) |push| {
+            if (push.interface == plan.uniform_interface and pushConstantBytesInitialized(op.push_constants, 4, push.byte_size))
+                two_axis_coverage_push_constants = op.push_constants.values[4][0..push.byte_size];
+        }
+        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+            if (binding.interface == plan.image_interface) two_axis_coverage_image = binding.sampled_image;
+        }
+    }
+    var two_axis_coverage_prepared: ?render_ir_exec.TwoAxisCoveragePrepared = null;
+    if (two_axis_coverage_plan != null and two_axis_coverage_push_constants != null and two_axis_coverage_image != null) {
+        two_axis_coverage_prepared = profile.fragment.prepareTwoAxisCoverage(two_axis_coverage_push_constants.?, two_axis_coverage_image.?) catch |err| {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render two-axis coverage preparation failed err={s}\n", .{@errorName(err)});
+            return;
+        } orelse return;
+    }
+    const circle_mask_plan = profile.fragment.circleMaskPlan();
+    var circle_mask_circle_varying: ?usize = null;
+    var circle_mask_color_varying: ?usize = null;
+    if (circle_mask_plan) |plan| for (profile.varyings[0..profile.varying_count], 0..) |varying, index| {
+        if (varying.fragment_interface == plan.circle_interface) circle_mask_circle_varying = index;
+        if (varying.fragment_interface == plan.color_interface) circle_mask_color_varying = index;
+    };
     var fragment_input_attachment_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_input_attachments[0..profile.fragment_input_attachment_count], 0..) |input_profile, index| {
         const input_color = color orelse return;
@@ -10747,6 +11243,205 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
+
+    // Chromium's captured VP9 compositor is a four-vertex strip whose two
+    // triangles form one axis-aligned, affine rectangle. Validate all four
+    // vertex executions and every relevant Vulkan state before replacing the
+    // triangle edge scan with a single rectangular row loop. This preserves
+    // the generic path for transformed, clipped-feedback, depth-tested,
+    // blended, or otherwise non-identical draws.
+    var vp9_quad_bounds = emptyRect();
+    var vp9_quad_pixels: usize = 0;
+    // `detectChromiumVp9ColorTransform` recognizes the complete canonical
+    // fragment program. Its third varying is the declared color input, but
+    // that program's output depends only on its Y and UV coordinates. Do not
+    // add a second, potentially divergent interpretation of the dead input
+    // here: three linked varyings plus the exact fragment identity prove the
+    // complete ABI, while the direct executor consumes the two live values.
+    const vp9_varying_abi = vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and profile.varying_count == 3;
+    if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_affine_candidates.fetchAdd(1, .monotonic) < 4) {
+        std.debug.print(
+            "ZPU VP9 affine candidate topology={d} vertices={d} instances={d} discard={d} cull={d} depth_test={d} depth_write={d} depth_bounds={d} depth_bias={d} depth_image={} fragment_bool={} derivatives={} frag_coord={} varyings={d} valid_abi={} luma_lanes={d}/flat={} chroma_lanes={d}/flat={} input_attachments={d} color={} mask={x} blend={d}/{d}/{d}/{d}/{d}/{d}/{d}\n",
+            .{ op.primitive_topology, op.vertex_count, op.instance_count, op.rasterizer_discard_enable, op.cull_mode, op.depth_test_enable, op.depth_write_enable, op.depth_bounds_test_enable, op.depth_bias_enable, depth != null, profile.fragment_bool, profile.fragment_needs_derivatives, profile.fragment_frag_coord != null, profile.varying_count, vp9_varying_abi, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_luma_coordinate_varying) |index| profile.varyings[index].flat else false, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].lanes else 0, if (vp9_chroma_coordinate_varying) |index| profile.varyings[index].flat else false, profile.fragment_input_attachment_count, color != null, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, op.pipeline.color_blend_op, op.pipeline.src_alpha_blend_factor, op.pipeline.dst_alpha_blend_factor, op.pipeline.alpha_blend_op },
+        );
+    }
+    const direct_vp9_affine_quad = blk: {
+        if (vp9_color_transform_prepared == null or vp9_luma_coordinate_varying == null or vp9_chroma_coordinate_varying == null or
+            op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
+            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
+            !vp9_varying_abi or profile.varyings[vp9_luma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_luma_coordinate_varying.?].flat or
+            profile.varyings[vp9_chroma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_chroma_coordinate_varying.?].flat or
+            profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or op.pipeline.color_write_mask != 0xf or
+            !(op.pipeline.color_blend_enable == 0 or
+                (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
+                    op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0))) break :blk false;
+        const v0 = profileEvaluateVertex(op, profile, 0, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v1 = profileEvaluateVertex(op, profile, 1, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v2 = profileEvaluateVertex(op, profile, 2, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v3 = profileEvaluateVertex(op, profile, 3, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const luma_varying = vp9_luma_coordinate_varying.?;
+        const chroma_varying = vp9_chroma_coordinate_varying.?;
+        const l0 = profileEvaluatedVaryingVec2(&v0, luma_varying) orelse break :blk false;
+        const l1 = profileEvaluatedVaryingVec2(&v1, luma_varying) orelse break :blk false;
+        const l2 = profileEvaluatedVaryingVec2(&v2, luma_varying) orelse break :blk false;
+        const l3 = profileEvaluatedVaryingVec2(&v3, luma_varying) orelse break :blk false;
+        const c0 = profileEvaluatedVaryingVec2(&v0, chroma_varying) orelse break :blk false;
+        const c1 = profileEvaluatedVaryingVec2(&v1, chroma_varying) orelse break :blk false;
+        const c2 = profileEvaluatedVaryingVec2(&v2, chroma_varying) orelse break :blk false;
+        const c3 = profileEvaluatedVaryingVec2(&v3, chroma_varying) orelse break :blk false;
+        const unit_w = @as(u32, @bitCast(v0.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v1.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v2.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v3.screen.w)) == 0x3f80_0000;
+        const affine_geometry = unit_w and v0.screen.x == v1.screen.x and v0.screen.y == v2.screen.y and v2.screen.x == v3.screen.x and v1.screen.y == v3.screen.y and
+            v0.screen.z == v1.screen.z and v0.screen.z == v2.screen.z and v0.screen.z == v3.screen.z and v2.screen.x > v0.screen.x and v1.screen.y > v0.screen.y and
+            l0[0] == l1[0] and l0[1] == l2[1] and l2[0] == l3[0] and l1[1] == l3[1] and
+            c0[0] == c1[0] and c0[1] == c2[1] and c2[0] == c3[0] and c1[1] == c3[1];
+        if (!affine_geometry) {
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_vp9_affine_rejections.fetchAdd(1, .monotonic) < 4) std.debug.print(
+                "ZPU VP9 affine geometry rejected unit_w={} v0={d:.7},{d:.7},{d:.7} v1={d:.7},{d:.7},{d:.7} v2={d:.7},{d:.7},{d:.7} v3={d:.7},{d:.7},{d:.7} luma0={d:.7},{d:.7} luma1={d:.7},{d:.7} luma2={d:.7},{d:.7} luma3={d:.7},{d:.7} chroma0={d:.7},{d:.7} chroma1={d:.7},{d:.7} chroma2={d:.7},{d:.7} chroma3={d:.7},{d:.7}\n",
+                .{ unit_w, v0.screen.x, v0.screen.y, v0.screen.z, v1.screen.x, v1.screen.y, v1.screen.z, v2.screen.x, v2.screen.y, v2.screen.z, v3.screen.x, v3.screen.y, v3.screen.z, l0[0], l0[1], l1[0], l1[1], l2[0], l2[1], l3[0], l3[1], c0[0], c0[1], c1[0], c1[1], c2[0], c2[1], c3[0], c3[1] },
+            );
+            break :blk false;
+        }
+        const min_x = @max(@as(i32, @intFromFloat(@floor(v0.screen.x))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(v0.screen.y))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(v2.screen.x))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(v1.screen.y))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
+        if (max_x <= min_x or max_y <= min_y) break :blk false;
+        const inverse_width = 1.0 / (v2.screen.x - v0.screen.x);
+        const inverse_height = 1.0 / (v1.screen.y - v0.screen.y);
+        for (@intCast(min_y)..@intCast(max_y)) |y| {
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            const vertical = (py - v0.screen.y) * inverse_height;
+            for (@intCast(min_x)..@intCast(max_x)) |x| {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const horizontal = (px - v0.screen.x) * inverse_width;
+                const luma_coordinates = [2]f32{
+                    l0[0] + horizontal * (l2[0] - l0[0]),
+                    l0[1] + vertical * (l1[1] - l0[1]),
+                };
+                const chroma_coordinates = [2]f32{
+                    c0[0] + horizontal * (c2[0] - c0[0]),
+                    c0[1] + vertical * (c1[1] - c0[1]),
+                };
+                const fragment_color = profile.fragment.executeVp9ColorTransformPreparedCoordinatesColor(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates) catch break :blk false;
+                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                if (profileWriteOpaqueColorComponents(color_bytes.?[offset..][0..4], color.?.format, fragment_color) == null) break :blk false;
+            }
+        }
+        vp9_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
+        vp9_quad_pixels = @as(usize, @intCast(max_x - min_x)) * @as(usize, @intCast(max_y - min_y));
+        break :blk true;
+    };
+    if (direct_vp9_affine_quad) {
+        if (profileTimingDiagnosticsEnabled() and render_diagnostic_vp9_affine_quads.fetchAdd(1, .monotonic) < 4)
+            std.debug.print("ZPU VP9 affine Mosaic quad target={d}x{d} bounds={d},{d} {d}x{d}\n", .{ target.width, target.height, vp9_quad_bounds.x, vp9_quad_bounds.y, vp9_quad_bounds.width, vp9_quad_bounds.height });
+        if (!publish_metadata) return;
+        if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(vp9_quad_pixels, .monotonic);
+        if (color) |color_image| {
+            color_image.content_bounds = unionRect(color_image.content_bounds, vp9_quad_bounds);
+            color_image.complex_3d_content = true;
+            color_image.force_full_present = true;
+        }
+        return;
+    }
+
+    // Chromium's exact texture-copy compositor profile is also routinely
+    // emitted as a four-vertex affine strip. The generic rasterizer would
+    // process its two triangles independently, repeating edge tests and
+    // perspective interpolation for every pixel. Admit a rectangular form
+    // only after proving the complete geometry, coordinate grid, and blend
+    // state are equivalent.
+    var texture_copy_quad_bounds = emptyRect();
+    var texture_copy_quad_pixels: usize = 0;
+    const direct_texture_copy_affine_quad = blk: {
+        if (texture_copy_prepared == null or texture_copy_coordinate_varying == null or
+            op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
+            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
+            profile.varying_count != 1 or profile.varyings[texture_copy_coordinate_varying.?].lanes != 2 or profile.varyings[texture_copy_coordinate_varying.?].flat or
+            profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or colorStorageIndices(color.?.format) == null or
+            op.pipeline.color_write_mask & ~@as(u32, 0xf) != 0) break :blk false;
+        const blend = ProfileBlendState{
+            .enable = op.pipeline.color_blend_enable,
+            .src_color_factor = op.pipeline.src_color_blend_factor,
+            .dst_color_factor = op.pipeline.dst_color_blend_factor,
+            .color_op = op.pipeline.color_blend_op,
+            .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+            .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+            .alpha_op = op.pipeline.alpha_blend_op,
+            .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
+        };
+        if (!profileBlendStateSupported(blend)) break :blk false;
+        const source_over = blend.enable == 1 and blend.src_color_factor == 1 and blend.dst_color_factor == 7 and blend.color_op == 0 and
+            blend.src_alpha_factor == 1 and blend.dst_alpha_factor == 7 and blend.alpha_op == 0;
+        // The scalar strip rasterizer includes its shared diagonal in both
+        // triangles. A single rectangle is therefore equivalent only with
+        // blending disabled, or when the sampled source is demonstrably
+        // opaque and source-over makes the second write idempotent.
+        if (blend.enable != 0 and !(source_over and profileTextureCopyPreparedIsOpaque(texture_copy_prepared.?))) break :blk false;
+        const v0 = profileEvaluateVertex(op, profile, 0, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v1 = profileEvaluateVertex(op, profile, 1, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v2 = profileEvaluateVertex(op, profile, 2, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const v3 = profileEvaluateVertex(op, profile, 3, vertex_uniform_bindings[0..vertex_uniform_count]) orelse break :blk false;
+        const varying = texture_copy_coordinate_varying.?;
+        const t0 = profileEvaluatedVaryingVec2(&v0, varying) orelse break :blk false;
+        const t1 = profileEvaluatedVaryingVec2(&v1, varying) orelse break :blk false;
+        const t2 = profileEvaluatedVaryingVec2(&v2, varying) orelse break :blk false;
+        const t3 = profileEvaluatedVaryingVec2(&v3, varying) orelse break :blk false;
+        const unit_w = @as(u32, @bitCast(v0.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v1.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v2.screen.w)) == 0x3f80_0000 and @as(u32, @bitCast(v3.screen.w)) == 0x3f80_0000;
+        const affine_geometry = unit_w and v0.screen.x == v1.screen.x and v0.screen.y == v2.screen.y and v2.screen.x == v3.screen.x and v1.screen.y == v3.screen.y and
+            v0.screen.z == v1.screen.z and v0.screen.z == v2.screen.z and v0.screen.z == v3.screen.z and v2.screen.x > v0.screen.x and v1.screen.y > v0.screen.y and
+            t0[0] == t1[0] and t0[1] == t2[1] and t2[0] == t3[0] and t1[1] == t3[1];
+        if (!affine_geometry) break :blk false;
+        const min_x = @max(@as(i32, @intFromFloat(@floor(v0.screen.x))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
+        const min_y = @max(@as(i32, @intFromFloat(@floor(v0.screen.y))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
+        const max_x = @min(@as(i32, @intFromFloat(@ceil(v2.screen.x))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
+        const max_y = @min(@as(i32, @intFromFloat(@ceil(v1.screen.y))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
+        if (max_x <= min_x or max_y <= min_y) break :blk false;
+        const inverse_width = 1.0 / (v2.screen.x - v0.screen.x);
+        const inverse_height = 1.0 / (v1.screen.y - v0.screen.y);
+        for (@intCast(min_y)..@intCast(max_y)) |y| {
+            const py = @as(f32, @floatFromInt(y)) + 0.5;
+            const vertical = (py - v0.screen.y) * inverse_height;
+            for (@intCast(min_x)..@intCast(max_x)) |x| {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const horizontal = (px - v0.screen.x) * inverse_width;
+                const coordinates = [2]f32{
+                    t0[0] + horizontal * (t2[0] - t0[0]),
+                    t0[1] + vertical * (t1[1] - t0[1]),
+                };
+                profile.fragment.executeTextureCopyPreparedCoordinates(texture_copy_prepared.?, coordinates, &fragment_output_bytes) catch return;
+                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                if (profileWriteColor(color_bytes.?[offset..][0..4], color.?.format, false, &fragment_output_bytes, op.pipeline.color_write_mask, blend) == null) return;
+            }
+        }
+        texture_copy_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
+        texture_copy_quad_pixels = @as(usize, @intCast(max_x - min_x)) * @as(usize, @intCast(max_y - min_y));
+        break :blk true;
+    };
+    if (direct_texture_copy_affine_quad) {
+        if (renderDiagnosticsEnabled()) _ = render_diagnostic_direct_texture_copy_quad_draws.fetchAdd(1, .monotonic);
+        if (!publish_metadata) return;
+        if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(texture_copy_quad_pixels, .monotonic);
+        if (color) |color_image| {
+            color_image.content_bounds = unionRect(color_image.content_bounds, texture_copy_quad_bounds);
+            color_image.complex_3d_content = true;
+            color_image.force_full_present = true;
+        }
+        return;
+    }
+    const draw_blend = ProfileBlendState{
+        .enable = op.pipeline.color_blend_enable,
+        .src_color_factor = op.pipeline.src_color_blend_factor,
+        .dst_color_factor = op.pipeline.dst_color_blend_factor,
+        .color_op = op.pipeline.color_blend_op,
+        .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
+        .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
+        .alpha_op = op.pipeline.alpha_blend_op,
+        .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
+    };
+    const direct_source_over_write = draw_blend.enable == 1 and draw_blend.src_color_factor == 1 and draw_blend.dst_color_factor == 7 and draw_blend.color_op == 0 and
+        draw_blend.src_alpha_factor == 1 and draw_blend.dst_alpha_factor == 7 and draw_blend.alpha_op == 0;
     var vertices: [3]ProfileScreenVertex = undefined;
     for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
@@ -10849,6 +11544,45 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
             for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], vertex_output_bytes[varying.vertex_slot][0 .. varying.lanes * 4]);
+            if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_geometry.fetchAdd(1, .monotonic) < 6) {
+                std.debug.print(
+                    "ZPU VP9 geometry triangle={d} corner={d} screen={d:.5},{d:.5},{d:.5},w={d:.5} luma={d:.7},{d:.7} chroma={d:.7},{d:.7}\n",
+                    .{
+                        triangle_index,
+                        corner,
+                        vertices[corner].x,
+                        vertices[corner].y,
+                        vertices[corner].z,
+                        vertices[corner].w,
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_luma_coordinate_varying.?][0..4], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_luma_coordinate_varying.?][4..8], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_chroma_coordinate_varying.?][0..4], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][vp9_chroma_coordinate_varying.?][4..8], .little))),
+                    },
+                );
+            }
+            // Keep the large Chromium compositor strip observable without
+            // turning the normal renderer into a benchmark-specific path.
+            // In particular, its shared diagonal is source-over visible when
+            // the sampled layer contains alpha, so an affine rectangle is not
+            // automatically equivalent to the two-triangle stream.
+            if (profileTimingDiagnosticsEnabled() and texture_copy_plan != null and target.width == 640 and target.height == 272 and
+                render_diagnostic_texture_copy_geometry.fetchAdd(1, .monotonic) < 12)
+            {
+                if (texture_copy_coordinate_varying) |coordinate| std.debug.print(
+                    "ZPU texture-copy geometry triangle={d} corner={d} screen={d:.7},{d:.7},{d:.7},w={d:.7} uv={d:.7},{d:.7}\n",
+                    .{
+                        triangle_index,
+                        corner,
+                        vertices[corner].x,
+                        vertices[corner].y,
+                        vertices[corner].z,
+                        vertices[corner].w,
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][coordinate][0..4], .little))),
+                        @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][coordinate][4..8], .little))),
+                    },
+                );
+            }
             if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
                 op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
                 target.width == 1280 and target.height == 256 and triangle_index < 2)
@@ -10910,254 +11644,472 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             };
         }
         const inverse_area = 1.0 / area;
+        // This is deliberately stricter than merely having a prepared VP9
+        // transform. The direct coordinate form is valid only for the exact
+        // two non-flat vec2 varyings with no fragment-coordinate or
+        // derivatives. The exact VP9 identity may declare FrontFacing, but
+        // its already-validated direct transform does not consume that input.
+        // Any other shader keeps the ordinary
+        // per-pixel binding and interpolation path below.
+        const direct_vp9_coordinates = vp9_color_transform_prepared != null and
+            vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and
+            profile.varying_count == 2 and !profile.fragment_needs_derivatives and
+            profile.fragment_frag_coord == null and
+            profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
+            profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
+        const direct_texture_copy_coordinates = texture_copy_plan != null and texture_copy_coordinate_varying != null and texture_copy_image != null and
+            profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+            profile.varyings[texture_copy_coordinate_varying.?].lanes == 2 and !profile.varyings[texture_copy_coordinate_varying.?].flat;
+        // The VP9 transform's canonical IR unconditionally writes alpha one.
+        // Therefore Chromium's normal source-over state is provably opaque,
+        // provided every component is written and its fixed factors are the
+        // exact alpha-one source-over combination.  Keep all other blend
+        // states on the general path: a similar-looking configuration is not
+        // sufficient to skip destination reads.
+        const direct_vp9_opaque_write = direct_vp9_coordinates and color != null and !profile.fragment_bool and
+            op.pipeline.color_write_mask == 0xf and
+            (op.pipeline.color_blend_enable == 0 or
+                (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
+                    op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0));
+        // The canonical radial mask consumes exactly two perspective vec4
+        // varyings. Its declared FrontFacing input is not data-dependent in
+        // the validated program, and it needs neither derivatives nor
+        // fragment coordinates. All other shader shapes keep the generic
+        // interpolation/binding path below.
+        const direct_radial_mask_coordinates = radial_mask_prepared != null and
+            radial_mask_color_varying != null and radial_mask_coordinate_varying != null and
+            profile.varying_count == 2 and !profile.fragment_needs_derivatives and
+            profile.fragment_frag_coord == null and
+            profile.varyings[radial_mask_color_varying.?].lanes == 4 and !profile.varyings[radial_mask_color_varying.?].flat and
+            profile.varyings[radial_mask_coordinate_varying.?].lanes == 4 and !profile.varyings[radial_mask_coordinate_varying.?].flat;
+        const direct_passthrough_coordinates = passthrough_plan != null and passthrough_varying != null and
+            profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+            profile.varyings[passthrough_varying.?].lanes == 4 and !profile.varyings[passthrough_varying.?].flat;
+        const direct_constant_black = constant_black_plan != null and !profile.fragment_bool;
+        const direct_circle_mask_coordinates = circle_mask_plan != null and
+            circle_mask_circle_varying != null and circle_mask_color_varying != null and
+            profile.varying_count == 2 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+            profile.varyings[circle_mask_circle_varying.?].lanes == 4 and !profile.varyings[circle_mask_circle_varying.?].flat and
+            profile.varyings[circle_mask_color_varying.?].lanes == 4 and !profile.varyings[circle_mask_color_varying.?].flat;
         const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
         const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
         const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
         const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
         if (max_x <= min_x or max_y <= min_y) continue;
-        for (@intCast(min_y)..@intCast(max_y)) |y| for (@intCast(min_x)..@intCast(max_x)) |x| {
-            const px = @as(f32, @floatFromInt(x)) + 0.5;
-            const py = @as(f32, @floatFromInt(y)) + 0.5;
-            const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
-            const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
-            const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
-            if (b0 < 0 or b1 < 0 or b2 < 0) continue;
-            const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
-            if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
-            if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
-                const q0 = b0 / vertices[0].w;
-                const q1 = b1 / vertices[1].w;
-                const q2 = b2 / vertices[2].w;
-                const denominator = q0 + q1 + q2;
-                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                const needs_derivatives = profile.fragment_needs_derivatives;
-                const db0_dx = if (needs_derivatives) (vertices[2].y - vertices[1].y) * inverse_area else 0;
-                const db1_dx = if (needs_derivatives) (vertices[0].y - vertices[2].y) * inverse_area else 0;
-                const db2_dx = if (needs_derivatives) (vertices[1].y - vertices[0].y) * inverse_area else 0;
-                const db0_dy = if (needs_derivatives) (vertices[1].x - vertices[2].x) * inverse_area else 0;
-                const db1_dy = if (needs_derivatives) (vertices[2].x - vertices[0].x) * inverse_area else 0;
-                const db2_dy = if (needs_derivatives) (vertices[0].x - vertices[1].x) * inverse_area else 0;
-                const dq0_dx = if (needs_derivatives) db0_dx / vertices[0].w else 0;
-                const dq1_dx = if (needs_derivatives) db1_dx / vertices[1].w else 0;
-                const dq2_dx = if (needs_derivatives) db2_dx / vertices[2].w else 0;
-                const dq0_dy = if (needs_derivatives) db0_dy / vertices[0].w else 0;
-                const dq1_dy = if (needs_derivatives) db1_dy / vertices[1].w else 0;
-                const dq2_dy = if (needs_derivatives) db2_dy / vertices[2].w else 0;
-                const denominator_dx = if (needs_derivatives) dq0_dx + dq1_dx + dq2_dx else 0;
-                const denominator_dy = if (needs_derivatives) dq0_dy + dq1_dy + dq2_dy else 0;
-                for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
-                    for (0..varying.lanes) |lane| {
-                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
-                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
-                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
-                        const numerator = q0 * a + q1 * b + q2 * c;
-                        // VK_EXT_provoking_vertex selects which triangle
-                        // vertex supplies flat-qualified outputs.  The
-                        // profile emits the logical triangle in API order,
-                        // so first/last map directly to a/c here.
-                        const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
-                        const value = if (varying.flat) flat_value else numerator / denominator;
-                        const numerator_dx = if (needs_derivatives) dq0_dx * a + dq1_dx * b + dq2_dx * c else 0;
-                        const numerator_dy = if (needs_derivatives) dq0_dy * a + dq1_dy * b + dq2_dy * c else 0;
-                        const derivative_scale = if (needs_derivatives) denominator * denominator else 1;
-                        const dpdx = if (!needs_derivatives or varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
-                        const dpdy = if (!needs_derivatives or varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
-                        if (!std.math.isFinite(value) or (needs_derivatives and (!std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)))) return;
-                        std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
-                        std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
-                        std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
+        for (@intCast(min_y)..@intCast(max_y)) |y| {
+            // A video quad is represented as two axis-aligned right
+            // triangles.  Shrink each triangle's rectangular scan to its
+            // diagonal without trusting the bound for coverage: the normal
+            // edge test below remains authoritative.
+            const row: ProfileRowBounds = if (direct_vp9_coordinates)
+                profileAxisAlignedTriangleRowBounds(vertices, @as(f32, @floatFromInt(y)) + 0.5, min_x, max_x) orelse .{ .min_x = min_x, .max_x = max_x }
+            else
+                .{ .min_x = min_x, .max_x = max_x };
+            if (row.max_x <= row.min_x) continue;
+            for (@intCast(row.min_x)..@intCast(row.max_x)) |x| {
+                const px = @as(f32, @floatFromInt(x)) + 0.5;
+                const py = @as(f32, @floatFromInt(y)) + 0.5;
+                const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
+                const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
+                const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
+                if (b0 < 0 or b1 < 0 or b2 < 0) continue;
+                const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
+                if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
+                var direct_fragment_color: ?[4]f32 = null;
+                if (direct_constant_black) {
+                    direct_fragment_color = .{ 0, 0, 0, 0 };
+                } else if (direct_vp9_coordinates) {
+                    // Preserve the normal perspective interpolation order, but
+                    // feed its resolved f32 lanes directly to the exact VP9
+                    // transform. This removes temporary byte packing/decoding
+                    // and construction of a generic fragment binding table.
+                    const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
+                    const luma_varying = vp9_luma_coordinate_varying.?;
+                    const chroma_varying = vp9_chroma_coordinate_varying.?;
+                    var luma_coordinates: [2]f32 = undefined;
+                    var chroma_coordinates: [2]f32 = undefined;
+                    for (0..2) |lane| {
+                        const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
+                        const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
+                        const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
+                        luma_coordinates[lane] = (weights.q0 * luma_a + weights.q1 * luma_b + weights.q2 * luma_c) / weights.denominator;
+                        const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
+                        const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
+                        const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
+                        chroma_coordinates[lane] = (weights.q0 * chroma_a + weights.q1 * chroma_b + weights.q2 * chroma_c) / weights.denominator;
                     }
-                    fragment_bindings[varying_index] = .{
-                        .interface = varying.fragment_interface,
-                        .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
-                        .dpdx_bytes = if (needs_derivatives) fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4] else &.{},
-                        .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
-                    };
-                }
-                var fragment_binding_count: usize = profile.varying_count;
-                for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
-                    fragment_bindings[fragment_binding_count] = uniform;
-                    fragment_binding_count += 1;
-                }
-                var frag_coord_bytes: [16]u8 = undefined;
-                var radial_gradient_frag_coord_ready = false;
-                var frag_coord_dpdx_bytes: [16]u8 = undefined;
-                var frag_coord_dpdy_bytes: [16]u8 = undefined;
-                if (profile.fragment_frag_coord) |interface| {
-                    const depth_dx = db0_dx * vertices[0].z + db1_dx * vertices[1].z + db2_dx * vertices[2].z;
-                    const depth_dy = db0_dy * vertices[0].z + db1_dy * vertices[1].z + db2_dy * vertices[2].z;
-                    const frag_coord = [_]f32{ px, py, depth_value, denominator };
-                    const frag_coord_dpdx = [_]f32{ 1, 0, depth_dx, denominator_dx };
-                    const frag_coord_dpdy = [_]f32{ 0, 1, depth_dy, denominator_dy };
-                    for (0..4) |lane| {
-                        std.mem.writeInt(u32, frag_coord_bytes[lane * 4 ..][0..4], @bitCast(frag_coord[lane]), .little);
-                        std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
-                        std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
-                    }
-                    radial_gradient_frag_coord_ready = true;
-                    fragment_bindings[fragment_binding_count] = .{
-                        .interface = interface,
-                        .bytes = &frag_coord_bytes,
-                        .dpdx_bytes = if (needs_derivatives) &frag_coord_dpdx_bytes else &.{},
-                        .dpdy_bytes = if (needs_derivatives) &frag_coord_dpdy_bytes else &.{},
-                    };
-                    fragment_binding_count += 1;
-                }
-                var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
-                if (profile.fragment_front_facing) |interface| {
-                    fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
-                    fragment_binding_count += 1;
-                }
-                for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
-                    if (fragment_binding_count == fragment_bindings.len) return;
-                    fragment_bindings[fragment_binding_count] = binding;
-                    fragment_binding_count += 1;
-                }
-                for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
-                    if (fragment_binding_count == fragment_bindings.len) return;
-                    fragment_bindings[fragment_binding_count] = binding;
-                    fragment_binding_count += 1;
-                }
-                const fragment_fast = direct: {
-                    if (sample_modulate_plan != null) {
-                        const color_varying = sample_modulate_color_varying orelse break :direct false;
-                        const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
-                        const image = sample_modulate_image orelse break :direct false;
-                        break :direct profile.fragment.executeSampleModulateDirect(
-                            fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
-                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                            image,
-                            &fragment_output_bytes,
-                        ) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                    }
-                    if (sample_coverage_plan != null) {
-                        const coordinate_varying = sample_coverage_coordinate_varying orelse break :direct false;
-                        const scalar_varying = sample_coverage_scalar_varying orelse break :direct false;
-                        const image = sample_coverage_image orelse break :direct false;
-                        break :direct profile.fragment.executeSampleCoverageDirect(
-                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                            fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
-                            image,
-                            &fragment_output_bytes,
-                        ) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                    }
-                    if (vp9_color_transform_plan != null) {
-                        const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
-                        const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
-                        const prepared = vp9_color_transform_prepared orelse break :direct false;
-                        profile.fragment.executeVp9ColorTransformPrepared(
-                            prepared,
-                            fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
-                            fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
-                            &fragment_output_bytes,
-                        ) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                        break :direct true;
-                    }
-                    if (radial_gradient_plan != null) {
-                        const circle_varying = radial_gradient_circle_varying orelse break :direct false;
-                        const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
-                        const uniform = radial_gradient_uniform orelse break :direct false;
-                        const image = radial_gradient_image orelse break :direct false;
-                        if (!radial_gradient_frag_coord_ready) break :direct false;
-                        break :direct profile.fragment.executeRadialGradientDirect(
-                            fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
-                            fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                            &frag_coord_bytes,
-                            uniform,
-                            image,
-                            &fragment_output_bytes,
-                        ) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                    }
-                    break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                    profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                         return;
                     };
-                };
-                if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
-                        "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
-                        .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
-                    );
-                    return;
-                };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
-                    ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
+                } else if (direct_texture_copy_coordinates) {
+                    const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
+                    const varying = texture_copy_coordinate_varying.?;
+                    var coordinates: [2]f32 = undefined;
+                    for (0..2) |lane| {
+                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
+                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
+                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
+                        coordinates[lane] = (weights.q0 * a + weights.q1 * b + weights.q2 * c) / weights.denominator;
+                    }
+                    if (texture_copy_prepared) |prepared| {
+                        profile.fragment.executeTextureCopyPreparedCoordinates(prepared, coordinates, &fragment_output_bytes) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    } else {
+                        var coordinate_bytes: [8]u8 = undefined;
+                        for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
+                        _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    }
+                } else if (direct_radial_mask_coordinates) {
+                    const q0 = b0 / vertices[0].w;
+                    const q1 = b1 / vertices[1].w;
+                    const q2 = b2 / vertices[2].w;
+                    const denominator = q0 + q1 + q2;
+                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const color_varying = radial_mask_color_varying.?;
+                    const coordinate_varying = radial_mask_coordinate_varying.?;
+                    var radial_color: [4]f32 = undefined;
+                    var radial_coordinates: [4]f32 = undefined;
+                    for (0..4) |lane| {
+                        const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
+                        const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
+                        const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
+                        radial_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
+                        const coordinate_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][coordinate_varying][lane * 4 ..][0..4], .little));
+                        const coordinate_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][coordinate_varying][lane * 4 ..][0..4], .little));
+                        const coordinate_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][coordinate_varying][lane * 4 ..][0..4], .little));
+                        radial_coordinates[lane] = (q0 * coordinate_a + q1 * coordinate_b + q2 * coordinate_c) / denominator;
+                    }
+                    profile.fragment.executeRadialMaskPreparedCoordinates(radial_mask_prepared.?, radial_color, radial_coordinates, &fragment_output_bytes) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                        return;
+                    };
+                } else if (direct_circle_mask_coordinates) {
+                    const q0 = b0 / vertices[0].w;
+                    const q1 = b1 / vertices[1].w;
+                    const q2 = b2 / vertices[2].w;
+                    const denominator = q0 + q1 + q2;
+                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const circle_varying = circle_mask_circle_varying.?;
+                    const color_varying = circle_mask_color_varying.?;
+                    var circle: [4]f32 = undefined;
+                    var circle_color: [4]f32 = undefined;
+                    for (0..4) |lane| {
+                        const circle_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][circle_varying][lane * 4 ..][0..4], .little));
+                        const circle_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][circle_varying][lane * 4 ..][0..4], .little));
+                        const circle_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][circle_varying][lane * 4 ..][0..4], .little));
+                        circle[lane] = (q0 * circle_a + q1 * circle_b + q2 * circle_c) / denominator;
+                        const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
+                        const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
+                        const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
+                        circle_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
+                    }
+                    _ = profile.fragment.executeCircleMaskCoordinates(circle, circle_color, &fragment_output_bytes) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct circle-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                        return;
+                    };
+                } else if (direct_passthrough_coordinates) {
+                    const q0 = b0 / vertices[0].w;
+                    const q1 = b1 / vertices[1].w;
+                    const q2 = b2 / vertices[2].w;
+                    const denominator = q0 + q1 + q2;
+                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const varying = passthrough_varying.?;
+                    var value: [4]f32 = undefined;
+                    for (0..4) |lane| {
+                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
+                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
+                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
+                        value[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
+                    }
+                    _ = profile.fragment.executePassthroughCoordinates(value, &fragment_output_bytes) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct pass-through failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                        return;
+                    };
+                } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
+                    const q0 = b0 / vertices[0].w;
+                    const q1 = b1 / vertices[1].w;
+                    const q2 = b2 / vertices[2].w;
+                    const denominator = q0 + q1 + q2;
+                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                    const needs_derivatives = profile.fragment_needs_derivatives;
+                    const db0_dx = if (needs_derivatives) (vertices[2].y - vertices[1].y) * inverse_area else 0;
+                    const db1_dx = if (needs_derivatives) (vertices[0].y - vertices[2].y) * inverse_area else 0;
+                    const db2_dx = if (needs_derivatives) (vertices[1].y - vertices[0].y) * inverse_area else 0;
+                    const db0_dy = if (needs_derivatives) (vertices[1].x - vertices[2].x) * inverse_area else 0;
+                    const db1_dy = if (needs_derivatives) (vertices[2].x - vertices[0].x) * inverse_area else 0;
+                    const db2_dy = if (needs_derivatives) (vertices[0].x - vertices[1].x) * inverse_area else 0;
+                    const dq0_dx = if (needs_derivatives) db0_dx / vertices[0].w else 0;
+                    const dq1_dx = if (needs_derivatives) db1_dx / vertices[1].w else 0;
+                    const dq2_dx = if (needs_derivatives) db2_dx / vertices[2].w else 0;
+                    const dq0_dy = if (needs_derivatives) db0_dy / vertices[0].w else 0;
+                    const dq1_dy = if (needs_derivatives) db1_dy / vertices[1].w else 0;
+                    const dq2_dy = if (needs_derivatives) db2_dy / vertices[2].w else 0;
+                    const denominator_dx = if (needs_derivatives) dq0_dx + dq1_dx + dq2_dx else 0;
+                    const denominator_dy = if (needs_derivatives) dq0_dy + dq1_dy + dq2_dy else 0;
+                    for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                        for (0..varying.lanes) |lane| {
+                            const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
+                            const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
+                            const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
+                            const numerator = q0 * a + q1 * b + q2 * c;
+                            // VK_EXT_provoking_vertex selects which triangle
+                            // vertex supplies flat-qualified outputs.  The
+                            // profile emits the logical triangle in API order,
+                            // so first/last map directly to a/c here.
+                            const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
+                            const value = if (varying.flat) flat_value else numerator / denominator;
+                            const numerator_dx = if (needs_derivatives) dq0_dx * a + dq1_dx * b + dq2_dx * c else 0;
+                            const numerator_dy = if (needs_derivatives) dq0_dy * a + dq1_dy * b + dq2_dy * c else 0;
+                            const derivative_scale = if (needs_derivatives) denominator * denominator else 1;
+                            const dpdx = if (!needs_derivatives or varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
+                            const dpdy = if (!needs_derivatives or varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
+                            if (!std.math.isFinite(value) or (needs_derivatives and (!std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)))) return;
+                            std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
+                            std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
+                            std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
+                        }
+                        fragment_bindings[varying_index] = .{
+                            .interface = varying.fragment_interface,
+                            .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
+                            .dpdx_bytes = if (needs_derivatives) fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4] else &.{},
+                            .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
+                        };
+                    }
+                    var fragment_binding_count: usize = profile.varying_count;
+                    for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
+                        fragment_bindings[fragment_binding_count] = uniform;
+                        fragment_binding_count += 1;
+                    }
+                    var frag_coord_bytes: [16]u8 = undefined;
+                    var radial_gradient_frag_coord_ready = false;
+                    var frag_coord_dpdx_bytes: [16]u8 = undefined;
+                    var frag_coord_dpdy_bytes: [16]u8 = undefined;
+                    if (profile.fragment_frag_coord) |interface| {
+                        const depth_dx = db0_dx * vertices[0].z + db1_dx * vertices[1].z + db2_dx * vertices[2].z;
+                        const depth_dy = db0_dy * vertices[0].z + db1_dy * vertices[1].z + db2_dy * vertices[2].z;
+                        const frag_coord = [_]f32{ px, py, depth_value, denominator };
+                        const frag_coord_dpdx = [_]f32{ 1, 0, depth_dx, denominator_dx };
+                        const frag_coord_dpdy = [_]f32{ 0, 1, depth_dy, denominator_dy };
+                        for (0..4) |lane| {
+                            std.mem.writeInt(u32, frag_coord_bytes[lane * 4 ..][0..4], @bitCast(frag_coord[lane]), .little);
+                            std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
+                            std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
+                        }
+                        radial_gradient_frag_coord_ready = true;
+                        fragment_bindings[fragment_binding_count] = .{
+                            .interface = interface,
+                            .bytes = &frag_coord_bytes,
+                            .dpdx_bytes = if (needs_derivatives) &frag_coord_dpdx_bytes else &.{},
+                            .dpdy_bytes = if (needs_derivatives) &frag_coord_dpdy_bytes else &.{},
+                        };
+                        fragment_binding_count += 1;
+                    }
+                    var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
+                    if (profile.fragment_front_facing) |interface| {
+                        fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
+                        fragment_binding_count += 1;
+                    }
+                    for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+                        if (fragment_binding_count == fragment_bindings.len) return;
+                        fragment_bindings[fragment_binding_count] = binding;
+                        fragment_binding_count += 1;
+                    }
+                    for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+                        if (fragment_binding_count == fragment_bindings.len) return;
+                        fragment_bindings[fragment_binding_count] = binding;
+                        fragment_binding_count += 1;
+                    }
+                    const fragment_fast = direct: {
+                        if (texture_copy_plan != null) {
+                            const coordinate_varying = texture_copy_coordinate_varying orelse break :direct false;
+                            const image = texture_copy_image orelse break :direct false;
+                            break :direct profile.fragment.executeTextureCopyDirect(
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                image,
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (sample_modulate_plan != null) {
+                            const color_varying = sample_modulate_color_varying orelse break :direct false;
+                            const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
+                            const image = sample_modulate_image orelse break :direct false;
+                            break :direct profile.fragment.executeSampleModulateDirect(
+                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                image,
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (analytic_coverage_plan != null) {
+                            const color_varying = analytic_coverage_color_varying orelse break :direct false;
+                            const coordinate_varying = analytic_coverage_coordinate_varying orelse break :direct false;
+                            break :direct profile.fragment.executeAnalyticCoverageDirect(
+                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                fragment_dpdx_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                fragment_dpdy_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (two_axis_coverage_plan != null) {
+                            const color_varying = two_axis_coverage_color_varying orelse break :direct false;
+                            const distance_varying = two_axis_coverage_distance_varying orelse break :direct false;
+                            const prepared = two_axis_coverage_prepared orelse break :direct false;
+                            break :direct profile.fragment.executeTwoAxisCoveragePrepared(
+                                prepared,
+                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                fragment_binding_storage[distance_varying][0 .. profile.varyings[distance_varying].lanes * 4],
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct two-axis coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                        if (sample_coverage_plan != null) {
+                            const coordinate_varying = sample_coverage_coordinate_varying orelse break :direct false;
+                            const scalar_varying = sample_coverage_scalar_varying orelse break :direct false;
+                            const prepared = sample_coverage_prepared orelse break :direct false;
+                            profile.fragment.executeSampleCoveragePrepared(
+                                prepared,
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                            break :direct true;
+                        }
+                        if (vp9_color_transform_plan != null) {
+                            const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
+                            const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
+                            const prepared = vp9_color_transform_prepared orelse break :direct false;
+                            profile.fragment.executeVp9ColorTransformPrepared(
+                                prepared,
+                                fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
+                                fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                            break :direct true;
+                        }
+                        if (radial_gradient_plan != null) {
+                            const circle_varying = radial_gradient_circle_varying orelse break :direct false;
+                            const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
+                            const prepared = radial_gradient_prepared orelse break :direct false;
+                            if (!radial_gradient_frag_coord_ready) break :direct false;
+                            profile.fragment.executeRadialGradientPrepared(
+                                prepared,
+                                fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
+                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                &frag_coord_bytes,
+                                &fragment_output_bytes,
+                            ) catch |err| {
+                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                            break :direct true;
+                        }
+                        break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                            return;
+                        };
+                    };
+                    if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                        if (renderDiagnosticsEnabled()) std.debug.print(
+                            "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
+                            .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
+                        );
+                        return;
+                    };
+                    if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
+                        ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
+                    {
+                        var diagnostic_output: [4]f32 = undefined;
+                        for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                        std.debug.print(
+                            "ZPU text coverage xy={d},{d} varying0={d:.6},{d:.6} output={d:.6},{d:.6},{d:.6},{d:.6}\n",
+                            .{ x, y, @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][0..4], .little))), @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][4..8], .little))), diagnostic_output[0], diagnostic_output[1], diagnostic_output[2], diagnostic_output[3] },
+                        );
+                    }
+                }
+                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+                    target.width == 1280 and target.height == 256 and x == 100 and y == 50 and
+                    render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
                 {
-                    var diagnostic_output: [4]f32 = undefined;
-                    for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                    var diagnostic_source: [4]f32 = undefined;
+                    for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
                     std.debug.print(
-                        "ZPU text coverage xy={d},{d} varying0={d:.6},{d:.6} output={d:.6},{d:.6},{d:.6},{d:.6}\n",
-                        .{ x, y, @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][0..4], .little))), @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][4..8], .little))), diagnostic_output[0], diagnostic_output[1], diagnostic_output[2], diagnostic_output[3] },
+                        "ZPU glyph fragment xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
+                        .{ x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
                     );
                 }
-            }
-            const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-            if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
-                target.width == 1280 and target.height == 256 and x == 100 and y == 50 and
-                render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
-            {
-                var diagnostic_source: [4]f32 = undefined;
-                for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                std.debug.print(
-                    "ZPU glyph fragment xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
-                    .{ x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
-                );
-            }
-            if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
-                op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
-                target.width == 1280 and target.height == 256 and x == 30 and y == 10)
-            {
-                var diagnostic_source: [4]f32 = undefined;
-                for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                std.debug.print(
-                    "ZPU text fragment draw={d} xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
-                    .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
-                );
-            }
-            if (renderDiagnosticsEnabled() and diagnostic_draw == 71 and x == 166 and y == 1) {
-                var diagnostic_source: [4]f32 = undefined;
-                var diagnostic_destination: [4]f32 = undefined;
-                for (0..4) |channel| {
-                    diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                    const storage_index = colorStorageIndices(color.?.format).?[channel];
-                    diagnostic_destination[channel] = @as(f32, @floatFromInt(color_bytes.?[offset + storage_index])) / 255;
+                if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+                    op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
+                    target.width == 1280 and target.height == 256 and x == 30 and y == 10)
+                {
+                    var diagnostic_source: [4]f32 = undefined;
+                    for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                    std.debug.print(
+                        "ZPU text fragment draw={d} xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
+                        .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                    );
                 }
-                std.debug.print(
-                    "ZPU targeted fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
-                    .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
-                );
+                if (renderDiagnosticsEnabled() and diagnostic_draw == 71 and x == 166 and y == 1) {
+                    var diagnostic_source: [4]f32 = undefined;
+                    var diagnostic_destination: [4]f32 = undefined;
+                    for (0..4) |channel| {
+                        diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                        const storage_index = colorStorageIndices(color.?.format).?[channel];
+                        diagnostic_destination[channel] = @as(f32, @floatFromInt(color_bytes.?[offset + storage_index])) / 255;
+                    }
+                    std.debug.print(
+                        "ZPU targeted fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
+                        .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                    );
+                }
+                if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
+                if (depth_bytes) |depth_storage| {
+                    const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
+                    if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
+                }
+                if (color_bytes) |color_storage| {
+                    const wrote = if (direct_vp9_opaque_write)
+                        profileWriteOpaqueColor(color_storage[offset..][0..4], color.?.format, &fragment_output_bytes)
+                    else if (direct_fragment_color) |components|
+                        if (direct_source_over_write)
+                            profileWriteSourceOverColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask)
+                        else
+                            profileWriteColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask, draw_blend)
+                    else if (direct_source_over_write)
+                        profileWriteSourceOverColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask)
+                    else
+                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
+                    if (wrote == null) return;
+                }
+                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
+                bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
+                pixels_written += 1;
             }
-            if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
-            if (depth_bytes) |depth_storage| {
-                const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
-                if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
-            }
-            if (color_bytes) |color_storage| if (profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, .{
-                .enable = op.pipeline.color_blend_enable,
-                .src_color_factor = op.pipeline.src_color_blend_factor,
-                .dst_color_factor = op.pipeline.dst_color_blend_factor,
-                .color_op = op.pipeline.color_blend_op,
-                .src_alpha_factor = op.pipeline.src_alpha_blend_factor,
-                .dst_alpha_factor = op.pipeline.dst_alpha_blend_factor,
-                .alpha_op = op.pipeline.alpha_blend_op,
-                .constants = if (op.pipeline.dynamic_blend_constants) op.blend_constants else op.pipeline.blend_constants,
-            }) == null) return;
-            if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
-            bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
-            pixels_written += 1;
-        };
+        }
     }
     // A parallel Mosaic lane owns disjoint pixels but must not race on image
     // content metadata. Its caller publishes a conservative whole-target
@@ -11311,17 +12263,28 @@ const ProfileLaneCache = struct {
     fragment_identity: [32]u8,
     clone: ProfileGraphicsClone,
 };
-threadlocal var profile_lane_cache: ?ProfileLaneCache = null;
+const profile_lane_cache_capacity: usize = 8;
+threadlocal var profile_lane_caches: [profile_lane_cache_capacity]?ProfileLaneCache = [_]?ProfileLaneCache{null} ** profile_lane_cache_capacity;
 
 fn cachedProfileLane(source: *const ProfileGraphics) ?*ProfileGraphics {
-    if (profile_lane_cache) |*entry| {
-        if (entry.source == source and std.mem.eql(u8, &entry.vertex_identity, &source.vertex.program.identity.digest) and std.mem.eql(u8, &entry.fragment_identity, &source.fragment.program.identity.digest)) return &entry.clone.graphics;
-        entry.clone.deinit();
-        profile_lane_cache = null;
+    for (&profile_lane_caches) |*slot| {
+        if (slot.*) |*entry| {
+            if (entry.source == source and std.mem.eql(u8, &entry.vertex_identity, &source.vertex.program.identity.digest) and std.mem.eql(u8, &entry.fragment_identity, &source.fragment.program.identity.digest)) return &entry.clone.graphics;
+        }
     }
     const clone = ProfileGraphicsClone.init(source) catch return null;
-    profile_lane_cache = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
-    return &profile_lane_cache.?.clone.graphics;
+    for (&profile_lane_caches) |*slot| {
+        if (slot.* == null) {
+            slot.* = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
+            return &slot.*.?.clone.graphics;
+        }
+    }
+    // Eight pipeline-local executors cover the observed compositor batches.
+    // On a genuinely wider batch, recycle one lane-local clone rather than
+    // allocating unbounded per-worker state.
+    profile_lane_caches[0].?.clone.deinit();
+    profile_lane_caches[0] = .{ .source = source, .vertex_identity = source.vertex.program.identity.digest, .fragment_identity = source.fragment.program.identity.digest, .clone = clone };
+    return &profile_lane_caches[0].?.clone.graphics;
 }
 
 /// The VP9 color-transform specialization has no mutable fragment state once
@@ -11333,6 +12296,8 @@ const Vp9MosaicLaneContext = struct {
     query_context: *QueryExecutionContext,
     width: u32,
     height: u32,
+    content_min_y: u32,
+    content_max_y: u32,
 
     fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
         const context: *Vp9MosaicLaneContext = @ptrCast(@alignCast(raw));
@@ -11347,12 +12312,62 @@ const Vp9MosaicLaneContext = struct {
         };
         if (source.fragment.vp9ColorTransformPlan() == null) return;
         const lane_profile = cachedProfileLane(source) orelse return;
-        const min_y: u32 = @intCast((@as(u64, context.height) * lane_index) / lane_count);
-        const max_y: u32 = @intCast((@as(u64, context.height) * (lane_index + 1)) / lane_count);
+        const range = vp9MosaicLaneRange(context.height, context.content_min_y, context.content_max_y, lane_index, lane_count);
+        const min_y = range.min_y;
+        const max_y = range.max_y;
         if (min_y == max_y) return;
         executeProfileDraw(op, lane_profile, context.query_context, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y }, false);
     }
 };
+
+const Vp9MosaicLaneRange = struct { min_y: u32, max_y: u32 };
+
+/// Partition the target at equal intervals inside the viewport that contains
+/// the video quad, while retaining the target's outer rows in the first and
+/// last lanes.  Thus every target pixel is still visited exactly once, but a
+/// bottom- or top-aligned video rect does not strand almost all useful work on
+/// one two-core Mosaic lane.
+fn vp9MosaicLaneRange(target_height: u32, content_min_y: u32, content_max_y: u32, lane_index: usize, lane_count: usize) Vp9MosaicLaneRange {
+    if (lane_count == 0 or lane_index >= lane_count) return .{ .min_y = 0, .max_y = 0 };
+    const minimum = @min(content_min_y, target_height);
+    const maximum = @max(minimum, @min(content_max_y, target_height));
+    const span = maximum - minimum;
+    const interiorBoundary = struct {
+        fn at(minimum_y: u32, span_y: u32, lane: usize, lanes: usize) u32 {
+            return minimum_y + @as(u32, @intCast((@as(u64, span_y) * lane) / lanes));
+        }
+    }.at;
+    return .{
+        .min_y = if (lane_index == 0) 0 else interiorBoundary(minimum, span, lane_index, lane_count),
+        .max_y = if (lane_index + 1 == lane_count) target_height else interiorBoundary(minimum, span, lane_index + 1, lane_count),
+    };
+}
+
+test "VP9 Mosaic lane ranges balance an offset viewport and cover the target" {
+    try std.testing.expectEqual(Vp9MosaicLaneRange{ .min_y = 0, .max_y = 179 }, vp9MosaicLaneRange(272, 87, 272, 0, 2));
+    try std.testing.expectEqual(Vp9MosaicLaneRange{ .min_y = 179, .max_y = 272 }, vp9MosaicLaneRange(272, 87, 272, 1, 2));
+    var previous: u32 = 0;
+    for (0..4) |lane| {
+        const range = vp9MosaicLaneRange(272, 87, 272, lane, 4);
+        try std.testing.expectEqual(previous, range.min_y);
+        try std.testing.expect(range.max_y >= range.min_y);
+        previous = range.max_y;
+    }
+    try std.testing.expectEqual(@as(u32, 272), previous);
+}
+
+fn vp9MosaicContentY(op: anytype, target_height: u32) struct { min_y: u32, max_y: u32 } {
+    if (target_height == 0 or !std.math.isFinite(op.viewport.y) or !std.math.isFinite(op.viewport.height) or op.viewport.height <= 0) return .{ .min_y = 0, .max_y = target_height };
+    const target_height_f32: f32 = @floatFromInt(target_height);
+    const viewport_end = op.viewport.y + op.viewport.height;
+    if (!std.math.isFinite(viewport_end)) return .{ .min_y = 0, .max_y = target_height };
+    const first = std.math.clamp(op.viewport.y, @as(f32, 0), target_height_f32);
+    const last = std.math.clamp(viewport_end, @as(f32, 0), target_height_f32);
+    const min_y: u32 = @intFromFloat(@floor(first));
+    const max_y: u32 = @intFromFloat(@ceil(last));
+    if (max_y <= min_y) return .{ .min_y = 0, .max_y = target_height };
+    return .{ .min_y = min_y, .max_y = max_y };
+}
 
 fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExecutionContext) bool {
     const op = switch (command.*) {
@@ -11367,13 +12382,94 @@ fn executeMosaicSingleVp9Draw(command: *const Command, query_context: *QueryExec
     if (profile.fragment.vp9ColorTransformPlan() == null) return false;
     const color = op.color_image orelse (if (op.framebuffer) |framebuffer| framebuffer.color_image else null) orelse return false;
     if (@as(u64, color.width) * color.height < @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size) return false;
-    var context = Vp9MosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height };
+    const content_y = vp9MosaicContentY(op, color.height);
+    var context = Vp9MosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height, .content_min_y = content_y.min_y, .content_max_y = content_y.max_y };
     if (!cpu_cube.dispatchParallelLanes(&context, Vp9MosaicLaneContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
     color.content_bounds = unionRect(color.content_bounds, full_target);
     color.complex_3d_content = true;
     color.force_full_present = true;
     if (op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null) |depth| depth.content_bounds = unionRect(depth.content_bounds, full_target);
+    return true;
+}
+
+/// The exact radial-gradient lowering is likewise immutable after its
+/// descriptor and uniform state is prepared. Keep this separate from the
+/// general profile scheduler: the explicit checks below reject every state
+/// that could introduce cross-band ordering or feedback.
+const RadialGradientMosaicLaneContext = struct {
+    command: *const Command,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *RadialGradientMosaicLaneContext = @ptrCast(@alignCast(raw));
+        if (lane_count == 0 or lane_index >= lane_count) return;
+        const op = switch (context.command.*) {
+            .cube_draw => |value| value,
+            else => return,
+        };
+        const source = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile,
+            else => return,
+        };
+        if (source.fragment.radialGradientPlan() == null) return;
+        const lane_profile = cachedProfileLane(source) orelse return;
+        const range = radialGradientMosaicLaneRange(context.height, lane_index, lane_count);
+        const min_y = range.min_y;
+        const max_y = range.max_y;
+        if (min_y == max_y) return;
+        executeProfileDraw(op, lane_profile, context.query_context, 0, .{ .min_x = 0, .min_y = min_y, .max_x = context.width, .max_y = max_y }, false);
+    }
+};
+
+const RadialGradientMosaicLaneRange = struct { min_y: u32, max_y: u32 };
+
+fn radialGradientMosaicLaneRange(height: u32, lane_index: usize, lane_count: usize) RadialGradientMosaicLaneRange {
+    if (lane_count == 0 or lane_index >= lane_count) return .{ .min_y = 0, .max_y = 0 };
+    return .{
+        .min_y = @intCast((@as(u64, height) * lane_index) / lane_count),
+        .max_y = @intCast((@as(u64, height) * (lane_index + 1)) / lane_count),
+    };
+}
+
+test "radial-gradient Mosaic bands cover a target exactly once" {
+    var previous: u32 = 0;
+    for (0..2) |lane| {
+        const range = radialGradientMosaicLaneRange(512, lane, 2);
+        try std.testing.expectEqual(previous, range.min_y);
+        try std.testing.expect(range.max_y >= range.min_y);
+        previous = range.max_y;
+    }
+    try std.testing.expectEqual(@as(u32, 512), previous);
+    try std.testing.expectEqual(RadialGradientMosaicLaneRange{ .min_y = 0, .max_y = 0 }, radialGradientMosaicLaneRange(512, 2, 2));
+}
+
+fn executeMosaicSingleRadialGradientDraw(command: *const Command, query_context: *QueryExecutionContext) bool {
+    const op = switch (command.*) {
+        .cube_draw => |value| value,
+        else => return false,
+    };
+    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null or op.depth_image != null or
+        op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.rasterizer_discard_enable != 0) return false;
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    if (profile.fragment.radialGradientPlan() == null or profile.fragment_input_attachment_count != 0) return false;
+    const framebuffer_depth = if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+    if (framebuffer_depth != null) return false;
+    const color = op.color_image orelse (if (op.framebuffer) |framebuffer| framebuffer.color_image else null) orelse return false;
+    if (@as(u64, color.width) * color.height < @as(u64, profile_mosaic_tile_size) * profile_mosaic_tile_size) return false;
+    if (op.descriptors.texture == color) return false;
+    for (op.descriptors.sampled_images) |sampled| if (sampled.image == color) return false;
+    var context = RadialGradientMosaicLaneContext{ .command = command, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, RadialGradientMosaicLaneContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
     return true;
 }
 
@@ -11399,6 +12495,189 @@ fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageOb
 fn profileMosaicEligible(op: anytype) bool {
     return op.pipeline.execution_abi == .profile_v1_scalar_graphics and
         op.rasterizer_discard_enable == 0 and op.layer_count == 1;
+}
+
+/// Resolve one image-order Mosaic tile.  Tile ownership is static and a lane
+/// processes tile indexes `lane, lane + lanes, ...`; no two lanes can write
+/// the same pixel.
+fn profileMosaicTileClip(width: u32, height: u32, tile_index: usize) ?ProfileMosaicClip {
+    if (width == 0 or height == 0) return null;
+    const tiles_x = (@as(usize, width) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+    const tiles_y = (@as(usize, height) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+    const tile_count = std.math.mul(usize, tiles_x, tiles_y) catch return null;
+    if (tile_index >= tile_count) return null;
+    const tile_x = @as(u32, @intCast((tile_index % tiles_x) * profile_mosaic_tile_size));
+    const tile_y = @as(u32, @intCast((tile_index / tiles_x) * profile_mosaic_tile_size));
+    return .{
+        .min_x = tile_x,
+        .min_y = tile_y,
+        .max_x = @min(width, tile_x + profile_mosaic_tile_size),
+        .max_y = @min(height, tile_y + profile_mosaic_tile_size),
+    };
+}
+
+test "profile Mosaic tile clips cover a 640 by 720 target exactly once" {
+    var covered = [_]u8{0} ** (640 * 720);
+    var tile_index: usize = 0;
+    while (profileMosaicTileClip(640, 720, tile_index)) |clip| : (tile_index += 1) {
+        for (clip.min_y..clip.max_y) |y| for (clip.min_x..clip.max_x) |x| {
+            const index = @as(usize, y) * 640 + x;
+            try std.testing.expectEqual(@as(u8, 0), covered[index]);
+            covered[index] = 1;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 9), tile_index);
+    for (covered) |pixel| try std.testing.expectEqual(@as(u8, 1), pixel);
+}
+
+/// Resolve a horizontal band for a profile batch.  A band establishes a
+/// draw's geometry once per worker instead of once per 64x64 tile.  It is
+/// admitted only through the strict stateless/no-feedback safety gate below.
+fn profileMosaicBandClip(width: u32, height: u32, lane_index: usize, lane_count: usize) ?ProfileMosaicClip {
+    if (width == 0 or height == 0 or lane_count == 0 or lane_index >= lane_count) return null;
+    const min_y = (@as(u64, height) * lane_index) / lane_count;
+    const max_y = (@as(u64, height) * (lane_index + 1)) / lane_count;
+    if (min_y >= max_y or max_y > height) return null;
+    return .{
+        .min_x = 0,
+        .min_y = @intCast(min_y),
+        .max_x = width,
+        .max_y = @intCast(max_y),
+    };
+}
+
+test "profile Mosaic bands cover a 192 by 192 target exactly once" {
+    var covered = [_]u8{0} ** (192 * 192);
+    for (0..2) |lane_index| {
+        const clip = profileMosaicBandClip(192, 192, lane_index, 2) orelse return error.TestUnexpectedResult;
+        for (clip.min_y..clip.max_y) |y| for (clip.min_x..clip.max_x) |x| {
+            const index = @as(usize, y) * 192 + x;
+            try std.testing.expectEqual(@as(u8, 0), covered[index]);
+            covered[index] = 1;
+        };
+    }
+    for (covered) |pixel| try std.testing.expectEqual(@as(u8, 1), pixel);
+}
+
+/// The parallel route is deliberately more restrictive than the generic
+/// profile scheduler. Exact texture-copy/sample-modulate/pass-through fragments are
+/// stateless after setup, and these checks rule out all cross-tile state:
+/// queries, depth, input attachments, and self-sampling feedback.
+fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (batch_count == 0 or query_context.pool != null) return false;
+    var cursor = start;
+    for (0..batch_count) |_| {
+        const raw = cursor.current() orelse return false;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => return false,
+        };
+        // A framebuffer is only an attachment container. A color-only
+        // framebuffer has the same per-tile ownership as a directly bound
+        // color image; reject an actual resolved depth attachment instead of
+        // discarding this otherwise stateless path merely for using the
+        // framebuffer form of the Vulkan API.
+        const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+        if (op.instance_count != 1 or depth != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
+        const profile = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*value| value,
+            else => return false,
+        };
+        if (!profile.fragment.tileParallelSafe() or profile.fragment_input_attachment_count != 0) return false;
+        if (op.descriptors.texture == color) return false;
+        for (op.descriptors.sampled_images) |sampled| if (sampled.image == color) return false;
+        cursor.advance();
+    }
+    return true;
+}
+
+const ProfileMosaicLaneContext = struct {
+    start: MosaicCommandCursor,
+    batch_count: usize,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *ProfileMosaicLaneContext = @ptrCast(@alignCast(raw));
+        if (lane_count == 0 or lane_index >= lane_count) return;
+        const tiles_x = (@as(usize, context.width) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+        const tiles_y = (@as(usize, context.height) + profile_mosaic_tile_size - 1) / profile_mosaic_tile_size;
+        const tile_count = std.math.mul(usize, tiles_x, tiles_y) catch return;
+        var tile_index = lane_index;
+        while (tile_index < tile_count) : (tile_index += lane_count) {
+            const clip = profileMosaicTileClip(context.width, context.height, tile_index) orelse return;
+            var draw_cursor = context.start;
+            for (0..context.batch_count) |_| {
+                const raw_command = draw_cursor.current() orelse return;
+                const op = switch (raw_command.*) {
+                    .cube_draw => |value| value,
+                    else => return,
+                };
+                const source = switch (op.pipeline.execution_abi) {
+                    .profile_v1_scalar_graphics => |*profile| profile,
+                    else => return,
+                };
+                const lane_profile = cachedProfileLane(source) orelse return;
+                executeProfileDraw(op, lane_profile, context.query_context, 0, clip, false);
+                draw_cursor.advance();
+            }
+        }
+    }
+};
+
+fn executeMosaicTileParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
+    var context = ProfileMosaicLaneContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicLaneContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+    return true;
+}
+
+const ProfileMosaicBandContext = struct {
+    start: MosaicCommandCursor,
+    batch_count: usize,
+    query_context: *QueryExecutionContext,
+    width: u32,
+    height: u32,
+
+    fn run(raw: *anyopaque, lane_index: usize, lane_count: usize) void {
+        const context: *ProfileMosaicBandContext = @ptrCast(@alignCast(raw));
+        const clip = profileMosaicBandClip(context.width, context.height, lane_index, lane_count) orelse return;
+        var draw_cursor = context.start;
+        for (0..context.batch_count) |_| {
+            const raw_command = draw_cursor.current() orelse return;
+            const op = switch (raw_command.*) {
+                .cube_draw => |value| value,
+                else => return,
+            };
+            const source = switch (op.pipeline.execution_abi) {
+                .profile_v1_scalar_graphics => |*profile| profile,
+                else => return,
+            };
+            const lane_profile = cachedProfileLane(source) orelse return;
+            executeProfileDraw(op, lane_profile, context.query_context, 0, clip, false);
+            draw_cursor.advance();
+        }
+    }
+};
+
+/// Small, dense profile targets are dominated by repeated geometry setup when
+/// split into 64-pixel tiles. Give each worker one horizontal band instead.
+/// The tile safety gate rules out target reads, depth, queries, and fragment
+/// state shared across pixels, so bands preserve exact per-pixel draw order.
+fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
+    var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
+    if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
+    const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
+    color.content_bounds = unionRect(color.content_bounds, full_target);
+    color.complex_3d_content = true;
+    color.force_full_present = true;
+    return true;
 }
 
 /// Execute adjacent native Skia profile draws through the Vulkan command
@@ -11444,15 +12723,103 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                 const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
                 if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic VP9 profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
             }
-            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128)
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
                 std.debug.print("ZPU Mosaic VP9 profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
+            cursor.* = candidate;
+            return 1;
+        }
+        // The exact scalar-coverage profile used while Chromium composites a
+        // decoded VP9 surface is stateless after its descriptor setup. Admit
+        // just this identity to the same disjoint worker bands as the native
+        // VP9 transform; `profileMosaicBatchTileParallelSafe` still rejects
+        // depth, queries, input attachments, and target feedback.
+        const single_sample_coverage = switch (first.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile.fragment.sampleCoveragePlan() != null,
+            else => false,
+        };
+        if (single_sample_coverage and executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context)) {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic VP9 coverage profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
+                std.debug.print("ZPU Mosaic VP9 coverage profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
+            cursor.* = candidate;
+            return 1;
+        }
+        if (executeMosaicSingleRadialGradientDraw(first_raw, query_context)) {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic radial-gradient profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
+                std.debug.print("ZPU Mosaic radial-gradient profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
             cursor.* = candidate;
             return 1;
         }
     }
     // Adjacent profiles still use ordered serial tiles: arbitrary executors
-    // own mutable scratch and cannot be parallelized safely.
+    // own mutable scratch and cannot be parallelized safely. The two exact
+    // stateless sampled profiles are the exception: execute their complete
+    // ordered draw list independently in each disjoint tile.
     if (!profileMosaicBatchEligible(batch_count, color_image.width, color_image.height)) return null;
+    // A later profile in an ordered target run can require serial execution
+    // without invalidating an earlier stateless prefix. Execute the longest
+    // safe prefix through disjoint Mosaic tiles, then resume the stream at
+    // the first serial command. Each tile still evaluates that prefix in
+    // command order, and no admitted command reads the target, so this is
+    // equivalent to whole-surface ordered execution.
+    var parallel_count = batch_count;
+    while (parallel_count >= 2) : (parallel_count -= 1) {
+        const parallel_start = cursor.*;
+        const parallel_operation_start = frame_pacing.monotonicNs();
+        // Large full-target Skia composite runs repeat the same profile
+        // vertex setup for every 64-pixel tile. They are already admitted
+        // only after proving every command is stateless and feedback-free, so
+        // two horizontal bands preserve each pixel's ordered draw list while
+        // establishing geometry once per worker. Keep the tile route for
+        // medium, potentially sparse targets where its work stealing is more
+        // useful; very short targets are likewise better as bands.
+        const area = @as(u64, color_image.width) * color_image.height;
+        const use_bands = area <= 192 * 192 or area >= 640 * 256;
+        const parallel_executed = if (use_bands)
+            executeMosaicBandParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)
+        else
+            executeMosaicTileParallelProfileBatch(parallel_start, parallel_count, color_image, query_context);
+        if (!parallel_executed) continue;
+        color_image.last_draw_ns = frame_pacing.monotonicNs() - parallel_operation_start;
+        if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+        if (renderDiagnosticsEnabled()) {
+            const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+            if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic parallel-{s} profile batch seq={d} commands={d} target={x} {d}x{d}\n", .{ if (use_bands) "band" else "tile", diagnostic_batch, parallel_count, @intFromPtr(color_image), color_image.width, color_image.height });
+        }
+        if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128)) {
+            std.debug.print("ZPU Mosaic parallel-{s} profile timing target={d}x{d} commands={d} total_ns={d}", .{ if (use_bands) "band" else "tile", color_image.width, color_image.height, parallel_count, color_image.last_draw_ns });
+            var timing_cursor = parallel_start;
+            for (0..parallel_count) |index| {
+                const raw = timing_cursor.current() orelse break;
+                const op = switch (raw.*) {
+                    .cube_draw => |value| value,
+                    else => break,
+                };
+                const profile = switch (op.pipeline.execution_abi) {
+                    .profile_v1_scalar_graphics => |value| value,
+                    else => break,
+                };
+                std.debug.print(" path[{d}]={s} ir[{d}]={x}", .{ index, profile.fragment.prevalidatedPathName(), index, profile.fragment.program.identity.digest });
+                timing_cursor.advance();
+            }
+            std.debug.print("\n", .{});
+        }
+        var parallel_end = cursor.*;
+        for (0..parallel_count) |_| parallel_end.advance();
+        cursor.* = parallel_end;
+        return parallel_count;
+    }
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_profile_draws.fetchAdd(batch_count, .monotonic);
 
     const operation_start = frame_pacing.monotonicNs();
@@ -11501,12 +12868,26 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
     // A Chromium startup can consume several samples before animated content
     // begins. Keep the opt-in window long enough to include steady-state
     // video composition while still bounding log volume.
-    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < 128) {
+    if (timing_enabled and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128)) {
         std.debug.print(
             "ZPU Mosaic profile timing target={d}x{d} commands={d} total_ns={d}",
             .{ color_image.width, color_image.height, batch_count, color_image.last_draw_ns },
         );
         for (command_elapsed_ns[0..batch_count], 0..) |elapsed, index| std.debug.print(" draw[{d}]_ns={d}", .{ index, elapsed });
+        var timing_cursor = start;
+        for (0..batch_count) |index| {
+            const raw = timing_cursor.current() orelse break;
+            const op = switch (raw.*) {
+                .cube_draw => |value| value,
+                else => break,
+            };
+            const profile = switch (op.pipeline.execution_abi) {
+                .profile_v1_scalar_graphics => |value| value,
+                else => break,
+            };
+            std.debug.print(" path[{d}]={s} ir[{d}]={x}", .{ index, profile.fragment.prevalidatedPathName(), index, profile.fragment.program.identity.digest });
+            timing_cursor.advance();
+        }
         std.debug.print("\n", .{});
     }
     cursor.* = candidate;
@@ -11774,7 +13155,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     var layer: u32 = 0;
                     while (layer < op.layer_count) : (layer += 1) executeProfileDraw(draw, null, query_context, layer, null, true);
                 }
-                if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < 512) {
+                if (profile_timing_enabled and render_diagnostic_profile_timing_direct_draws.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(512)) {
                     const target = color orelse depth;
                     std.debug.print(
                         "ZPU direct profile timing target={d}x{d} topology={d} vertices={d} fragment_path={s} fragment_ir={x} total_ns={d}\n",
@@ -14336,13 +15717,41 @@ test "current Chromium VP9 color transform native path matches validated IR" {
         writeF32(&uniform, base + 64, 2); // linear branch for normalized samples
     }
     var coordinates = [_]u8{0} ** 8;
-    writeF32(&coordinates, 0, 0.5);
-    writeF32(&coordinates, 4, 0.5);
-    const luma_pixels = [_]u8{ 64, 0, 0, 255 };
-    const chroma_pixels = [_]u8{ 128, 192, 0, 255 };
-    const image_common = .{ .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = render_ir_exec.SampledImage.Format.rgba8_unorm, .filter = render_ir_exec.SampledImage.Filter.nearest, .address_u = render_ir_exec.SampledImage.AddressMode.clamp_to_edge, .address_v = render_ir_exec.SampledImage.AddressMode.clamp_to_edge };
-    const luma_image = render_ir_exec.SampledImage{ .pixels = &luma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
-    const chroma_image = render_ir_exec.SampledImage{ .pixels = &chroma_pixels, .width = image_common.width, .height = image_common.height, .row_stride = image_common.row_stride, .bytes_per_texel = image_common.bytes_per_texel, .format = image_common.format, .filter = image_common.filter, .address_u = image_common.address_u, .address_v = image_common.address_v };
+    writeF32(&coordinates, 0, 0.625);
+    writeF32(&coordinates, 4, 0.375);
+    // Match the video uploader's padded four-byte texel storage while using
+    // the R8/RG8 formats and linear clamp mode selected by the real VP9
+    // profile. The generic executor is the oracle for the prepared path.
+    const luma_pixels = [_]u8{
+        16,  0, 0, 0, 64,  0, 0, 0,
+        128, 0, 0, 0, 240, 0, 0, 0,
+    };
+    const chroma_pixels = [_]u8{
+        16,  192, 0, 0, 96,  160, 0, 0,
+        128, 64,  0, 0, 224, 32,  0, 0,
+    };
+    const luma_image = render_ir_exec.SampledImage{
+        .pixels = &luma_pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .bytes_per_texel = 4,
+        .format = .r8_unorm,
+        .filter = .linear,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    const chroma_image = render_ir_exec.SampledImage{
+        .pixels = &chroma_pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .bytes_per_texel = 4,
+        .format = .rg8_unorm,
+        .filter = .linear,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
     var color = [_]u8{0} ** 16;
     var facing = [_]u8{1};
     const bindings = [_]render_ir_exec.Binding{
@@ -14357,13 +15766,45 @@ test "current Chromium VP9 color transform native path matches validated IR" {
     var generic_output = [_]u8{0} ** 16;
     var direct_output = [_]u8{0} ** 16;
     var prepared_output = [_]u8{0} ** 16;
+    var coordinate_output = [_]u8{0} ** 16;
     const outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &generic_output }};
     try executor.execute(&bindings, &outputs);
     try std.testing.expect(try executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, &uniform, luma_image, chroma_image, &direct_output));
     const prepared = (try executor.prepareVp9ColorTransform(&uniform, luma_image, chroma_image)).?;
     try executor.executeVp9ColorTransformPrepared(prepared, &coordinates, &coordinates, &prepared_output);
+    try executor.executeVp9ColorTransformPreparedCoordinates(prepared, .{ 0.625, 0.375 }, .{ 0.625, 0.375 }, &coordinate_output);
+    const coordinate_color = try executor.executeVp9ColorTransformPreparedCoordinatesColor(prepared, .{ 0.625, 0.375 }, .{ 0.625, 0.375 });
+    var coordinate_color_output = [_]u8{0} ** 16;
+    for (coordinate_color, 0..) |component, lane| std.mem.writeInt(u32, coordinate_color_output[lane * 4 ..][0..4], @bitCast(component), .little);
     try std.testing.expectEqualSlices(u8, &generic_output, &direct_output);
     try std.testing.expectEqualSlices(u8, &generic_output, &prepared_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &coordinate_color_output);
+
+    // A descriptor that is still valid for the shader but outside the narrow
+    // linear-clamp plane contract must retain the ordinary sampler.  The
+    // prepared VP9 state is allowed to skip its repeated bounds checks only
+    // after both planes pass that complete immutable validation.
+    var nearest_luma = luma_image;
+    var nearest_chroma = chroma_image;
+    nearest_luma.filter = .nearest;
+    nearest_chroma.filter = .nearest;
+    const fallback_bindings = [_]render_ir_exec.Binding{
+        .{ .interface = 0, .bytes = &color },
+        .{ .interface = 1, .bytes = &coordinates },
+        .{ .interface = 2, .bytes = &coordinates },
+        .{ .interface = 3, .bytes = &facing },
+        .{ .interface = 5, .bytes = &uniform },
+        .{ .interface = 6, .sampled_image = nearest_luma },
+        .{ .interface = 7, .sampled_image = nearest_chroma },
+    };
+    var fallback_generic_output = [_]u8{0} ** 16;
+    var fallback_prepared_output = [_]u8{0} ** 16;
+    const fallback_outputs = [_]render_ir_exec.Output{.{ .interface = 4, .bytes = &fallback_generic_output }};
+    try executor.execute(&fallback_bindings, &fallback_outputs);
+    const fallback_prepared = (try executor.prepareVp9ColorTransform(&uniform, nearest_luma, nearest_chroma)).?;
+    try executor.executeVp9ColorTransformPrepared(fallback_prepared, &coordinates, &coordinates, &fallback_prepared_output);
+    try std.testing.expectEqualSlices(u8, &fallback_generic_output, &fallback_prepared_output);
     try std.testing.expectError(error.Bounds, executor.executeVp9ColorTransformDirect(&coordinates, &coordinates, uniform[0..483], luma_image, chroma_image, &direct_output));
     try std.testing.expectError(error.Bounds, executor.prepareVp9ColorTransform(uniform[0..483], luma_image, chroma_image));
 }

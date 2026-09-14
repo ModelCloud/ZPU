@@ -198,6 +198,13 @@ pub fn build(b: *std.Build) void {
     if (enable_xcb) b.installArtifact(icd);
     const install_manifest = b.addInstallFile(b.path("src/vulkan/zpu_icd.x86_64.json"), "share/vulkan/icd.d/zpu_icd.x86_64.json");
     b.getInstallStep().dependOn(&install_manifest.step);
+    // Performance bring-up frequently changes only the ICD. Keep a narrow
+    // install step for controlled guest iteration, while the default install
+    // remains the complete shipped package.
+    const install_icd_only = b.addInstallArtifact(icd, .{});
+    const icd_install_step = b.step("icd-install", "Install only the Vulkan ICD and manifest");
+    icd_install_step.dependOn(&install_icd_only.step);
+    icd_install_step.dependOn(&install_manifest.step);
     const demo = b.addExecutable(.{
         .name = "zpu-demo",
         .root_module = b.createModule(.{

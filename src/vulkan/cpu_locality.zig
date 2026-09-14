@@ -40,6 +40,57 @@ fn singleton(cpu: usize) CpuSet {
     return set;
 }
 
+/// Parse the deliberately small CPU-list grammar used by the Mosaic process
+/// override. A caller must opt in through the existing physical-core contract;
+/// malformed, empty, repeated, or out-of-range entries are rejected rather
+/// than silently selecting a different execution placement.
+fn parseCpuSet(text: []const u8) ?CpuSet {
+    var result = [_]usize{0} ** @typeInfo(CpuSet).array.len;
+    var any = false;
+    var entries = std.mem.splitScalar(u8, text, ',');
+    while (entries.next()) |raw_entry| {
+        const entry = std.mem.trim(u8, raw_entry, " \t");
+        if (entry.len == 0) return null;
+        var range = std.mem.splitScalar(u8, entry, '-');
+        const first_text = range.next() orelse return null;
+        const last_text = range.next();
+        if (range.next() != null) return null;
+        const first = std.fmt.parseInt(usize, first_text, 10) catch return null;
+        const last = if (last_text) |value| std.fmt.parseInt(usize, value, 10) catch return null else first;
+        if (first > last or last >= cpu_capacity) return null;
+        for (first..last + 1) |cpu| {
+            if (contains(result, cpu)) return null;
+            result[cpu / bits_per_word] |= @as(usize, 1) << @intCast(cpu % bits_per_word);
+            any = true;
+        }
+    }
+    return if (any) result else null;
+}
+
+/// Chromium may narrow its GPU subprocess to a single CPU after the launcher
+/// has assigned a larger mask. `ZPU_MOSAIC_CPU_SET` lets a controlled caller
+/// restore an explicit, bounded set for Mosaic only. The kernel must accept
+/// the complete requested set exactly; otherwise the original affinity is
+/// restored and normal discovery proceeds. This never expands a process by
+/// default, nor does it accept the override outside `physical-core-v1`.
+fn applyConfiguredCpuSet(initial: CpuSet) CpuSet {
+    if (std.c.getenv("ZPU_LIMITED")) |limited| {
+        if (!std.mem.eql(u8, std.mem.span(limited), "physical-core-v1")) return initial;
+    } else return initial;
+    const raw = std.c.getenv("ZPU_MOSAIC_CPU_SET") orelse return initial;
+    const requested = parseCpuSet(std.mem.span(raw)) orelse return initial;
+    std.os.linux.sched_setaffinity(0, &requested) catch return initial;
+    const applied = std.posix.sched_getaffinity(0) catch {
+        std.os.linux.sched_setaffinity(0, &initial) catch {};
+        return initial;
+    };
+    if (!std.mem.eql(usize, &applied, &requested)) {
+        std.os.linux.sched_setaffinity(0, &initial) catch {};
+        return initial;
+    }
+    return applied;
+}
+
 fn monotonicNs() u64 {
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
@@ -149,7 +200,8 @@ fn rankSelectedCpus(allowed: CpuSet) void {
 }
 
 fn discoverLinux() void {
-    const allowed = std.posix.sched_getaffinity(0) catch return;
+    const initial_allowed = std.posix.sched_getaffinity(0) catch return;
+    const allowed = applyConfiguredCpuSet(initial_allowed);
     var cpu_nodes = [_]usize{std.math.maxInt(usize)} ** cpu_capacity;
     var node_counts = [_]usize{0} ** cpu_capacity;
     var initial_node: usize = 0;
@@ -319,6 +371,19 @@ test "CPU masks select exactly one requested processor" {
     const set = singleton(cpu);
     try std.testing.expect(contains(set, cpu));
     try std.testing.expectEqual(@as(usize, 1), @popCount(set[cpu / bits_per_word]));
+}
+
+test "Mosaic CPU-set override grammar is exact and bounded" {
+    const parsed = parseCpuSet("0,2-3") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(contains(parsed, 0));
+    try std.testing.expect(!contains(parsed, 1));
+    try std.testing.expect(contains(parsed, 2));
+    try std.testing.expect(contains(parsed, 3));
+    try std.testing.expect(parseCpuSet("") == null);
+    try std.testing.expect(parseCpuSet("0,,1") == null);
+    try std.testing.expect(parseCpuSet("0,0") == null);
+    try std.testing.expect(parseCpuSet("3-2") == null);
+    try std.testing.expect(parseCpuSet("x") == null);
 }
 
 test "raster roles fan out when CPUs are available" {

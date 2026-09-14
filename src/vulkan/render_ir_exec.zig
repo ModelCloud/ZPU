@@ -742,6 +742,111 @@ pub const RadialGradientPlan = struct {
     output_interface: u32,
 };
 
+/// Immutable values read by Chromium's exact radial-gradient profile. The
+/// dynamic circle, coordinate and fragment-position inputs remain per-pixel;
+/// this merely moves bounded std140 loads out of the raster loop.
+pub const RadialGradientPrepared = struct {
+    image: SampledImage,
+    phase_bias: f32,
+    phase_scale: f32,
+    thresholds: [3]f32,
+    color_scales: [4][4]f32,
+    color_biases: [4][4]f32,
+    lower_color: [4]f32,
+    upper_color: [4]f32,
+    range: [2]f32,
+    sample_matrix: [6]f32,
+    contrast: f32,
+};
+
+/// Exact ABI of Chromium's two-distance-field radial mask. The profile is
+/// selected by the complete canonical IR digest below, not by its arithmetic
+/// shape or a shader name.
+pub const RadialMaskPlan = struct {
+    color_interface: u32,
+    coordinates_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+/// Draw-invariant state for Chromium's exact two-distance-field radial mask.
+/// The profile is still selected exclusively by its complete canonical Render
+/// IR identity.  Preparing this record only moves bounded push-constant reads
+/// and descriptor resolution out of the per-pixel raster loop.
+pub const RadialMaskPrepared = struct {
+    image: SampledImage,
+    /// The radial-mask shader consumes only sampled red. When the image is a
+    /// validated linear R8/RG8 clamp plane, reuse the exact prepared-plane
+    /// sampler shared with the VP9 path rather than repeat generic sampler
+    /// state and bounds validation for every covered fragment.
+    fast_red_plane: bool,
+    matrix_column0: [2]f32,
+    matrix_column2: [2]f32,
+    transform: [2]f32,
+    first_center: [2]f32,
+    first_inset: f32,
+    first_scale: f32,
+    second_center: [2]f32,
+    second_edge: f32,
+    second_scale: f32,
+    bias: f32,
+};
+
+/// Exact ABI of Chromium's canonical vec4 pass-through compositor profile.
+/// It is identity-gated because even a seemingly trivial extra operation can
+/// be shader-visible for NaNs or signed zero.
+pub const PassthroughPlan = struct {
+    input_interface: u32,
+    output_interface: u32,
+};
+
+/// Exact ABI of Chromium's captured constant-transparent-black fragment. It
+/// is identity-gated because a constant output may still be blended against a
+/// live destination by the rasterizer.
+pub const ConstantBlackPlan = struct {
+    output_interface: u32,
+};
+
+/// Exact ABI of Chromium's derivative-based analytic coverage profile. The
+/// direct form preserves the canonical IR's f32 operation and derivative
+/// order; it is not a general replacement for fragment derivatives.
+pub const AnalyticCoveragePlan = struct {
+    color_interface: u32,
+    coordinate_interface: u32,
+    output_interface: u32,
+};
+
+/// Exact ABI of Chromium's two-axis glyph/edge coverage profile. It maps two
+/// signed distances through a push-constant matrix, samples red twice, and
+/// modulates the input color by their product.
+pub const TwoAxisCoveragePlan = struct {
+    color_interface: u32,
+    distance_interface: u32,
+    uniform_interface: u32,
+    image_interface: u32,
+    output_interface: u32,
+    bias_literal: [4]u8,
+};
+
+pub const TwoAxisCoveragePrepared = struct {
+    matrix: [3][3]f32,
+    bounds: [4]f32,
+    coordinate_transform: [2]f32,
+    image: SampledImage,
+    bias: Value,
+};
+
+/// Exact ABI of Chromium's small analytic circle-coverage profile. It is
+/// identity-gated: the direct form is not a generic replacement for GLSL
+/// Length or clamp programs.
+pub const CircleMaskPlan = struct {
+    circle_interface: u32,
+    color_interface: u32,
+    output_interface: u32,
+};
+
 /// Fully validated interface map for Chromium's simple final-composite
 /// shader.  The driver may resolve these interfaces once per triangle and
 /// invoke the direct form for every covered pixel, avoiding repeated generic
@@ -754,11 +859,20 @@ pub const SampleModulatePlan = struct {
     bias_literal: [4]u8,
 };
 
-const TextureCopyFastPath = struct {
+pub const TextureCopyPlan = struct {
     coordinate_interface: u32,
     image_interface: u32,
     output_interface: u32,
     bias_literal: [4]u8,
+};
+
+/// Draw-invariant sampling state for Chromium's exact texture-copy profile.
+/// The fast representation is admitted only for identity-swizzled RGBA/BGRA
+/// clamp-to-edge linear images; all other images retain `sample` unchanged.
+pub const TextureCopyPrepared = struct {
+    image: SampledImage,
+    bias: f32,
+    fast_rgba8_clamp_linear: bool,
 };
 
 /// Exact Chromium VP9 video-surface composite: sample a texture at the local
@@ -770,6 +884,16 @@ pub const SampleCoverageFastPath = struct {
     image_interface: u32,
     output_interface: u32,
     bias_literal: [4]u8,
+};
+
+/// Draw-invariant sampling state for Chromium's exact scalar-coverage
+/// compositor.  `fast_rgba8_clamp_linear` is intentionally narrower than the
+/// Vulkan sampler contract: every unsupported image retains `sample`'s normal
+/// validation and execution at each pixel.
+pub const SampleCoveragePrepared = struct {
+    image: SampledImage,
+    bias: f32,
+    fast_rgba8_clamp_linear: bool,
 };
 
 /// Exact interface map for Chromium's VP9 Y/UV color-transform fragment.
@@ -792,18 +916,29 @@ pub const Vp9ColorTransformPlan = struct {
 pub const Vp9ColorTransformPrepared = struct {
     luma_image: SampledImage,
     chroma_image: SampledImage,
+    fast_planes: bool,
     source_matrix: [3][3]f32,
     source_offset: [3]f32,
     source_transfer: [7]f32,
     destination_matrix: [3][3]f32,
     destination_transfer: [7]f32,
+    /// Set only for the exact IEC 61966-2-1 parameter tuples emitted by the
+    /// observed Chromium VP9 profile. This preserves the generic path for
+    /// every other transfer function.
+    fast_srgb_transfers: bool,
 };
 
 const FastPath = union(enum) {
     sample_modulate: SampleModulatePlan,
-    texture_copy: TextureCopyFastPath,
+    texture_copy: TextureCopyPlan,
     sample_coverage: SampleCoverageFastPath,
     vp9_color_transform: Vp9ColorTransformPlan,
+    radial_mask: RadialMaskPlan,
+    passthrough: PassthroughPlan,
+    constant_black: ConstantBlackPlan,
+    analytic_coverage: AnalyticCoveragePlan,
+    two_axis_coverage: TwoAxisCoveragePlan,
+    circle_mask: CircleMaskPlan,
     /// Exact validated lowering of the Skia eight-tap convolution program
     /// currently emitted by Chromium.  The discriminator is the canonical
     /// Render IR digest, not the raw SPIR-V module: `Executor.init` validates
@@ -814,6 +949,15 @@ const FastPath = union(enum) {
     /// specialization, not a claim that arbitrary shader input is JITed;
     /// every other program uses the interpreter.
     convolution_8tap: ConvolutionFastPath,
+    /// Exact validated lowering of Chromium's clamped eight-tap convolution.
+    /// This is a separate canonical program and ABI from `convolution_8tap`:
+    /// the clamp is shader-visible behavior, so it must never be folded into
+    /// the unclamped profile or selected by a partial shape match.
+    clamped_convolution_8tap: ConvolutionFastPath,
+    /// Exact eight-sample (one offset/weight per iteration) clamped
+    /// convolution captured from the two-core Chromium compositor. It is a
+    /// different shader from the paired sixteen-sample ABI above.
+    clamped_convolution_single_8tap: ConvolutionFastPath,
     /// Semantics-first direct lowering for the current Chromium radial
     /// gradient. This remains normal ZPU code, not a JIT claim: it is the
     /// stable oracle the ORC path must match before runtime selection.
@@ -829,10 +973,19 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
     if (detectChromiumTextureCopy(program)) |path| return .{ .texture_copy = path };
+    if (detectChromiumUnmodulatedTextureCopy(program)) |path| return .{ .texture_copy = path };
     if (detectChromiumVp9SampleCoverage(program)) |path| return .{ .sample_coverage = path };
     if (detectChromiumVp9ColorTransform(program)) |path| return .{ .vp9_color_transform = path };
+    if (detectChromiumRadialMask(program)) |path| return .{ .radial_mask = path };
+    if (detectChromiumPassthrough(program)) |path| return .{ .passthrough = path };
+    if (detectChromiumConstantBlack(program)) |path| return .{ .constant_black = path };
+    if (detectChromiumAnalyticCoverage(program)) |path| return .{ .analytic_coverage = path };
+    if (detectChromiumTwoAxisCoverage(program)) |path| return .{ .two_axis_coverage = path };
+    if (detectChromiumCircleMask(program)) |path| return .{ .circle_mask = path };
     if (detectChromiumRadialGradient(program)) |path| return .{ .radial_gradient_2004 = path };
     if (detectChromiumConvolution(program)) |path| return .{ .convolution_8tap = path };
+    if (detectChromiumClampedConvolution(program)) |path| return .{ .clamped_convolution_8tap = path };
+    if (detectChromiumClampedSingleConvolution(program)) |path| return .{ .clamped_convolution_single_8tap = path };
     const instructions = program.instructions;
     if (instructions.len != 13 or instructions[0].literal.len != 4 or instructions[3].literal.len != 4) return null;
     if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or
@@ -863,14 +1016,42 @@ fn detectFastPath(program: *const ir.Program) ?FastPath {
 }
 
 const chromium_texture_copy_identity = [_]u8{ 0x7c, 0x59, 0xf3, 0xc8, 0xe2, 0x40, 0xd5, 0x24, 0xee, 0xa2, 0xe0, 0x83, 0x5c, 0x86, 0xf2, 0x62, 0x3b, 0xf3, 0x05, 0xcb, 0x81, 0x88, 0xba, 0x25, 0x3d, 0x20, 0x6c, 0x09, 0xcf, 0x89, 0xbf, 0x9c };
+const chromium_unmodulated_texture_copy_identity = [_]u8{ 0xa1, 0x34, 0xf3, 0x5b, 0xa3, 0x3a, 0x21, 0xcd, 0x41, 0x6c, 0x03, 0xd1, 0xe6, 0xc7, 0xf7, 0xca, 0xfd, 0xa7, 0x89, 0x54, 0xb4, 0xd9, 0x96, 0x4d, 0xc2, 0xfb, 0x87, 0xc7, 0x7d, 0x49, 0x2e, 0xd7 };
 const chromium_vp9_sample_coverage_identity = [_]u8{ 0xa1, 0x8e, 0x37, 0xfe, 0xe8, 0x7b, 0x32, 0x69, 0xf0, 0xe1, 0x00, 0x23, 0xe1, 0xc4, 0x60, 0x3b, 0x5c, 0xe1, 0x3c, 0xcc, 0x71, 0xdb, 0xe6, 0xc8, 0xa3, 0x79, 0x4e, 0xe9, 0x62, 0xa4, 0xf4, 0x50 };
 const chromium_vp9_color_transform_identity = [_]u8{ 0xdd, 0xaa, 0x22, 0x5a, 0xa0, 0xad, 0x69, 0x75, 0x74, 0xe5, 0x69, 0xa5, 0xbb, 0xf0, 0xf2, 0x67, 0x88, 0xd2, 0xbb, 0x19, 0x54, 0x5b, 0xe0, 0x19, 0xe2, 0x23, 0x5e, 0x73, 0x4b, 0x38, 0xf0, 0xc9 };
 
-fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyFastPath {
+fn detectChromiumTextureCopy(program: *const ir.Program) ?TextureCopyPlan {
     if (program.stage != .fragment or program.instructions.len != 13 or !std.mem.eql(u8, &program.identity.digest, &chromium_texture_copy_identity)) return null;
     const instructions = program.instructions;
     if (instructions[1].op != .constant or instructions[1].literal.len != 4 or instructions[7].op != .input or instructions[7].operands.len != 1 or instructions[9].op != .image_sample_implicit_lod or instructions[9].operands.len != 3 or instructions[11].op != .output or instructions[11].operands.len != 2) return null;
     return .{ .coordinate_interface = instructions[7].operands[0], .image_interface = instructions[9].operands[0], .output_interface = instructions[11].operands[0], .bias_literal = instructions[1].literal[0..4].* };
+}
+
+/// Chromium also emits this exact copy profile with dead color, front-facing
+/// and push-constant scaffolding. Its complete canonical identity and all
+/// live interface positions are checked before sharing the texture-copy
+/// lowering; a merely similar sampled shader remains interpreter-only.
+fn detectChromiumUnmodulatedTextureCopy(program: *const ir.Program) ?TextureCopyPlan {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 14 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_unmodulated_texture_copy_identity)) return null;
+    const instructions = program.instructions;
+    if (instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or instructions[0].literal.len != 4 or
+        !exactInstruction(instructions[1], .local, f32x4, &.{}) or !exactInstruction(instructions[2], .local, f32x4, &.{}) or !exactInstruction(instructions[3], .local, f32x4, &.{}) or
+        instructions[4].op != .label or !same(instructions[4].ty, .{ .scalar = .u32 }) or instructions[4].operands.len != 0 or instructions[4].literal.len != 4 or
+        !exactInstruction(instructions[5], .input, f32x4, &.{0}) or !exactInstruction(instructions[6], .local_store, f32x4, &.{ 1, 5 }) or
+        !exactInstruction(instructions[7], .local_store, f32x4, &.{ 2, 5 }) or !exactInstruction(instructions[8], .input, f32x2, &.{1}) or
+        !exactInstruction(instructions[9], .image_sample_implicit_lod, f32x4, &.{ 5, 8, 0 }) or !exactInstruction(instructions[10], .local_store, f32x4, &.{ 2, 9 }) or
+        !exactInstruction(instructions[11], .local_store, f32x4, &.{ 3, 9 }) or !exactInstruction(instructions[12], .output, f32x4, &.{ 3, 9 }) or
+        !exactInstruction(instructions[13], .return_, .{ .scalar = .u32 }, &.{})) return null;
+    if (program.interfaces[0].storage != .input or !same(program.interfaces[0].ty, f32x4) or program.interfaces[0].location == null or program.interfaces[0].location.? != 0 or
+        program.interfaces[1].storage != .input or !same(program.interfaces[1].ty, f32x2) or program.interfaces[1].location == null or program.interfaces[1].location.? != 1 or
+        program.interfaces[3].storage != .output or !same(program.interfaces[3].ty, f32x4) or program.interfaces[3].location == null or program.interfaces[3].location.? != 0 or
+        program.interfaces[5].storage != .sampled_image or !same(program.interfaces[5].ty, f32x4) or program.interfaces[5].descriptor_set == null or program.interfaces[5].descriptor_set.? != 1 or
+        program.interfaces[5].binding == null or program.interfaces[5].binding.? != 0) return null;
+    return .{ .coordinate_interface = 1, .image_interface = 5, .output_interface = 3, .bias_literal = instructions[0].literal[0..4].* };
 }
 
 fn detectChromiumVp9SampleCoverage(program: *const ir.Program) ?SampleCoverageFastPath {
@@ -979,6 +1160,27 @@ const chromium_convolution_identity = [_]u8{
     0xa1, 0x05, 0xdc, 0xdc, 0x16, 0xaa, 0xaf, 0xc7,
 };
 
+/// Canonical identity of Chromium's clamped eight-tap convolution profile.
+/// The complete post-validation Render IR is captured from a live two-core
+/// compositor session. In particular, this is not a broad optimization for
+/// shaders that merely contain a loop, a clamp, and texture samples.
+const chromium_clamped_convolution_identity = [_]u8{
+    0x1a, 0x41, 0x35, 0x05, 0x2a, 0x60, 0x14, 0x05,
+    0x59, 0x90, 0x38, 0x72, 0xb2, 0x7a, 0xb4, 0x63,
+    0x1d, 0xc6, 0xca, 0x08, 0x4e, 0xb8, 0x2f, 0xb7,
+    0x02, 0x41, 0x5f, 0x43, 0x23, 0xcd, 0x25, 0xd5,
+};
+
+/// Canonical identity of Chromium's one-sample-per-iteration clamped
+/// convolution. The whole validated IR, including its eight-trip loop and
+/// std140 ABI, is part of this identity.
+const chromium_clamped_single_convolution_identity = [_]u8{
+    0x69, 0x9a, 0xcd, 0x07, 0x92, 0x2d, 0x94, 0x8e,
+    0x47, 0xb5, 0x9f, 0x7e, 0x86, 0xf1, 0x59, 0xb2,
+    0x45, 0x04, 0x55, 0x55, 0xff, 0x85, 0x0f, 0xc4,
+    0xe6, 0x98, 0x93, 0x37, 0x52, 0x54, 0xd5, 0xaa,
+};
+
 /// Canonical identity of the 2,004-word Chromium fragment program captured
 /// from the VP9 Mosaic workload.  A runtime compiler must select by this
 /// post-validation Render-IR identity, never by an untrusted SPIR-V module
@@ -988,6 +1190,58 @@ const chromium_radial_gradient_identity = [_]u8{
     0x4e, 0x59, 0xf2, 0x24, 0x1a, 0x1f, 0x03, 0x0c,
     0x13, 0x57, 0xcb, 0x2f, 0x94, 0xc8, 0xfc, 0x21,
     0xed, 0xad, 0x76, 0x0e, 0x37, 0xc3, 0x5d, 0x41,
+};
+
+const chromium_radial_mask_identity = [_]u8{
+    0xb0, 0x4d, 0xfa, 0xb7, 0x86, 0x4c, 0xe1, 0xbd,
+    0xd5, 0x5f, 0xd4, 0x91, 0x06, 0x08, 0x0a, 0x14,
+    0xd2, 0xc8, 0x2e, 0x79, 0xfb, 0xe6, 0xd8, 0xa8,
+    0x2d, 0xdc, 0x07, 0xc5, 0x5a, 0x1d, 0xcb, 0xa5,
+};
+
+const chromium_passthrough_identity = [_]u8{
+    0x9a, 0x0c, 0xe3, 0x40, 0xc2, 0xa3, 0xe9, 0x4e,
+    0xab, 0x6f, 0x77, 0x27, 0x46, 0xb9, 0xe4, 0xdc,
+    0x2a, 0x00, 0xa3, 0x53, 0x5b, 0xb1, 0xb1, 0x9e,
+    0xbd, 0x7d, 0xa4, 0x11, 0xca, 0xd6, 0x05, 0x3a,
+};
+
+/// Canonical identity of Chromium's analytic circle coverage fragment,
+/// captured from the two-core compositor fixture. The identity includes its
+/// precise floating-point instruction graph and interface ABI.
+const chromium_circle_mask_identity = [_]u8{
+    0xbe, 0xb2, 0x92, 0xed, 0xd4, 0xef, 0x3d, 0x0b,
+    0x27, 0x73, 0x1b, 0x1e, 0x86, 0x38, 0x9c, 0x45,
+    0x40, 0x8a, 0xca, 0x30, 0x19, 0x0c, 0x68, 0x2f,
+    0xc0, 0xc2, 0xe6, 0x28, 0x9d, 0xc0, 0x9e, 0x53,
+};
+
+/// Canonical identity of Chromium's constant transparent-black clear
+/// fragment, captured in the two-core compositor workload. Its three-instruction
+/// program is complete and produces `vec4(0)` independently of both inputs.
+const chromium_constant_black_identity = [_]u8{
+    0xd9, 0xb1, 0x3e, 0x75, 0x3a, 0x10, 0xc1, 0xb7,
+    0xb0, 0x36, 0x47, 0x68, 0xb5, 0xe5, 0x39, 0xa5,
+    0xe0, 0xc3, 0x69, 0x4b, 0x46, 0x13, 0x25, 0x27,
+    0xdf, 0x3a, 0x38, 0xd4, 0x07, 0xc4, 0xe0, 0x95,
+};
+
+/// Canonical identity of Chromium's derivative-based analytic coverage
+/// fragment captured as the dominant two-core compositor profile.
+const chromium_analytic_coverage_identity = [_]u8{
+    0xcb, 0x55, 0x63, 0x18, 0x4b, 0xb2, 0x2a, 0xc7,
+    0xf0, 0x2b, 0x70, 0xae, 0xff, 0x30, 0xc3, 0x95,
+    0x05, 0x45, 0xd8, 0x19, 0xfb, 0x8a, 0xe4, 0x96,
+    0x6b, 0x60, 0xe6, 0xfe, 0x6e, 0x0a, 0x31, 0x9e,
+};
+
+/// Canonical identity of Chromium's recurring two-axis text/glyph coverage
+/// fragment captured from the two-core Mosaic compositor workload.
+const chromium_two_axis_coverage_identity = [_]u8{
+    0x95, 0x42, 0x22, 0x62, 0xcc, 0xa0, 0xc9, 0xfc,
+    0x6a, 0xb2, 0xec, 0x46, 0xd3, 0x45, 0x4d, 0xbd,
+    0xf2, 0x88, 0x18, 0x0b, 0xa7, 0xee, 0x1b, 0x0a,
+    0x90, 0xe2, 0xe7, 0xc9, 0x23, 0xbc, 0x05, 0x22,
 };
 
 /// Candidate classes which are permitted to cross the experimental
@@ -1045,6 +1299,74 @@ fn detectChromiumConvolution(program: *const ir.Program) ?ConvolutionFastPath {
     };
 }
 
+fn detectChromiumClampedConvolution(program: *const ir.Program) ?ConvolutionFastPath {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 139 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_clamped_convolution_identity) or program.interfaces.len != 6) return null;
+    const color = program.interfaces[0];
+    const coordinate = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinate.storage != .input or !same(coordinate.ty, f32x2) or coordinate.location == null or coordinate.location.? != 1 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or front_facing.location != null or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .uniform or !uniform.block or uniform.descriptor_set == null or uniform.descriptor_set.? != 0 or uniform.binding == null or uniform.binding.? != 0 or uniform.member_count != 5 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x4, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x3x3, 32, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x4, 80, 14, 16) or
+        !convolutionMemberMatches(uniform.members[3], f32x2, 304, 1, 0) or
+        !convolutionMemberMatches(uniform.members[4], f32x3x3, 320, 1, 0)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{
+        .coordinate_interface = 1,
+        .uniform_interface = 4,
+        .image_interface = 5,
+        .output_interface = 3,
+        .bias_literal = .{ 51, 51, 243, 190 },
+    };
+}
+
+fn detectChromiumClampedSingleConvolution(program: *const ir.Program) ?ConvolutionFastPath {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 153 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_clamped_single_convolution_identity) or program.interfaces.len != 6) return null;
+    const color = program.interfaces[0];
+    const coordinate = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinate.storage != .input or !same(coordinate.ty, f32x2) or coordinate.location == null or coordinate.location.? != 1 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or front_facing.location != null or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .uniform or !uniform.block or uniform.descriptor_set == null or uniform.descriptor_set.? != 0 or uniform.binding == null or uniform.binding.? != 0 or uniform.member_count != 5 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x4, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x3x3, 32, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x4, 80, 14, 16) or
+        !convolutionMemberMatches(uniform.members[3], f32x2, 304, 1, 0) or
+        !convolutionMemberMatches(uniform.members[4], f32x3x3, 320, 1, 0)) return null;
+    for (program.interfaces, 0..) |interface, index| if (interface.storage == .output and index != 3) return null;
+    return .{
+        .coordinate_interface = 1,
+        .uniform_interface = 4,
+        .image_interface = 5,
+        .output_interface = 3,
+        .bias_literal = .{ 51, 51, 243, 190 },
+    };
+}
+
 fn detectChromiumRadialGradient(program: *const ir.Program) ?RadialGradientPlan {
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
@@ -1086,6 +1408,181 @@ fn detectChromiumRadialGradient(program: *const ir.Program) ?RadialGradientPlan 
         }
     }
     return if (circle_found and coordinates_found and frag_coord_found and uniform_found and image_found and output_found) result else null;
+}
+
+fn detectChromiumRadialMask(program: *const ir.Program) ?RadialMaskPlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 110 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_radial_mask_identity)) return null;
+    const color = program.interfaces[0];
+    const coordinates = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinates.storage != .input or !same(coordinates.ty, f32x4) or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .push_constant or !uniform.block or uniform.member_count != 4 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x4, 64, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x4, 80, 1, 0) or
+        !convolutionMemberMatches(uniform.members[3], f32x2, 96, 1, 0)) return null;
+    return .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 4, .image_interface = 5, .output_interface = 3, .bias_literal = .{ 51, 51, 243, 190 } };
+}
+
+fn detectChromiumPassthrough(program: *const ir.Program) ?PassthroughPlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 6 or program.interfaces.len != 3 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_passthrough_identity)) return null;
+    const input = program.interfaces[0];
+    const front_facing = program.interfaces[1];
+    const output = program.interfaces[2];
+    if (input.storage != .input or !same(input.ty, f32x4) or input.location == null or input.location.? != 0 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0) return null;
+    return .{ .input_interface = 0, .output_interface = 2 };
+}
+
+fn detectChromiumConstantBlack(program: *const ir.Program) ?ConstantBlackPlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    if (program.stage != .fragment or program.instructions.len != 3 or program.interfaces.len != 3 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_constant_black_identity)) return null;
+    const input = program.interfaces[0];
+    const front_facing = program.interfaces[1];
+    const output = program.interfaces[2];
+    const instructions = program.instructions;
+    if (input.storage != .input or !same(input.ty, f32x4) or input.location == null or input.location.? != 0 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or instructions[0].literal.len != 4 or std.mem.readInt(u32, instructions[0].literal[0..4], .little) != 0 or
+        !exactInstruction(instructions[1], .constant_composite, f32x4, &.{ 0, 0, 0, 0 }) or
+        !exactInstruction(instructions[2], .output, f32x4, &.{ 2, 1 })) return null;
+    return .{ .output_interface = 2 };
+}
+
+fn detectChromiumAnalyticCoverage(program: *const ir.Program) ?AnalyticCoveragePlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const u32_scalar = ir.Type{ .scalar = .u32 };
+    if (program.stage != .fragment or program.instructions.len != 46 or program.interfaces.len != 4 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_analytic_coverage_identity)) return null;
+    const color = program.interfaces[0];
+    const coordinates = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const instructions = program.instructions;
+    const zero = [_]u8{ 0, 0, 0, 0 };
+    const one_half = [_]u8{ 0, 0, 0, 63 };
+    const two = [_]u8{ 0, 0, 0, 64 };
+    const one = [_]u8{ 0, 0, 128, 63 };
+    const label_21 = [_]u8{ 21, 0, 0, 0 };
+    const label_35 = [_]u8{ 35, 0, 0, 0 };
+    const label_36 = [_]u8{ 36, 0, 0, 0 };
+    const label_37 = [_]u8{ 37, 0, 0, 0 };
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        coordinates.storage != .input or !same(coordinates.ty, f32x2) or coordinates.location == null or coordinates.location.? != 1 or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        instructions[0].op != .constant or !same(instructions[0].ty, f32_scalar) or instructions[0].operands.len != 0 or !std.mem.eql(u8, instructions[0].literal, &zero) or
+        instructions[1].op != .constant or !same(instructions[1].ty, f32_scalar) or instructions[1].operands.len != 0 or !std.mem.eql(u8, instructions[1].literal, &one_half) or
+        instructions[2].op != .constant or !same(instructions[2].ty, f32_scalar) or instructions[2].operands.len != 0 or !std.mem.eql(u8, instructions[2].literal, &two) or
+        instructions[3].op != .constant or !same(instructions[3].ty, f32_scalar) or instructions[3].operands.len != 0 or !std.mem.eql(u8, instructions[3].literal, &one) or
+        !exactInstruction(instructions[4], .local, f32_scalar, &.{}) or !exactInstruction(instructions[5], .local, f32_scalar, &.{}) or
+        !exactInstruction(instructions[6], .local, f32_scalar, &.{}) or !exactInstruction(instructions[7], .local, f32_scalar, &.{}) or
+        !exactInstruction(instructions[8], .local, f32_scalar, &.{}) or !exactInstruction(instructions[9], .local, f32x4, &.{}) or !exactInstruction(instructions[10], .local, f32x4, &.{}) or
+        instructions[11].op != .label or !same(instructions[11].ty, u32_scalar) or instructions[11].operands.len != 0 or !std.mem.eql(u8, instructions[11].literal, &label_21) or
+        !exactInstruction(instructions[12], .input, f32x4, &.{0}) or !exactInstruction(instructions[13], .local_store, f32x4, &.{ 9, 12 }) or
+        !exactInstruction(instructions[14], .input, f32x2, &.{1}) or !exactInstruction(instructions[15], .extract, f32_scalar, &.{ 14, 0 }) or !exactInstruction(instructions[16], .local_store, f32_scalar, &.{ 4, 15 }) or
+        !exactInstruction(instructions[17], .input, f32x2, &.{1}) or !exactInstruction(instructions[18], .extract, f32_scalar, &.{ 17, 1 }) or !exactInstruction(instructions[19], .local_store, f32_scalar, &.{ 5, 18 }) or
+        !exactInstruction(instructions[20], .ford_eq, boolean, &.{ 0, 15 }) or instructions[21].op != .branch_conditional or !same(instructions[21].ty, u32_scalar) or !std.mem.eql(u32, instructions[21].operands, &.{20}) or !std.mem.eql(u8, instructions[21].literal, &.{ 35, 0, 0, 0, 36, 0, 0, 0 }) or
+        instructions[22].op != .label or !same(instructions[22].ty, u32_scalar) or instructions[22].operands.len != 0 or !std.mem.eql(u8, instructions[22].literal, &label_35) or !exactInstruction(instructions[23], .local_store, f32_scalar, &.{ 6, 18 }) or
+        instructions[24].op != .branch or !same(instructions[24].ty, u32_scalar) or instructions[24].operands.len != 0 or !std.mem.eql(u8, instructions[24].literal, &label_37) or
+        instructions[25].op != .label or !same(instructions[25].ty, u32_scalar) or instructions[25].operands.len != 0 or !std.mem.eql(u8, instructions[25].literal, &label_36) or
+        !exactInstruction(instructions[26], .fsub, f32_scalar, &.{ 15, 2 }) or !exactInstruction(instructions[27], .fmul, f32_scalar, &.{ 15, 26 }) or !exactInstruction(instructions[28], .local_store, f32_scalar, &.{ 7, 27 }) or
+        !exactInstruction(instructions[29], .fma, f32_scalar, &.{ 18, 18, 27 }) or !exactInstruction(instructions[30], .local_store, f32_scalar, &.{ 7, 29 }) or !exactInstruction(instructions[31], .fwidth, f32_scalar, &.{29}) or !exactInstruction(instructions[32], .local_store, f32_scalar, &.{ 8, 31 }) or
+        !exactInstruction(instructions[33], .fdiv, f32_scalar, &.{ 29, 31 }) or !exactInstruction(instructions[34], .fsub, f32_scalar, &.{ 1, 33 }) or !exactInstruction(instructions[35], .local_store, f32_scalar, &.{ 6, 34 }) or !exactInstruction(instructions[36], .f_clamp, f32_scalar, &.{ 34, 0, 3 }) or !exactInstruction(instructions[37], .local_store, f32_scalar, &.{ 6, 36 }) or
+        instructions[38].op != .branch or !same(instructions[38].ty, u32_scalar) or instructions[38].operands.len != 0 or !std.mem.eql(u8, instructions[38].literal, &label_37) or instructions[39].op != .label or !same(instructions[39].ty, u32_scalar) or instructions[39].operands.len != 0 or !std.mem.eql(u8, instructions[39].literal, &label_37) or
+        !exactInstruction(instructions[40], .local_load, f32_scalar, &.{6}) or !exactInstruction(instructions[41], .composite, f32x4, &.{ 40, 40, 40, 40 }) or !exactInstruction(instructions[42], .local_store, f32x4, &.{ 10, 41 }) or !exactInstruction(instructions[43], .fmul, f32x4, &.{ 12, 41 }) or !exactInstruction(instructions[44], .output, f32x4, &.{ 3, 43 }) or !exactInstruction(instructions[45], .return_, u32_scalar, &.{})) return null;
+    return .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 3 };
+}
+
+fn detectChromiumTwoAxisCoverage(program: *const ir.Program) ?TwoAxisCoveragePlan {
+    const boolean = ir.Type{ .scalar = .bool };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const f32x3x3 = ir.Type{ .scalar = .f32, .columns = 3, .rows = 3 };
+    if (program.stage != .fragment or program.instructions.len != 80 or program.interfaces.len != 6 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_two_axis_coverage_identity)) return null;
+    const color = program.interfaces[0];
+    const distance = program.interfaces[1];
+    const front_facing = program.interfaces[2];
+    const output = program.interfaces[3];
+    const uniform = program.interfaces[4];
+    const image = program.interfaces[5];
+    if (color.storage != .input or !same(color.ty, f32x4) or color.location == null or color.location.? != 0 or
+        distance.storage != .input or !same(distance.ty, f32x4) or distance.location != null or
+        front_facing.storage != .input or !same(front_facing.ty, boolean) or !front_facing.builtin_front_facing or
+        output.storage != .output or !same(output.ty, f32x4) or output.location == null or output.location.? != 0 or
+        uniform.storage != .push_constant or !uniform.block or uniform.member_count != 3 or
+        image.storage != .sampled_image or !same(image.ty, f32x4) or image.descriptor_set == null or image.descriptor_set.? != 1 or image.binding == null or image.binding.? != 0) return null;
+    if (!convolutionMemberMatches(uniform.members[0], f32x3x3, 16, 1, 0) or
+        !convolutionMemberMatches(uniform.members[1], f32x4, 64, 1, 0) or
+        !convolutionMemberMatches(uniform.members[2], f32x2, 80, 1, 0)) return null;
+    return .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 4, .image_interface = 5, .output_interface = 3, .bias_literal = .{ 51, 51, 243, 190 } };
+}
+
+fn detectChromiumCircleMask(program: *const ir.Program) ?CircleMaskPlan {
+    if (program.stage != .fragment or program.instructions.len != 27 or program.interfaces.len != 4 or
+        !std.mem.eql(u8, &program.identity.digest, &chromium_circle_mask_identity)) return null;
+    // The canonical digest is generated only after frontend validation and
+    // serializes every instruction, interface, decoration, type, member and
+    // entry record. It is therefore the complete ABI guard for this precise
+    // live shader; duplicating selected metadata here made an otherwise
+    // identical frontend representation needlessly miss the lowering.
+    return .{ .circle_interface = 0, .color_interface = 1, .output_interface = 3 };
+}
+
+test "Chromium sRGB transfer specialization is bit exact" {
+    const source = [_]f32{ 2.4, 0.9478673, 0.0521327, 0.07739938, 0.04045, 0, 0 };
+    const destination = [_]f32{ 1.0 / 2.4, 1.137283, -0.0, 12.92, 0.0031308, -0.0549698, -0.0 };
+    try std.testing.expect(Executor.isChromiumSrgbTransferPair(source, destination));
+    const values = [_]f32{ -1, -0.5, -0.04045, -0.0031308, -0.0, 0, 0.0031308, 0.04045, 0.25, 0.5, 1 };
+    for (values) |value| {
+        try std.testing.expectEqual(@as(u32, @bitCast(try Executor.colorTransformTransferPrepared(value, source))), @as(u32, @bitCast(try Executor.srgbToLinearPrepared(value))));
+        try std.testing.expectEqual(@as(u32, @bitCast(try Executor.colorTransformTransferPrepared(value, destination))), @as(u32, @bitCast(try Executor.linearToSrgbPrepared(value))));
+    }
+    Executor.SrgbTransferLut.ensure();
+    var maximum_error: f32 = 0;
+    for (0..8193) |index| {
+        const value = @as(f32, @floatFromInt(index)) / 4096;
+        const linear_reference = try Executor.srgbToLinearPrepared(value);
+        const srgb_reference = try Executor.linearToSrgbPrepared(value);
+        maximum_error = @max(maximum_error, @abs(linear_reference - Executor.srgbTransferLut(value, &Executor.SrgbTransferLut.to_linear).?));
+        maximum_error = @max(maximum_error, @abs(srgb_reference - Executor.srgbTransferLut(value, &Executor.SrgbTransferLut.to_srgb).?));
+    }
+    try std.testing.expect(maximum_error < 0.00001);
+    var altered = source;
+    altered[0] = 2.2;
+    try std.testing.expect(!Executor.isChromiumSrgbTransferPair(altered, destination));
+}
+
+test "VP9 UNORM byte table preserves generic f32 conversion" {
+    for (0..256) |index| {
+        const byte: u8 = @intCast(index);
+        const generic = @as(f32, @floatFromInt(byte)) / 255;
+        try std.testing.expectEqual(@as(u32, @bitCast(generic)), @as(u32, @bitCast(Executor.unorm8_to_f32[byte])));
+    }
 }
 
 pub const Executor = struct {
@@ -1139,7 +1636,15 @@ pub const Executor = struct {
             .texture_copy => "chromium_texture_copy",
             .sample_coverage => "chromium_vp9_sample_coverage",
             .vp9_color_transform => "chromium_vp9_color_transform",
+            .radial_mask => "chromium_radial_mask",
+            .passthrough => "chromium_passthrough",
+            .constant_black => "chromium_constant_black",
+            .analytic_coverage => "chromium_analytic_coverage",
+            .two_axis_coverage => "chromium_two_axis_coverage",
+            .circle_mask => "chromium_circle_mask",
             .convolution_8tap => "convolution_8tap",
+            .clamped_convolution_8tap => "clamped_convolution_8tap",
+            .clamped_convolution_single_8tap => "clamped_convolution_single_8tap",
             .radial_gradient_2004 => "radial_gradient_2004_reference",
         };
     }
@@ -1161,6 +1666,15 @@ pub const Executor = struct {
     pub fn sampleModulatePlan(self: *const Executor) ?SampleModulatePlan {
         return switch (self.fast_path orelse return null) {
             .sample_modulate => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the fully identity-gated ABI of Chromium's exact texture-copy
+    /// compositor profile. Altered shaders retain the normal executor path.
+    pub fn textureCopyPlan(self: *const Executor) ?TextureCopyPlan {
+        return switch (self.fast_path orelse return null) {
+            .texture_copy => |plan| plan,
             else => null,
         };
     }
@@ -1193,15 +1707,64 @@ pub const Executor = struct {
         };
     }
 
+    /// Return the exact ABI of Chromium's captured two-distance-field radial
+    /// mask. Any changed canonical instruction stays on the general path.
+    pub fn radialMaskPlan(self: *const Executor) ?RadialMaskPlan {
+        return switch (self.fast_path orelse return null) {
+            .radial_mask => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the ABI only for Chromium's exact vec4 pass-through profile.
+    pub fn passthroughPlan(self: *const Executor) ?PassthroughPlan {
+        return switch (self.fast_path orelse return null) {
+            .passthrough => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the constant-black ABI only for the captured canonical program.
+    pub fn constantBlackPlan(self: *const Executor) ?ConstantBlackPlan {
+        return switch (self.fast_path orelse return null) {
+            .constant_black => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the derivative-aware ABI only for Chromium's captured analytic
+    /// coverage program. All other derivative programs retain the executor.
+    pub fn analyticCoveragePlan(self: *const Executor) ?AnalyticCoveragePlan {
+        return switch (self.fast_path orelse return null) {
+            .analytic_coverage => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the push-constant ABI only for Chromium's exact two-axis glyph
+    /// coverage profile. Every other text/atlas shader remains interpreter
+    /// executed or selects its own exact specialization.
+    pub fn twoAxisCoveragePlan(self: *const Executor) ?TwoAxisCoveragePlan {
+        return switch (self.fast_path orelse return null) {
+            .two_axis_coverage => |plan| plan,
+            else => null,
+        };
+    }
+
+    /// Return the exact ABI of Chromium's analytic circle coverage profile.
+    pub fn circleMaskPlan(self: *const Executor) ?CircleMaskPlan {
+        return switch (self.fast_path orelse return null) {
+            .circle_mask => |plan| plan,
+            else => null,
+        };
+    }
+
     /// These exact paths use no mutable executor values, locals, or
     /// derivative scratch after setup. A driver may execute disjoint pixel
     /// regions concurrently while retaining submission order within each
     /// region. Every other profile remains serial by construction.
     pub fn tileParallelSafe(self: *const Executor) bool {
-        return switch (self.fast_path orelse return false) {
-            .sample_modulate, .texture_copy => true,
-            else => false,
-        };
+        return fastPathTileParallelSafe(self.fast_path);
     }
 
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
@@ -1250,6 +1813,21 @@ pub const Executor = struct {
         }
     }
 
+    fn convolutionCoordinateClamped(matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32, clamp: [4]f32) Error!Value {
+        var result = convolutionCoordinate(matrix, coordinates, direction, offset);
+        result.bits[0] = canonicalFloat(@bitCast(try radialClamp(@bitCast(result.bits[0]), clamp[0], clamp[2])));
+        result.bits[1] = canonicalFloat(@bitCast(try radialClamp(@bitCast(result.bits[1]), clamp[1], clamp[3])));
+        return result;
+    }
+
+    fn convolutionAccumulateClamped(sum: *[4]f32, image: SampledImage, matrix: [3][3]f32, coordinates: Value, direction: [2]f32, offset: f32, clamp: [4]f32, weight: f32, bias: Value) Error!void {
+        const sampled = try sample(image, try convolutionCoordinateClamped(matrix, coordinates, direction, offset, clamp), bias);
+        for (0..4) |lane| {
+            const weighted: f32 = @bitCast(canonicalFloat(@bitCast(@as(f32, @bitCast(sampled.bits[lane])) * weight)));
+            sum[lane] = @bitCast(canonicalFloat(@bitCast(sum[lane] + weighted)));
+        }
+    }
+
     fn executeConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
         const uniform = try findBindingRecord(bindings, path.uniform_interface);
@@ -1281,6 +1859,81 @@ pub const Executor = struct {
             const second_weight = try uniformF32(uniform.bytes, base + 12);
             try convolutionAccumulate(&sum, image, matrix, coordinates, direction, first_offset, first_weight, bias);
             try convolutionAccumulate(&sum, image, matrix, coordinates, direction, second_offset, second_weight, bias);
+        }
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
+    }
+
+    fn executeClampedConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        // The full interface has a trailing matrix which this canonical IR
+        // never reads. Preserve generic behavior by requiring only the bytes
+        // reached by its actual access instructions, through direction.y.
+        if (uniform.bytes.len < 32 or uniform.bytes.len < 76 or uniform.bytes.len < 208 or uniform.bytes.len < 312) return error.Bounds;
+        const clamp = [_]f32{
+            try uniformF32(uniform.bytes, 16),
+            try uniformF32(uniform.bytes, 20),
+            try uniformF32(uniform.bytes, 24),
+            try uniformF32(uniform.bytes, 28),
+        };
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| for (0..3) |row| {
+            matrix[column][row] = try uniformF32(uniform.bytes, 32 + column * 16 + row * 4);
+        };
+        const direction = [_]f32{ try uniformF32(uniform.bytes, 304), try uniformF32(uniform.bytes, 308) };
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        var sum = [_]f32{ 0, 0, 0, 0 };
+        inline for (0..8) |tap| {
+            const base = 80 + tap * 16;
+            const first_offset = try uniformF32(uniform.bytes, base);
+            const first_weight = try uniformF32(uniform.bytes, base + 4);
+            const second_offset = try uniformF32(uniform.bytes, base + 8);
+            const second_weight = try uniformF32(uniform.bytes, base + 12);
+            try convolutionAccumulateClamped(&sum, image, matrix, coordinates, direction, first_offset, clamp, first_weight, bias);
+            try convolutionAccumulateClamped(&sum, image, matrix, coordinates, direction, second_offset, clamp, second_weight, bias);
+        }
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
+    }
+
+    fn executeClampedSingleConvolutionFastPath(path: ConvolutionFastPath, bindings: []const Binding, outputs: []const Output) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const image = try findSampledImage(bindings, path.image_interface);
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        // Its trailing uniform matrix is declared but dead. The validated IR
+        // reaches the clamp, matrix, first eight offset/weight pairs, and
+        // direction only; preserve generic rejection for shorter ranges.
+        if (uniform.bytes.len < 32 or uniform.bytes.len < 204 or uniform.bytes.len < 312) return error.Bounds;
+        const clamp = [_]f32{
+            try uniformF32(uniform.bytes, 16), try uniformF32(uniform.bytes, 20),
+            try uniformF32(uniform.bytes, 24), try uniformF32(uniform.bytes, 28),
+        };
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| for (0..3) |row| {
+            matrix[column][row] = try uniformF32(uniform.bytes, 32 + column * 16 + row * 4);
+        };
+        const direction = [_]f32{ try uniformF32(uniform.bytes, 304), try uniformF32(uniform.bytes, 308) };
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        var sum = [_]f32{ 0, 0, 0, 0 };
+        inline for (0..8) |tap| {
+            const base = 80 + tap * 16;
+            try convolutionAccumulateClamped(&sum, image, matrix, coordinates, direction, try uniformF32(uniform.bytes, base), clamp, try uniformF32(uniform.bytes, base + 4), bias);
         }
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(sum[lane])), .little);
     }
@@ -1361,6 +2014,88 @@ pub const Executor = struct {
         for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(result[lane] * edge_alpha))), .little);
     }
 
+    fn prepareRadialGradientResolved(uniform: []const u8, image: SampledImage) Error!RadialGradientPrepared {
+        if (uniform.len < 480) return error.Bounds;
+        var result = RadialGradientPrepared{
+            .image = image,
+            .phase_bias = try uniformF32(uniform, 320),
+            .phase_scale = try uniformF32(uniform, 324),
+            .thresholds = .{ try uniformF32(uniform, 32), try uniformF32(uniform, 36), try uniformF32(uniform, 40) },
+            .color_scales = undefined,
+            .color_biases = undefined,
+            .lower_color = undefined,
+            .upper_color = undefined,
+            .range = .{ try uniformF32(uniform, 472), try uniformF32(uniform, 476) },
+            .sample_matrix = .{
+                try uniformF32(uniform, 416), try uniformF32(uniform, 420), try uniformF32(uniform, 432),
+                try uniformF32(uniform, 436), try uniformF32(uniform, 448), try uniformF32(uniform, 452),
+            },
+            .contrast = try uniformF32(uniform, 464),
+        };
+        for (0..4) |position| for (0..4) |lane| {
+            result.color_scales[position][lane] = try uniformF32(uniform, 64 + position * 16 + lane * 4);
+            result.color_biases[position][lane] = try uniformF32(uniform, 192 + position * 16 + lane * 4);
+            result.lower_color[lane] = try uniformF32(uniform, 384 + lane * 4);
+            result.upper_color[lane] = try uniformF32(uniform, 400 + lane * 4);
+        };
+        return result;
+    }
+
+    fn executeRadialGradientPreparedResolved(prepared: RadialGradientPrepared, circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, bytes: []u8) Error!void {
+        const circle = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = circle_bytes });
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = coordinate_bytes });
+        const frag_coord = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = 0, .bytes = frag_coord_bytes });
+        if (bytes.len < 16) return error.InvalidOutput;
+
+        const circle_x: f32 = @bitCast(circle.bits[0]);
+        const circle_y: f32 = @bitCast(circle.bits[1]);
+        const circle_z: f32 = @bitCast(circle.bits[2]);
+        var length_squared = canonicalF32(circle_x * circle_x);
+        length_squared = canonicalF32(length_squared + canonicalF32(circle_y * circle_y));
+        const distance = canonicalF32(std.math.sqrt(length_squared));
+        const edge_distance = canonicalF32(circle_z * canonicalF32(1 - distance));
+        const edge_alpha = try radialClamp(edge_distance, 0, 1);
+
+        const coordinate_x: f32 = @bitCast(coordinates.bits[0]);
+        const coordinate_y: f32 = @bitCast(coordinates.bits[1]);
+        const angle = if (coordinate_x != 0)
+            canonicalF32(std.math.atan2(-coordinate_y, -coordinate_x))
+        else blk: {
+            const sign: f32 = if (std.math.isNan(coordinate_y)) 0 else if (coordinate_y > 0) 1 else if (coordinate_y < 0) -1 else @bitCast(coordinates.bits[1] & 0x80000000);
+            break :blk canonicalF32(sign * -1.57079637);
+        };
+        var t = canonicalF32(angle * 0.159154937);
+        t = canonicalF32(t + 0.5);
+        t = canonicalF32(t + prepared.phase_bias);
+        t = canonicalF32(t * prepared.phase_scale);
+
+        var color: [4]f32 = undefined;
+        if (t < 0) color = prepared.lower_color else if (t > 1) color = prepared.upper_color else {
+            const position: usize = if (t < prepared.thresholds[1])
+                if (t < prepared.thresholds[0]) 0 else 1
+            else if (t < prepared.thresholds[2]) 2 else 3;
+            for (0..4) |lane| color[lane] = canonicalF32(canonicalF32(prepared.color_scales[position][lane] * t) + prepared.color_biases[position][lane]);
+        }
+
+        const fragment_x: f32 = @bitCast(frag_coord.bits[0]);
+        const fragment_y: f32 = @bitCast(frag_coord.bits[1]);
+        const transformed_y = canonicalF32(prepared.range[0] + canonicalF32(prepared.range[1] * fragment_y));
+        const sample_x = canonicalF32(canonicalF32(prepared.sample_matrix[0] * fragment_x) + canonicalF32(prepared.sample_matrix[2] * transformed_y) + prepared.sample_matrix[4]);
+        const sample_y = canonicalF32(canonicalF32(prepared.sample_matrix[1] * fragment_x) + canonicalF32(prepared.sample_matrix[3] * transformed_y) + prepared.sample_matrix[5]);
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(sample_x);
+        sample_coordinates.bits[1] = @bitCast(sample_y);
+        const sample_bias = Value{ .ty = .{ .scalar = .f32 }, .bits = .{0xbef33333} ++ .{0} ** 15 };
+        const sampled = try sample(prepared.image, sample_coordinates, sample_bias);
+        const sampled_red: f32 = @bitCast(sampled.bits[0]);
+        const sample_value = canonicalF32(sampled_red - 0.5);
+        const alpha = color[3];
+        var result: [4]f32 = undefined;
+        for (0..3) |lane| result[lane] = try radialClamp(canonicalF32(color[lane] + canonicalF32(sample_value * prepared.contrast)), 0, alpha);
+        result[3] = alpha;
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(result[lane] * edge_alpha))), .little);
+    }
+
     fn colorTransformTransfer(value: f32, uniform: []const u8, base: usize) Error!f32 {
         // Match the captured helper's FSign/FAbs, branch, Pow, and multiply
         // order exactly. The uniform array is std140 (`float[7]`, stride 16).
@@ -1408,6 +2143,91 @@ pub const Executor = struct {
             if (pow_base < 0 or (pow_base == 0 and exponent <= 0)) return error.NumericDomain;
             break :blk canonicalF32(canonicalF32(std.math.pow(f32, pow_base, exponent)) + nonlinear_offset);
         };
+        return canonicalF32(sign * transformed);
+    }
+
+    fn transferParametersEqual(actual: [7]f32, expected: [7]f32) bool {
+        for (actual, expected) |left, right| if (@as(u32, @bitCast(left)) != @as(u32, @bitCast(right))) return false;
+        return true;
+    }
+
+    fn isChromiumSrgbTransferPair(source: [7]f32, destination: [7]f32) bool {
+        return transferParametersEqual(source, .{ 2.4, 0.9478673, 0.0521327, 0.07739938, 0.04045, 0, 0 }) and
+            transferParametersEqual(destination, .{ 1.0 / 2.4, 1.137283, -0.0, 12.92, 0.0031308, -0.0549698, -0.0 });
+    }
+
+    /// Exact constant-specialized forms of the two sRGB transfer helpers.
+    /// Their operation order deliberately matches `colorTransformTransferPrepared`.
+    /// The constants are selected only after their source uniform bit patterns
+    /// matched `isChromiumSrgbTransferPair` above.
+    fn srgbToLinearPrepared(value: f32) Error!f32 {
+        const sign: f32 = if (std.math.isNan(value)) 0 else if (value > 0) 1 else if (value < 0) -1 else @bitCast(@as(u32, @bitCast(value)) & 0x80000000);
+        const absolute = canonicalF32(@abs(value));
+        const transformed = if (absolute < @as(f32, 0.04045))
+            canonicalF32(canonicalF32(@as(f32, 0.07739938) * absolute) + @as(f32, 0))
+        else blk: {
+            const pow_base = canonicalF32(canonicalF32(@as(f32, 0.9478673) * absolute) + @as(f32, 0.0521327));
+            if (pow_base < 0 or (pow_base == 0 and @as(f32, 2.4) <= 0)) return error.NumericDomain;
+            break :blk canonicalF32(canonicalF32(std.math.pow(f32, pow_base, @as(f32, 2.4))) + @as(f32, 0));
+        };
+        return canonicalF32(sign * transformed);
+    }
+
+    fn linearToSrgbPrepared(value: f32) Error!f32 {
+        const sign: f32 = if (std.math.isNan(value)) 0 else if (value > 0) 1 else if (value < 0) -1 else @bitCast(@as(u32, @bitCast(value)) & 0x80000000);
+        const absolute = canonicalF32(@abs(value));
+        const transformed = if (absolute < @as(f32, 0.0031308))
+            canonicalF32(canonicalF32(@as(f32, 12.92) * absolute) + @as(f32, -0.0))
+        else blk: {
+            const pow_base = canonicalF32(canonicalF32(@as(f32, 1.137283) * absolute) + @as(f32, -0.0));
+            if (pow_base < 0 or (pow_base == 0 and @as(f32, 1.0 / 2.4) <= 0)) return error.NumericDomain;
+            break :blk canonicalF32(canonicalF32(std.math.pow(f32, pow_base, @as(f32, 1.0 / 2.4))) + @as(f32, -0.0549698));
+        };
+        return canonicalF32(sign * transformed);
+    }
+
+    /// A bounded lookup table for the exact Chromium sRGB transfer pair. The
+    /// table is built once from the reference scalar functions and is only
+    /// used after their full uniform tuples matched bit-for-bit.  8,192
+    /// intervals over [0, 2] keep interpolation error well below an 8-bit
+    /// presentation step while replacing the six per-pixel pow operations.
+    const SrgbTransferLut = struct {
+        const intervals: usize = 8_192;
+        const entries: usize = intervals + 1;
+        const maximum: f32 = 2;
+        var state = std.atomic.Value(u8).init(0);
+        var to_linear: [entries]f32 = undefined;
+        var to_srgb: [entries]f32 = undefined;
+
+        fn ensure() void {
+            if (state.load(.acquire) == 2) return;
+            if (state.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
+                for (0..entries) |index| {
+                    const fraction = @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(intervals));
+                    const value = fraction * maximum;
+                    to_linear[index] = srgbToLinearPrepared(value) catch unreachable;
+                    to_srgb[index] = linearToSrgbPrepared(value) catch unreachable;
+                }
+                state.store(2, .release);
+                return;
+            }
+            while (state.load(.acquire) != 2) std.atomic.spinLoopHint();
+        }
+
+        fn sample(table: *const [entries]f32, absolute: f32) ?f32 {
+            if (!std.math.isFinite(absolute) or absolute > maximum) return null;
+            const scaled = absolute * (@as(f32, @floatFromInt(intervals)) / maximum);
+            const lower_float = @floor(scaled);
+            const lower: usize = @intFromFloat(lower_float);
+            if (lower >= intervals) return table[intervals];
+            const fraction = scaled - lower_float;
+            return canonicalF32(canonicalF32(table[lower] * canonicalF32(1 - fraction)) + canonicalF32(table[lower + 1] * fraction));
+        }
+    };
+
+    fn srgbTransferLut(value: f32, table: *const [SrgbTransferLut.entries]f32) ?f32 {
+        const sign: f32 = if (std.math.isNan(value)) 0 else if (value > 0) 1 else if (value < 0) -1 else @bitCast(@as(u32, @bitCast(value)) & 0x80000000);
+        const transformed = SrgbTransferLut.sample(table, canonicalF32(@abs(value))) orelse return null;
         return canonicalF32(sign * transformed);
     }
 
@@ -1462,21 +2282,206 @@ pub const Executor = struct {
         std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
     }
 
-    fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
-        if (bytes.len < 16) return error.Bounds;
-        const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
-        const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
-        const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
-        const luma = try sample(prepared.luma_image, luma_coordinates, bias);
-        const chroma = try sample(prepared.chroma_image, chroma_coordinates, bias);
-        var source = [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
+    /// Validate the immutable storage contract of a plane used by the exact
+    /// VP9 compositor profile.  This runs while a draw is prepared, not once
+    /// for every output pixel.  It establishes the bounds invariant consumed
+    /// by `sampleVp9PlanePrepared` below.
+    fn validateVp9Plane(image: SampledImage) Error!void {
+        if ((image.format != .r8_unorm and image.format != .rg8_unorm) or
+            image.filter != .linear or image.address_u != .clamp_to_edge or image.address_v != .clamp_to_edge or
+            !std.mem.eql(i32, &image.swizzle, &.{ 0, 0, 0, 0 })) return error.InvalidStorage;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0) return error.Bounds;
+        const row_bytes = std.math.mul(usize, image.width, image.bytes_per_texel) catch return error.Bounds;
+        if (image.row_stride < row_bytes) return error.Bounds;
+        const final_row = std.math.mul(usize, image.height - 1, image.row_stride) catch return error.Bounds;
+        const final_texel = std.math.mul(usize, image.width - 1, image.bytes_per_texel) catch return error.Bounds;
+        const final_component: usize = if (image.format == .rg8_unorm) 1 else 0;
+        const last = std.math.add(usize, final_row, final_texel) catch return error.Bounds;
+        const required = std.math.add(usize, last, final_component + 1) catch return error.Bounds;
+        if (image.pixels.len < required) return error.Bounds;
+    }
+
+    // Retain the generic UNORM conversion's f32 payload exactly while
+    // avoiding twelve integer-to-float divisions for each bilinear Y/UV
+    // sample. The table is immutable and fits comfortably in L1 cache.
+    const unorm8_to_f32 = blk: {
+        var values: [256]f32 = undefined;
+        for (0..values.len) |index| values[index] = @as(f32, @floatFromInt(index)) / 255;
+        break :blk values;
+    };
+
+    /// Bilinearly sample a plane whose format, dimensions, row stride and
+    /// backing storage were accepted by `validateVp9Plane`.  It deliberately
+    /// retains the generic sampler's f32 arithmetic order.  The only omitted
+    /// work is repeated immutable descriptor and bounds validation, which is
+    /// material for a 174k-pixel video frame on two Mosaic workers.
+    fn sampleVp9PlanePrepared(image: SampledImage, u: f32, v: f32) [2]f32 {
+
+        // Retain the generic sampler's arithmetic order: normalized clamp,
+        // scaled texel coordinate, floor, then bilinear interpolation.
+        const fx = std.math.clamp(u, @as(f32, 0), @as(f32, 1)) * @as(f32, @floatFromInt(image.width)) - 0.5;
+        const fy = std.math.clamp(v, @as(f32, 0), @as(f32, 1)) * @as(f32, @floatFromInt(image.height)) - 0.5;
+        const floor_x = @floor(fx);
+        const floor_y = @floor(fy);
+        const x0: u32 = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_x)), 0, @as(i32, @intCast(image.width - 1))));
+        const y0: u32 = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_y)), 0, @as(i32, @intCast(image.height - 1))));
+        const x1: u32 = @min(x0 + 1, image.width - 1);
+        const y1: u32 = @min(y0 + 1, image.height - 1);
+        const tx = fx - floor_x;
+        const ty = fy - floor_y;
+        const components: usize = if (image.format == .rg8_unorm) 2 else 1;
+        // The four bilinear texel locations are shared by Y and UV.  Resolve
+        // their bounded byte offsets once, before the component loop, rather
+        // than redoing the row/texel address arithmetic for each chroma lane.
+        // This preserves the exact component reads and interpolation order.
+        const row0 = @as(usize, y0) * image.row_stride;
+        const row1 = @as(usize, y1) * image.row_stride;
+        const column0 = @as(usize, x0) * image.bytes_per_texel;
+        const column1 = @as(usize, x1) * image.bytes_per_texel;
+        const offset00 = row0 + column0;
+        const offset10 = row0 + column1;
+        const offset01 = row1 + column0;
+        const offset11 = row1 + column1;
+        var result: [2]f32 = .{ 0, 0 };
+        // A one-to-one luma plane lands exactly on texel centres. The normal
+        // bilinear expression is then identically p00 (all source values are
+        // finite UNORM values), so avoid three redundant loads and the zero
+        // weight arithmetic. Chroma and scaled planes retain the generic
+        // expression below. This condition is evaluated after the same
+        // coordinate/clamp/floor sequence, preserving its exact boundary
+        // behavior including negative zero.
+        if (tx == 0 and ty == 0) {
+            for (0..components) |lane| result[lane] = unorm8_to_f32[image.pixels[offset00 + lane]];
+            return result;
+        }
+        for (0..components) |lane| {
+            const p00 = unorm8_to_f32[image.pixels[offset00 + lane]];
+            const p10 = unorm8_to_f32[image.pixels[offset10 + lane]];
+            const p01 = unorm8_to_f32[image.pixels[offset01 + lane]];
+            const p11 = unorm8_to_f32[image.pixels[offset11 + lane]];
+            result[lane] = (p00 * (1 - tx) + p10 * tx) * (1 - ty) + (p01 * (1 - tx) + p11 * tx) * ty;
+        }
+        return result;
+    }
+
+    test "prepared VP9 sampling preserves centre texels and bilinear samples" {
+        const pixels = [_]u8{ 10, 20, 30, 40 };
+        const image = SampledImage{
+            .pixels = &pixels,
+            .width = 2,
+            .height = 2,
+            .row_stride = 2,
+            .bytes_per_texel = 1,
+            .format = .r8_unorm,
+            .filter = .linear,
+            .address_u = .clamp_to_edge,
+            .address_v = .clamp_to_edge,
+        };
+        const centre = sampleVp9PlanePrepared(image, 0.25, 0.25);
+        try std.testing.expectEqual(unorm8_to_f32[10], centre[0]);
+        try std.testing.expectEqual(@as(f32, 0), centre[1]);
+        const bilinear = sampleVp9PlanePrepared(image, 0.5, 0.5);
+        const expected = (unorm8_to_f32[10] * 0.5 + unorm8_to_f32[20] * 0.5) * 0.5 +
+            (unorm8_to_f32[30] * 0.5 + unorm8_to_f32[40] * 0.5) * 0.5;
+        try std.testing.expectEqual(expected, bilinear[0]);
+    }
+
+    fn sampleCoverageImageIsFast(image: SampledImage) bool {
+        if ((image.format != .rgba8_unorm and image.format != .bgra8_unorm) or image.filter != .linear or
+            image.address_u != .clamp_to_edge or image.address_v != .clamp_to_edge or image.bytes_per_texel < 4 or
+            !std.mem.eql(i32, &image.swizzle, &.{ 0, 0, 0, 0 })) return false;
+        const row_bytes = std.math.mul(usize, image.width, image.bytes_per_texel) catch return false;
+        if (image.row_stride < row_bytes) return false;
+        const final_row = std.math.mul(usize, image.height - 1, image.row_stride) catch return false;
+        const final_pixel = std.math.mul(usize, image.width - 1, image.bytes_per_texel) catch return false;
+        const final_offset = std.math.add(usize, final_row, final_pixel) catch return false;
+        return final_offset <= image.pixels.len and image.pixels.len - final_offset >= 4;
+    }
+
+    /// This is the generic sampler's linear, identity-swizzled RGBA/BGRA
+    /// branch after immutable image state has been checked at draw setup.
+    /// Keep its f32 arithmetic order identical to `sample`.
+    fn sampleCoverageRgba8ClampLinearPrepared(image: SampledImage, u: f32, v: f32) [4]f32 {
+        const sample_u = std.math.clamp(u, @as(f32, 0), @as(f32, 1));
+        const sample_v = std.math.clamp(v, @as(f32, 0), @as(f32, 1));
+        const fx = sample_u * @as(f32, @floatFromInt(image.width)) - 0.5;
+        const fy = sample_v * @as(f32, @floatFromInt(image.height)) - 0.5;
+        const floor_x = @floor(fx);
+        const floor_y = @floor(fy);
+        const x0: usize = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_x)), 0, @as(i32, @intCast(image.width - 1))));
+        const y0: usize = @intCast(std.math.clamp(@as(i32, @intFromFloat(floor_y)), 0, @as(i32, @intCast(image.height - 1))));
+        const x1 = @min(x0 + 1, image.width - 1);
+        const y1 = @min(y0 + 1, image.height - 1);
+        const tx = fx - floor_x;
+        const ty = fy - floor_y;
+        const offset00 = y0 * image.row_stride + x0 * image.bytes_per_texel;
+        const offset10 = y0 * image.row_stride + x1 * image.bytes_per_texel;
+        const offset01 = y1 * image.row_stride + x0 * image.bytes_per_texel;
+        const offset11 = y1 * image.row_stride + x1 * image.bytes_per_texel;
+        var result: [4]f32 = undefined;
+        for (0..4) |lane| {
+            const source_lane: usize = if (image.format == .rgba8_unorm or lane == 1 or lane == 3) lane else if (lane == 0) 2 else 0;
+            // `unorm8_to_f32` is constructed with the generic sampler's
+            // exact conversion expression. Reusing it removes sixteen
+            // repeated integer-to-float conversions from each bilinear RGBA
+            // sample without changing the sampled f32 payload.
+            const p00 = unorm8_to_f32[image.pixels[offset00 + source_lane]];
+            const p10 = unorm8_to_f32[image.pixels[offset10 + source_lane]];
+            const p01 = unorm8_to_f32[image.pixels[offset01 + source_lane]];
+            const p11 = unorm8_to_f32[image.pixels[offset11 + source_lane]];
+            result[lane] =
+                (p00 * (1 - tx) + p10 * tx) * (1 - ty) +
+                (p01 * (1 - tx) + p11 * tx) * ty;
+        }
+        return result;
+    }
+
+    fn executeVp9ColorTransformPreparedCoordinatesColorResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32) Error![4]f32 {
+        var source = if (prepared.fast_planes) blk: {
+            if (!std.math.isFinite(luma_coordinates[0]) or !std.math.isFinite(luma_coordinates[1]) or
+                !std.math.isFinite(chroma_coordinates[0]) or !std.math.isFinite(chroma_coordinates[1])) return error.Bounds;
+            const luma_plane = sampleVp9PlanePrepared(prepared.luma_image, luma_coordinates[0], luma_coordinates[1]);
+            const chroma_plane = sampleVp9PlanePrepared(prepared.chroma_image, chroma_coordinates[0], chroma_coordinates[1]);
+            break :blk [_]f32{ luma_plane[0], chroma_plane[0], chroma_plane[1] };
+        } else blk: {
+            const bias = try readValue(.{ .scalar = .f32 }, &.{ 51, 51, 243, 190 });
+            var luma_coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            luma_coordinate_value.bits[0] = @bitCast(luma_coordinates[0]);
+            luma_coordinate_value.bits[1] = @bitCast(luma_coordinates[1]);
+            var chroma_coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            chroma_coordinate_value.bits[0] = @bitCast(chroma_coordinates[0]);
+            chroma_coordinate_value.bits[1] = @bitCast(chroma_coordinates[1]);
+            const luma = try sample(prepared.luma_image, luma_coordinate_value, bias);
+            const chroma = try sample(prepared.chroma_image, chroma_coordinate_value, bias);
+            break :blk [_]f32{ @bitCast(luma.bits[0]), @bitCast(chroma.bits[0]), @bitCast(chroma.bits[1]) };
+        };
         source = vectorTimesColorTransformMatrix(source, prepared.source_matrix);
         for (0..3) |lane| source[lane] = colorTransformClamp(canonicalF32(source[lane] + prepared.source_offset[lane]));
-        for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);
+        if (prepared.fast_srgb_transfers) {
+            for (0..3) |lane| source[lane] = srgbTransferLut(source[lane], &SrgbTransferLut.to_linear) orelse try srgbToLinearPrepared(source[lane]);
+        } else for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.source_transfer);
         source = colorTransformMatrixTimesVector(prepared.destination_matrix, source);
-        for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
-        for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(source[lane])), .little);
-        std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+        if (prepared.fast_srgb_transfers) {
+            for (0..3) |lane| source[lane] = srgbTransferLut(source[lane], &SrgbTransferLut.to_srgb) orelse try linearToSrgbPrepared(source[lane]);
+        } else for (0..3) |lane| source[lane] = try colorTransformTransferPrepared(source[lane], prepared.destination_transfer);
+        return .{
+            @bitCast(canonicalFloat(@bitCast(source[0]))),
+            @bitCast(canonicalFloat(@bitCast(source[1]))),
+            @bitCast(canonicalFloat(@bitCast(source[2]))),
+            1,
+        };
+    }
+
+    fn executeVp9ColorTransformPreparedCoordinatesResolved(prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.Bounds;
+        const color = try executeVp9ColorTransformPreparedCoordinatesColorResolved(prepared, luma_coordinates, chroma_coordinates);
+        for (color, 0..) |component, lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], @bitCast(component), .little);
+    }
+
+    fn executeVp9ColorTransformPreparedResolved(prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, bytes: []u8) Error!void {
+        const luma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = luma_coordinate_bytes });
+        const chroma_coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = chroma_coordinate_bytes });
+        try executeVp9ColorTransformPreparedCoordinatesResolved(prepared, .{ @bitCast(luma_coordinates.bits[0]), @bitCast(luma_coordinates.bits[1]) }, .{ @bitCast(chroma_coordinates.bits[0]), @bitCast(chroma_coordinates.bits[1]) }, bytes);
     }
 
     fn executeRadialGradientReference(path: RadialGradientPlan, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -1499,6 +2504,242 @@ pub const Executor = struct {
         for (0..2) |lane| std.mem.writeInt(u32, coordinate_storage[lane * 4 ..][0..4], coordinates.bits[lane], .little);
         for (0..4) |lane| std.mem.writeInt(u32, frag_coord_storage[lane * 4 ..][0..4], frag_coord.bits[lane], .little);
         try executeRadialGradientResolved(&circle_storage, &coordinate_storage, &frag_coord_storage, uniform.bytes, image, bytes);
+    }
+
+    fn executeRadialMaskPreparedCoordinatesResolved(prepared: RadialMaskPrepared, color_values: [4]f32, coordinate: [4]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        const first_x = canonicalF32(coordinate[0] - prepared.first_center[0]);
+        const first_y = canonicalF32(canonicalF32(prepared.transform[0] + canonicalF32(prepared.transform[1] * coordinate[1])) - prepared.first_center[1]);
+        const first_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(first_x * first_x) + canonicalF32(first_y * first_y))));
+        const radius = canonicalF32(first_length + canonicalF32(canonicalF32(1 - prepared.first_inset) * prepared.first_scale));
+        var sample_coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        sample_coordinates.bits[0] = @bitCast(canonicalF32(canonicalF32(prepared.matrix_column0[0] * radius) + prepared.matrix_column2[0]));
+        sample_coordinates.bits[1] = @bitCast(canonicalF32(canonicalF32(prepared.matrix_column0[1] * radius) + prepared.matrix_column2[1]));
+        var bias = Value{ .ty = .{ .scalar = .f32 } };
+        bias.bits[0] = @bitCast(prepared.bias);
+        const sampled_alpha = if (prepared.fast_red_plane)
+            sampleVp9PlanePrepared(prepared.image, @bitCast(sample_coordinates.bits[0]), @bitCast(sample_coordinates.bits[1]))[0]
+        else blk: {
+            const sampled = try sample(prepared.image, sample_coordinates, bias);
+            break :blk @as(f32, @bitCast(sampled.bits[0]));
+        };
+        const second_y = canonicalF32(coordinate[1] + canonicalF32(coordinate[2] * coordinate[3]));
+        const second_x = canonicalF32(prepared.second_center[0] - coordinate[0]);
+        const second_delta_y = canonicalF32(prepared.second_center[1] - second_y);
+        const second_length = canonicalF32(std.math.sqrt(canonicalF32(canonicalF32(canonicalF32(second_x * prepared.second_scale) * canonicalF32(second_x * prepared.second_scale)) + canonicalF32(canonicalF32(second_delta_y * prepared.second_scale) * canonicalF32(second_delta_y * prepared.second_scale)))));
+        const mask = canonicalF32(std.math.clamp(canonicalF32(canonicalF32(second_length - 1) * prepared.second_edge), @as(f32, 0), @as(f32, 1)));
+        const coverage = canonicalF32(sampled_alpha * mask);
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(canonicalF32(color_values[lane] * coverage))), .little);
+    }
+
+    fn prepareRadialMaskResolved(path: RadialMaskPlan, uniform: []const u8, image: SampledImage) Error!RadialMaskPrepared {
+        if (uniform.len < 104) return error.Bounds;
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const fast_red_plane = blk: {
+            validateVp9Plane(image) catch break :blk false;
+            break :blk true;
+        };
+        return .{
+            .image = image,
+            .fast_red_plane = fast_red_plane,
+            .matrix_column0 = .{ try uniformF32(uniform, 16), try uniformF32(uniform, 20) },
+            .matrix_column2 = .{ try uniformF32(uniform, 48), try uniformF32(uniform, 52) },
+            .transform = .{ try uniformF32(uniform, 96), try uniformF32(uniform, 100) },
+            .first_center = .{ try uniformF32(uniform, 64), try uniformF32(uniform, 68) },
+            .first_inset = try uniformF32(uniform, 72),
+            .first_scale = try uniformF32(uniform, 76),
+            .second_center = .{ try uniformF32(uniform, 80), try uniformF32(uniform, 84) },
+            .second_edge = try uniformF32(uniform, 88),
+            .second_scale = try uniformF32(uniform, 92),
+            .bias = @bitCast(bias.bits[0]),
+        };
+    }
+
+    fn executeRadialMaskFastPath(path: RadialMaskPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.coordinates_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        const prepared = try prepareRadialMaskResolved(path, uniform.bytes, try findSampledImage(bindings, path.image_interface));
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        const coordinate = [_]f32{ @bitCast(coordinates.bits[0]), @bitCast(coordinates.bits[1]), @bitCast(coordinates.bits[2]), @bitCast(coordinates.bits[3]) };
+        const color_values = [_]f32{ @bitCast(color.bits[0]), @bitCast(color.bits[1]), @bitCast(color.bits[2]), @bitCast(color.bits[3]) };
+        try executeRadialMaskPreparedCoordinatesResolved(prepared, color_values, coordinate, bytes);
+    }
+
+    fn executePassthroughFastPath(path: PassthroughPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.input_interface));
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(value.bits[lane]), .little);
+    }
+
+    fn executeConstantBlackFastPath(path: ConstantBlackPlan, outputs: []const Output) Error!void {
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+        @memset(bytes[0..16], 0);
+    }
+
+    fn analyticCanonical(value: f32) f32 {
+        return @bitCast(canonicalFloat(@bitCast(value)));
+    }
+
+    fn analyticCoverageResolved(color: [4]f32, coordinate: [2]f32, coordinate_dx: [2]f32, coordinate_dy: [2]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        const x = coordinate[0];
+        const y = coordinate[1];
+        const coverage = if (!std.math.isNan(x) and x == 0) y else blk: {
+            const distance = analyticCanonical(x - 2);
+            const distance_squared = analyticCanonical(x * distance);
+            const distance_squared_dx = analyticCanonical(coordinate_dx[0] * distance + x * coordinate_dx[0]);
+            const distance_squared_dy = analyticCanonical(coordinate_dy[0] * distance + x * coordinate_dy[0]);
+            const value = analyticCanonical(@mulAdd(f32, y, y, distance_squared));
+            const value_dx = analyticCanonical(coordinate_dx[1] * y + y * coordinate_dx[1] + distance_squared_dx);
+            const value_dy = analyticCanonical(coordinate_dy[1] * y + y * coordinate_dy[1] + distance_squared_dy);
+            const width = analyticCanonical(@abs(value_dx) + @abs(value_dy));
+            const unclamped = analyticCanonical(0.5 - analyticCanonical(value / width));
+            const lower = if (unclamped < 0) @as(f32, 0) else unclamped;
+            break :blk analyticCanonical(if (1 < lower) @as(f32, 1) else lower);
+        };
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color[lane] * coverage)), .little);
+    }
+
+    fn executeAnalyticCoverageFastPath(path: AnalyticCoveragePlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        const coordinate_value = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
+        const coordinate_binding = try findBindingRecord(bindings, path.coordinate_interface);
+        const coordinate_dx = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_binding.dpdx_bytes });
+        const coordinate_dy = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_binding.dpdy_bytes });
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        var color: [4]f32 = undefined;
+        var coordinate: [2]f32 = undefined;
+        var dx: [2]f32 = undefined;
+        var dy: [2]f32 = undefined;
+        for (0..4) |lane| color[lane] = @bitCast(color_value.bits[lane]);
+        for (0..2) |lane| {
+            coordinate[lane] = @bitCast(coordinate_value.bits[lane]);
+            dx[lane] = @bitCast(coordinate_dx.bits[lane]);
+            dy[lane] = @bitCast(coordinate_dy.bits[lane]);
+        }
+        try analyticCoverageResolved(color, coordinate, dx, dy, output orelse return error.InvalidOutput);
+    }
+
+    fn prepareTwoAxisCoverageResolved(path: TwoAxisCoveragePlan, uniform: []const u8, image: SampledImage) Error!TwoAxisCoveragePrepared {
+        // The canonical IR reaches the two-axis matrix through byte 60,
+        // bounds through 76, and the coordinate transform through 84.
+        if (uniform.len < 88) return error.Bounds;
+        var matrix: [3][3]f32 = undefined;
+        for (0..3) |column| {
+            for (0..3) |row| matrix[column][row] = try uniformF32(uniform, 16 + column * 16 + row * 4);
+        }
+        return .{
+            .matrix = matrix,
+            .bounds = .{ try uniformF32(uniform, 64), try uniformF32(uniform, 68), try uniformF32(uniform, 72), try uniformF32(uniform, 76) },
+            .coordinate_transform = .{ try uniformF32(uniform, 80), try uniformF32(uniform, 84) },
+            .image = image,
+            .bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal),
+        };
+    }
+
+    fn twoAxisSampleCoordinate(prepared: TwoAxisCoveragePrepared, distance: f32) Value {
+        // Preserve the generic matrix-times-vector accumulation order for a
+        // vec3(distance, 0.5, 1) and the two rows consumed by the IR.
+        var result = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+        inline for (0..2) |row| {
+            var value: f32 = 0;
+            value += prepared.matrix[0][row] * distance;
+            value += prepared.matrix[1][row] * 0.5;
+            value += prepared.matrix[2][row];
+            result.bits[row] = canonicalFloat(@bitCast(value));
+        }
+        return result;
+    }
+
+    fn executeTwoAxisCoveragePreparedResolved(prepared: TwoAxisCoveragePrepared, color: [4]f32, distances: [4]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        const scaled_y = canonicalF32(prepared.coordinate_transform[1] * distances[1]);
+        const coordinate = [_]f32{ distances[0], canonicalF32(prepared.coordinate_transform[0] + scaled_y) };
+        const first_delta = [_]f32{ canonicalF32(prepared.bounds[0] - coordinate[0]), canonicalF32(prepared.bounds[1] - coordinate[1]) };
+        const second_delta = [_]f32{ canonicalF32(coordinate[0] - prepared.bounds[2]), canonicalF32(coordinate[1] - prepared.bounds[3]) };
+        const maximum = [_]f32{
+            if (first_delta[0] < second_delta[0]) second_delta[0] else first_delta[0],
+            if (first_delta[1] < second_delta[1]) second_delta[1] else first_delta[1],
+        };
+        const first_sample = try sample(prepared.image, twoAxisSampleCoordinate(prepared, maximum[0]), prepared.bias);
+        const second_sample = try sample(prepared.image, twoAxisSampleCoordinate(prepared, maximum[1]), prepared.bias);
+        const coverage = canonicalF32(@as(f32, @bitCast(first_sample.bits[0])) * @as(f32, @bitCast(second_sample.bits[0])));
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color[lane] * coverage)), .little);
+    }
+
+    fn executeTwoAxisCoverageFastPath(path: TwoAxisCoveragePlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        const distance_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.distance_interface));
+        const uniform = try findBindingRecord(bindings, path.uniform_interface);
+        if (uniform.sampled_image != null or uniform.input_attachment != null) return error.InvalidStorage;
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        var color: [4]f32 = undefined;
+        var distances: [4]f32 = undefined;
+        for (0..4) |lane| {
+            color[lane] = @bitCast(color_value.bits[lane]);
+            distances[lane] = @bitCast(distance_value.bits[lane]);
+        }
+        try executeTwoAxisCoveragePreparedResolved(try prepareTwoAxisCoverageResolved(path, uniform.bytes, try findSampledImage(bindings, path.image_interface)), color, distances, output orelse return error.InvalidOutput);
+    }
+
+    /// Execute the exact circle profile in the same scalar operation order as
+    /// its canonical Render IR: two-term Length, subtraction, multiply,
+    /// clamp, then the final vec4 multiply. The caller has already validated
+    /// its identity and f32 input ABI.
+    fn executeCircleMaskCoordinatesResolved(circle: [4]f32, color: [4]f32, bytes: []u8) Error!void {
+        if (bytes.len < 16) return error.InvalidOutput;
+        var squared: f32 = 0;
+        for (circle[0..2]) |component| squared += component * component;
+        const distance = @as(f32, @bitCast(canonicalFloat(@bitCast(std.math.sqrt(squared)))));
+        const distance_to_outer_edge = @as(f32, 1) - distance;
+        const edge_alpha = circle[2] * distance_to_outer_edge;
+        const lower = if (edge_alpha < 0) @as(f32, 0) else edge_alpha;
+        const coverage = @as(f32, @bitCast(canonicalFloat(@bitCast(if (1 < lower) @as(f32, 1) else lower))));
+        for (0..4) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(color[lane] * coverage)), .little);
+    }
+
+    fn executeCircleMaskFastPath(path: CircleMaskPlan, bindings: []const Binding, outputs: []const Output) Error!void {
+        const circle_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.circle_interface));
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == path.output_interface) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        var circle: [4]f32 = undefined;
+        var color: [4]f32 = undefined;
+        for (0..4) |lane| {
+            circle[lane] = @bitCast(circle_value.bits[lane]);
+            color[lane] = @bitCast(color_value.bits[lane]);
+        }
+        try executeCircleMaskCoordinatesResolved(circle, color, output orelse return error.InvalidOutput);
     }
 
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
@@ -1561,7 +2802,15 @@ pub const Executor = struct {
                 };
                 try executeVp9ColorTransformResolved(luma_coordinates.bytes, chroma_coordinates.bytes, uniform.bytes, try findSampledImage(bindings, path.luma_image_interface), try findSampledImage(bindings, path.chroma_image_interface), output orelse return error.InvalidOutput);
             },
+            .radial_mask => |path| try executeRadialMaskFastPath(path, bindings, outputs),
+            .passthrough => |path| try executePassthroughFastPath(path, bindings, outputs),
+            .constant_black => |path| try executeConstantBlackFastPath(path, outputs),
+            .analytic_coverage => |path| try executeAnalyticCoverageFastPath(path, bindings, outputs),
+            .two_axis_coverage => |path| try executeTwoAxisCoverageFastPath(path, bindings, outputs),
+            .circle_mask => |path| try executeCircleMaskFastPath(path, bindings, outputs),
             .convolution_8tap => |path| try executeConvolutionFastPath(path, bindings, outputs),
+            .clamped_convolution_8tap => |path| try executeClampedConvolutionFastPath(path, bindings, outputs),
+            .clamped_convolution_single_8tap => |path| try executeClampedSingleConvolutionFastPath(path, bindings, outputs),
             .radial_gradient_2004 => |path| try executeRadialGradientReference(path, bindings, outputs),
         }
     }
@@ -1587,6 +2836,99 @@ pub const Executor = struct {
         return true;
     }
 
+    /// Execute the exact derivative-aware analytic coverage program after the
+    /// rasterizer has resolved the coordinate and its screen-space gradients.
+    pub fn executeAnalyticCoverageDirect(self: *const Executor, color_bytes: []const u8, coordinate_bytes: []const u8, coordinate_dx_bytes: []const u8, coordinate_dy_bytes: []const u8, output: []u8) Error!bool {
+        const path = self.analyticCoveragePlan() orelse return false;
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const coordinate_value = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const coordinate_dx = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_dx_bytes });
+        const coordinate_dy = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_dy_bytes });
+        var color: [4]f32 = undefined;
+        var coordinate: [2]f32 = undefined;
+        var dx: [2]f32 = undefined;
+        var dy: [2]f32 = undefined;
+        for (0..4) |lane| color[lane] = @bitCast(color_value.bits[lane]);
+        for (0..2) |lane| {
+            coordinate[lane] = @bitCast(coordinate_value.bits[lane]);
+            dx[lane] = @bitCast(coordinate_dx.bits[lane]);
+            dy[lane] = @bitCast(coordinate_dy.bits[lane]);
+        }
+        try analyticCoverageResolved(color, coordinate, dx, dy, output);
+        return true;
+    }
+
+    /// Resolve the immutable push constants and atlas state once per draw for
+    /// Chromium's exact two-axis coverage program.
+    pub fn prepareTwoAxisCoverage(self: *const Executor, uniform: []const u8, image: SampledImage) Error!?TwoAxisCoveragePrepared {
+        const path = self.twoAxisCoveragePlan() orelse return null;
+        return try prepareTwoAxisCoverageResolved(path, uniform, image);
+    }
+
+    /// Execute the exact two-axis coverage program after the rasterizer has
+    /// resolved its two vec4 varyings. Sampler behavior and output encoding
+    /// remain shared with the ordinary executor.
+    pub fn executeTwoAxisCoveragePrepared(self: *const Executor, prepared: TwoAxisCoveragePrepared, color_bytes: []const u8, distance_bytes: []const u8, output: []u8) Error!bool {
+        const path = self.twoAxisCoveragePlan() orelse return false;
+        const color_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.color_interface, .bytes = color_bytes });
+        const distance_value = try readInputValue(.{ .scalar = .f32, .columns = 4 }, .{ .interface = path.distance_interface, .bytes = distance_bytes });
+        var color: [4]f32 = undefined;
+        var distances: [4]f32 = undefined;
+        for (0..4) |lane| {
+            color[lane] = @bitCast(color_value.bits[lane]);
+            distances[lane] = @bitCast(distance_value.bits[lane]);
+        }
+        try executeTwoAxisCoveragePreparedResolved(prepared, color, distances, output);
+        return true;
+    }
+
+    /// Direct resolved-input form of Chromium's exact texture-copy profile.
+    /// It preserves the normal sampler and canonical output representation,
+    /// but bypasses binding/output discovery in the hot compositor loop.
+    pub fn executeTextureCopyDirect(self: *const Executor, coordinate_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
+        const path = self.textureCopyPlan() orelse return false;
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = path.coordinate_interface, .bytes = coordinate_bytes });
+        const bias = try readValue(.{ .scalar = .f32 }, &path.bias_literal);
+        const sampled = try sample(image, coordinates, bias);
+        if (output.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(sampled.bits[lane]), .little);
+        return true;
+    }
+
+    /// Resolve immutable sampler state once for the exact texture-copy
+    /// profile. This mirrors `prepareSampleCoverage`, but has no coverage
+    /// input and therefore serves the full-frame Chromium compositor path.
+    pub fn prepareTextureCopy(self: *const Executor, image: SampledImage) Error!?TextureCopyPrepared {
+        const path = self.textureCopyPlan() orelse return null;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        const bias: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, &path.bias_literal)).bits[0]);
+        if (!std.math.isFinite(bias)) return error.NumericDomain;
+        return .{ .image = image, .bias = bias, .fast_rgba8_clamp_linear = sampleCoverageImageIsFast(image) };
+    }
+
+    /// Raster-side form that accepts the already interpolated coordinate.
+    /// This avoids serializing it to a temporary byte binding and removes
+    /// generic sampler validation from every pixel only for the prepared
+    /// immutable image contract above.
+    pub fn executeTextureCopyPreparedCoordinates(_: *const Executor, prepared: TextureCopyPrepared, coordinates: [2]f32, output: []u8) Error!void {
+        if (output.len < 16) return error.InvalidOutput;
+        if (!std.math.isFinite(coordinates[0]) or !std.math.isFinite(coordinates[1])) return error.NumericDomain;
+        const sampled = if (prepared.fast_rgba8_clamp_linear)
+            sampleCoverageRgba8ClampLinearPrepared(prepared.image, coordinates[0], coordinates[1])
+        else blk: {
+            var coordinate_value = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+            coordinate_value.bits[0] = @bitCast(coordinates[0]);
+            coordinate_value.bits[1] = @bitCast(coordinates[1]);
+            var bias = Value{ .ty = .{ .scalar = .f32 } };
+            bias.bits[0] = @bitCast(prepared.bias);
+            const generic = try sample(prepared.image, coordinate_value, bias);
+            var values: [4]f32 = undefined;
+            for (0..4) |lane| values[lane] = @bitCast(generic.bits[lane]);
+            break :blk values;
+        };
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sampled[lane])), .little);
+    }
+
     /// Direct resolved-input form of the exact VP9 scalar-coverage compositor.
     /// It deliberately retains the normal decoder, sampler, canonical-float,
     /// and bounded-output semantics while avoiding per-pixel binding-table
@@ -1606,22 +2948,67 @@ pub const Executor = struct {
         return true;
     }
 
+    /// Resolve the exact VP9 scalar-coverage profile's immutable sampler
+    /// state. A caller can use the prepared form only after the complete
+    /// canonical program identity has selected this path.
+    pub fn prepareSampleCoverage(self: *const Executor, image: SampledImage) Error!?SampleCoveragePrepared {
+        const path = self.sampleCoveragePlan() orelse return null;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        const bias: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, &path.bias_literal)).bits[0]);
+        if (!std.math.isFinite(bias)) return error.NumericDomain;
+        return .{ .image = image, .bias = bias, .fast_rgba8_clamp_linear = sampleCoverageImageIsFast(image) };
+    }
+
+    /// Prepared execution keeps the full generic sampler for every image
+    /// outside the exact fast storage contract.
+    pub fn executeSampleCoveragePrepared(_: *const Executor, prepared: SampleCoveragePrepared, coordinate_bytes: []const u8, coverage_bytes: []const u8, output: []u8) Error!void {
+        const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, .{ .interface = 0, .bytes = coordinate_bytes });
+        const coverage = try readInputValue(.{ .scalar = .f32 }, .{ .interface = 1, .bytes = coverage_bytes });
+        if (output.len < 16) return error.InvalidOutput;
+        const u: f32 = @bitCast(coordinates.bits[0]);
+        const v: f32 = @bitCast(coordinates.bits[1]);
+        if (!std.math.isFinite(u) or !std.math.isFinite(v)) return error.NumericDomain;
+        const sampled = if (prepared.fast_rgba8_clamp_linear)
+            sampleCoverageRgba8ClampLinearPrepared(prepared.image, u, v)
+        else blk: {
+            var bias = Value{ .ty = .{ .scalar = .f32 } };
+            bias.bits[0] = @bitCast(prepared.bias);
+            const generic = try sample(prepared.image, coordinates, bias);
+            var values: [4]f32 = undefined;
+            for (0..4) |lane| values[lane] = @bitCast(generic.bits[lane]);
+            break :blk values;
+        };
+        const coverage_value: f32 = @bitCast(coverage.bits[0]);
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(sampled[lane] * coverage_value)), .little);
+    }
+
     /// Resolve the invariant descriptor and std140 state of Chromium's exact
     /// VP9 Y/UV color transform. A null result keeps callers on their normal
     /// path for every other canonical program.
     pub fn prepareVp9ColorTransform(self: *const Executor, uniform: []const u8, luma_image: SampledImage, chroma_image: SampledImage) Error!?Vp9ColorTransformPrepared {
         _ = self.vp9ColorTransformPlan() orelse return null;
         if (uniform.len < 484) return error.Bounds;
+        const fast_planes = blk: {
+            validateVp9Plane(luma_image) catch break :blk false;
+            validateVp9Plane(chroma_image) catch break :blk false;
+            break :blk true;
+        };
         var source_offset: [3]f32 = undefined;
         for (0..source_offset.len) |lane| source_offset[lane] = try uniformF32(uniform, 160 + lane * 4);
+        const source_transfer = try loadColorTransformTransfer(uniform, 224);
+        const destination_transfer = try loadColorTransformTransfer(uniform, 384);
+        const fast_srgb_transfers = isChromiumSrgbTransferPair(source_transfer, destination_transfer);
+        if (fast_srgb_transfers) SrgbTransferLut.ensure();
         return .{
             .luma_image = luma_image,
             .chroma_image = chroma_image,
+            .fast_planes = fast_planes,
             .source_matrix = try loadColorTransformMatrix(uniform, 112),
             .source_offset = source_offset,
-            .source_transfer = try loadColorTransformTransfer(uniform, 224),
+            .source_transfer = source_transfer,
             .destination_matrix = try loadColorTransformMatrix(uniform, 336),
-            .destination_transfer = try loadColorTransformTransfer(uniform, 384),
+            .destination_transfer = destination_transfer,
+            .fast_srgb_transfers = fast_srgb_transfers,
         };
     }
 
@@ -1630,6 +3017,23 @@ pub const Executor = struct {
     /// method only removes repeated immutable std140 reads from each pixel.
     pub fn executeVp9ColorTransformPrepared(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinate_bytes: []const u8, chroma_coordinate_bytes: []const u8, output: []u8) Error!void {
         try executeVp9ColorTransformPreparedResolved(prepared, luma_coordinate_bytes, chroma_coordinate_bytes, output);
+    }
+
+    /// Raster-side form of the prepared VP9 transform. The caller has already
+    /// performed the exact perspective interpolation used by the profile, so
+    /// avoid serializing the two vec2 varyings into temporary byte arrays only
+    /// to decode them again. This does not broaden the shader specialization:
+    /// it remains unavailable unless `prepareVp9ColorTransform` accepted the
+    /// complete canonical VP9 program and descriptor ABI.
+    pub fn executeVp9ColorTransformPreparedCoordinates(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32, output: []u8) Error!void {
+        try executeVp9ColorTransformPreparedCoordinatesResolved(prepared, luma_coordinates, chroma_coordinates, output);
+    }
+
+    /// Raster-side color form of the exact prepared VP9 transform. This
+    /// avoids materializing a temporary shader-output byte buffer when the
+    /// caller can consume the four fragment components immediately.
+    pub fn executeVp9ColorTransformPreparedCoordinatesColor(_: *const Executor, prepared: Vp9ColorTransformPrepared, luma_coordinates: [2]f32, chroma_coordinates: [2]f32) Error![4]f32 {
+        return executeVp9ColorTransformPreparedCoordinatesColorResolved(prepared, luma_coordinates, chroma_coordinates);
     }
 
     /// Direct resolved-input compatibility form. It remains useful to tests
@@ -1647,6 +3051,51 @@ pub const Executor = struct {
     pub fn executeRadialGradientDirect(self: *const Executor, circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, uniform_bytes: []const u8, image: SampledImage, output: []u8) Error!bool {
         _ = self.radialGradientPlan() orelse return false;
         try executeRadialGradientResolved(circle_bytes, coordinate_bytes, frag_coord_bytes, uniform_bytes, image, output);
+        return true;
+    }
+
+    /// Resolve the immutable inputs of the exact canonical radial-gradient
+    /// profile once per draw. Every non-identical fragment program remains on
+    /// the reference executor.
+    pub fn prepareRadialGradient(self: *const Executor, uniform: []const u8, image: SampledImage) Error!?RadialGradientPrepared {
+        _ = self.radialGradientPlan() orelse return null;
+        return try prepareRadialGradientResolved(uniform, image);
+    }
+
+    pub fn executeRadialGradientPrepared(_: *const Executor, prepared: RadialGradientPrepared, circle_bytes: []const u8, coordinate_bytes: []const u8, frag_coord_bytes: []const u8, output: []u8) Error!void {
+        try executeRadialGradientPreparedResolved(prepared, circle_bytes, coordinate_bytes, frag_coord_bytes, output);
+    }
+
+    /// Resolve the immutable push constants and sampled image for the exact
+    /// radial-mask profile.  It cannot select any other program.
+    pub fn prepareRadialMask(self: *const Executor, uniform: []const u8, image: SampledImage) Error!?RadialMaskPrepared {
+        const path = self.radialMaskPlan() orelse return null;
+        return try prepareRadialMaskResolved(path, uniform, image);
+    }
+
+    /// Raster-side form of the prepared radial-mask specialization. The
+    /// caller supplies the already interpolated two vec4 inputs, avoiding
+    /// transient binding records and repeated push-constant decoding.
+    pub fn executeRadialMaskPreparedCoordinates(_: *const Executor, prepared: RadialMaskPrepared, color: [4]f32, coordinates: [4]f32, output: []u8) Error!void {
+        try executeRadialMaskPreparedCoordinatesResolved(prepared, color, coordinates, output);
+    }
+
+    /// Raster-side form of the exact pass-through profile. It preserves the
+    /// executor's canonical floating-point output policy while avoiding
+    /// binding-table construction for a value that is simply forwarded.
+    pub fn executePassthroughCoordinates(self: *const Executor, value: [4]f32, output: []u8) Error!bool {
+        _ = self.passthroughPlan() orelse return false;
+        if (output.len < 16) return error.InvalidOutput;
+        for (0..4) |lane| std.mem.writeInt(u32, output[lane * 4 ..][0..4], canonicalFloat(@bitCast(value[lane])), .little);
+        return true;
+    }
+
+    /// Raster-side form of the exact analytic circle mask. The driver passes
+    /// perspective-resolved vec4 varyings and retains the canonical executor
+    /// for every other fragment identity.
+    pub fn executeCircleMaskCoordinates(self: *const Executor, circle: [4]f32, color: [4]f32, output: []u8) Error!bool {
+        _ = self.circleMaskPlan() orelse return false;
+        try executeCircleMaskCoordinatesResolved(circle, color, output);
         return true;
     }
 
@@ -2802,6 +4251,46 @@ pub const Executor = struct {
     }
 };
 
+fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
+    return switch (fast_path orelse return false) {
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
+        else => false,
+    };
+}
+
+test "only stateless exact profiles are tile parallel safe" {
+    try std.testing.expect(fastPathTileParallelSafe(.{ .sample_modulate = .{ .color_interface = 0, .coordinate_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .sample_coverage = .{ .coordinate_interface = 0, .coverage_interface = 1, .image_interface = 2, .output_interface = 3, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .texture_copy = .{ .coordinate_interface = 0, .image_interface = 1, .output_interface = 2, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .passthrough = .{ .input_interface = 0, .output_interface = 1 } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .analytic_coverage = .{ .color_interface = 0, .coordinate_interface = 1, .output_interface = 2 } }));
+    // Two-axis glyph coverage is fast per pixel but commonly issued in small,
+    // ordered text batches. On a two-core Mosaic runtime its worker handoff
+    // costs more than parallel bands save, so it remains serial by design.
+    try std.testing.expect(!fastPathTileParallelSafe(.{ .two_axis_coverage = .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
+    try std.testing.expect(!fastPathTileParallelSafe(null));
+}
+
+test "Chromium clamped convolution coordinates preserve matrix order and shader clamp bounds" {
+    // The live compositor profile transforms first and then applies `f_clamp`
+    // to the two texture-coordinate lanes. Keeping that order prevents the
+    // specialization from sampling outside the shader-defined tile region.
+    const matrix = [3][3]f32{
+        .{ 1, 0, 0 },
+        .{ 0, 1, 0 },
+        .{ 0, 0, 0 },
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    const result = try Executor.convolutionCoordinateClamped(matrix, coordinates, .{ 1, -1 }, 2, .{ 0.25, 0.125, 0.75, 0.875 });
+    try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0.125), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectError(error.NumericDomain, Executor.convolutionCoordinateClamped(matrix, coordinates, .{ 0, 0 }, 0, .{ 1, 0, 0, 1 }));
+}
+
 fn convert(from: ir.Scalar, to: ir.Scalar, bits: u32) Error!u32 {
     if (from == to) return bits;
     return switch (to) {
@@ -3367,6 +4856,70 @@ fn f32bytes(x: f32) [4]u8 {
     return b;
 }
 
+test "captured Chromium constant black path is identity-gated and exact" {
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const boolean = ir.Type{ .scalar = .bool };
+    const zero = [_]u8{ 0, 0, 0, 0 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = boolean, .builtin_front_facing = true },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &zero },
+        .{ .op = .constant_composite, .ty = f32x4, .operands = &.{ 0, 0, 0, 0 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 2, 1 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_constant_black_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_constant_black", executor.prevalidatedPathName());
+    var output = [_]u8{0xff} ** 16;
+    _ = try executor.executePrevalidated(&.{}, &.{.{ .interface = 2, .bytes = &output }});
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &output);
+    source.identity.digest[0] ^= 1;
+    try std.testing.expect(detectChromiumConstantBlack(&source) == null);
+}
+
+test "Chromium analytic coverage preserves the branch derivative and clamp order" {
+    const color = [_]f32{ 0.8, 0.4, 0.2, 1.0 };
+    var output: [16]u8 = undefined;
+    // The x==0 branch bypasses derivative arithmetic and uses y directly.
+    try Executor.analyticCoverageResolved(color, .{ 0, 0.25 }, .{ 1, 0 }, .{ 0, 1 }, &output);
+    for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * 0.25)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    // On the curved branch at x=2/y=0, the exact product-rule derivative of
+    // x * (x - 2) is two. Thus fwidth is two and coverage is one-half.
+    try Executor.analyticCoverageResolved(color, .{ 2, 0 }, .{ 1, 0 }, .{ 0, 1 }, &output);
+    for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * 0.5)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    try std.testing.expectError(error.InvalidOutput, Executor.analyticCoverageResolved(color, .{ 0, 0 }, .{ 0, 0 }, .{ 0, 0 }, output[0..12]));
+}
+
+test "Chromium two-axis coverage preserves push constants and red atlas product" {
+    var uniform = [_]u8{0} ** 88;
+    // Column-major identity transform for the two matrix rows consumed by
+    // the canonical shader. The third row is declared but not read.
+    std.mem.writeInt(u32, uniform[16..20], @bitCast(@as(f32, 1)), .little);
+    std.mem.writeInt(u32, uniform[36..40], @bitCast(@as(f32, 1)), .little);
+    for ([_]f32{ 1, 1, 2, 2 }, 0..) |value, index| std.mem.writeInt(u32, uniform[64 + index * 4 ..][0..4], @bitCast(value), .little);
+    std.mem.writeInt(u32, uniform[80..84], @bitCast(@as(f32, 0)), .little);
+    std.mem.writeInt(u32, uniform[84..88], @bitCast(@as(f32, 1)), .little);
+    const path = TwoAxisCoveragePlan{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 51, 51, 243, 190 } };
+    const pixel = [_]u8{ 128, 0, 0, 255 };
+    const image = SampledImage{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    const prepared = try Executor.prepareTwoAxisCoverageResolved(path, &uniform, image);
+    var output: [16]u8 = undefined;
+    const color = [_]f32{ 1, 0.5, 0.25, 1 };
+    try Executor.executeTwoAxisCoveragePreparedResolved(prepared, color, .{ 0.25, 0.5, 0, 0 }, &output);
+    const sampled = @as(f32, 128) / 255;
+    const coverage = Executor.canonicalF32(sampled * sampled);
+    for (color, 0..) |component, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(component * coverage)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    try std.testing.expectError(error.Bounds, Executor.prepareTwoAxisCoverageResolved(path, uniform[0..87], image));
+}
+
 test "exact sampled-color modulation fast path preserves Chromium compositing semantics" {
     const bias = f32bytes(-0.475);
     const f32_scalar = ir.Type{ .scalar = .f32 };
@@ -3497,7 +5050,138 @@ test "exact VP9 scalar-coverage composite fast path preserves sampled output" {
     @memset(&output, 0);
     try std.testing.expect(try executor.executeSampleCoverageDirect(&coordinates, &coverage, bindings[2].sampled_image.?, &output));
     try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    const nearest_prepared = (try executor.prepareSampleCoverage(bindings[2].sampled_image.?)).?;
+    try std.testing.expect(!nearest_prepared.fast_rgba8_clamp_linear);
+    @memset(&output, 0);
+    try executor.executeSampleCoveragePrepared(nearest_prepared, &coordinates, &coverage, &output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+    const fast_pixels = [_]u8{
+        10, 20,  30,  40,  50,  60,  70,  80,
+        90, 100, 110, 120, 130, 140, 150, 160,
+    };
+    const fast_image = SampledImage{ .pixels = &fast_pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var direct_fast_output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeSampleCoverageDirect(&coordinates, &coverage, fast_image, &direct_fast_output));
+    const fast_prepared = (try executor.prepareSampleCoverage(fast_image)).?;
+    try std.testing.expect(fast_prepared.fast_rgba8_clamp_linear);
+    @memset(&output, 0);
+    try executor.executeSampleCoveragePrepared(fast_prepared, &coordinates, &coverage, &output);
+    try std.testing.expectEqualSlices(u8, &direct_fast_output, &output);
     try std.testing.expectError(error.Bounds, executor.executeSampleCoverageDirect(coordinates[0..4], &coverage, bindings[2].sampled_image.?, &output));
+}
+
+test "Chromium unmodulated texture copy with dead scaffolding uses copy path" {
+    const bias = f32bytes(-0.475);
+    const label = [_]u8{ 30, 0, 0, 0 };
+    const f32_scalar = ir.Type{ .scalar = .f32 };
+    const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = f32x4, .location = 0 },
+        .{ .storage = .input, .ty = f32x2, .location = 1 },
+        .{ .storage = .input, .ty = .{ .scalar = .bool } },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+        .{ .storage = .push_constant, .ty = .{ .scalar = .u32 } },
+        .{ .storage = .sampled_image, .ty = f32x4, .descriptor_set = 1, .binding = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = f32_scalar, .operands = &.{}, .literal = &bias },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .local, .ty = f32x4, .operands = &.{}, .literal = &.{} },
+        .{ .op = .label, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &label },
+        .{ .op = .input, .ty = f32x4, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 1, 5 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 5 }, .literal = &.{} },
+        .{ .op = .input, .ty = f32x2, .operands = &.{1}, .literal = &.{} },
+        .{ .op = .image_sample_implicit_lod, .ty = f32x4, .operands = &.{ 5, 8, 0 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 2, 9 }, .literal = &.{} },
+        .{ .op = .local_store, .ty = f32x4, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 3, 9 }, .literal = &.{} },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    source.identity.digest = chromium_unmodulated_texture_copy_identity;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("chromium_texture_copy", executor.prevalidatedPathName());
+    var coordinates: [8]u8 = undefined;
+    for ([_]f32{ 0.5, 0.5 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    const pixel = [_]u8{ 17, 34, 51, 68 };
+    const image = SampledImage{ .pixels = &pixel, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeTextureCopyDirect(&coordinates, image, &output));
+    for (pixel, 0..) |channel, lane| try std.testing.expectEqual(canonicalFloat(@bitCast(@as(f32, @floatFromInt(channel)) / 255)), std.mem.readInt(u32, output[lane * 4 ..][0..4], .little));
+    const fast_pixels = [_]u8{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160 };
+    const fast_image = SampledImage{ .pixels = &fast_pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var generic_output: [16]u8 = undefined;
+    try std.testing.expect(try executor.executeTextureCopyDirect(&coordinates, fast_image, &generic_output));
+    const prepared = (try executor.prepareTextureCopy(fast_image)).?;
+    try std.testing.expect(prepared.fast_rgba8_clamp_linear);
+    try executor.executeTextureCopyPreparedCoordinates(prepared, .{ 0.5, 0.5 }, &output);
+    try std.testing.expectEqualSlices(u8, &generic_output, &output);
+}
+
+test "prepared Chromium radial gradient preserves the resolved pixel" {
+    var uniform = [_]u8{0} ** 480;
+    const write = struct {
+        fn value(bytes: []u8, offset: usize, item: f32) void {
+            std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(item), .little);
+        }
+    }.value;
+    write(&uniform, 32, 0.25);
+    write(&uniform, 36, 0.5);
+    write(&uniform, 40, 0.75);
+    write(&uniform, 320, 0.1);
+    write(&uniform, 324, 0.8);
+    write(&uniform, 464, 0.4);
+    for (0..4) |position| for (0..4) |lane| {
+        write(&uniform, 64 + position * 16 + lane * 4, 0.25 + @as(f32, @floatFromInt(position)) * 0.1);
+        write(&uniform, 192 + position * 16 + lane * 4, @as(f32, @floatFromInt(lane)) * 0.05);
+    };
+    const pixels = [_]u8{ 90, 120, 150, 255 };
+    const image = SampledImage{ .pixels = &pixels, .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var circle: [16]u8 = undefined;
+    var coordinates: [8]u8 = undefined;
+    var frag_coord: [16]u8 = undefined;
+    for ([_]f32{ 0.25, 0.5, 0.75, 1 }, 0..) |value, lane| std.mem.writeInt(u32, circle[lane * 4 ..][0..4], @bitCast(value), .little);
+    for ([_]f32{ 0.3, -0.4 }, 0..) |value, lane| std.mem.writeInt(u32, coordinates[lane * 4 ..][0..4], @bitCast(value), .little);
+    for ([_]f32{ 3, 7, 0, 1 }, 0..) |value, lane| std.mem.writeInt(u32, frag_coord[lane * 4 ..][0..4], @bitCast(value), .little);
+    var reference: [16]u8 = undefined;
+    var prepared_output: [16]u8 = undefined;
+    try Executor.executeRadialGradientResolved(&circle, &coordinates, &frag_coord, &uniform, image, &reference);
+    const prepared = try Executor.prepareRadialGradientResolved(&uniform, image);
+    try Executor.executeRadialGradientPreparedResolved(prepared, &circle, &coordinates, &frag_coord, &prepared_output);
+    try std.testing.expectEqualSlices(u8, &reference, &prepared_output);
+}
+
+test "prepared Chromium radial mask red plane preserves generic sampling" {
+    const pixels = [_]u8{ 12, 91, 173, 249 };
+    const image = SampledImage{ .pixels = &pixels, .width = 2, .height = 2, .row_stride = 2, .bytes_per_texel = 1, .format = .r8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var generic = RadialMaskPrepared{
+        .image = image,
+        .fast_red_plane = false,
+        .matrix_column0 = .{ 0.75, 0.25 },
+        .matrix_column2 = .{ 0.1, 0.2 },
+        .transform = .{ 0.05, 0.8 },
+        .first_center = .{ 0.2, 0.3 },
+        .first_inset = 0.1,
+        .first_scale = 0.6,
+        .second_center = .{ 0.4, 0.6 },
+        .second_edge = 0.9,
+        .second_scale = 0.5,
+        .bias = -0.475,
+    };
+    const color = [_]f32{ 0.2, 0.5, 0.8, 1 };
+    const coordinates = [_]f32{ 0.35, 0.6, 0.15, 0.4 };
+    var reference: [16]u8 = undefined;
+    var prepared: [16]u8 = undefined;
+    try Executor.executeRadialMaskPreparedCoordinatesResolved(generic, color, coordinates, &reference);
+    generic.fast_red_plane = true;
+    try Executor.executeRadialMaskPreparedCoordinatesResolved(generic, color, coordinates, &prepared);
+    try std.testing.expectEqualSlices(u8, &reference, &prepared);
 }
 
 test "forward branches execute local stores and select phi predecessors" {
