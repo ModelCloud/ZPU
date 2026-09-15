@@ -151,13 +151,20 @@ def main() -> None:
     parser.add_argument(
         "--compositor-selector",
         default=".scene",
-        help="selector that proves the compositor fixture has loaded",
+        help="selector that proves the page has loaded (default: .scene)",
+    )
+    parser.add_argument(
+        "--max-p99-frame-ms",
+        type=float,
+        help="fail a compositor probe when its p99 requestAnimationFrame interval exceeds this budget",
     )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
     if args.warmup < 0:
         parser.error("--warmup must not be negative")
+    if args.max_p99_frame_ms is not None and args.max_p99_frame_ms <= 0:
+        parser.error("--max-p99-frame-ms must be positive")
 
     devtools = DevTools(args.port)
     try:
@@ -188,27 +195,34 @@ def main() -> None:
               const ready = await new Promise(resolve => {{
                 const deadline = performance.now() + 10000;
                 function probe() {{
-                  if (document.querySelector({json.dumps(args.compositor_selector)}) || performance.now() >= deadline) {{
-                    resolve(Boolean(document.querySelector({json.dumps(args.compositor_selector)}))); return;
+                  const matches = document.readyState === 'complete' && document.querySelector({json.dumps(args.compositor_selector)});
+                  if (matches || performance.now() >= deadline) {{
+                    resolve(Boolean(matches)); return;
                   }}
                   setTimeout(probe, 25);
                 }}
                 probe();
               }});
               if (!ready) return {{ loadState: 'missing-scene', callbacks: 0, callbackElapsedSeconds: 0, framesPerSecond: 0 }};
-              let callbacks = 0, first = null, last = null;
+              let callbacks = 0, first = null, last = null, previous = null;
+              const intervals = [];
               const deadline = performance.now() + {args.duration * 1000:.3f};
               await new Promise(resolve => {{
                 function frame(now) {{
-                  callbacks++; first ??= now; last = now;
+                  callbacks++; first ??= now;
+                  if (previous !== null) intervals.push(now - previous);
+                  previous = now; last = now;
                   if (now < deadline) requestAnimationFrame(frame); else resolve();
                 }}
                 requestAnimationFrame(frame);
               }});
+              intervals.sort((a, b) => a - b);
+              const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
               return {{
                 loadState: 'ready', callbacks,
                 callbackElapsedSeconds: first === null || last === null ? 0 : (last - first) / 1000,
                 framesPerSecond: first === null || last === null ? 0 : (callbacks - 1) / ((last - first) / 1000),
+                p99FrameIntervalMilliseconds,
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""
@@ -228,6 +242,13 @@ def main() -> None:
                 with open(args.screenshot, "wb") as output:
                     output.write(base64.b64decode(capture["data"]))
             print(json.dumps(telemetry, indent=2, sort_keys=True))
+            if args.max_p99_frame_ms is not None:
+                p99 = telemetry.get("p99FrameIntervalMilliseconds", 0)
+                if not isinstance(p99, (int, float)) or p99 <= 0 or p99 > args.max_p99_frame_ms:
+                    raise SystemExit(
+                        f"compositor p99 frame interval {p99!r} ms exceeds "
+                        f"{args.max_p99_frame_ms:.3f} ms"
+                    )
             return
         # `awaitPromise` makes the sample duration independent of DevTools
         # message timing. requestVideoFrameCallback measures presented frames,

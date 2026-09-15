@@ -34,6 +34,18 @@ for chrome_requirement in \
         exit 1
     }
 done
+# The 2K Chromium benchmark must inherit a strict two-CPU mask and carry the
+# same explicit two-lane cap into ZPU's GPU subprocesses.
+for chrome_requirement in \
+    'taskset -c "$chrome_cpu_set" env -i' \
+    'ZPU_MAX_THREADS=2' \
+    'ZPU_MOSAIC_CPU_SET="$chrome_cpu_set"' \
+    'benchmark) benchmark ;;'; do
+    grep -F -- "$chrome_requirement" "$chrome_launcher" >/dev/null || {
+        echo "Chromium two-core benchmark requirement is missing: $chrome_requirement" >&2
+        exit 1
+    }
+done
 tmp=$(mktemp -d)
 display_fixture_pid=
 untracked_probe=$repo/smolvm-review-untracked-probe

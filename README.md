@@ -176,11 +176,18 @@ tools/smolvm-zpu.sh build
 tools/smolvm-zpu.sh package
 tools/smolvm-zpu.sh stage
 tools/smolvm-chrome.sh reproduce
+# 2560x1440, 60 Hz target; Chromium and ZPU are limited to CPUs 0 and 1.
+tools/smolvm-chrome.sh benchmark
 ```
 
 The workflow requires SmolVM 1.7.1 and its documented host prerequisites. It
 does not use SmolVM's virtual GPU option; that keeps the validation path focused
 on ZPU rather than virtio/Venus.
+
+The benchmark loads google.com, bing.com, and youtube.com individually and
+requires a compositor p99 frame interval no greater than 17 ms. It is a live
+networked measurement, so it fails rather than claiming 60 fps when a site or
+the two-core renderer cannot sustain the target.
 
 ## Documentation
 
