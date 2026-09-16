@@ -54,6 +54,7 @@ host_socket=$socket_root/X${display#:}
 host_xauthority=${ZPU_HOST_XAUTHORITY:-${XAUTHORITY:-$HOME/.Xauthority}}
 
 host_auth=
+xvfb_auth=
 xvfb_pid=
 twm_pid=
 
@@ -101,7 +102,7 @@ cleanup() {
         kill "$xvfb_pid" 2>/dev/null || true
         wait "$xvfb_pid" 2>/dev/null || true
     fi
-    rm -f -- "${host_auth:-}"
+    rm -f -- "${host_auth:-}" "${xvfb_auth:-}"
 }
 trap cleanup EXIT
 trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
@@ -178,9 +179,9 @@ ensure_display() {
     fi
 
     local cookie
-    host_auth=$(mktemp /tmp/zpu-xauth.XXXXXX)
-    chmod 600 "$host_auth"
-    export XAUTHORITY="$host_auth"
+    xvfb_auth=$(mktemp /tmp/zpu-xauth.XXXXXX)
+    chmod 600 "$xvfb_auth"
+    export XAUTHORITY="$xvfb_auth"
     if command -v mcookie >/dev/null; then
         cookie=$(mcookie)
     elif command -v openssl >/dev/null; then
@@ -188,9 +189,9 @@ ensure_display() {
     else
         die 'mcookie or openssl is required to generate an X authority cookie'
     fi
-    xauth -f "$host_auth" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
+    xauth -f "$xvfb_auth" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
 
-    Xvfb "$display" -auth "$host_auth" -screen 0 "${width}x${height}x24" \
+    Xvfb "$display" -auth "$xvfb_auth" -screen 0 "${width}x${height}x24" \
         -noreset +extension GLX +extension RANDR +extension RENDER \
         >/tmp/zpu-xvfb.log 2>&1 &
     xvfb_pid=$!
@@ -216,7 +217,7 @@ prepare_host_auth() {
     local source_auth=$host_xauthority
     # If this invocation created Xvfb, its authority is the source of truth;
     # otherwise use the configured authority for the pre-existing display.
-    if [[ -n ${xvfb_pid:-} ]]; then source_auth=$host_auth; fi
+    if [[ -n ${xvfb_pid:-} ]]; then source_auth=$xvfb_auth; fi
     [[ -f $source_auth && ! -L $source_auth && -r $source_auth ]] || die "host X authority is not a readable regular file: $source_auth"
     # Normalize the host cookie to FamilyWild (0xffff) so the SmolVM guest can
     # use it regardless of its own hostname. Keep exactly one entry to avoid
@@ -405,10 +406,11 @@ benchmark_chrome() {
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
         ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" \
+        ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
         ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
         ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
         ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
-        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-blink-features=AutomationControlled --user-agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36' --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
     # The CDP probe reports a bounded connection error if Chromium cannot
     # start; waiting here avoids turning normal process initialization into a
     # spurious measurement failure.
@@ -438,6 +440,7 @@ benchmark_chrome() {
             # The CDP probe prints valid telemetry before it rejects a gate.
             # Preserve that evidence while the guest tmpfs still exists.
             run smolvm machine exec --name "$machine" -- cat "$result" || true
+            run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
             return "$probe_status"
         fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?

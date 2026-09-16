@@ -193,6 +193,10 @@ def main() -> None:
         devtools.call(
             "Page.navigate", {"url": args.page_url}, session_id=session_id
         )
+        # Navigation may replace or background the renderer target. Assert
+        # focus again after issuing it so the compositor probe measures the
+        # visible page, rather than a throttled background tab.
+        devtools.call("Page.bringToFront", session_id=session_id)
         if args.compositor:
             expression = f"""(async () => {{
               const ready = await new Promise(resolve => {{
@@ -234,6 +238,8 @@ def main() -> None:
               const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
               return {{
                 loadState: 'ready', callbacks,
+                visibilityState: document.visibilityState,
+                hasFocus: document.hasFocus(),
                 callbackElapsedSeconds: first === null || last === null ? 0 : (last - first) / 1000,
                 framesPerSecond: first === null || last === null ? 0 : (callbacks - 1) / ((last - first) / 1000),
                 p99FrameIntervalMilliseconds,

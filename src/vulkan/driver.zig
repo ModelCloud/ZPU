@@ -1929,6 +1929,20 @@ fn failureDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+/// Narrow present-path diagnostics for browser bring-up.  Keep this separate
+/// from the command-recorder trace: a busy web page can submit thousands of
+/// draws while a single rejected present is enough to make Chromium discard
+/// its GPU process.
+fn presentDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PRESENT") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+fn rejectPresent(comptime reason: []const u8) Result {
+    if (presentDiagnosticsEnabled()) std.debug.print("ZPU queue present rejected: {s}\n", .{reason});
+    return .error_initialization_failed;
+}
+
 fn renderDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
@@ -19936,16 +19950,16 @@ fn presentTimingInfoPresent(info: *const PresentInfo) bool {
 }
 
 fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
-    const present = info orelse return .error_initialization_failed;
+    const present = info orelse return rejectPresent("missing VkPresentInfoKHR");
     const timing_info_present = presentTimingInfoPresent(present);
     lock();
     const q = queue orelse {
         mutex.unlock();
-        return .error_initialization_failed;
+        return rejectPresent("unknown queue");
     };
     if (!validDeviceLocked(q.owner) or present.s_type != 1_000_001_001 or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or present.wait_semaphore_count > max_present_entries or (present.wait_semaphore_count != 0 and present.wait_semaphores == null)) {
         mutex.unlock();
-        return .error_initialization_failed;
+        return rejectPresent("invalid VkPresentInfoKHR envelope");
     }
     // Complete all cross-object and image-lifecycle validation before
     // consuming wait semaphores or queuing any image.  PresentInfo is a batch;
@@ -19955,23 +19969,23 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
         const target_request = presentTimingRequest(present, i, frame_pacing.monotonicNs()) catch {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("unsupported present-timing chain");
         };
         const swapchain = validSwapchainLocked(handle) orelse {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("unknown swapchain");
         };
         if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring or (timing_info_present and !swapchain.present_timing_enabled)) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("foreign, retiring, or timing-disabled swapchain");
         }
         const image = validImageLocked(swapchain.images[index]) orelse {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("unknown swapchain image");
         };
         if (!imageStorageValid(image)) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("invalid swapchain image storage");
         }
         if (target_request) |request| {
             if (request.source == .ext and swapchain.present_timing_queue_size != 0) {
@@ -19986,13 +20000,15 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         for (present.swapchains.?[0..i]) |prior| if (prior == handle) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("duplicate swapchain in present batch");
         };
         _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
         const acquired = swapchain.image_states[index] == .acquired;
         _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
         if (!acquired) {
+            const state = swapchain.image_states[index];
             mutex.unlock();
+            if (presentDiagnosticsEnabled()) std.debug.print("ZPU queue present rejected: image state is {s}\n", .{@tagName(state)});
             return .error_initialization_failed;
         }
         timing_requests[i] = target_request;
@@ -20033,11 +20049,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         const target_ns = targets[i];
         const swapchain = validSwapchainLocked(handle) orelse {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("swapchain disappeared before queueing");
         };
         if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("swapchain changed before queueing");
         }
         const image = validImageLocked(swapchain.images[index]) orelse {
             mutex.unlock();
@@ -20045,7 +20061,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         };
         if (image.retire_pending or image.owner != q.owner) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("retiring or foreign image before queueing");
         }
         // Present execution may run on the shared worker after this function
         // drops the registry mutex.  Keep the swapchain image's owned bytes
@@ -20053,9 +20069,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         _ = image.active_users.fetchAdd(1, .acq_rel);
         _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
         if (!frame_lifecycle.queue(swapchain.image_states[0..swapchain.image_count], index)) {
+            const state = swapchain.image_states[index];
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
             releaseImageUserLocked(image);
             mutex.unlock();
+            if (presentDiagnosticsEnabled()) std.debug.print("ZPU queue present rejected: queue transition from {s}\n", .{@tagName(state)});
             return .error_initialization_failed;
         }
         swapchain.pending += 1;
