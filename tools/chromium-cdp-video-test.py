@@ -263,7 +263,7 @@ def main() -> None:
                 longTaskCount: longTasks.length,
                 maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
                 documentTitle: document.title,
-                documentTextPrefix: (document.body?.innerText || '').split('\n').join(' ').slice(0, 300),
+                documentTextPrefix: (document.body?.innerText || '').split('\\n').join(' ').slice(0, 300),
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""
