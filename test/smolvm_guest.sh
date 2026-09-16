@@ -34,10 +34,10 @@ for chrome_requirement in \
         exit 1
     }
 done
-# The 2K Chromium benchmark must inherit a strict two-CPU mask and carry the
-# same explicit two-lane cap into ZPU's GPU subprocesses.
+# The 2K Chromium benchmark must carry an explicit two-lane cap and the same
+# strict CPU mask into ZPU's GPU subprocesses without starving Chromium's
+# browser and renderer processes.
 for chrome_requirement in \
-    'taskset -c "$chrome_cpu_set" env -i' \
     'ZPU_MAX_THREADS=2' \
     'ZPU_MOSAIC_CPU_SET="$chrome_cpu_set"' \
     'benchmark) benchmark ;;'; do

@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Reproduce the README Chromium/google.com screenshot or benchmark real sites
-# inside SmolVM.  Chromium and all inherited ZPU workers are constrained to
-# exactly two guest CPUs in both modes.
+# inside SmolVM. ZPU Mosaic workers are constrained to exactly two guest CPUs.
+# Chromium itself remains schedulable across the guest so its browser,
+# renderer, and networking threads do not starve the two ZPU render lanes.
 # Usage: tools/smolvm-chrome.sh [start-desktop|reproduce|benchmark]
 # Default command is "reproduce".
 #
@@ -262,13 +263,26 @@ ensure_chromium() {
         printf '+ ensure Chromium is installed on %s\n' "$machine"
         return 0
     fi
-    if run smolvm machine exec --name "$machine" -- sh -c "test -x '$chrome_bin' && command -v taskset >/dev/null && command -v python3 >/dev/null"; then
+    if run smolvm machine exec --name "$machine" -- sh -c "test -x '$chrome_bin' && command -v python3 >/dev/null && command -v xdpyinfo >/dev/null"; then
         return 0
     fi
-    run smolvm machine update --name "$machine" --net
-    run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm
-    run smolvm machine exec --name "$machine" -- pacman -S --noconfirm --needed chromium ttf-liberation vulkan-icd-loader libxcb xorg-xauth util-linux python
-    run smolvm machine update --name "$machine" --no-net
+    # SmolVM only changes persisted network state while stopped.  Keep the
+    # package-install egress window bounded and restore the running isolated
+    # machine even if pacman itself fails.
+    local status=0
+    run smolvm machine stop --name "$machine" || return $?
+    run smolvm machine update --name "$machine" --net || return $?
+    run smolvm machine start --name "$machine" || return $?
+    if run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm &&
+       run smolvm machine exec --name "$machine" -- pacman -S --noconfirm --needed chromium ttf-liberation vulkan-icd-loader libxcb xorg-xauth xorg-xdpyinfo util-linux python; then
+        :
+    else
+        status=$?
+    fi
+    run smolvm machine stop --name "$machine" || return $?
+    run smolvm machine update --name "$machine" --no-net || return $?
+    run smolvm machine start --name "$machine" || return $?
+    [[ $status -eq 0 ]] || return "$status"
     run smolvm machine exec --name "$machine" -- test -x "$chrome_bin" || die "chromium installation did not provide $chrome_bin"
 }
 
@@ -296,6 +310,19 @@ prepare_guest_auth() {
     '
 }
 
+verify_guest_x11() {
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        printf '+ verify guest X11 authentication over the SmolVM Unix-socket bridge on %s\n' "$machine"
+        return 0
+    fi
+    # This exercises a real authenticated X11 connection, rather than merely
+    # checking that the guest path has socket file type.  It catches a stale
+    # mount, a bridge that cannot reach the host X server, and bad Xauthority.
+    run smolvm machine exec --name "$machine" -- env -i \
+        PATH=/usr/bin:/bin DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
+        xdpyinfo >/dev/null || die 'guest cannot authenticate to the host X server through the SmolVM socket bridge'
+}
+
 compress_png() {
     python3 - "$1" <<'PY'
 import sys
@@ -312,7 +339,7 @@ launch_chrome() {
     if [[ $host_screenshot != /* ]]; then
         host_screenshot=$repo/$host_screenshot
     fi
-    run smolvm machine exec --name "$machine" -- taskset -c "$chrome_cpu_set" env -i \
+    run smolvm machine exec --name "$machine" -- env -i \
         HOME=/root \
         PATH=/usr/bin:/bin \
         XDG_RUNTIME_DIR=/run/zpu-runtime \
@@ -339,6 +366,9 @@ launch_chrome() {
         --enable-features=Vulkan \
         --disable-vulkan-fallback-to-gl-for-testing \
         --disable-software-compositing-fallback \
+        --disable-background-timer-throttling \
+        --disable-backgrounding-occluded-windows \
+        --disable-renderer-backgrounding \
         --run-all-compositor-stages-before-draw \
         --virtual-time-budget="$wait_budget" \
         --window-size="${width},${height}" \
@@ -352,7 +382,7 @@ launch_chrome() {
 
 benchmark_chrome() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ benchmark Chromium at %sx%s @ %s Hz on CPUs %s (ZPU_MAX_THREADS=2)\n' "$width" "$height" "$refresh_hz" "$chrome_cpu_set"
+        printf '+ benchmark Chromium at %sx%s @ %s Hz with ZPU restricted to CPUs %s (ZPU_MAX_THREADS=2)\n' "$width" "$height" "$refresh_hz" "$chrome_cpu_set"
         printf '+ visit %s for %ss each; require compositor p99 <= %sms\n' "$benchmark_urls" "$benchmark_duration" "$benchmark_p99_ms"
         return 0
     fi
@@ -367,13 +397,13 @@ benchmark_chrome() {
         install -m 700 '$transfer_tool' '$guest_tool'
         rm -f '$transfer_tool'
     " || return $?
-    run smolvm machine exec --name "$machine" -- taskset -c "$chrome_cpu_set" env -i \
+    run smolvm machine exec --name "$machine" -- env -i \
         HOME=/root PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/zpu-runtime DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
         VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
         ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" \
-        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
     # The CDP probe reports a bounded connection error if Chromium cannot
     # start; waiting here avoids turning normal process initialization into a
     # spurious measurement failure.
@@ -392,8 +422,8 @@ benchmark_chrome() {
         safe_url=${site#https://}
         safe_url=${safe_url//\//_}
         result="/run/zpu-runtime/chromium-${safe_url}.json"
-        printf 'zpu-chrome: measuring %s at %sx%s on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
-        run smolvm machine exec --name "$machine" -- taskset -c "$chrome_cpu_set" \
+        printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
+        run smolvm machine exec --name "$machine" -- \
             sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --duration "$3" --max-p99-frame-ms "$4" > "$5"' \
             sh "$guest_tool" "$site" "$benchmark_duration" "$benchmark_p99_ms" "$result" || return $?
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
@@ -420,6 +450,7 @@ reproduce() {
     ensure_zpu_staged
     ensure_chromium
     prepare_guest_auth
+    verify_guest_x11
     launch_chrome
 }
 
@@ -438,6 +469,7 @@ benchmark() {
     run smolvm machine update --name "$machine" --net
     run smolvm machine start --name "$machine"
     prepare_guest_auth
+    verify_guest_x11
     local status=0
     if benchmark_chrome; then :; else status=$?; fi
     stop_benchmark_chrome || { [[ $status -ne 0 ]] || status=$?; }

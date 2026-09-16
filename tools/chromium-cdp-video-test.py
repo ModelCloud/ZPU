@@ -187,6 +187,9 @@ def main() -> None:
         )
         session_id = attached["sessionId"]
         devtools.call("Page.enable", session_id=session_id)
+        # Headless Chromium otherwise treats a CDP-created tab as background
+        # work and may intentionally reduce requestAnimationFrame to 1 Hz.
+        devtools.call("Page.bringToFront", session_id=session_id)
         devtools.call(
             "Page.navigate", {"url": args.page_url}, session_id=session_id
         )
