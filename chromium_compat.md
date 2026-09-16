@@ -288,13 +288,14 @@ WebGL canvas and rejects SwiftShader, llvmpipe, lavapipe, and other software
 renderer strings. A passing page load or a 60 Hz rAF loop without those checks
 is not evidence of ZPU WebGL support.
 
-As of the initial probe, this is expected to fail: ANGLE's WebGL renderbuffer
-format setup is rejected and ZPU's drawable graphics profile accepts only the
-fixed `cpu_cube_v1` shaders. Arbitrary ANGLE-generated SPIR-V therefore still
-fails closed. Implementing Tier B requires a general shader execution profile,
-the associated color/depth/stencil and multisample attachment paths, and an
-evidence-backed ANGLE format/feature matrix; it must not be enabled by merely
-advertising additional Vulkan formats.
+As of the current probe, this is expected to fail: the packed color
+renderbuffer family is present, but ANGLE still rejects the default framebuffer
+because ZPU lacks D24/S8 and multisample attachment semantics. ZPU's drawable
+graphics profile also accepts only the fixed `cpu_cube_v1` shaders, so
+arbitrary ANGLE-generated SPIR-V still fails closed. Implementing Tier B
+requires a general shader execution profile, real color/depth/stencil and
+multisample attachment paths, and an evidence-backed ANGLE format/feature
+matrix; it must not be enabled by merely advertising additional Vulkan formats.
 
 ### Tier C — WebGPU / Skia Graphite, via Dawn
 
