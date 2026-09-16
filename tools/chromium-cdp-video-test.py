@@ -187,6 +187,11 @@ def main() -> None:
         )
         session_id = attached["sessionId"]
         devtools.call("Page.enable", session_id=session_id)
+        devtools.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(window, '__zpuNativeRaf', { value: window.requestAnimationFrame.bind(window), writable: false, configurable: false });"},
+            session_id=session_id,
+        )
         # Headless Chromium otherwise treats a CDP-created tab as background
         # work and may intentionally reduce requestAnimationFrame to 1 Hz.
         devtools.call("Page.bringToFront", session_id=session_id)
@@ -215,12 +220,13 @@ def main() -> None:
               // compositor sample.  This is still active rendering time: rAF
               // must be delivered continuously through the whole warm-up.
               if ({args.warmup * 1000:.3f} > 0) await new Promise(resolve => {{
+                const raf = window.__zpuNativeRaf || requestAnimationFrame;
                 const warmupDeadline = performance.now() + {args.warmup * 1000:.3f};
                 function warmupFrame(now) {{
-                  if (now < warmupDeadline) requestAnimationFrame(warmupFrame);
+                  if (now < warmupDeadline) raf(warmupFrame);
                   else resolve();
                 }}
-                requestAnimationFrame(warmupFrame);
+                raf(warmupFrame);
               }});
               let callbacks = 0, first = null, last = null, previous = null;
               const intervals = [];
@@ -233,14 +239,15 @@ def main() -> None:
                 observer.observe({{ type: 'longtask', buffered: true }});
               }} catch (_) {{}}
               const deadline = performance.now() + {args.duration * 1000:.3f};
+              const raf = window.__zpuNativeRaf || requestAnimationFrame;
               await new Promise(resolve => {{
                 function frame(now) {{
                   callbacks++; first ??= now;
                   if (previous !== null) intervals.push(now - previous);
                   previous = now; last = now;
-                  if (now < deadline) requestAnimationFrame(frame); else resolve();
+                  if (now < deadline) raf(frame); else resolve();
                 }}
-                requestAnimationFrame(frame);
+                raf(frame);
               }});
               intervals.sort((a, b) => a - b);
               observer?.disconnect();
@@ -255,6 +262,8 @@ def main() -> None:
                 warmupSeconds: {args.warmup:.3f},
                 longTaskCount: longTasks.length,
                 maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
+                documentTitle: document.title,
+                documentTextPrefix: (document.body?.innerText || '').split('\n').join(' ').slice(0, 300),
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""
