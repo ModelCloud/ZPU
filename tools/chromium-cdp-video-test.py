@@ -281,6 +281,16 @@ def main() -> None:
         default=60.0,
         help="mouse dispatch rate used with --pointer-sweep (default: 60)",
     )
+    parser.add_argument(
+        "--require-webgl",
+        action="store_true",
+        help="require a live non-fallback WebGL canvas and report its renderer",
+    )
+    parser.add_argument(
+        "--require-webgl-draw",
+        action="store_true",
+        help="also require the live WebGL canvas to contain more than one sampled RGBA value",
+    )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
@@ -294,9 +304,25 @@ def main() -> None:
         parser.error("--pointer-sweep-hz must be positive")
     if args.pointer_sweep and not args.compositor:
         parser.error("--pointer-sweep requires --compositor")
+    if args.require_webgl and not args.compositor:
+        parser.error("--require-webgl requires --compositor")
+    if args.require_webgl_draw and not args.require_webgl:
+        parser.error("--require-webgl-draw requires --require-webgl")
 
     devtools = DevTools(args.port)
     try:
+        # SystemInfo is browser-scoped (not a page Runtime call), which makes
+        # it available even when ANGLE refuses the page's first WebGL context.
+        # Keep only stable diagnostic fields: the full response contains large
+        # machine-specific tables and is not useful as benchmark telemetry.
+        gpu_result = devtools.call("SystemInfo.getInfo").get("gpu", {})
+        gpu_aux = gpu_result.get("auxAttributes", {}) if isinstance(gpu_result, dict) else {}
+        gpu_telemetry = {
+            "featureStatus": gpu_result.get("featureStatus", {}) if isinstance(gpu_result, dict) else {},
+            "glRenderer": gpu_aux.get("glRenderer"),
+            "glVersion": gpu_aux.get("glVersion"),
+            "vulkanVersion": gpu_aux.get("vulkanVersion"),
+        }
         target = devtools.call("Target.createTarget", {"url": "about:blank"})
         # Chromium starts a New Tab page even in headless mode. Keeping it
         # alive turns a focused video measurement into a concurrent browser-UI
@@ -318,7 +344,23 @@ def main() -> None:
         devtools.call("Page.enable", session_id=session_id)
         devtools.call(
             "Page.addScriptToEvaluateOnNewDocument",
-            {"source": "Object.defineProperty(window, '__zpuNativeRaf', { value: window.requestAnimationFrame.bind(window), writable: false, configurable: false });"},
+            {
+                "source": """
+                  Object.defineProperty(window, '__zpuNativeRaf', {
+                    value: window.requestAnimationFrame.bind(window),
+                    writable: false, configurable: false
+                  });
+                  window.__zpuPageErrors = [];
+                  addEventListener('error', event => {
+                    if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+                      String(event.message || event.error || 'script error'));
+                  });
+                  addEventListener('unhandledrejection', event => {
+                    if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+                      `unhandled rejection: ${String(event.reason)}`);
+                  });
+                """,
+            },
             session_id=session_id,
         )
         # Headless Chromium otherwise treats a CDP-created tab as background
@@ -413,6 +455,50 @@ def main() -> None:
               intervals.sort((a, b) => a - b);
               observer?.disconnect();
               const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
+              let webgl = null;
+              if ({str(args.require_webgl).lower()}) {{
+                // A DOM canvas alone is not WebGL evidence: Chromium can
+                // allocate a canvas while ANGLE has fallen back or while its
+                // renderbuffer setup has failed. Inspect the live context and
+                // sample it after the frame cadence interval instead.
+                await new Promise(resolve => (window.__zpuNativeRaf || requestAnimationFrame)(resolve));
+                const canvases = [...document.querySelectorAll('canvas')];
+                const contexts = canvases.map((canvas, index) => {{
+                  let gl = null, api = null;
+                  for (const candidate of ['webgl2', 'webgl', 'experimental-webgl']) {{
+                    try {{ gl = canvas.getContext(candidate); }} catch (_) {{ gl = null; }}
+                    if (gl) {{ api = candidate; break; }}
+                  }}
+                  if (!gl) return {{ index, context: null }};
+                  const debug = gl.getExtension('WEBGL_debug_renderer_info');
+                  const renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+                  const version = gl.getParameter(gl.VERSION);
+                  const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
+                  let uniqueRgbaColors = 0, readbackError = null;
+                  try {{
+                    const samples = 8, pixels = new Uint8Array(samples * samples * 4);
+                    // The whole drawing buffer may be large; an evenly spaced
+                    // grid is enough to distinguish a cleared/failed target
+                    // from the terrain geometry without perturbing its frame
+                    // time with a full 2K readback.
+                    const sampleWidth = Math.max(1, Math.min(width, samples));
+                    const sampleHeight = Math.max(1, Math.min(height, samples));
+                    gl.readPixels(0, 0, sampleWidth, sampleHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                    const colors = new Set();
+                    for (let pixel = 0; pixel < sampleWidth * sampleHeight; pixel++) {{
+                      const offset = pixel * 4;
+                      colors.add(`${{pixels[offset]}},${{pixels[offset + 1]}},${{pixels[offset + 2]}},${{pixels[offset + 3]}}`);
+                    }}
+                    uniqueRgbaColors = colors.size;
+                  }} catch (error) {{ readbackError = String(error); }}
+                  return {{
+                    index, context: api, renderer: String(renderer), version: String(version),
+                    drawingBuffer: {{ width, height }}, contextLost: gl.isContextLost(),
+                    uniqueRgbaColors, readbackError,
+                  }};
+                }});
+                webgl = {{ canvases: canvases.length, contexts }};
+              }}
               return {{
                 loadState: 'ready', callbacks,
                 visibilityState: document.visibilityState,
@@ -425,7 +511,10 @@ def main() -> None:
                 maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
                 documentTitle: document.title,
                 documentTextPrefix: (document.body?.innerText || '').split('\\n').join(' ').slice(0, 300),
+                pageErrors: Array.isArray(window.__zpuPageErrors) ? window.__zpuPageErrors : [],
+                gpu: {json.dumps(gpu_telemetry, separators=(',', ':'))},
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
+                webgl,
               }};
             }})()"""
             try:
@@ -489,6 +578,38 @@ def main() -> None:
                 with open(args.screenshot, "wb") as output:
                     output.write(base64.b64decode(capture["data"]))
             print(json.dumps(telemetry, indent=2, sort_keys=True))
+            # Establish that the page actually rendered WebGL before reporting
+            # a cadence miss. That keeps an absent/failed canvas from being
+            # mistaken for a merely slow 60 Hz workload.
+            if args.require_webgl:
+                webgl = telemetry.get("webgl")
+                contexts = webgl.get("contexts", []) if isinstance(webgl, dict) else []
+                live_contexts = [
+                    context
+                    for context in contexts
+                    if isinstance(context, dict)
+                    and context.get("context")
+                    and not context.get("contextLost")
+                    and context.get("drawingBuffer", {}).get("width", 0) > 0
+                    and context.get("drawingBuffer", {}).get("height", 0) > 0
+                ]
+                if not live_contexts:
+                    raise SystemExit("no live WebGL canvas was available for the compositor sample")
+                renderer_text = " ".join(
+                    str(context.get("renderer", "")) for context in live_contexts
+                ).lower()
+                if any(token in renderer_text for token in ("swiftshader", "llvmpipe", "lavapipe", "software")):
+                    raise SystemExit(
+                        f"WebGL renderer is a software fallback, not the ZPU Vulkan path: {renderer_text!r}"
+                    )
+                if args.require_webgl_draw and not any(
+                    isinstance(context.get("uniqueRgbaColors"), int)
+                    and context["uniqueRgbaColors"] > 1
+                    for context in live_contexts
+                ):
+                    raise SystemExit(
+                        "WebGL canvas did not produce non-uniform sampled pixels"
+                    )
             if args.max_p99_frame_ms is not None:
                 p99 = telemetry.get("p99FrameIntervalMilliseconds", 0)
                 if not isinstance(p99, (int, float)) or p99 <= 0 or p99 > args.max_p99_frame_ms:

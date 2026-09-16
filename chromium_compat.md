@@ -275,6 +275,28 @@ still leaves WebGL2 partly disabled through ANGLE, so this is not a solved
 problem even for a conformant 1.3 driver. Enumerate ANGLE's requirements only
 when tier A is stable.
 
+The reproducible probe is deliberately strict while this remains deferred:
+
+```sh
+tools/smolvm-chrome.sh webgl
+```
+
+It loads the public Three.js animated terrain geometry demo at **2560×1440**,
+keeps ZPU's Mosaic executor on CPUs `0,1` (`ZPU_MAX_THREADS=2`), and requires
+60 fps with a 17 ms rAF p99. The CDP probe also requires a live, non-uniform
+WebGL canvas and rejects SwiftShader, llvmpipe, lavapipe, and other software
+renderer strings. A passing page load or a 60 Hz rAF loop without those checks
+is not evidence of ZPU WebGL support.
+
+As of the current probe, this is expected to fail: the packed color
+renderbuffer family is present, but ANGLE still rejects the default framebuffer
+because ZPU lacks D24/S8 and multisample attachment semantics. ZPU's drawable
+graphics profile also accepts only the fixed `cpu_cube_v1` shaders, so
+arbitrary ANGLE-generated SPIR-V still fails closed. Implementing Tier B
+requires a general shader execution profile, real color/depth/stencil and
+multisample attachment paths, and an evidence-backed ANGLE format/feature
+matrix; it must not be enabled by merely advertising additional Vulkan formats.
+
 ### Tier C — WebGPU / Skia Graphite, via Dawn
 
 `DAWN_ASSERT(mDeviceInfo.properties.apiVersion >= VK_API_VERSION_1_1)` in

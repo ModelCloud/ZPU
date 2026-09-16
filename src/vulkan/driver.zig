@@ -4187,6 +4187,16 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
 fn isDepthFormat(format: i32) bool {
     return format == 124 or format == 126;
 }
+// WebGL 1 requires the RGBA4, RGB565, and RGB5_A1 renderbuffer families before
+// ANGLE permits a context. Both Vulkan channel orders are required because
+// ANGLE probes them separately. ZPU retains these optimal-tiling images in its
+// existing four-byte internal color surface, so they are deliberately not
+// exposed to linear mappings or transfer commands. The scalar renderer sees
+// normalized RGBA values, while ANGLE owns the GL-facing packed-format
+// conversion.
+fn webglBootstrapColorFormat(format: i32) bool {
+    return format >= 2 and format <= 7;
+}
 const format_g8_b8r8_2plane_420_unorm: i32 = 1000156003;
 const image_aspect_color_bit: u32 = 0x1;
 const image_aspect_plane_0_bit: u32 = 0x10;
@@ -4215,7 +4225,9 @@ fn imageFormatMipChainLayerByteSize(format: i32, width: u32, height: u32, mip_le
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
     // and vkCreateImage both receive the tiling explicitly.
-    _ = tiling;
+    // The WebGL bootstrap formats deliberately have no linear image support:
+    // they are backed only by ZPU's private optimal-tiled RGBA surface.
+    if (webglBootstrapColorFormat(format)) return if (tiling == 0) 0x4 | 0x10 else 0;
     return switch (format) {
         // R8_UNORM is retained in the internal image store as one red byte
         // per texel followed by an opaque padding word. It supports the
@@ -4226,8 +4238,7 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // R8G8 for interleaved chroma. Both are sampled/transfer resources;
         // neither is exposed as a color attachment in this bounded profile.
         16 => 0x1 | 0x2 | 0x4 | 0x10,
-        37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
-        43 => 0x4,
+        37, 43 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         // Bounded NV12 support is sampled and transferred only. It is not a
         // render target or input attachment, and every plane shares one
@@ -4262,11 +4273,15 @@ fn sparseImageFormatQueryValid(format: i32, image_type: i32, samples: u32, usage
 fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatProperties) bool {
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
+    if (webglBootstrapColorFormat(format)) {
+        // ANGLE validates standard renderbuffers as blendable color targets.
+        out.* = .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x80 | 0x100, .buffer_features = 0 };
+        return true;
+    }
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
+        37, 43 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
@@ -7195,7 +7210,7 @@ fn colorBytesForFormat(format: i32, value: *const ClearColorValue) ?[4]u8 {
         if (!std.math.isFinite(component)) return null;
         rgba[i] = @intFromFloat(@round(std.math.clamp(component, 0, 1) * 255));
     }
-    if (format == 44) std.mem.swap(u8, &rgba[0], &rgba[2]);
+    if (format == 43 or format == 44) std.mem.swap(u8, &rgba[0], &rgba[2]);
     return rgba;
 }
 fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
@@ -7813,23 +7828,24 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
     return false;
 }
 
-// The advertised transfer profile exposes the two four-byte UNORM color
-// formats.  Their memory layout is byte-addressable and the CPU transfer
-// backend can copy/filter them without format conversion.  sRGB and depth
-// formats retain their narrower sampled/destination-only contracts.
+// The advertised transfer profile exposes the three four-byte color formats
+// with a byte-addressable CPU layout.  The B8G8R8A8 UNORM and sRGB variants
+// share BGRA storage, so the CPU transfer and scalar-raster paths can copy and
+// filter them without format conversion. Depth formats retain their narrower
+// sampled/destination-only contracts.
 fn transferableColorFormat(format: i32) bool {
-    return format == 37 or format == 44;
+    return format == 37 or format == 43 or format == 44;
 }
 
 fn colorAttachmentFormat(format: i32) bool {
-    return format == 9 or format == 16 or transferableColorFormat(format);
+    return format == 9 or format == 16 or webglBootstrapColorFormat(format) or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
     return switch (format) {
         9 => 1,
         16 => 2,
-        37, 44 => 4,
+        37, 43, 44 => 4,
         else => null,
     };
 }
@@ -10429,8 +10445,10 @@ fn profileBlendEquation(op: i32, source: f32, destination: f32) ?f32 {
 fn colorStorageIndices(format: i32) ?[4]usize {
     return switch (format) {
         9 => .{ 0, 1, 2, 3 },
+        2, 4, 6 => .{ 0, 1, 2, 3 },
+        3, 5, 7 => .{ 2, 1, 0, 3 },
         37 => .{ 0, 1, 2, 3 },
-        44 => .{ 2, 1, 0, 3 },
+        43, 44 => .{ 2, 1, 0, 3 },
         else => null,
     };
 }
@@ -10594,15 +10612,17 @@ test "scalar profile color writes preserve RGBA and BGRA storage order" {
     try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&rgba, 37, false, &output, 0xf, .{}));
     try std.testing.expectEqual([_]u8{ 255, 127, 63, 255 }, rgba);
 
-    var bgra = [_]u8{0} ** 4;
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, 44, false, &output, 0xf, .{}));
-    try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
+    for ([_]i32{ 43, 44 }) |format| {
+        var bgra = [_]u8{0} ** 4;
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, format, false, &output, 0xf, .{}));
+        try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
+    }
 }
 
 test "opaque profile color write matches disabled and alpha-one source blending" {
     var output = [_]u8{0} ** 16;
     for ([_]f32{ 0.75, 0.5, 0.25, 1 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
-    for ([_]i32{ 37, 44 }) |format| {
+    for ([_]i32{ 37, 43, 44 }) |format| {
         var opaque_bytes = [_]u8{ 11, 22, 33, 44 };
         var disabled = opaque_bytes;
         var blended = opaque_bytes;
@@ -10800,8 +10820,10 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
         9 => .r8_unorm,
         16 => .rg8_unorm,
+        2, 4, 6 => .rgba8_unorm,
+        3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
-        44 => .bgra8_unorm,
+        43, 44 => .bgra8_unorm,
         format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
         else => return null,
     };
@@ -10878,8 +10900,10 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
     const image = input.image orelse return null;
     if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * 4) return null;
     const format: render_ir_exec.SampledImage.Format = switch (color.format) {
+        2, 4, 6 => .rgba8_unorm,
+        3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
-        44 => .bgra8_unorm,
+        43, 44 => .bgra8_unorm,
         else => return null,
     };
     return .{
@@ -17182,7 +17206,7 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
             var clear_bytes = [4]u8{ 0, 0, 0, 0 };
             if (clear_color) {
                 for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
-                if (color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
+                if (color_target.format == 43 or color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
             }
             record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
         } else if (depth) |depth_image| if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .layer_count = framebuffer.layers } });
@@ -21889,7 +21913,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(@as(i32, 44), dynamic_pipeline_object.rendering_color_format);
     try std.testing.expectEqual(@as(i32, 126), dynamic_pipeline_object.rendering_depth_format);
     dynamic_pipeline_object.execution_abi = .cpu_cube_v1;
-    dynamic_pipeline_formats[0] = 43;
+    dynamic_pipeline_formats[0] = 42;
     const dynamic_pipeline_states_before_rejection = graphics_pipeline_state;
     var invalid_dynamic_pipeline = [_]usize{0xfeed_face};
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&dynamic_pipeline_info), null, &invalid_dynamic_pipeline));
@@ -24437,8 +24461,14 @@ test "all physical queries cover success boundaries and invalid handles" {
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
     const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
+        .{ .format = 2, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 3, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 4, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 5, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 6, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 7, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
-        .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .linear_usage = 0x4, .optimal_usage = 0x4 },
+        .{ .format = 43, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
     };
@@ -27459,7 +27489,7 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const area = RenderingAreaInfo{ .s_type = 1000470003, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = @ptrCast(&image_info.format), .depth_attachment_format = 0, .stencil_attachment_format = 0 };
     getRenderingAreaGranularity(ctx.device, &area, &granularity);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, granularity);
-    var unsupported_area_format: i32 = 43;
+    var unsupported_area_format: i32 = 42;
     var bad_area = area;
     bad_area.color_attachment_formats = @ptrCast(&unsupported_area_format);
     granularity = .{ .width = 0xdead, .height = 0xbeef };

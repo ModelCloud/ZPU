@@ -6,7 +6,7 @@
 # inside SmolVM. ZPU Mosaic workers are constrained to exactly two guest CPUs.
 # Chromium itself remains schedulable across the guest so its browser,
 # renderer, and networking threads do not starve the two ZPU render lanes.
-# Usage: tools/smolvm-chrome.sh [start-desktop|reproduce|benchmark]
+# Usage: tools/smolvm-chrome.sh [start-desktop|reproduce|benchmark|webgl]
 # Default command is "reproduce".
 #
 # Run a dry-run to inspect commands:
@@ -45,6 +45,8 @@ benchmark_min_fps=${ZPU_CHROME_BENCHMARK_MIN_FPS:-60}
 benchmark_pointer_sweep=${ZPU_CHROME_POINTER_SWEEP:-1}
 benchmark_pointer_hz=${ZPU_CHROME_POINTER_HZ:-60}
 benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.google.com/search?q=zpu+60fps,https://www.bing.com,https://www.bing.com/search?q=zpu+60fps}
+benchmark_require_webgl=${ZPU_CHROME_BENCHMARK_REQUIRE_WEBGL:-0}
+webgl_demo_url=${ZPU_WEBGL_DEMO_URL:-https://threejs.org/examples/webgl_geometry_terrain.html}
 # An optional host directory that receives each site's JSON telemetry before
 # the benchmark tears down the guest tmpfs and restores network isolation.
 benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
@@ -82,6 +84,7 @@ die() {
 [[ $benchmark_p99_ms =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_P99_MS must be a positive decimal'
 [[ $benchmark_min_fps =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_MIN_FPS must be a positive decimal'
 [[ $benchmark_pointer_sweep == 0 || $benchmark_pointer_sweep == 1 ]] || die 'ZPU_CHROME_POINTER_SWEEP must be 0 or 1'
+[[ $benchmark_require_webgl == 0 || $benchmark_require_webgl == 1 ]] || die 'ZPU_CHROME_BENCHMARK_REQUIRE_WEBGL must be 0 or 1'
 [[ $benchmark_pointer_hz =~ ^([1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$ ]] || die 'ZPU_CHROME_POINTER_HZ must be a positive decimal'
 IFS=, read -r chrome_cpu_a chrome_cpu_b chrome_cpu_extra <<<"$chrome_cpu_set"
 [[ -n ${chrome_cpu_a:-} && -n ${chrome_cpu_b:-} && -z ${chrome_cpu_extra:-} && $chrome_cpu_a =~ ^[0-9]+$ && $chrome_cpu_b =~ ^[0-9]+$ && $chrome_cpu_a != "$chrome_cpu_b" ]] || \
@@ -411,8 +414,12 @@ benchmark_chrome() {
     local guest_profile=/run/zpu-runtime/chromium-profile
     local site safe_url result
     local -a pointer_options=()
+    local -a webgl_options=()
     if [[ $benchmark_pointer_sweep == 1 ]]; then
         pointer_options=(--pointer-sweep --pointer-sweep-hz "$benchmark_pointer_hz")
+    fi
+    if [[ $benchmark_require_webgl == 1 ]]; then
+        webgl_options=(--require-webgl --require-webgl-draw)
     fi
     if [[ -n $benchmark_results_dir ]]; then
         mkdir -p -- "$benchmark_results_dir"
@@ -426,7 +433,12 @@ benchmark_chrome() {
     " || return $?
     IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
     for site in "${benchmark_url_list[@]}"; do
-        [[ $site =~ ^https://(www\.)?(google\.com|bing\.com)(/search\?q=[A-Za-z0-9._%+-]+)?/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits Google/Bing homepages or deterministic search queries: $site"
+        if [[ $benchmark_require_webgl == 1 ]]; then
+            [[ $site == "$webgl_demo_url" && $site =~ ^https://threejs\.org/examples/webgl_geometry_[A-Za-z0-9_-]+\.html$ ]] || \
+                die "ZPU_WEBGL_DEMO_URL must be an official Three.js geometry demo: $site"
+        else
+            [[ $site =~ ^https://(www\.)?(google\.com|bing\.com)(/search\?q=[A-Za-z0-9._%+-]+)?/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits Google/Bing homepages or deterministic search queries: $site"
+        fi
         safe_url=${site#https://}
         safe_url=${safe_url//[^A-Za-z0-9._-]/_}
         result="/run/zpu-runtime/chromium-${safe_url}.json"
@@ -460,7 +472,7 @@ benchmark_chrome() {
             sh -c 'result=$1; shift; python3 "$@" > "$result"' \
             sh "$result" "$guest_tool" --compositor --compositor-selector body --page-url "$site" \
             --warmup "$benchmark_warmup" --duration "$benchmark_duration" \
-            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}"; then
+            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}" "${webgl_options[@]}"; then
             :
         else
             probe_status=$?
@@ -533,8 +545,20 @@ benchmark() {
     return "$status"
 }
 
+webgl() {
+    # This is deliberately a distinct profile from the 4K search benchmark.
+    # It exercises a public, animated Three.js terrain canvas at 2K and asks
+    # CDP to reject an ANGLE software fallback or a cleared/failed canvas.
+    # ZPU remains restricted to the same two Mosaic CPU lanes.
+    width=${ZPU_WEBGL_WIDTH:-2560}
+    height=${ZPU_WEBGL_HEIGHT:-1440}
+    benchmark_urls=$webgl_demo_url
+    benchmark_require_webgl=1
+    benchmark
+}
+
 usage() {
-    printf 'usage: %s [start-desktop|reproduce|benchmark]\n' "${BASH_SOURCE[0]}" >&2
+    printf 'usage: %s [start-desktop|reproduce|benchmark|webgl]\n' "${BASH_SOURCE[0]}" >&2
     exit 2
 }
 
@@ -543,5 +567,6 @@ case $cmd in
     start-desktop) start_desktop_cmd ;;
     reproduce) reproduce ;;
     benchmark) benchmark ;;
+    webgl) webgl ;;
     *) usage ;;
 esac
