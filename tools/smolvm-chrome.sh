@@ -37,7 +37,7 @@ wait_budget=${ZPU_CHROME_WAIT:-10000}
 chrome_cpu_set=${ZPU_CHROME_CPU_SET:-0,1}
 refresh_hz=${ZPU_CHROME_REFRESH_HZ:-60}
 benchmark_duration=${ZPU_CHROME_BENCHMARK_DURATION:-8}
-benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-3}
+benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-10}
 # 17 ms leaves the same small scheduling margin as the desktop 60 Hz gate,
 # while still rejecting a missed 60 Hz compositor deadline.
 benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
@@ -405,7 +405,10 @@ benchmark_chrome() {
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
         ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" \
-        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+        ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
+        ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+        ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
+        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-blink-features=AutomationControlled --user-agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36' --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
     # The CDP probe reports a bounded connection error if Chromium cannot
     # start; waiting here avoids turning normal process initialization into a
     # spurious measurement failure.
@@ -425,9 +428,18 @@ benchmark_chrome() {
         safe_url=${safe_url//\//_}
         result="/run/zpu-runtime/chromium-${safe_url}.json"
         printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
-        run smolvm machine exec --name "$machine" -- \
+        local probe_status=0
+        if run smolvm machine exec --name "$machine" -- \
             sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --warmup "$3" --duration "$4" --max-p99-frame-ms "$5" > "$6"' \
-            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$result" || return $?
+            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$result"; then
+            :
+        else
+            probe_status=$?
+            # The CDP probe prints valid telemetry before it rejects a gate.
+            # Preserve that evidence while the guest tmpfs still exists.
+            run smolvm machine exec --name "$machine" -- cat "$result" || true
+            return "$probe_status"
+        fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
     done
 }

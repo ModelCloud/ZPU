@@ -245,7 +245,12 @@ def main() -> None:
                 "Runtime.evaluate",
                 {"expression": expression, "awaitPromise": True, "returnByValue": True},
                 session_id,
-                timeout=args.duration + 15,
+                # The compositor evaluator includes up to ten seconds waiting
+                # for page readiness, followed by explicit warm-up and the
+                # measured interval.  Keep the DevTools bound larger than all
+                # three phases so a slow real-site load is reported as
+                # telemetry, not mistaken for a transport failure.
+                timeout=args.duration + args.warmup + 25,
             )
             if "exceptionDetails" in result:
                 raise RuntimeError(json.dumps(result["exceptionDetails"], indent=2))
