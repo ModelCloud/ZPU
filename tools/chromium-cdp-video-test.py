@@ -311,6 +311,18 @@ def main() -> None:
 
     devtools = DevTools(args.port)
     try:
+        # SystemInfo is browser-scoped (not a page Runtime call), which makes
+        # it available even when ANGLE refuses the page's first WebGL context.
+        # Keep only stable diagnostic fields: the full response contains large
+        # machine-specific tables and is not useful as benchmark telemetry.
+        gpu_result = devtools.call("SystemInfo.getInfo").get("gpu", {})
+        gpu_aux = gpu_result.get("auxAttributes", {}) if isinstance(gpu_result, dict) else {}
+        gpu_telemetry = {
+            "featureStatus": gpu_result.get("featureStatus", {}) if isinstance(gpu_result, dict) else {},
+            "glRenderer": gpu_aux.get("glRenderer"),
+            "glVersion": gpu_aux.get("glVersion"),
+            "vulkanVersion": gpu_aux.get("vulkanVersion"),
+        }
         target = devtools.call("Target.createTarget", {"url": "about:blank"})
         # Chromium starts a New Tab page even in headless mode. Keeping it
         # alive turns a focused video measurement into a concurrent browser-UI
@@ -332,7 +344,23 @@ def main() -> None:
         devtools.call("Page.enable", session_id=session_id)
         devtools.call(
             "Page.addScriptToEvaluateOnNewDocument",
-            {"source": "Object.defineProperty(window, '__zpuNativeRaf', { value: window.requestAnimationFrame.bind(window), writable: false, configurable: false });"},
+            {
+                "source": """
+                  Object.defineProperty(window, '__zpuNativeRaf', {
+                    value: window.requestAnimationFrame.bind(window),
+                    writable: false, configurable: false
+                  });
+                  window.__zpuPageErrors = [];
+                  addEventListener('error', event => {
+                    if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+                      String(event.message || event.error || 'script error'));
+                  });
+                  addEventListener('unhandledrejection', event => {
+                    if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+                      `unhandled rejection: ${String(event.reason)}`);
+                  });
+                """,
+            },
             session_id=session_id,
         )
         # Headless Chromium otherwise treats a CDP-created tab as background
@@ -483,6 +511,8 @@ def main() -> None:
                 maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
                 documentTitle: document.title,
                 documentTextPrefix: (document.body?.innerText || '').split('\\n').join(' ').slice(0, 300),
+                pageErrors: Array.isArray(window.__zpuPageErrors) ? window.__zpuPageErrors : [],
+                gpu: {json.dumps(gpu_telemetry, separators=(',', ':'))},
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
                 webgl,
               }};

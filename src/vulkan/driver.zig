@@ -4187,6 +4187,16 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
 fn isDepthFormat(format: i32) bool {
     return format == 124 or format == 126;
 }
+// WebGL 1 requires the RGBA4, RGB565, and RGB5_A1 renderbuffer families before
+// ANGLE permits a context. Both Vulkan channel orders are required because
+// ANGLE probes them separately. ZPU retains these optimal-tiling images in its
+// existing four-byte internal color surface, so they are deliberately not
+// exposed to linear mappings or transfer commands. The scalar renderer sees
+// normalized RGBA values, while ANGLE owns the GL-facing packed-format
+// conversion.
+fn webglBootstrapColorFormat(format: i32) bool {
+    return format >= 2 and format <= 7;
+}
 const format_g8_b8r8_2plane_420_unorm: i32 = 1000156003;
 const image_aspect_color_bit: u32 = 0x1;
 const image_aspect_plane_0_bit: u32 = 0x10;
@@ -4215,7 +4225,9 @@ fn imageFormatMipChainLayerByteSize(format: i32, width: u32, height: u32, mip_le
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
     // and vkCreateImage both receive the tiling explicitly.
-    _ = tiling;
+    // The WebGL bootstrap formats deliberately have no linear image support:
+    // they are backed only by ZPU's private optimal-tiled RGBA surface.
+    if (webglBootstrapColorFormat(format)) return if (tiling == 0) 0x4 | 0x10 else 0;
     return switch (format) {
         // R8_UNORM is retained in the internal image store as one red byte
         // per texel followed by an opaque padding word. It supports the
@@ -4261,6 +4273,11 @@ fn sparseImageFormatQueryValid(format: i32, image_type: i32, samples: u32, usage
 fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatProperties) bool {
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
+    if (webglBootstrapColorFormat(format)) {
+        // ANGLE validates standard renderbuffers as blendable color targets.
+        out.* = .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x80 | 0x100, .buffer_features = 0 };
+        return true;
+    }
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
@@ -7821,7 +7838,7 @@ fn transferableColorFormat(format: i32) bool {
 }
 
 fn colorAttachmentFormat(format: i32) bool {
-    return format == 9 or format == 16 or transferableColorFormat(format);
+    return format == 9 or format == 16 or webglBootstrapColorFormat(format) or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
@@ -10428,6 +10445,8 @@ fn profileBlendEquation(op: i32, source: f32, destination: f32) ?f32 {
 fn colorStorageIndices(format: i32) ?[4]usize {
     return switch (format) {
         9 => .{ 0, 1, 2, 3 },
+        2, 4, 6 => .{ 0, 1, 2, 3 },
+        3, 5, 7 => .{ 2, 1, 0, 3 },
         37 => .{ 0, 1, 2, 3 },
         43, 44 => .{ 2, 1, 0, 3 },
         else => null,
@@ -10801,6 +10820,8 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
         9 => .r8_unorm,
         16 => .rg8_unorm,
+        2, 4, 6 => .rgba8_unorm,
+        3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
         43, 44 => .bgra8_unorm,
         format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
@@ -10879,6 +10900,8 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
     const image = input.image orelse return null;
     if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * 4) return null;
     const format: render_ir_exec.SampledImage.Format = switch (color.format) {
+        2, 4, 6 => .rgba8_unorm,
+        3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
         43, 44 => .bgra8_unorm,
         else => return null,
@@ -24438,6 +24461,12 @@ test "all physical queries cover success boundaries and invalid handles" {
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
     const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
+        .{ .format = 2, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 3, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 4, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 5, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 6, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 7, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 43, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
