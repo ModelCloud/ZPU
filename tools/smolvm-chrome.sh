@@ -2,8 +2,11 @@
 # Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 # SPDX-License-Identifier: Apache-2.0
 #
-# Reproduce the README Chromium/google.com screenshot inside SmolVM.
-# Usage: tools/smolvm-chrome.sh [start-desktop|reproduce]
+# Reproduce the README Chromium/google.com screenshot or benchmark real sites
+# inside SmolVM. ZPU Mosaic workers are constrained to exactly two guest CPUs.
+# Chromium itself remains schedulable across the guest so its browser,
+# renderer, and networking threads do not starve the two ZPU render lanes.
+# Usage: tools/smolvm-chrome.sh [start-desktop|reproduce|benchmark]
 # Default command is "reproduce".
 #
 # Run a dry-run to inspect commands:
@@ -28,12 +31,28 @@ chrome_bin=${ZPU_CHROME_BIN:-/usr/bin/chromium}
 url=${ZPU_CHROME_URL:-https://www.google.com}
 guest_screenshot=${ZPU_GUEST_SCREENSHOT:-/tmp/zpu-chrome.png}
 host_screenshot=${ZPU_HOST_SCREENSHOT:-$repo/docs/assets/zpu-chromium-google.png}
-width=${ZPU_CHROME_WIDTH:-1280}
-height=${ZPU_CHROME_HEIGHT:-720}
+width=${ZPU_CHROME_WIDTH:-2560}
+height=${ZPU_CHROME_HEIGHT:-1440}
 wait_budget=${ZPU_CHROME_WAIT:-10000}
+chrome_cpu_set=${ZPU_CHROME_CPU_SET:-0,1}
+refresh_hz=${ZPU_CHROME_REFRESH_HZ:-60}
+benchmark_duration=${ZPU_CHROME_BENCHMARK_DURATION:-8}
+benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-10}
+# 17 ms leaves the same small scheduling margin as the desktop 60 Hz gate,
+# while still rejecting a missed 60 Hz compositor deadline.
+benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
+benchmark_min_fps=${ZPU_CHROME_BENCHMARK_MIN_FPS:-60}
+benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.bing.com,https://www.youtube.com}
+# An optional host directory that receives each site's JSON telemetry before
+# the benchmark tears down the guest tmpfs and restores network isolation.
+benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
 diagnose_failures=${ZPU_DIAGNOSE_FAILURES:-0}
 diagnose_render=${ZPU_DIAGNOSE_RENDER:-0}
 present_dump=${ZPU_PRESENT_DUMP:-}
+# Keep presentation on the caller lane by default. With two Mosaic raster
+# lanes this avoids a third CPU-bound presenter contending for the same two
+# guest CPUs; it does not change ZPU_MAX_THREADS or raster parallelism.
+one_core_present=${ZPU_ONE_CORE:-1}
 
 socket_root=/tmp/.X11-unix
 host_socket=$socket_root/X${display#:}
@@ -43,6 +62,7 @@ host_socket=$socket_root/X${display#:}
 host_xauthority=${ZPU_HOST_XAUTHORITY:-${XAUTHORITY:-$HOME/.Xauthority}}
 
 host_auth=
+xvfb_auth=
 xvfb_pid=
 twm_pid=
 
@@ -53,6 +73,15 @@ die() {
 
 [[ $diagnose_failures == 0 || $diagnose_failures == 1 ]] || die 'ZPU_DIAGNOSE_FAILURES must be 0 or 1'
 [[ $diagnose_render == 0 || $diagnose_render == 1 ]] || die 'ZPU_DIAGNOSE_RENDER must be 0 or 1'
+[[ $one_core_present == 0 || $one_core_present == 1 ]] || die 'ZPU_ONE_CORE must be 0 or 1'
+[[ $refresh_hz == 60 ]] || die 'ZPU_CHROME_REFRESH_HZ must be exactly 60 for the 60 fps profile'
+[[ $benchmark_duration =~ ^[1-9][0-9]*$ ]] || die 'ZPU_CHROME_BENCHMARK_DURATION must be a positive integer'
+[[ $benchmark_warmup =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_WARMUP must be a non-negative decimal'
+[[ $benchmark_p99_ms =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_P99_MS must be a positive decimal'
+[[ $benchmark_min_fps =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_MIN_FPS must be a positive decimal'
+IFS=, read -r chrome_cpu_a chrome_cpu_b chrome_cpu_extra <<<"$chrome_cpu_set"
+[[ -n ${chrome_cpu_a:-} && -n ${chrome_cpu_b:-} && -z ${chrome_cpu_extra:-} && $chrome_cpu_a =~ ^[0-9]+$ && $chrome_cpu_b =~ ^[0-9]+$ && $chrome_cpu_a != "$chrome_cpu_b" ]] || \
+    die 'ZPU_CHROME_CPU_SET must name exactly two distinct CPU numbers, e.g. 0,1'
 case $smolvm_uid_drop in
     on) unset SMOLVM_VM_UID_DROP ;;
     off)
@@ -83,7 +112,7 @@ cleanup() {
         kill "$xvfb_pid" 2>/dev/null || true
         wait "$xvfb_pid" 2>/dev/null || true
     fi
-    rm -f -- "${host_auth:-}"
+    rm -f -- "${host_auth:-}" "${xvfb_auth:-}"
 }
 trap cleanup EXIT
 trap 'trap "" HUP INT TERM QUIT; exit 129' HUP
@@ -160,9 +189,9 @@ ensure_display() {
     fi
 
     local cookie
-    host_auth=$(mktemp /tmp/zpu-xauth.XXXXXX)
-    chmod 600 "$host_auth"
-    export XAUTHORITY="$host_auth"
+    xvfb_auth=$(mktemp /tmp/zpu-xauth.XXXXXX)
+    chmod 600 "$xvfb_auth"
+    export XAUTHORITY="$xvfb_auth"
     if command -v mcookie >/dev/null; then
         cookie=$(mcookie)
     elif command -v openssl >/dev/null; then
@@ -170,9 +199,9 @@ ensure_display() {
     else
         die 'mcookie or openssl is required to generate an X authority cookie'
     fi
-    xauth -f "$host_auth" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
+    xauth -f "$xvfb_auth" add "$display" MIT-MAGIC-COOKIE-1 "$cookie"
 
-    Xvfb "$display" -auth "$host_auth" -screen 0 "${width}x${height}x24" \
+    Xvfb "$display" -auth "$xvfb_auth" -screen 0 "${width}x${height}x24" \
         -noreset +extension GLX +extension RANDR +extension RENDER \
         >/tmp/zpu-xvfb.log 2>&1 &
     xvfb_pid=$!
@@ -198,7 +227,7 @@ prepare_host_auth() {
     local source_auth=$host_xauthority
     # If this invocation created Xvfb, its authority is the source of truth;
     # otherwise use the configured authority for the pre-existing display.
-    if [[ -n ${xvfb_pid:-} ]]; then source_auth=$host_auth; fi
+    if [[ -n ${xvfb_pid:-} ]]; then source_auth=$xvfb_auth; fi
     [[ -f $source_auth && ! -L $source_auth && -r $source_auth ]] || die "host X authority is not a readable regular file: $source_auth"
     # Normalize the host cookie to FamilyWild (0xffff) so the SmolVM guest can
     # use it regardless of its own hostname. Keep exactly one entry to avoid
@@ -247,13 +276,26 @@ ensure_chromium() {
         printf '+ ensure Chromium is installed on %s\n' "$machine"
         return 0
     fi
-    if run smolvm machine exec --name "$machine" -- test -x "$chrome_bin"; then
+    if run smolvm machine exec --name "$machine" -- sh -c "test -x '$chrome_bin' && command -v python3 >/dev/null && command -v xdpyinfo >/dev/null"; then
         return 0
     fi
-    run smolvm machine update --name "$machine" --net
-    run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm
-    run smolvm machine exec --name "$machine" -- pacman -S --noconfirm --needed chromium ttf-liberation vulkan-icd-loader libxcb xorg-xauth
-    run smolvm machine update --name "$machine" --no-net
+    # SmolVM only changes persisted network state while stopped.  Keep the
+    # package-install egress window bounded and restore the running isolated
+    # machine even if pacman itself fails.
+    local status=0
+    run smolvm machine stop --name "$machine" || return $?
+    run smolvm machine update --name "$machine" --net || return $?
+    run smolvm machine start --name "$machine" || return $?
+    if run smolvm machine exec --name "$machine" -- pacman -Syu --noconfirm &&
+       run smolvm machine exec --name "$machine" -- pacman -S --noconfirm --needed chromium ttf-liberation vulkan-icd-loader libxcb xorg-xauth xorg-xdpyinfo util-linux python; then
+        :
+    else
+        status=$?
+    fi
+    run smolvm machine stop --name "$machine" || return $?
+    run smolvm machine update --name "$machine" --no-net || return $?
+    run smolvm machine start --name "$machine" || return $?
+    [[ $status -eq 0 ]] || return "$status"
     run smolvm machine exec --name "$machine" -- test -x "$chrome_bin" || die "chromium installation did not provide $chrome_bin"
 }
 
@@ -262,15 +304,36 @@ prepare_guest_auth() {
         printf '+ prepare guest X authority at /run/zpu-xauth on %s\n' "$machine"
         return 0
     fi
+    # SmolVM's secure copy endpoint is the guest workspace.  Copying straight
+    # into tmpfs-backed /run can report success while dropping the file under
+    # UID isolation, so stage there first and install it into the private
+    # runtime directory from inside the guest.
+    local transfer=/workspace/.zpu-chrome-transfer
+    run smolvm machine exec --name "$machine" -- sh -ceu "
+        rm -rf /run/zpu-xauth /run/zpu-runtime '$transfer'
+        install -d -m 700 /run/zpu-xauth /run/zpu-runtime '$transfer'
+    "
+    run smolvm machine cp "$host_auth" "$machine:$transfer/Xauthority"
     run smolvm machine exec --name "$machine" -- sh -c '
-        rm -rf /run/zpu-xauth /run/zpu-runtime
-        install -d -m 700 /run/zpu-xauth /run/zpu-runtime
-    '
-    run smolvm machine cp "$host_auth" "$machine:/run/zpu-xauth/Xauthority"
-    run smolvm machine exec --name "$machine" -- sh -c '
+        test -f /workspace/.zpu-chrome-transfer/Xauthority
+        install -m 600 /workspace/.zpu-chrome-transfer/Xauthority /run/zpu-xauth/Xauthority
+        rm -f /workspace/.zpu-chrome-transfer/Xauthority
         printf "%s\n" trusted > /run/zpu-xauth/mode
         chmod 600 /run/zpu-xauth/Xauthority /run/zpu-xauth/mode
     '
+}
+
+verify_guest_x11() {
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        printf '+ verify guest X11 authentication over the SmolVM Unix-socket bridge on %s\n' "$machine"
+        return 0
+    fi
+    # This exercises a real authenticated X11 connection, rather than merely
+    # checking that the guest path has socket file type.  It catches a stale
+    # mount, a bridge that cannot reach the host X server, and bad Xauthority.
+    run smolvm machine exec --name "$machine" -- env -i \
+        PATH=/usr/bin:/bin DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
+        xdpyinfo >/dev/null || die 'guest cannot authenticate to the host X server through the SmolVM socket bridge'
 }
 
 compress_png() {
@@ -300,6 +363,12 @@ launch_chrome() {
         ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
         ZPU_DIAGNOSE_RENDER="$diagnose_render" \
         ZPU_PRESENT_DUMP="$present_dump" \
+        ZPU_LIMITED=physical-core-v1 \
+        ZPU_MAX_THREADS=2 \
+        ZPU_SELECTED_CPUS="$chrome_cpu_set" \
+        ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" \
+        ZPU_ONE_CORE="$one_core_present" \
+        ZPU_REFRESH_HZ="$refresh_hz" \
         "$chrome_bin" --no-sandbox \
         --disable-gpu-sandbox \
         --headless \
@@ -311,6 +380,9 @@ launch_chrome() {
         --enable-features=Vulkan \
         --disable-vulkan-fallback-to-gl-for-testing \
         --disable-software-compositing-fallback \
+        --disable-background-timer-throttling \
+        --disable-backgrounding-occluded-windows \
+        --disable-renderer-backgrounding \
         --run-all-compositor-stages-before-draw \
         --virtual-time-budget="$wait_budget" \
         --window-size="${width},${height}" \
@@ -320,6 +392,90 @@ launch_chrome() {
     run smolvm machine cp "$machine:$guest_screenshot" "$host_screenshot"
     compress_png "$host_screenshot"
     printf 'zpu-chrome: screenshot saved to %s\n' "$host_screenshot"
+}
+
+benchmark_chrome() {
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        printf '+ benchmark Chromium at %sx%s @ %s Hz with ZPU restricted to CPUs %s (ZPU_MAX_THREADS=2)\n' "$width" "$height" "$refresh_hz" "$chrome_cpu_set"
+        printf '+ warm up each site for %ss, then measure %ss; require compositor p99 <= %sms and >= %sfps\n' "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$benchmark_min_fps"
+        return 0
+    fi
+    local guest_tool=/run/zpu-runtime/chromium-cdp-video-test.py
+    local transfer_tool=/workspace/.zpu-chrome-transfer/chromium-cdp-video-test.py
+    local guest_pid=/run/zpu-runtime/chromium.pid
+    local guest_log=/run/zpu-runtime/chromium.log
+    local guest_profile=/run/zpu-runtime/chromium-profile
+    local site safe_url result
+    if [[ -n $benchmark_results_dir ]]; then
+        mkdir -p -- "$benchmark_results_dir"
+        [[ -d $benchmark_results_dir && -w $benchmark_results_dir ]] || die "ZPU_CHROME_BENCHMARK_RESULTS_DIR is not a writable directory: $benchmark_results_dir"
+    fi
+    run smolvm machine cp "$repo/tools/chromium-cdp-video-test.py" "$machine:$transfer_tool" || return $?
+    run smolvm machine exec --name "$machine" -- sh -ceu "
+        test -f '$transfer_tool'
+        install -m 700 '$transfer_tool' '$guest_tool'
+        rm -f '$transfer_tool'
+    " || return $?
+    IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
+    for site in "${benchmark_url_list[@]}"; do
+        [[ $site =~ ^https://(www\.)?(google\.com|bing\.com|youtube\.com)/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits google.com, bing.com, and youtube.com: $site"
+        safe_url=${site#https://}
+        safe_url=${safe_url//\//_}
+        result="/run/zpu-runtime/chromium-${safe_url}.json"
+        # Each site gets a fresh GPU process. Reusing one leaves page-specific
+        # swapchain pacing state behind and made Bing depend on whether Google
+        # ran first, which is not a valid per-site performance measurement.
+        run smolvm machine exec --name "$machine" -- env -i \
+            HOME=/root PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/zpu-runtime DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
+            VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
+            VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
+            ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
+            ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" ZPU_ONE_CORE="$one_core_present" \
+            ZPU_DIAGNOSE_FAILURES="$diagnose_failures" ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
+            ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
+            ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+            ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
+            sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+        run smolvm machine exec --name "$machine" -- sh -c '
+            pid=$1 log=$2
+            for i in $(seq 1 100); do
+                test -s "$pid" && python3 -c "import socket; s=socket.create_connection((\"127.0.0.1\", 9222), .1); s.close()" 2>/dev/null && exit 0
+                sleep .1
+            done
+            cat "$log" >&2
+            exit 1
+        ' sh "$guest_pid" "$guest_log" || return $?
+        printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
+        local probe_status=0
+        if run smolvm machine exec --name "$machine" -- \
+            sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --warmup "$3" --duration "$4" --max-p99-frame-ms "$5" --min-fps "$6" > "$7"' \
+            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$benchmark_min_fps" "$result"; then
+            :
+        else
+            probe_status=$?
+            # The CDP probe prints valid telemetry before it rejects a gate.
+            # Preserve that evidence while the guest tmpfs still exists.
+            if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$result"; then
+                run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
+            fi
+            if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$guest_log"; then
+                run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+            fi
+            run smolvm machine exec --name "$machine" -- cat "$result" || true
+            run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
+            return "$probe_status"
+        fi
+        if [[ -n $benchmark_results_dir ]]; then
+            run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
+            run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+        fi
+        run smolvm machine exec --name "$machine" -- cat "$result" || return $?
+        stop_benchmark_chrome
+    done
+}
+
+stop_benchmark_chrome() {
+    run smolvm machine exec --name "$machine" -- sh -c 'test -r /run/zpu-runtime/chromium.pid && kill $(cat /run/zpu-runtime/chromium.pid) 2>/dev/null || true'
 }
 
 start_desktop_cmd() {
@@ -338,11 +494,36 @@ reproduce() {
     ensure_zpu_staged
     ensure_chromium
     prepare_guest_auth
+    verify_guest_x11
     launch_chrome
 }
 
+benchmark() {
+    require_programs
+    ensure_machine
+    ensure_display
+    prepare_host_auth
+    ensure_desktop
+    ensure_zpu_staged
+    ensure_chromium
+    # Real-site measurements require temporary guest egress.  Restore the
+    # normal isolated state even when the compositor probe fails.  SmolVM
+    # changes persistent network state only while a machine is stopped.
+    run smolvm machine stop --name "$machine"
+    run smolvm machine update --name "$machine" --net
+    run smolvm machine start --name "$machine"
+    prepare_guest_auth
+    verify_guest_x11
+    local status=0
+    if benchmark_chrome; then :; else status=$?; fi
+    stop_benchmark_chrome || { [[ $status -ne 0 ]] || status=$?; }
+    run smolvm machine stop --name "$machine"
+    run smolvm machine update --name "$machine" --no-net
+    return "$status"
+}
+
 usage() {
-    printf 'usage: %s [start-desktop|reproduce]\n' "${BASH_SOURCE[0]}" >&2
+    printf 'usage: %s [start-desktop|reproduce|benchmark]\n' "${BASH_SOURCE[0]}" >&2
     exit 2
 }
 
@@ -350,5 +531,6 @@ cmd=${1:-reproduce}
 case $cmd in
     start-desktop) start_desktop_cmd ;;
     reproduce) reproduce ;;
+    benchmark) benchmark ;;
     *) usage ;;
 esac

@@ -1929,6 +1929,20 @@ fn failureDiagnosticsEnabled() bool {
     return std.mem.eql(u8, std.mem.span(raw), "1");
 }
 
+/// Narrow present-path diagnostics for browser bring-up.  Keep this separate
+/// from the command-recorder trace: a busy web page can submit thousands of
+/// draws while a single rejected present is enough to make Chromium discard
+/// its GPU process.
+fn presentDiagnosticsEnabled() bool {
+    const raw = std.c.getenv("ZPU_DIAGNOSE_PRESENT") orelse return false;
+    return std.mem.eql(u8, std.mem.span(raw), "1");
+}
+
+fn rejectPresent(comptime reason: []const u8) Result {
+    if (presentDiagnosticsEnabled()) std.debug.print("ZPU queue present rejected: {s}\n", .{reason});
+    return .error_initialization_failed;
+}
+
 fn renderDiagnosticsEnabled() bool {
     const raw = std.c.getenv("ZPU_DIAGNOSE_RENDER") orelse return false;
     return std.mem.eql(u8, std.mem.span(raw), "1");
@@ -2215,8 +2229,35 @@ fn synchronousOneCore() bool {
     return value[0] == '1';
 }
 
+fn configuredMosaicThreadCount() ?usize {
+    const limited = std.c.getenv("ZPU_LIMITED") orelse return null;
+    if (!std.mem.eql(u8, std.mem.span(limited), "physical-core-v1")) return null;
+    const raw = std.c.getenv("ZPU_MAX_THREADS") orelse return null;
+    const count = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch return null;
+    return if (count >= 1 and count <= 8) count else null;
+}
+
+fn usePresentWorkerForProfile(complex_3d_content: bool, force_one_core: bool, cpu_count: usize, configured_threads: ?usize) bool {
+    // A two-core Mosaic profile already has a caller render lane and one
+    // raster worker. Adding an asynchronous presentation thread creates a
+    // third CPU-bound participant, which can starve Chromium's compositor.
+    // Present on the caller lane for that bounded profile; wider placements
+    // retain overlap between rendering and presentation.
+    const lanes = configured_threads orelse cpu_count;
+    return complex_3d_content and !force_one_core and lanes > 2;
+}
+
 fn usePresentWorker(complex_3d_content: bool, force_one_core: bool) bool {
-    return complex_3d_content and !force_one_core;
+    return usePresentWorkerForProfile(complex_3d_content, force_one_core, cpu_locality.selectedCpuCount(), configuredMosaicThreadCount());
+}
+
+test "two-core Mosaic profile presents synchronously" {
+    try std.testing.expect(!usePresentWorkerForProfile(false, false, 8, null));
+    try std.testing.expect(!usePresentWorkerForProfile(true, true, 8, null));
+    try std.testing.expect(!usePresentWorkerForProfile(true, false, 2, null));
+    try std.testing.expect(!usePresentWorkerForProfile(true, false, 8, 2));
+    try std.testing.expect(usePresentWorkerForProfile(true, false, 3, null));
+    try std.testing.expect(usePresentWorkerForProfile(true, false, 2, 3));
 }
 
 fn releasePresentedState(swapchain: *SwapchainObj, image_index: u32) void {
@@ -5493,7 +5534,8 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
         hit(.heap_exhaustion);
         return .error_out_of_host_memory;
     }
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     const allocation_size = std.math.cast(usize, ci.allocation_size) orelse {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU host allocation size conversion failed size={}\n", .{ci.allocation_size});
         return .error_out_of_host_memory;
@@ -19758,7 +19800,8 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
         if (old.owner != d or old.surface != surface or old.retiring) return .error_initialization_failed;
         break :blk old;
     };
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never or (state.* == .tombstone and !swapchain.transport_retire_pending)) {
         const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
         const image_count = if (pixels >= @as(u64, 3840) * 2160 and ci.min_image_count < 4) ci.min_image_count + 1 else ci.min_image_count;
@@ -19936,16 +19979,16 @@ fn presentTimingInfoPresent(info: *const PresentInfo) bool {
 }
 
 fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
-    const present = info orelse return .error_initialization_failed;
+    const present = info orelse return rejectPresent("missing VkPresentInfoKHR");
     const timing_info_present = presentTimingInfoPresent(present);
     lock();
     const q = queue orelse {
         mutex.unlock();
-        return .error_initialization_failed;
+        return rejectPresent("unknown queue");
     };
     if (!validDeviceLocked(q.owner) or present.s_type != 1_000_001_001 or present.swapchain_count == 0 or present.swapchain_count > max_present_entries or present.swapchains == null or present.image_indices == null or present.wait_semaphore_count > max_present_entries or (present.wait_semaphore_count != 0 and present.wait_semaphores == null)) {
         mutex.unlock();
-        return .error_initialization_failed;
+        return rejectPresent("invalid VkPresentInfoKHR envelope");
     }
     // Complete all cross-object and image-lifecycle validation before
     // consuming wait semaphores or queuing any image.  PresentInfo is a batch;
@@ -19955,23 +19998,23 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
     for (present.swapchains.?[0..present.swapchain_count], present.image_indices.?[0..present.swapchain_count], 0..) |handle, index, i| {
         const target_request = presentTimingRequest(present, i, frame_pacing.monotonicNs()) catch {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("unsupported present-timing chain");
         };
         const swapchain = validSwapchainLocked(handle) orelse {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("unknown swapchain");
         };
         if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring or (timing_info_present and !swapchain.present_timing_enabled)) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("foreign, retiring, or timing-disabled swapchain");
         }
         const image = validImageLocked(swapchain.images[index]) orelse {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("unknown swapchain image");
         };
         if (!imageStorageValid(image)) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("invalid swapchain image storage");
         }
         if (target_request) |request| {
             if (request.source == .ext and swapchain.present_timing_queue_size != 0) {
@@ -19986,13 +20029,15 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         }
         for (present.swapchains.?[0..i]) |prior| if (prior == handle) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("duplicate swapchain in present batch");
         };
         _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
         const acquired = swapchain.image_states[index] == .acquired;
         _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
         if (!acquired) {
+            const state = swapchain.image_states[index];
             mutex.unlock();
+            if (presentDiagnosticsEnabled()) std.debug.print("ZPU queue present rejected: image state is {s}\n", .{@tagName(state)});
             return .error_initialization_failed;
         }
         timing_requests[i] = target_request;
@@ -20033,11 +20078,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         const target_ns = targets[i];
         const swapchain = validSwapchainLocked(handle) orelse {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("swapchain disappeared before queueing");
         };
         if (swapchain.owner != q.owner or index >= swapchain.image_count or swapchain.retiring) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("swapchain changed before queueing");
         }
         const image = validImageLocked(swapchain.images[index]) orelse {
             mutex.unlock();
@@ -20045,7 +20090,7 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         };
         if (image.retire_pending or image.owner != q.owner) {
             mutex.unlock();
-            return .error_initialization_failed;
+            return rejectPresent("retiring or foreign image before queueing");
         }
         // Present execution may run on the shared worker after this function
         // drops the registry mutex.  Keep the swapchain image's owned bytes
@@ -20053,9 +20098,11 @@ fn queuePresent(queue: ?Queue, info: ?*const PresentInfo) callconv(.c) Result {
         _ = image.active_users.fetchAdd(1, .acq_rel);
         _ = std.c.pthread_mutex_lock(&swapchain.present_mutex);
         if (!frame_lifecycle.queue(swapchain.image_states[0..swapchain.image_count], index)) {
+            const state = swapchain.image_states[index];
             _ = std.c.pthread_mutex_unlock(&swapchain.present_mutex);
             releaseImageUserLocked(image);
             mutex.unlock();
+            if (presentDiagnosticsEnabled()) std.debug.print("ZPU queue present rejected: queue transition from {s}\n", .{@tagName(state)});
             return .error_initialization_failed;
         }
         swapchain.pending += 1;
@@ -20612,10 +20659,15 @@ fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?P
                 const timing = times[index];
                 logGoogleDisplayTimingMapped("VkPresentTimesInfoGOOGLE in vkQueuePresentKHR");
                 // A zero desiredPresentTime means the presentation engine may
-                // display the image at any time.  Use the current monotonic
-                // instant as the internal scheduling deadline, while retaining
-                // the application value for VkPastPresentationTimingGOOGLE.
-                const target = if (timing.desired_present_time == 0) now_ns else timing.desired_present_time;
+                // display the image at any time.  Chromium can also carry a
+                // stale far-future legacy deadline across a surface restart;
+                // honoring it verbatim freezes the visible compositor for
+                // seconds.  The fixed-refresh ZPU engine accepts a requested
+                // slot only within two refresh intervals and presents stale
+                // or distant requests immediately, while retaining the exact
+                // application value for VkPastPresentationTimingGOOGLE.
+                const lead_limit = configuredRefreshDuration() orelse 0;
+                const target = if (timing.desired_present_time == 0 or timing.desired_present_time <= now_ns or lead_limit == 0 or timing.desired_present_time - now_ns > lead_limit *| 2) now_ns else timing.desired_present_time;
                 request = .{ .target_ns = target, .reported_target_ns = timing.desired_present_time, .requested_stages = 0, .present_id = timing.present_id, .source = .google };
             }
             next = @ptrCast(header.p_next);
@@ -20714,6 +20766,10 @@ test "EXT present timing selects absolute and relative deadlines" {
     const zero_google_request = try presentTimingRequest(&google_info, 0, 1_000);
     try std.testing.expectEqual(@as(?u64, 1_000), zero_google_request.?.target_ns);
     try std.testing.expectEqual(@as(u64, 0), zero_google_request.?.reported_target_ns);
+    google_time.desired_present_time = 100_000_000;
+    const stale_google_request = try presentTimingRequest(&google_info, 0, 1_000);
+    try std.testing.expectEqual(@as(?u64, 1_000), stale_google_request.?.target_ns);
+    try std.testing.expectEqual(@as(u64, 100_000_000), stale_google_request.?.reported_target_ns);
     google.times = null;
     try std.testing.expectEqual(@as(?u64, null), try presentTarget(&google_info, 0, 1_000));
     const ignored = ChainHeader{ .s_type = 99, .p_next = null };

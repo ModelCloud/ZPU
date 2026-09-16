@@ -151,13 +151,27 @@ def main() -> None:
     parser.add_argument(
         "--compositor-selector",
         default=".scene",
-        help="selector that proves the compositor fixture has loaded",
+        help="selector that proves the page has loaded (default: .scene)",
+    )
+    parser.add_argument(
+        "--max-p99-frame-ms",
+        type=float,
+        help="fail a compositor probe when its p99 requestAnimationFrame interval exceeds this budget",
+    )
+    parser.add_argument(
+        "--min-fps",
+        type=float,
+        help="fail a compositor probe when its measured average frame rate is below this value",
     )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
     if args.warmup < 0:
         parser.error("--warmup must not be negative")
+    if args.max_p99_frame_ms is not None and args.max_p99_frame_ms <= 0:
+        parser.error("--max-p99-frame-ms must be positive")
+    if args.min_fps is not None and args.min_fps <= 0:
+        parser.error("--min-fps must be positive")
 
     devtools = DevTools(args.port)
     try:
@@ -181,34 +195,82 @@ def main() -> None:
         session_id = attached["sessionId"]
         devtools.call("Page.enable", session_id=session_id)
         devtools.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(window, '__zpuNativeRaf', { value: window.requestAnimationFrame.bind(window), writable: false, configurable: false });"},
+            session_id=session_id,
+        )
+        # Headless Chromium otherwise treats a CDP-created tab as background
+        # work and may intentionally reduce requestAnimationFrame to 1 Hz.
+        devtools.call("Page.bringToFront", session_id=session_id)
+        devtools.call(
             "Page.navigate", {"url": args.page_url}, session_id=session_id
         )
+        # Navigation may replace or background the renderer target. Assert
+        # focus again after issuing it so the compositor probe measures the
+        # visible page, rather than a throttled background tab.
+        devtools.call("Page.bringToFront", session_id=session_id)
         if args.compositor:
             expression = f"""(async () => {{
               const ready = await new Promise(resolve => {{
                 const deadline = performance.now() + 10000;
                 function probe() {{
-                  if (document.querySelector({json.dumps(args.compositor_selector)}) || performance.now() >= deadline) {{
-                    resolve(Boolean(document.querySelector({json.dumps(args.compositor_selector)}))); return;
+                  const matches = document.readyState === 'complete' && document.querySelector({json.dumps(args.compositor_selector)});
+                  if (matches || performance.now() >= deadline) {{
+                    resolve(Boolean(matches)); return;
                   }}
                   setTimeout(probe, 25);
                 }}
                 probe();
               }});
               if (!ready) return {{ loadState: 'missing-scene', callbacks: 0, callbackElapsedSeconds: 0, framesPerSecond: 0 }};
-              let callbacks = 0, first = null, last = null;
+              // Exclude page hydration and GPU-process setup from the steady
+              // compositor sample.  This is still active rendering time: rAF
+              // must be delivered continuously through the whole warm-up.
+              if ({args.warmup * 1000:.3f} > 0) await new Promise(resolve => {{
+                const raf = window.__zpuNativeRaf || requestAnimationFrame;
+                const warmupDeadline = performance.now() + {args.warmup * 1000:.3f};
+                function warmupFrame(now) {{
+                  if (now < warmupDeadline) raf(warmupFrame);
+                  else resolve();
+                }}
+                raf(warmupFrame);
+              }});
+              let callbacks = 0, first = null, last = null, previous = null;
+              const intervals = [];
+              const longTasks = [];
+              let observer = null;
+              if (typeof PerformanceObserver !== 'undefined') try {{
+                observer = new PerformanceObserver(list => {{
+                  for (const entry of list.getEntries()) longTasks.push(entry.duration);
+                }});
+                observer.observe({{ type: 'longtask', buffered: true }});
+              }} catch (_) {{}}
               const deadline = performance.now() + {args.duration * 1000:.3f};
+              const raf = window.__zpuNativeRaf || requestAnimationFrame;
               await new Promise(resolve => {{
                 function frame(now) {{
-                  callbacks++; first ??= now; last = now;
-                  if (now < deadline) requestAnimationFrame(frame); else resolve();
+                  callbacks++; first ??= now;
+                  if (previous !== null) intervals.push(now - previous);
+                  previous = now; last = now;
+                  if (now < deadline) raf(frame); else resolve();
                 }}
-                requestAnimationFrame(frame);
+                raf(frame);
               }});
+              intervals.sort((a, b) => a - b);
+              observer?.disconnect();
+              const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
               return {{
                 loadState: 'ready', callbacks,
+                visibilityState: document.visibilityState,
+                hasFocus: document.hasFocus(),
                 callbackElapsedSeconds: first === null || last === null ? 0 : (last - first) / 1000,
                 framesPerSecond: first === null || last === null ? 0 : (callbacks - 1) / ((last - first) / 1000),
+                p99FrameIntervalMilliseconds,
+                warmupSeconds: {args.warmup:.3f},
+                longTaskCount: longTasks.length,
+                maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
+                documentTitle: document.title,
+                documentTextPrefix: (document.body?.innerText || '').split('\\n').join(' ').slice(0, 300),
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""
@@ -216,7 +278,12 @@ def main() -> None:
                 "Runtime.evaluate",
                 {"expression": expression, "awaitPromise": True, "returnByValue": True},
                 session_id,
-                timeout=args.duration + 15,
+                # The compositor evaluator includes up to ten seconds waiting
+                # for page readiness, followed by explicit warm-up and the
+                # measured interval.  Keep the DevTools bound larger than all
+                # three phases so a slow real-site load is reported as
+                # telemetry, not mistaken for a transport failure.
+                timeout=args.duration + args.warmup + 25,
             )
             if "exceptionDetails" in result:
                 raise RuntimeError(json.dumps(result["exceptionDetails"], indent=2))
@@ -228,6 +295,20 @@ def main() -> None:
                 with open(args.screenshot, "wb") as output:
                     output.write(base64.b64decode(capture["data"]))
             print(json.dumps(telemetry, indent=2, sort_keys=True))
+            if args.max_p99_frame_ms is not None:
+                p99 = telemetry.get("p99FrameIntervalMilliseconds", 0)
+                if not isinstance(p99, (int, float)) or p99 <= 0 or p99 > args.max_p99_frame_ms:
+                    raise SystemExit(
+                        f"compositor p99 frame interval {p99!r} ms exceeds "
+                        f"{args.max_p99_frame_ms:.3f} ms"
+                    )
+            if args.min_fps is not None:
+                fps = telemetry.get("framesPerSecond", 0)
+                if not isinstance(fps, (int, float)) or fps < args.min_fps:
+                    raise SystemExit(
+                        f"compositor frame rate {fps!r} fps is below "
+                        f"{args.min_fps:.3f} fps"
+                    )
             return
         # `awaitPromise` makes the sample duration independent of DevTools
         # message timing. requestVideoFrameCallback measures presented frames,

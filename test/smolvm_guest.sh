@@ -34,6 +34,18 @@ for chrome_requirement in \
         exit 1
     }
 done
+# The 2K Chromium benchmark must carry an explicit two-lane cap and the same
+# strict CPU mask into ZPU's GPU subprocesses without starving Chromium's
+# browser and renderer processes.
+for chrome_requirement in \
+    'ZPU_MAX_THREADS=2' \
+    'ZPU_MOSAIC_CPU_SET="$chrome_cpu_set"' \
+    'benchmark) benchmark ;;'; do
+    grep -F -- "$chrome_requirement" "$chrome_launcher" >/dev/null || {
+        echo "Chromium two-core benchmark requirement is missing: $chrome_requirement" >&2
+        exit 1
+    }
+done
 tmp=$(mktemp -d)
 display_fixture_pid=
 untracked_probe=$repo/smolvm-review-untracked-probe
@@ -128,7 +140,7 @@ ln -sfn "$repo/test/fixtures/smolvm/v1.6.9/smolvm" "$tmp/bin/smolvm"
 if "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     echo 'SmolVM 1.6.9 unexpectedly satisfied the exact version pin' >&2; exit 1
 fi
-grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.7.1' "$tmp/err"
+grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.16.1' "$tmp/err"
 ln -sfn "$fixture" "$tmp/bin/smolvm"
 if SMOLVM_VM_UID_DROP=off SMOLVM_FIXTURE_EXPECT_UID_DROP=unset "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     :

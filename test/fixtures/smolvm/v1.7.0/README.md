@@ -4,10 +4,11 @@
 # SmolVM CLI contract fixture
 
 This strict argv/help/state fixture reports the production-pinned
-`smol-machines/smolvm` **v1.7.1** version while retaining its historical
+`smol-machines/smolvm` **v1.16.1** version while retaining its historical
 directory name so old fixture paths remain stable.
 
-- production pin: `smolvm 1.7.1`
+- production pin: `smolvm 1.16.1` (upstream tag `v1.16.1`, commit
+  `9504e94e3581a1f52c414247edcbcd6d6b49a71a`)
 - captured commands: `smolvm --version`; `smolvm machine create --help`;
   `smolvm machine exec --help`; and `smolvm machine cp`, `stop`, `start`, and
   `update --help`; and `machine ls --help`/`--json`. Synthetic JSON variants

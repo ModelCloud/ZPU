@@ -20,7 +20,9 @@ runtime=
 runtime_base=
 runtime_is_temporary=0
 guest_manifest=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json
-required_smolvm_version=1.7.1
+# Exact upstream release pin.  v1.16.1 carries the fixed Unix-socket bridge
+# and current virtio-net implementation required by the Chromium 2K gate.
+required_smolvm_version=1.16.1
 
 die() { printf 'zpu-smolvm: %s\n' "$*" >&2; exit 2; }
 [[ $machine =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'ZPU_SMOLVM_MACHINE must be 1-64 letters, digits, dots, underscores, or hyphens and start alphanumeric'
