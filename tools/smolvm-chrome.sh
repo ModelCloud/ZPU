@@ -447,6 +447,9 @@ benchmark_chrome() {
             probe_status=$?
             # The CDP probe prints valid telemetry before it rejects a gate.
             # Preserve that evidence while the guest tmpfs still exists.
+            if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$result"; then
+                run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
+            fi
             run smolvm machine exec --name "$machine" -- cat "$result" || true
             run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
             return "$probe_status"
