@@ -140,7 +140,7 @@ ln -sfn "$repo/test/fixtures/smolvm/v1.6.9/smolvm" "$tmp/bin/smolvm"
 if "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     echo 'SmolVM 1.6.9 unexpectedly satisfied the exact version pin' >&2; exit 1
 fi
-grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.7.1' "$tmp/err"
+grep -F 'smolvm 1.6.9 is unsupported; require exactly 1.16.1' "$tmp/err"
 ln -sfn "$fixture" "$tmp/bin/smolvm"
 if SMOLVM_VM_UID_DROP=off SMOLVM_FIXTURE_EXPECT_UID_DROP=unset "$repo/tools/smolvm-zpu.sh" cli-check >"$tmp/out" 2>"$tmp/err"; then
     :

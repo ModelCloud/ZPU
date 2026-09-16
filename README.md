@@ -180,7 +180,7 @@ tools/smolvm-chrome.sh reproduce
 tools/smolvm-chrome.sh benchmark
 ```
 
-The workflow requires SmolVM 1.7.1 and its documented host prerequisites. It
+The workflow requires SmolVM 1.16.1 and its documented host prerequisites. It
 does not use SmolVM's virtual GPU option; that keeps the validation path focused
 on ZPU rather than virtio/Venus.
 
