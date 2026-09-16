@@ -2229,24 +2229,35 @@ fn synchronousOneCore() bool {
     return value[0] == '1';
 }
 
-fn usePresentWorkerForCpuCount(complex_3d_content: bool, force_one_core: bool, cpu_count: usize) bool {
+fn configuredMosaicThreadCount() ?usize {
+    const limited = std.c.getenv("ZPU_LIMITED") orelse return null;
+    if (!std.mem.eql(u8, std.mem.span(limited), "physical-core-v1")) return null;
+    const raw = std.c.getenv("ZPU_MAX_THREADS") orelse return null;
+    const count = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch return null;
+    return if (count >= 1 and count <= 8) count else null;
+}
+
+fn usePresentWorkerForProfile(complex_3d_content: bool, force_one_core: bool, cpu_count: usize, configured_threads: ?usize) bool {
     // A two-core Mosaic profile already has a caller render lane and one
     // raster worker. Adding an asynchronous presentation thread creates a
     // third CPU-bound participant, which can starve Chromium's compositor.
     // Present on the caller lane for that bounded profile; wider placements
     // retain overlap between rendering and presentation.
-    return complex_3d_content and !force_one_core and cpu_count > 2;
+    const lanes = configured_threads orelse cpu_count;
+    return complex_3d_content and !force_one_core and lanes > 2;
 }
 
 fn usePresentWorker(complex_3d_content: bool, force_one_core: bool) bool {
-    return usePresentWorkerForCpuCount(complex_3d_content, force_one_core, cpu_locality.selectedCpuCount());
+    return usePresentWorkerForProfile(complex_3d_content, force_one_core, cpu_locality.selectedCpuCount(), configuredMosaicThreadCount());
 }
 
 test "two-core Mosaic profile presents synchronously" {
-    try std.testing.expect(!usePresentWorkerForCpuCount(false, false, 8));
-    try std.testing.expect(!usePresentWorkerForCpuCount(true, true, 8));
-    try std.testing.expect(!usePresentWorkerForCpuCount(true, false, 2));
-    try std.testing.expect(usePresentWorkerForCpuCount(true, false, 3));
+    try std.testing.expect(!usePresentWorkerForProfile(false, false, 8, null));
+    try std.testing.expect(!usePresentWorkerForProfile(true, true, 8, null));
+    try std.testing.expect(!usePresentWorkerForProfile(true, false, 2, null));
+    try std.testing.expect(!usePresentWorkerForProfile(true, false, 8, 2));
+    try std.testing.expect(usePresentWorkerForProfile(true, false, 3, null));
+    try std.testing.expect(usePresentWorkerForProfile(true, false, 2, 3));
 }
 
 fn releasePresentedState(swapchain: *SwapchainObj, image_index: u32) void {
