@@ -107,6 +107,13 @@ with KeyboardClient("/run/zkeyboard.sock") as keyboard:
     keyboard.key_tap(30)  # "a"
 ```
 
+For SmolVM, use `tools/smolvm-zinput.sh` to stage the drivers. SmolVM's
+minimal guest `/dev` omits nodes for built-in kernel devices, so the helper
+materializes `/dev/uinput` from `/sys/class/misc/uinput/dev`, creates the
+registered `/dev/input/event*` node, and requires a `MouseClient` motion to be
+read back as real `EV_REL` events before it succeeds. This is guest-local
+Linux input; a headless Chromium target still needs its own browser input path.
+
 Build them with `zig build zinput`; see
 [`tools/smolvm-zinput.sh`](tools/smolvm-zinput.sh) for guest staging and
 [`test/zinput.sh`](test/zinput.sh) for the exercised interface.

@@ -86,18 +86,17 @@ static inline int zinput_server_run(int listen_fd, int uinput_fd,
         for (int i = nfds - 1; i >= 1; --i) {
             int idx = i - 1;
             int revents = fds[i].revents;
-            if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                close(clients[idx].fd);
-                clients[idx] = clients[nfds - 2];
-                fds[i] = fds[nfds - 1];
-                nfds--;
-                continue;
-            }
-
+            /* A MouseClient commonly sends its last line and closes the Unix
+             * socket immediately.  poll then reports POLLIN|POLLHUP together;
+             * drain POLLIN before retiring the descriptor or that final real
+             * /dev/uinput command is silently discarded. */
             if (revents & POLLIN) {
                 struct zinput_client *cl = &clients[idx];
                 ssize_t n = recv(cl->fd, cl->buf + cl->len,
                                  sizeof(cl->buf) - cl->len - 1, 0);
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    continue;
+                }
                 if (n <= 0) {
                     close(cl->fd);
                     clients[idx] = clients[nfds - 2];
@@ -123,6 +122,13 @@ static inline int zinput_server_run(int listen_fd, int uinput_fd,
                 if (cl->len > 0 && line_start != cl->buf) {
                     memmove(cl->buf, line_start, cl->len);
                 }
+            }
+
+            if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                close(clients[idx].fd);
+                clients[idx] = clients[nfds - 2];
+                fds[i] = fds[nfds - 1];
+                nfds--;
             }
         }
     }

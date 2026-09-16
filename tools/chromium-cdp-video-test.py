@@ -12,9 +12,12 @@ still enforce the ZPU-only ICD and forbid software-compositing fallback.
 import argparse
 import base64
 import json
+import math
 import os
 import socket
 import struct
+import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -89,6 +92,23 @@ class DevTools:
     def close(self) -> None:
         self.connection.close()
 
+    def send(self, method: str, params: dict | None = None, session_id: str | None = None) -> int:
+        """Send a command without waiting for its response.
+
+        High-rate input needs this non-blocking form: a complete WebSocket/CDP
+        round trip per mouse position adds unrelated transport latency to a
+        60 Hz interaction probe.
+        """
+        request_id = self.next_id
+        self.next_id += 1
+        request = {"id": request_id, "method": method}
+        if params is not None:
+            request["params"] = params
+        if session_id is not None:
+            request["sessionId"] = session_id
+        send_text(self.connection, json.dumps(request))
+        return request_id
+
     def call(
         self,
         method: str,
@@ -97,17 +117,11 @@ class DevTools:
         timeout: float | None = None,
     ) -> dict:
         request_id = self.next_id
-        self.next_id += 1
-        request = {"id": request_id, "method": method}
-        if params is not None:
-            request["params"] = params
-        if session_id is not None:
-            request["sessionId"] = session_id
         previous_timeout = self.connection.gettimeout()
         if timeout is not None:
             self.connection.settimeout(timeout)
         try:
-            send_text(self.connection, json.dumps(request))
+            self.send(method, params, session_id)
             while True:
                 opcode, payload = receive_frame(self.connection)
                 if opcode == 8:
@@ -122,6 +136,99 @@ class DevTools:
                 return response["result"]
         finally:
             self.connection.settimeout(previous_timeout)
+
+
+class PointerSweep:
+    """Drive Chromium's native CDP mouse-input path on a separate connection.
+
+    The SmolVM guest's ``/dev/uinput`` devices cannot be consumed by the host
+    X server mounted into the guest, and the Chromium performance profile is
+    deliberately ozone/headless.  CDP Input.dispatchMouseEvent is therefore
+    the browser-visible input route for this probe.  It exercises the same
+    browser input dispatch and hover work as mouse movement without pretending
+    that a guest-only virtual input device reaches the headless target.
+    """
+
+    def __init__(
+        self,
+        port: int,
+        target_id: str,
+        width: int,
+        height: int,
+        hz: float,
+        start_after: float,
+        duration: float,
+    ) -> None:
+        self.devtools = DevTools(port)
+        attached = self.devtools.call(
+            "Target.attachToTarget", {"targetId": target_id, "flatten": True}
+        )
+        self.session_id = attached["sessionId"]
+        self.width = max(1, width)
+        self.height = max(1, height)
+        self.hz = hz
+        self.start_after = start_after
+        self.duration = duration
+        self.dispatched = 0
+        self.skipped = 0
+        self.error: Exception | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="zpu-pointer-sweep")
+
+    @staticmethod
+    def _position(progress: float, width: int, height: int) -> tuple[int, int]:
+        """A figure-eight covers the 4K viewport's edges and centre."""
+        theta = progress * 4.0 * math.pi
+        x = round((0.5 + 0.5 * math.sin(theta)) * (width - 1))
+        y = round((0.5 + 0.5 * math.sin(2.0 * theta)) * (height - 1))
+        return x, y
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def close(self) -> None:
+        self.stop_and_join()
+        self.devtools.close()
+
+    def stop_and_join(self) -> None:
+        """Stop command production but retain the connection for queued input."""
+        self.stop()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        try:
+            started = time.monotonic() + self.start_after
+            if self._stop.wait(max(0.0, started - time.monotonic())):
+                return
+            count = max(1, math.ceil(self.duration * self.hz))
+            index = 0
+            while index < count:
+                deadline = started + index / self.hz
+                if self._stop.wait(max(0.0, deadline - time.monotonic())):
+                    return
+                # Do not replay a backlog of stale pointer positions.  Record
+                # each missed dispatch explicitly, since it means the input
+                # producer itself could not sustain the requested cadence.
+                now = time.monotonic()
+                overdue = math.floor((now - deadline) * self.hz)
+                if overdue > 0:
+                    skipped = min(overdue, count - index - 1)
+                    self.skipped += skipped
+                    index += skipped
+                    deadline = started + index / self.hz
+                x, y = self._position(index / max(1, count - 1), self.width, self.height)
+                self.devtools.send(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": x, "y": y, "pointerType": "mouse"},
+                    self.session_id,
+                )
+                self.dispatched += 1
+                index += 1
+        except Exception as error:  # surfaced by the measuring thread
+            self.error = error
 
 
 def main() -> None:
@@ -163,6 +270,17 @@ def main() -> None:
         type=float,
         help="fail a compositor probe when its measured average frame rate is below this value",
     )
+    parser.add_argument(
+        "--pointer-sweep",
+        action="store_true",
+        help="dispatch a viewport-wide 60 Hz mouse sweep through Chromium's CDP input path",
+    )
+    parser.add_argument(
+        "--pointer-sweep-hz",
+        type=float,
+        default=60.0,
+        help="mouse dispatch rate used with --pointer-sweep (default: 60)",
+    )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
@@ -172,6 +290,10 @@ def main() -> None:
         parser.error("--max-p99-frame-ms must be positive")
     if args.min_fps is not None and args.min_fps <= 0:
         parser.error("--min-fps must be positive")
+    if args.pointer_sweep_hz <= 0:
+        parser.error("--pointer-sweep-hz must be positive")
+    if args.pointer_sweep and not args.compositor:
+        parser.error("--pointer-sweep requires --compositor")
 
     devtools = DevTools(args.port)
     try:
@@ -210,6 +332,38 @@ def main() -> None:
         # visible page, rather than a throttled background tab.
         devtools.call("Page.bringToFront", session_id=session_id)
         if args.compositor:
+            pointer_sweep = None
+            if args.pointer_sweep:
+                devtools.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "window.__zpuPointerMoveEvents = 0; addEventListener('pointermove', () => window.__zpuPointerMoveEvents++, true);"
+                    },
+                    session_id,
+                )
+                viewport_result = devtools.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "({width: window.innerWidth, height: window.innerHeight})",
+                        "returnByValue": True,
+                    },
+                    session_id,
+                )
+                viewport = viewport_result["result"].get("value", {})
+                width = viewport.get("width")
+                height = viewport.get("height")
+                if not isinstance(width, int) or not isinstance(height, int):
+                    raise RuntimeError(f"unexpected viewport dimensions: {viewport!r}")
+                pointer_sweep = PointerSweep(
+                    args.port,
+                    target["targetId"],
+                    width,
+                    height,
+                    args.pointer_sweep_hz,
+                    args.warmup,
+                    args.duration,
+                )
+                pointer_sweep.start()
             expression = f"""(async () => {{
               const ready = await new Promise(resolve => {{
                 const deadline = performance.now() + 10000;
@@ -274,22 +428,62 @@ def main() -> None:
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""
-            result = devtools.call(
-                "Runtime.evaluate",
-                {"expression": expression, "awaitPromise": True, "returnByValue": True},
-                session_id,
-                # The compositor evaluator includes up to ten seconds waiting
-                # for page readiness, followed by explicit warm-up and the
-                # measured interval.  Keep the DevTools bound larger than all
-                # three phases so a slow real-site load is reported as
-                # telemetry, not mistaken for a transport failure.
-                timeout=args.duration + args.warmup + 25,
-            )
+            try:
+                result = devtools.call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "awaitPromise": True, "returnByValue": True},
+                    session_id,
+                    # The compositor evaluator includes up to ten seconds waiting
+                    # for page readiness, followed by explicit warm-up and the
+                    # measured interval.  Keep the DevTools bound larger than all
+                    # three phases so a slow real-site load is reported as
+                    # telemetry, not mistaken for a transport failure.
+                    timeout=args.duration + args.warmup + 25,
+                )
+            finally:
+                if pointer_sweep is not None:
+                    pointer_sweep.stop_and_join()
             if "exceptionDetails" in result:
                 raise RuntimeError(json.dumps(result["exceptionDetails"], indent=2))
             telemetry = result["result"].get("value")
             if not isinstance(telemetry, dict):
                 raise RuntimeError(f"unexpected compositor telemetry: {result}")
+            if pointer_sweep is not None:
+                try:
+                    if pointer_sweep.error is not None:
+                        raise RuntimeError(f"pointer sweep failed: {pointer_sweep.error}")
+                    delivered = devtools.call(
+                        "Runtime.evaluate",
+                        {
+                            "expression": "window.__zpuPointerMoveEvents || 0",
+                            "returnByValue": True,
+                        },
+                        session_id,
+                    )
+                    telemetry["pointerSweep"] = {
+                        "source": "Chromium CDP Input.dispatchMouseEvent",
+                        "viewport": {"width": pointer_sweep.width, "height": pointer_sweep.height},
+                        "requestedHertz": pointer_sweep.hz,
+                        "dispatchedEvents": pointer_sweep.dispatched,
+                        "skippedEvents": pointer_sweep.skipped,
+                        "pagePointerMoveEvents": delivered["result"].get("value", 0),
+                    }
+                    expected_events = math.ceil(args.duration * args.pointer_sweep_hz)
+                    if pointer_sweep.skipped or pointer_sweep.dispatched != expected_events:
+                        raise RuntimeError(
+                            "pointer sweep could not sustain its requested cadence: "
+                            f"dispatched={pointer_sweep.dispatched}, skipped={pointer_sweep.skipped}, "
+                            f"expected={expected_events}"
+                        )
+                    # Chromium is permitted to coalesce high-frequency pointer
+                    # events before page JavaScript observes them.  The dispatch
+                    # count, rather than this listener count, proves the input
+                    # producer maintained 60 Hz; rAF p99/FPS remains the frame
+                    # delivery gate.  Keep the listener count as corroborating
+                    # browser-visible evidence without treating coalescing as a
+                    # dropped renderer frame.
+                finally:
+                    pointer_sweep.close()
             if args.screenshot:
                 capture = devtools.call("Page.captureScreenshot", {"format": "png"}, session_id)
                 with open(args.screenshot, "wb") as output:
