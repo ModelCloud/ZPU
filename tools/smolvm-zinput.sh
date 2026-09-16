@@ -2,11 +2,12 @@
 # Copyright 2026 Qubitium (qubitium@modelcloud.ai) and ModelCloud team
 # SPDX-License-Identifier: Apache-2.0
 #
-# Stage and start the zmouse/zkeyboard uinput drivers inside a SmolVM guest.
+# Stage and verify the zmouse/zkeyboard uinput drivers inside a SmolVM guest.
 #
 # The script builds static binaries on the host, copies them into the guest,
-# attempts to load the uinput kernel module, and starts the two drivers on
-# Unix domain sockets inside the guest.
+# materializes the uinput/evdev nodes omitted by SmolVM's minimal /dev, starts
+# the two drivers on Unix domain sockets, and reads back a real MouseClient
+# event from the resulting guest /dev/input/event* node.
 #
 # Usage: tools/smolvm-zinput.sh
 # Set ZPU_SMOLVM_DRY_RUN=1 to print the command sequence without mutating state.
@@ -19,6 +20,8 @@ guest_runtime=${ZPU_GUEST_RUNTIME:-/run/zpu-runtime}
 host_tools=$repo/tools
 mouse_sock=${ZPU_ZMOUSE_SOCKET:-/run/zmouse.sock}
 keyboard_sock=${ZPU_ZKEYBOARD_SOCKET:-/run/zkeyboard.sock}
+host_verify=$repo/tools/zinput-evdev-verify.py
+guest_verify=$guest_runtime/zinput-evdev-verify.py
 
 run() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
@@ -105,20 +108,120 @@ stage_drivers() {
 
 start_drivers() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
-        printf '+ load uinput module and start zmouse/zkeyboard on %s\n' "$machine"
+        printf '+ materialize guest /dev/uinput and start zmouse/zkeyboard on %s\n' "$machine"
         return 0
     fi
-    run smolvm machine exec --name "$machine" -- sh -c "
-        rm -f $mouse_sock $keyboard_sock
-        modprobe uinput 2>/dev/null || true
-        if [[ ! -c /dev/uinput ]]; then
-            echo 'warning: /dev/uinput is not available' >&2
+    run smolvm machine exec --name "$machine" -- sh -ceu '
+        uinput_sysfs=/sys/class/misc/uinput/dev
+        test -r "$uinput_sysfs" || {
+            echo "guest kernel does not expose CONFIG_INPUT_UINPUT" >&2
+            exit 2
+        }
+        spec=$(cat "$uinput_sysfs")
+        case "$spec" in
+            [0-9]*:[0-9]*) ;;
+            *) echo "invalid uinput device number: $spec" >&2; exit 2 ;;
+        esac
+        major=${spec%:*}
+        minor=${spec#*:}
+        if test -e /dev/uinput && ! test -c /dev/uinput; then
+            echo "/dev/uinput exists but is not a character device" >&2
+            exit 2
         fi
-        nohup $guest_runtime/zmouse -d /dev/uinput -s $mouse_sock >/dev/null 2>&1 &
-        nohup $guest_runtime/zkeyboard -d /dev/uinput -s $keyboard_sock >/dev/null 2>&1 &
+        if ! test -e /dev/uinput; then
+            mknod -m 600 /dev/uinput c "$major" "$minor"
+        fi
+        test -c /dev/uinput || {
+            echo "failed to materialize /dev/uinput" >&2
+            exit 2
+        }
+
+        # Retire only stale drivers that this helper staged in the guest.  A
+        # prior launch has an unlinked socket after the next run binds the
+        # pathname, so merely removing the socket would leave duplicate evdev
+        # devices behind.
+        for proc in /proc/[0-9]*; do
+            test -r "$proc/cmdline" || continue
+            cmd=$(tr "\\000" " " < "$proc/cmdline" 2>/dev/null || :)
+            case "$cmd" in
+                "$3"\ *|"$4"\ *) kill "${proc##*/}" 2>/dev/null || true ;;
+            esac
+        done
         sleep 1
-        ss -lx 2>/dev/null | grep -E 'zmouse|zkeyboard' || true
-    "
+        rm -f -- "$1" "$2"
+        nohup "$3" -d /dev/uinput -s "$1" > /run/zpu-runtime/zmouse.log 2>&1 &
+        zmouse_pid=$!
+        nohup "$4" -d /dev/uinput -s "$2" > /run/zpu-runtime/zkeyboard.log 2>&1 &
+        zkeyboard_pid=$!
+        sleep 1
+        kill -0 "$zmouse_pid" 2>/dev/null || {
+            cat /run/zpu-runtime/zmouse.log >&2
+            exit 2
+        }
+        kill -0 "$zkeyboard_pid" 2>/dev/null || {
+            cat /run/zpu-runtime/zkeyboard.log >&2
+            exit 2
+        }
+        test -S "$1" && test -S "$2" || {
+            echo "zinput driver sockets were not created" >&2
+            exit 2
+        }
+    ' sh "$mouse_sock" "$keyboard_sock" "$guest_runtime/zmouse" "$guest_runtime/zkeyboard"
+}
+
+materialize_evdev_nodes() {
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        printf '+ materialize guest /dev/input/event* nodes and locate zmouse on %s\n' "$machine"
+        return 0
+    fi
+    run smolvm machine exec --name "$machine" -- sh -ceu '
+        install -d -m 755 /dev/input
+        zmouse_event=
+        for event_dir in /sys/class/input/event*; do
+            test -r "$event_dir/dev" || continue
+            event=$(basename "$event_dir")
+            spec=$(cat "$event_dir/dev")
+            case "$spec" in
+                [0-9]*:[0-9]*) ;;
+                *) echo "invalid evdev device number for $event: $spec" >&2; exit 2 ;;
+            esac
+            major=${spec%:*}
+            minor=${spec#*:}
+            node=/dev/input/$event
+            if test -e "$node" && ! test -c "$node"; then
+                echo "$node exists but is not a character device" >&2
+                exit 2
+            fi
+            if ! test -e "$node"; then
+                mknod -m 600 "$node" c "$major" "$minor"
+            fi
+            test -c "$node" || {
+                echo "failed to materialize $node" >&2
+                exit 2
+            }
+            if test "$(cat "$event_dir/device/name" 2>/dev/null || :)" = zmouse; then
+                zmouse_event=$node
+            fi
+        done
+        test -n "$zmouse_event" || {
+            echo "zmouse did not register an evdev device" >&2
+            exit 2
+        }
+        printf "%s\\n" "$zmouse_event"
+    '
+}
+
+verify_mouse_client() {
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
+        printf '+ send MouseClient motion and read its EV_REL events from guest /dev/input/event* on %s\n' "$machine"
+        return 0
+    fi
+    local event_node
+    event_node=$(materialize_evdev_nodes)
+    run smolvm machine cp "$host_verify" "$machine:$guest_verify"
+    run smolvm machine exec --name "$machine" -- env \
+        PYTHONPATH="$guest_runtime" \
+        python3 "$guest_verify" "$event_node" "$mouse_sock"
 }
 
 echo_dry_run_note() {
@@ -147,6 +250,7 @@ main() {
     build_drivers
     stage_drivers
     start_drivers
+    verify_mouse_client
     echo_dry_run_note
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
         echo "smolvm-zinput: drivers staged on $machine ($mouse_sock, $keyboard_sock)"

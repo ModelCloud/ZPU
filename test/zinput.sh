@@ -35,6 +35,7 @@ if [[ ! -f "$repo/tools/libzinput.so" ]]; then
 fi
 
 python3 -m py_compile "$repo/tools/zinput.py"
+python3 -m py_compile "$repo/tools/zinput-evdev-verify.py"
 python3 -m py_compile "$repo/zpu/__init__.py"
 python3 -m py_compile "$repo/zpu/zinput.py"
 
