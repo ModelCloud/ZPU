@@ -402,6 +402,7 @@ benchmark_chrome() {
     local transfer_tool=/workspace/.zpu-chrome-transfer/chromium-cdp-video-test.py
     local guest_pid=/run/zpu-runtime/chromium.pid
     local guest_log=/run/zpu-runtime/chromium.log
+    local guest_profile=/run/zpu-runtime/chromium-profile
     local site safe_url result
     if [[ -n $benchmark_results_dir ]]; then
         mkdir -p -- "$benchmark_results_dir"
@@ -432,7 +433,7 @@ benchmark_chrome() {
             ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
             ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
             ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
-            sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+            sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
         run smolvm machine exec --name "$machine" -- sh -c '
             pid=$1 log=$2
             for i in $(seq 1 100); do
