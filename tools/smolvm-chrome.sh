@@ -48,7 +48,10 @@ benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
 diagnose_failures=${ZPU_DIAGNOSE_FAILURES:-0}
 diagnose_render=${ZPU_DIAGNOSE_RENDER:-0}
 present_dump=${ZPU_PRESENT_DUMP:-}
-one_core_present=${ZPU_ONE_CORE:-0}
+# Keep presentation on the caller lane by default. With two Mosaic raster
+# lanes this avoids a third CPU-bound presenter contending for the same two
+# guest CPUs; it does not change ZPU_MAX_THREADS or raster parallelism.
+one_core_present=${ZPU_ONE_CORE:-1}
 
 socket_root=/tmp/.X11-unix
 host_socket=$socket_root/X${display#:}
