@@ -454,12 +454,16 @@ benchmark_chrome() {
             if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$result"; then
                 run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
             fi
+            if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$guest_log"; then
+                run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+            fi
             run smolvm machine exec --name "$machine" -- cat "$result" || true
             run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
             return "$probe_status"
         fi
         if [[ -n $benchmark_results_dir ]]; then
             run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
+            run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
         fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
     done
