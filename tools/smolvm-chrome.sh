@@ -413,37 +413,35 @@ benchmark_chrome() {
         install -m 700 '$transfer_tool' '$guest_tool'
         rm -f '$transfer_tool'
     " || return $?
-    run smolvm machine exec --name "$machine" -- env -i \
-        HOME=/root PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/zpu-runtime DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
-        VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
-        VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
-        ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
-        ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" \
-        ZPU_ONE_CORE="$one_core_present" \
-        ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
-        ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
-        ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
-        ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
-        ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
-        sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
-    # The CDP probe reports a bounded connection error if Chromium cannot
-    # start; waiting here avoids turning normal process initialization into a
-    # spurious measurement failure.
-    run smolvm machine exec --name "$machine" -- sh -c '
-        pid=$1 log=$2
-        for i in $(seq 1 100); do
-            test -s "$pid" && python3 -c "import socket; s=socket.create_connection((\"127.0.0.1\", 9222), .1); s.close()" 2>/dev/null && exit 0
-            sleep .1
-        done
-        cat "$log" >&2
-        exit 1
-    ' sh "$guest_pid" "$guest_log" || return $?
     IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
     for site in "${benchmark_url_list[@]}"; do
         [[ $site =~ ^https://(www\.)?(google\.com|bing\.com|youtube\.com)/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits google.com, bing.com, and youtube.com: $site"
         safe_url=${site#https://}
         safe_url=${safe_url//\//_}
         result="/run/zpu-runtime/chromium-${safe_url}.json"
+        # Each site gets a fresh GPU process. Reusing one leaves page-specific
+        # swapchain pacing state behind and made Bing depend on whether Google
+        # ran first, which is not a valid per-site performance measurement.
+        run smolvm machine exec --name "$machine" -- env -i \
+            HOME=/root PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/zpu-runtime DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
+            VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
+            VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
+            ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
+            ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" ZPU_ONE_CORE="$one_core_present" \
+            ZPU_DIAGNOSE_FAILURES="$diagnose_failures" ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
+            ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
+            ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+            ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
+            sh -c "rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir=/run/zpu-runtime/chromium-profile about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+        run smolvm machine exec --name "$machine" -- sh -c '
+            pid=$1 log=$2
+            for i in $(seq 1 100); do
+                test -s "$pid" && python3 -c "import socket; s=socket.create_connection((\"127.0.0.1\", 9222), .1); s.close()" 2>/dev/null && exit 0
+                sleep .1
+            done
+            cat "$log" >&2
+            exit 1
+        ' sh "$guest_pid" "$guest_log" || return $?
         printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
         local probe_status=0
         if run smolvm machine exec --name "$machine" -- \
@@ -469,6 +467,7 @@ benchmark_chrome() {
             run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
         fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
+        stop_benchmark_chrome
     done
 }
 
