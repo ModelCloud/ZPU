@@ -31,8 +31,8 @@ chrome_bin=${ZPU_CHROME_BIN:-/usr/bin/chromium}
 url=${ZPU_CHROME_URL:-https://www.google.com}
 guest_screenshot=${ZPU_GUEST_SCREENSHOT:-/tmp/zpu-chrome.png}
 host_screenshot=${ZPU_HOST_SCREENSHOT:-$repo/docs/assets/zpu-chromium-google.png}
-width=${ZPU_CHROME_WIDTH:-2560}
-height=${ZPU_CHROME_HEIGHT:-1440}
+width=${ZPU_CHROME_WIDTH:-3840}
+height=${ZPU_CHROME_HEIGHT:-2160}
 wait_budget=${ZPU_CHROME_WAIT:-10000}
 chrome_cpu_set=${ZPU_CHROME_CPU_SET:-0,1}
 refresh_hz=${ZPU_CHROME_REFRESH_HZ:-60}
@@ -42,7 +42,7 @@ benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-10}
 # while still rejecting a missed 60 Hz compositor deadline.
 benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
 benchmark_min_fps=${ZPU_CHROME_BENCHMARK_MIN_FPS:-60}
-benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.bing.com,https://www.youtube.com}
+benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.google.com/search?q=zpu+60fps,https://www.bing.com,https://www.bing.com/search?q=zpu+60fps}
 # An optional host directory that receives each site's JSON telemetry before
 # the benchmark tears down the guest tmpfs and restores network isolation.
 benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
@@ -418,9 +418,9 @@ benchmark_chrome() {
     " || return $?
     IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
     for site in "${benchmark_url_list[@]}"; do
-        [[ $site =~ ^https://(www\.)?(google\.com|bing\.com|youtube\.com)/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits google.com, bing.com, and youtube.com: $site"
+        [[ $site =~ ^https://(www\.)?(google\.com|bing\.com)(/search\?q=[A-Za-z0-9._%+-]+)?/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits Google/Bing homepages or deterministic search queries: $site"
         safe_url=${site#https://}
-        safe_url=${safe_url//\//_}
+        safe_url=${safe_url//[^A-Za-z0-9._-]/_}
         result="/run/zpu-runtime/chromium-${safe_url}.json"
         # Each site gets a fresh GPU process. Reusing one leaves page-specific
         # swapchain pacing state behind and made Bing depend on whether Google
