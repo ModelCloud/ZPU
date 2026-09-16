@@ -42,6 +42,9 @@ benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-10}
 # while still rejecting a missed 60 Hz compositor deadline.
 benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
 benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.bing.com,https://www.youtube.com}
+# An optional host directory that receives each site's JSON telemetry before
+# the benchmark tears down the guest tmpfs and restores network isolation.
+benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
 diagnose_failures=${ZPU_DIAGNOSE_FAILURES:-0}
 diagnose_render=${ZPU_DIAGNOSE_RENDER:-0}
 present_dump=${ZPU_PRESENT_DUMP:-}
@@ -394,6 +397,10 @@ benchmark_chrome() {
     local guest_pid=/run/zpu-runtime/chromium.pid
     local guest_log=/run/zpu-runtime/chromium.log
     local site safe_url result
+    if [[ -n $benchmark_results_dir ]]; then
+        mkdir -p -- "$benchmark_results_dir"
+        [[ -d $benchmark_results_dir && -w $benchmark_results_dir ]] || die "ZPU_CHROME_BENCHMARK_RESULTS_DIR is not a writable directory: $benchmark_results_dir"
+    fi
     run smolvm machine cp "$repo/tools/chromium-cdp-video-test.py" "$machine:$transfer_tool" || return $?
     run smolvm machine exec --name "$machine" -- sh -ceu "
         test -f '$transfer_tool'
@@ -443,6 +450,9 @@ benchmark_chrome() {
             run smolvm machine exec --name "$machine" -- cat "$result" || true
             run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
             return "$probe_status"
+        fi
+        if [[ -n $benchmark_results_dir ]]; then
+            run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
         fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
     done
