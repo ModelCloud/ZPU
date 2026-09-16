@@ -158,6 +158,11 @@ def main() -> None:
         type=float,
         help="fail a compositor probe when its p99 requestAnimationFrame interval exceeds this budget",
     )
+    parser.add_argument(
+        "--min-fps",
+        type=float,
+        help="fail a compositor probe when its measured average frame rate is below this value",
+    )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
@@ -165,6 +170,8 @@ def main() -> None:
         parser.error("--warmup must not be negative")
     if args.max_p99_frame_ms is not None and args.max_p99_frame_ms <= 0:
         parser.error("--max-p99-frame-ms must be positive")
+    if args.min_fps is not None and args.min_fps <= 0:
+        parser.error("--min-fps must be positive")
 
     devtools = DevTools(args.port)
     try:
@@ -294,6 +301,13 @@ def main() -> None:
                     raise SystemExit(
                         f"compositor p99 frame interval {p99!r} ms exceeds "
                         f"{args.max_p99_frame_ms:.3f} ms"
+                    )
+            if args.min_fps is not None:
+                fps = telemetry.get("framesPerSecond", 0)
+                if not isinstance(fps, (int, float)) or fps < args.min_fps:
+                    raise SystemExit(
+                        f"compositor frame rate {fps!r} fps is below "
+                        f"{args.min_fps:.3f} fps"
                     )
             return
         # `awaitPromise` makes the sample duration independent of DevTools

@@ -41,6 +41,7 @@ benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-10}
 # 17 ms leaves the same small scheduling margin as the desktop 60 Hz gate,
 # while still rejecting a missed 60 Hz compositor deadline.
 benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
+benchmark_min_fps=${ZPU_CHROME_BENCHMARK_MIN_FPS:-60}
 benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.bing.com,https://www.youtube.com}
 # An optional host directory that receives each site's JSON telemetry before
 # the benchmark tears down the guest tmpfs and restores network isolation.
@@ -77,6 +78,7 @@ die() {
 [[ $benchmark_duration =~ ^[1-9][0-9]*$ ]] || die 'ZPU_CHROME_BENCHMARK_DURATION must be a positive integer'
 [[ $benchmark_warmup =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_WARMUP must be a non-negative decimal'
 [[ $benchmark_p99_ms =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_P99_MS must be a positive decimal'
+[[ $benchmark_min_fps =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_MIN_FPS must be a positive decimal'
 IFS=, read -r chrome_cpu_a chrome_cpu_b chrome_cpu_extra <<<"$chrome_cpu_set"
 [[ -n ${chrome_cpu_a:-} && -n ${chrome_cpu_b:-} && -z ${chrome_cpu_extra:-} && $chrome_cpu_a =~ ^[0-9]+$ && $chrome_cpu_b =~ ^[0-9]+$ && $chrome_cpu_a != "$chrome_cpu_b" ]] || \
     die 'ZPU_CHROME_CPU_SET must name exactly two distinct CPU numbers, e.g. 0,1'
@@ -395,7 +397,7 @@ launch_chrome() {
 benchmark_chrome() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ benchmark Chromium at %sx%s @ %s Hz with ZPU restricted to CPUs %s (ZPU_MAX_THREADS=2)\n' "$width" "$height" "$refresh_hz" "$chrome_cpu_set"
-        printf '+ warm up each site for %ss, then measure %ss; require compositor p99 <= %sms\n' "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms"
+        printf '+ warm up each site for %ss, then measure %ss; require compositor p99 <= %sms and >= %sfps\n' "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$benchmark_min_fps"
         return 0
     fi
     local guest_tool=/run/zpu-runtime/chromium-cdp-video-test.py
@@ -446,8 +448,8 @@ benchmark_chrome() {
         printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
         local probe_status=0
         if run smolvm machine exec --name "$machine" -- \
-            sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --warmup "$3" --duration "$4" --max-p99-frame-ms "$5" > "$6"' \
-            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$result"; then
+            sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --warmup "$3" --duration "$4" --max-p99-frame-ms "$5" --min-fps "$6" > "$7"' \
+            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$benchmark_min_fps" "$result"; then
             :
         else
             probe_status=$?
