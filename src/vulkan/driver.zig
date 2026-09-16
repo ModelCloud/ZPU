@@ -2229,8 +2229,24 @@ fn synchronousOneCore() bool {
     return value[0] == '1';
 }
 
+fn usePresentWorkerForCpuCount(complex_3d_content: bool, force_one_core: bool, cpu_count: usize) bool {
+    // A two-core Mosaic profile already has a caller render lane and one
+    // raster worker. Adding an asynchronous presentation thread creates a
+    // third CPU-bound participant, which can starve Chromium's compositor.
+    // Present on the caller lane for that bounded profile; wider placements
+    // retain overlap between rendering and presentation.
+    return complex_3d_content and !force_one_core and cpu_count > 2;
+}
+
 fn usePresentWorker(complex_3d_content: bool, force_one_core: bool) bool {
-    return complex_3d_content and !force_one_core;
+    return usePresentWorkerForCpuCount(complex_3d_content, force_one_core, cpu_locality.selectedCpuCount());
+}
+
+test "two-core Mosaic profile presents synchronously" {
+    try std.testing.expect(!usePresentWorkerForCpuCount(false, false, 8));
+    try std.testing.expect(!usePresentWorkerForCpuCount(true, true, 8));
+    try std.testing.expect(!usePresentWorkerForCpuCount(true, false, 2));
+    try std.testing.expect(usePresentWorkerForCpuCount(true, false, 3));
 }
 
 fn releasePresentedState(swapchain: *SwapchainObj, image_index: u32) void {
