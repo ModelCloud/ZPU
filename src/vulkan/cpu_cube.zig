@@ -3982,7 +3982,8 @@ fn drawParallel(target: []u8, depth: ?[]u8, width: u32, height: u32, uniform: []
     const dirty_bytes = dirtyTileByteCount(width, height);
     if (dirty_bytes > max_dirty_tile_bytes) return null;
     if (dirty_output) |output| if (output.len < dirty_bytes) return null;
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     configureParallelBandCount();
     var prepared: PreparedDraw = undefined;
     prepareDraw(uniform, vertex_count, base_vertex, viewport, indexed, &prepared);
@@ -4000,7 +4001,8 @@ fn drawPreparedParallel(target: []u8, depth: []u8, width: u32, height: u32, unif
     const dirty_bytes = dirtyTileByteCount(width, height);
     if (dirty_bytes > max_dirty_tile_bytes) return 0;
     if (expected_target) |expected| if (expected.len != target.len) return 0;
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     configureParallelBandCount();
     var prepared: PreparedDraw = undefined;
     const cache_status = prepareDrawCached(uniform, texture, texture_width, texture_height, vertex_count, viewport, &prepared);
@@ -4086,7 +4088,8 @@ fn drawParallelBatchImpl(target: []u8, depth: []u8, width: u32, height: u32, com
     if (commands.len == 0 or commands.len > max_batch_commands or dirtyTileByteCount(width, height) > max_dirty_tile_bytes) return 0;
     if (target.len != @as(usize, width) * height * 4 or depth.len < @as(usize, width) * height * 4) return 0;
     if (dirty_output) |output| if (output.len < dirtyTileByteCount(width, height)) return 0;
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     configureParallelBandCount();
     const needs_preparation = batchNeedsPreparation(commands, width, height);
     var prepare_context: ParallelBatchPrepare = undefined;

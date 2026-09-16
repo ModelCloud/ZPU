@@ -5507,7 +5507,8 @@ fn allocateMemory(device: ?Device, info: ?*const MemoryAllocateInfo, alloc: ?*co
         hit(.heap_exhaustion);
         return .error_out_of_host_memory;
     }
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     const allocation_size = std.math.cast(usize, ci.allocation_size) orelse {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU host allocation size conversion failed size={}\n", .{ci.allocation_size});
         return .error_out_of_host_memory;
@@ -19772,7 +19773,8 @@ fn createSwapchain(device: ?Device, info: ?*const SwapchainCreateInfo, alloc: ?*
         if (old.owner != d or old.surface != surface or old.retiring) return .error_initialization_failed;
         break :blk old;
     };
-    _ = cpu_locality.pinCurrent(.render);
+    const caller_pin = cpu_locality.pinForCall(.render);
+    defer if (caller_pin) |pin| pin.restore();
     for (&swapchain_objects, &swapchain_state) |*swapchain, *state| if (state.* == .never or (state.* == .tombstone and !swapchain.transport_retire_pending)) {
         const pixels = @as(u64, ci.image_extent.width) * ci.image_extent.height;
         const image_count = if (pixels >= @as(u64, 3840) * 2160 and ci.min_image_count < 4) ci.min_image_count + 1 else ci.min_image_count;
