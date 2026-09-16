@@ -407,6 +407,7 @@ benchmark_chrome() {
         ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
         ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" \
         ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
+        ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
         ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
         ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
         ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \

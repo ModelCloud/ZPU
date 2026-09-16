@@ -20630,10 +20630,15 @@ fn presentTimingRequest(info: *const PresentInfo, index: usize, now_ns: u64) !?P
                 const timing = times[index];
                 logGoogleDisplayTimingMapped("VkPresentTimesInfoGOOGLE in vkQueuePresentKHR");
                 // A zero desiredPresentTime means the presentation engine may
-                // display the image at any time.  Use the current monotonic
-                // instant as the internal scheduling deadline, while retaining
-                // the application value for VkPastPresentationTimingGOOGLE.
-                const target = if (timing.desired_present_time == 0) now_ns else timing.desired_present_time;
+                // display the image at any time.  Chromium can also carry a
+                // stale far-future legacy deadline across a surface restart;
+                // honoring it verbatim freezes the visible compositor for
+                // seconds.  The fixed-refresh ZPU engine accepts a requested
+                // slot only within two refresh intervals and presents stale
+                // or distant requests immediately, while retaining the exact
+                // application value for VkPastPresentationTimingGOOGLE.
+                const lead_limit = configuredRefreshDuration() orelse 0;
+                const target = if (timing.desired_present_time == 0 or timing.desired_present_time <= now_ns or lead_limit == 0 or timing.desired_present_time - now_ns > lead_limit *| 2) now_ns else timing.desired_present_time;
                 request = .{ .target_ns = target, .reported_target_ns = timing.desired_present_time, .requested_stages = 0, .present_id = timing.present_id, .source = .google };
             }
             next = @ptrCast(header.p_next);
@@ -20732,6 +20737,10 @@ test "EXT present timing selects absolute and relative deadlines" {
     const zero_google_request = try presentTimingRequest(&google_info, 0, 1_000);
     try std.testing.expectEqual(@as(?u64, 1_000), zero_google_request.?.target_ns);
     try std.testing.expectEqual(@as(u64, 0), zero_google_request.?.reported_target_ns);
+    google_time.desired_present_time = 100_000_000;
+    const stale_google_request = try presentTimingRequest(&google_info, 0, 1_000);
+    try std.testing.expectEqual(@as(?u64, 1_000), stale_google_request.?.target_ns);
+    try std.testing.expectEqual(@as(u64, 100_000_000), stale_google_request.?.reported_target_ns);
     google.times = null;
     try std.testing.expectEqual(@as(?u64, null), try presentTarget(&google_info, 0, 1_000));
     const ignored = ChainHeader{ .s_type = 99, .p_next = null };
