@@ -207,6 +207,17 @@ def main() -> None:
                 probe();
               }});
               if (!ready) return {{ loadState: 'missing-scene', callbacks: 0, callbackElapsedSeconds: 0, framesPerSecond: 0 }};
+              // Exclude page hydration and GPU-process setup from the steady
+              // compositor sample.  This is still active rendering time: rAF
+              // must be delivered continuously through the whole warm-up.
+              if ({args.warmup * 1000:.3f} > 0) await new Promise(resolve => {{
+                const warmupDeadline = performance.now() + {args.warmup * 1000:.3f};
+                function warmupFrame(now) {{
+                  if (now < warmupDeadline) requestAnimationFrame(warmupFrame);
+                  else resolve();
+                }}
+                requestAnimationFrame(warmupFrame);
+              }});
               let callbacks = 0, first = null, last = null, previous = null;
               const intervals = [];
               const deadline = performance.now() + {args.duration * 1000:.3f};
@@ -226,6 +237,7 @@ def main() -> None:
                 callbackElapsedSeconds: first === null || last === null ? 0 : (last - first) / 1000,
                 framesPerSecond: first === null || last === null ? 0 : (callbacks - 1) / ((last - first) / 1000),
                 p99FrameIntervalMilliseconds,
+                warmupSeconds: {args.warmup:.3f},
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""

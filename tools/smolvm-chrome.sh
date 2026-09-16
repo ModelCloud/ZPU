@@ -37,6 +37,7 @@ wait_budget=${ZPU_CHROME_WAIT:-10000}
 chrome_cpu_set=${ZPU_CHROME_CPU_SET:-0,1}
 refresh_hz=${ZPU_CHROME_REFRESH_HZ:-60}
 benchmark_duration=${ZPU_CHROME_BENCHMARK_DURATION:-8}
+benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-3}
 # 17 ms leaves the same small scheduling margin as the desktop 60 Hz gate,
 # while still rejecting a missed 60 Hz compositor deadline.
 benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
@@ -65,6 +66,7 @@ die() {
 [[ $diagnose_render == 0 || $diagnose_render == 1 ]] || die 'ZPU_DIAGNOSE_RENDER must be 0 or 1'
 [[ $refresh_hz == 60 ]] || die 'ZPU_CHROME_REFRESH_HZ must be exactly 60 for the 60 fps profile'
 [[ $benchmark_duration =~ ^[1-9][0-9]*$ ]] || die 'ZPU_CHROME_BENCHMARK_DURATION must be a positive integer'
+[[ $benchmark_warmup =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_WARMUP must be a non-negative decimal'
 [[ $benchmark_p99_ms =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_P99_MS must be a positive decimal'
 IFS=, read -r chrome_cpu_a chrome_cpu_b chrome_cpu_extra <<<"$chrome_cpu_set"
 [[ -n ${chrome_cpu_a:-} && -n ${chrome_cpu_b:-} && -z ${chrome_cpu_extra:-} && $chrome_cpu_a =~ ^[0-9]+$ && $chrome_cpu_b =~ ^[0-9]+$ && $chrome_cpu_a != "$chrome_cpu_b" ]] || \
@@ -383,7 +385,7 @@ launch_chrome() {
 benchmark_chrome() {
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} == 1 ]]; then
         printf '+ benchmark Chromium at %sx%s @ %s Hz with ZPU restricted to CPUs %s (ZPU_MAX_THREADS=2)\n' "$width" "$height" "$refresh_hz" "$chrome_cpu_set"
-        printf '+ visit %s for %ss each; require compositor p99 <= %sms\n' "$benchmark_urls" "$benchmark_duration" "$benchmark_p99_ms"
+        printf '+ warm up each site for %ss, then measure %ss; require compositor p99 <= %sms\n' "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms"
         return 0
     fi
     local guest_tool=/run/zpu-runtime/chromium-cdp-video-test.py
@@ -424,8 +426,8 @@ benchmark_chrome() {
         result="/run/zpu-runtime/chromium-${safe_url}.json"
         printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
         run smolvm machine exec --name "$machine" -- \
-            sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --duration "$3" --max-p99-frame-ms "$4" > "$5"' \
-            sh "$guest_tool" "$site" "$benchmark_duration" "$benchmark_p99_ms" "$result" || return $?
+            sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --warmup "$3" --duration "$4" --max-p99-frame-ms "$5" > "$6"' \
+            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$result" || return $?
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
     done
 }
