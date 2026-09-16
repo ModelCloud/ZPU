@@ -40,7 +40,9 @@ done
 for chrome_requirement in \
     'ZPU_MAX_THREADS=2' \
     'ZPU_MOSAIC_CPU_SET="$chrome_cpu_set"' \
-    'benchmark) benchmark ;;'; do
+    'benchmark) benchmark ;;' \
+    'webgl) webgl ;;' \
+    '--require-webgl-draw'; do
     grep -F -- "$chrome_requirement" "$chrome_launcher" >/dev/null || {
         echo "Chromium two-core benchmark requirement is missing: $chrome_requirement" >&2
         exit 1
