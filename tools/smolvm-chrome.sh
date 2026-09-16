@@ -48,6 +48,7 @@ benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
 diagnose_failures=${ZPU_DIAGNOSE_FAILURES:-0}
 diagnose_render=${ZPU_DIAGNOSE_RENDER:-0}
 present_dump=${ZPU_PRESENT_DUMP:-}
+one_core_present=${ZPU_ONE_CORE:-0}
 
 socket_root=/tmp/.X11-unix
 host_socket=$socket_root/X${display#:}
@@ -68,6 +69,7 @@ die() {
 
 [[ $diagnose_failures == 0 || $diagnose_failures == 1 ]] || die 'ZPU_DIAGNOSE_FAILURES must be 0 or 1'
 [[ $diagnose_render == 0 || $diagnose_render == 1 ]] || die 'ZPU_DIAGNOSE_RENDER must be 0 or 1'
+[[ $one_core_present == 0 || $one_core_present == 1 ]] || die 'ZPU_ONE_CORE must be 0 or 1'
 [[ $refresh_hz == 60 ]] || die 'ZPU_CHROME_REFRESH_HZ must be exactly 60 for the 60 fps profile'
 [[ $benchmark_duration =~ ^[1-9][0-9]*$ ]] || die 'ZPU_CHROME_BENCHMARK_DURATION must be a positive integer'
 [[ $benchmark_warmup =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_WARMUP must be a non-negative decimal'
@@ -360,6 +362,7 @@ launch_chrome() {
         ZPU_MAX_THREADS=2 \
         ZPU_SELECTED_CPUS="$chrome_cpu_set" \
         ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" \
+        ZPU_ONE_CORE="$one_core_present" \
         ZPU_REFRESH_HZ="$refresh_hz" \
         "$chrome_bin" --no-sandbox \
         --disable-gpu-sandbox \
@@ -413,6 +416,7 @@ benchmark_chrome() {
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_LIMITED=physical-core-v1 ZPU_MAX_THREADS=2 ZPU_SELECTED_CPUS="$chrome_cpu_set" \
         ZPU_MOSAIC_CPU_SET="$chrome_cpu_set" ZPU_REFRESH_HZ="$refresh_hz" \
+        ZPU_ONE_CORE="$one_core_present" \
         ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
         ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
         ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
