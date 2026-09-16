@@ -42,6 +42,8 @@ benchmark_warmup=${ZPU_CHROME_BENCHMARK_WARMUP:-10}
 # while still rejecting a missed 60 Hz compositor deadline.
 benchmark_p99_ms=${ZPU_CHROME_BENCHMARK_P99_MS:-17}
 benchmark_min_fps=${ZPU_CHROME_BENCHMARK_MIN_FPS:-60}
+benchmark_pointer_sweep=${ZPU_CHROME_POINTER_SWEEP:-1}
+benchmark_pointer_hz=${ZPU_CHROME_POINTER_HZ:-60}
 benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.google.com/search?q=zpu+60fps,https://www.bing.com,https://www.bing.com/search?q=zpu+60fps}
 # An optional host directory that receives each site's JSON telemetry before
 # the benchmark tears down the guest tmpfs and restores network isolation.
@@ -79,6 +81,8 @@ die() {
 [[ $benchmark_warmup =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_WARMUP must be a non-negative decimal'
 [[ $benchmark_p99_ms =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_P99_MS must be a positive decimal'
 [[ $benchmark_min_fps =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_MIN_FPS must be a positive decimal'
+[[ $benchmark_pointer_sweep == 0 || $benchmark_pointer_sweep == 1 ]] || die 'ZPU_CHROME_POINTER_SWEEP must be 0 or 1'
+[[ $benchmark_pointer_hz =~ ^([1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$ ]] || die 'ZPU_CHROME_POINTER_HZ must be a positive decimal'
 IFS=, read -r chrome_cpu_a chrome_cpu_b chrome_cpu_extra <<<"$chrome_cpu_set"
 [[ -n ${chrome_cpu_a:-} && -n ${chrome_cpu_b:-} && -z ${chrome_cpu_extra:-} && $chrome_cpu_a =~ ^[0-9]+$ && $chrome_cpu_b =~ ^[0-9]+$ && $chrome_cpu_a != "$chrome_cpu_b" ]] || \
     die 'ZPU_CHROME_CPU_SET must name exactly two distinct CPU numbers, e.g. 0,1'
@@ -406,6 +410,10 @@ benchmark_chrome() {
     local guest_log=/run/zpu-runtime/chromium.log
     local guest_profile=/run/zpu-runtime/chromium-profile
     local site safe_url result
+    local -a pointer_options=()
+    if [[ $benchmark_pointer_sweep == 1 ]]; then
+        pointer_options=(--pointer-sweep --pointer-sweep-hz "$benchmark_pointer_hz")
+    fi
     if [[ -n $benchmark_results_dir ]]; then
         mkdir -p -- "$benchmark_results_dir"
         [[ -d $benchmark_results_dir && -w $benchmark_results_dir ]] || die "ZPU_CHROME_BENCHMARK_RESULTS_DIR is not a writable directory: $benchmark_results_dir"
@@ -445,11 +453,14 @@ benchmark_chrome() {
             cat "$log" >&2
             exit 1
         ' sh "$guest_pid" "$guest_log" || return $?
-        printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s\n' "$site" "$width" "$height" "$chrome_cpu_set"
+        printf 'zpu-chrome: measuring %s at %sx%s with ZPU on CPUs %s%s\n' "$site" "$width" "$height" "$chrome_cpu_set" \
+            "$([[ $benchmark_pointer_sweep == 1 ]] && printf ' and a %s Hz viewport-wide pointer sweep' "$benchmark_pointer_hz")"
         local probe_status=0
         if run smolvm machine exec --name "$machine" -- \
-            sh -c 'python3 "$1" --compositor --compositor-selector body --page-url "$2" --warmup "$3" --duration "$4" --max-p99-frame-ms "$5" --min-fps "$6" > "$7"' \
-            sh "$guest_tool" "$site" "$benchmark_warmup" "$benchmark_duration" "$benchmark_p99_ms" "$benchmark_min_fps" "$result"; then
+            sh -c 'result=$1; shift; python3 "$@" > "$result"' \
+            sh "$result" "$guest_tool" --compositor --compositor-selector body --page-url "$site" \
+            --warmup "$benchmark_warmup" --duration "$benchmark_duration" \
+            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}"; then
             :
         else
             probe_status=$?
