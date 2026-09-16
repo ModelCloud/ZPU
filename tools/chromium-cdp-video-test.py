@@ -224,6 +224,14 @@ def main() -> None:
               }});
               let callbacks = 0, first = null, last = null, previous = null;
               const intervals = [];
+              const longTasks = [];
+              let observer = null;
+              if (typeof PerformanceObserver !== 'undefined') try {{
+                observer = new PerformanceObserver(list => {{
+                  for (const entry of list.getEntries()) longTasks.push(entry.duration);
+                }});
+                observer.observe({{ type: 'longtask', buffered: true }});
+              }} catch (_) {{}}
               const deadline = performance.now() + {args.duration * 1000:.3f};
               await new Promise(resolve => {{
                 function frame(now) {{
@@ -235,6 +243,7 @@ def main() -> None:
                 requestAnimationFrame(frame);
               }});
               intervals.sort((a, b) => a - b);
+              observer?.disconnect();
               const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
               return {{
                 loadState: 'ready', callbacks,
@@ -244,6 +253,8 @@ def main() -> None:
                 framesPerSecond: first === null || last === null ? 0 : (callbacks - 1) / ((last - first) / 1000),
                 p99FrameIntervalMilliseconds,
                 warmupSeconds: {args.warmup:.3f},
+                longTaskCount: longTasks.length,
+                maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
               }};
             }})()"""
