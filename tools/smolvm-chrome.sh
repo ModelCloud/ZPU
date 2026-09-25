@@ -46,7 +46,7 @@ benchmark_pointer_sweep=${ZPU_CHROME_POINTER_SWEEP:-1}
 benchmark_pointer_hz=${ZPU_CHROME_POINTER_HZ:-60}
 benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.google.com/search?q=zpu+60fps,https://www.bing.com,https://www.bing.com/search?q=zpu+60fps}
 benchmark_require_webgl=${ZPU_CHROME_BENCHMARK_REQUIRE_WEBGL:-0}
-webgl_demo_url=${ZPU_WEBGL_DEMO_URL:-https://threejs.org/examples/webgl_geometry_terrain.html}
+webgl_demo_urls=${ZPU_WEBGL_DEMO_URLS:-${ZPU_WEBGL_DEMO_URL:-https://threejs.org/examples/webgl_geometry_terrain.html}}
 # An optional host directory that receives each site's JSON telemetry before
 # the benchmark tears down the guest tmpfs and restores network isolation.
 benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
@@ -134,7 +134,7 @@ require_programs() {
             command -v "$program" >/dev/null || die "$program is required"
         fi
     done
-    if ! python3 -c 'from PIL import Image' 2>/dev/null; then
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]] && ! python3 -c 'from PIL import Image' 2>/dev/null; then
         die 'python3 PIL is required for PNG compression'
     fi
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
@@ -415,11 +415,12 @@ benchmark_chrome() {
     local site safe_url result
     local -a pointer_options=()
     local -a webgl_options=()
+    local -a game_options=()
     if [[ $benchmark_pointer_sweep == 1 ]]; then
         pointer_options=(--pointer-sweep --pointer-sweep-hz "$benchmark_pointer_hz")
     fi
     if [[ $benchmark_require_webgl == 1 ]]; then
-        webgl_options=(--require-webgl --require-webgl-draw)
+        webgl_options=(--require-webgl --require-webgl-draw --require-webgl-size "${width}x${height}")
     fi
     if [[ -n $benchmark_results_dir ]]; then
         mkdir -p -- "$benchmark_results_dir"
@@ -433,9 +434,13 @@ benchmark_chrome() {
     " || return $?
     IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
     for site in "${benchmark_url_list[@]}"; do
+        game_options=()
         if [[ $benchmark_require_webgl == 1 ]]; then
-            [[ $site == "$webgl_demo_url" && $site =~ ^https://threejs\.org/examples/webgl_geometry_[A-Za-z0-9_-]+\.html$ ]] || \
-                die "ZPU_WEBGL_DEMO_URL must be an official Three.js geometry demo: $site"
+            [[ $site =~ ^https://threejs\.org/examples/(webgl_[A-Za-z0-9_-]+|games_[A-Za-z0-9_-]+)\.html$ ]] || \
+                die "WebGL demos must be official Three.js WebGL or games examples: $site"
+            if [[ $site =~ /games_ ]]; then
+                game_options=(--exercise-game-controls)
+            fi
         else
             [[ $site =~ ^https://(www\.)?(google\.com|bing\.com)(/search\?q=[A-Za-z0-9._%+-]+)?/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits Google/Bing homepages or deterministic search queries: $site"
         fi
@@ -472,7 +477,7 @@ benchmark_chrome() {
             sh -c 'result=$1; shift; python3 "$@" > "$result"' \
             sh "$result" "$guest_tool" --compositor --compositor-selector body --page-url "$site" \
             --warmup "$benchmark_warmup" --duration "$benchmark_duration" \
-            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}" "${webgl_options[@]}"; then
+            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}" "${webgl_options[@]}" "${game_options[@]}"; then
             :
         else
             probe_status=$?
@@ -547,12 +552,12 @@ benchmark() {
 
 webgl() {
     # This is deliberately a distinct profile from the 4K search benchmark.
-    # It exercises a public, animated Three.js terrain canvas at 2K and asks
-    # CDP to reject an ANGLE software fallback or a cleared/failed canvas.
-    # ZPU remains restricted to the same two Mosaic CPU lanes.
+    # It exercises public Three.js graphics and game scenes at 2K, requires
+    # ZPU's Vulkan adapter and actual canvas output, and sends gameplay input
+    # to the FPS case. ZPU remains restricted to the same two Mosaic CPU lanes.
     width=${ZPU_WEBGL_WIDTH:-2560}
     height=${ZPU_WEBGL_HEIGHT:-1440}
-    benchmark_urls=$webgl_demo_url
+    benchmark_urls=$webgl_demo_urls
     benchmark_require_webgl=1
     benchmark
 }

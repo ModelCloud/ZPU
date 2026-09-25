@@ -1386,6 +1386,8 @@ const RenderPassObj = struct {
     color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
+    stencil_load_op: i32 = 2,
+    stencil_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
     depth_subpass_layout: i32 = 0,
     depth_final_layout: i32 = 0,
@@ -1657,12 +1659,16 @@ const IndirectCountState = struct { buffer: *BufferObj, offset: u64, max_draw_co
 const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{}, count_source: ?IndirectCountState = null };
 const BlitImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageBlit, filter: i32 };
 const ResolveImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageResolve };
+const ClearDepthCommand = struct { image: *ImageObj, layout: i32, depth: f32, stencil: u32 = 0, aspect_mask: u32 = 2, base_layer: u32 = 0, layer_count: u32 = 1 };
+const RenderClearCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, stencil_value: u32 = 0, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true, clear_stencil: bool = false };
+const ClearAttachmentsCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
+const DeferredClearAttachmentsCommand = struct { color: [4]u8, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
 const DynamicState = struct { cull_mode: u32 = std.math.maxInt(u32), front_face: i32 = -1, primitive_topology: i32 = 3, primitive_topology_set: bool = false, primitive_restart_enable: u32 = 0, primitive_restart_enable_set: bool = false, rasterizer_discard_enable: u32 = 0, rasterizer_discard_enable_set: bool = false, depth_bias_enable: u32 = 0, depth_bias_enable_set: bool = false, depth_test_enable: u32 = 1, depth_test_enable_set: bool = false, depth_write_enable: u32 = 1, depth_write_enable_set: bool = false, depth_compare_op: i32 = 3, depth_compare_op_set: bool = false, depth_bounds_test_enable: u32 = 0, depth_bounds_test_enable_set: bool = false, stencil_test_enable: u32 = 0, stencil_test_enable_set: bool = false, stencil_fail_op: i32 = 0, stencil_pass_op: i32 = 0, stencil_depth_fail_op: i32 = 0, stencil_compare_op: i32 = 7, stencil_op_set: bool = false };
 const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, clear_attachments_deferred: struct { color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -2562,7 +2568,7 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
             pipeline_rendering_create_info_stype => {
                 if (seen_rendering) return null;
                 const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
-                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !colorAttachmentFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
+                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !colorAttachmentFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or (info.stencil_attachment_format != 0 and !isStencilFormat(info.stencil_attachment_format))) return null;
                 const color_format = if (info.color_attachment_count == 0) 0 else info.color_attachment_formats.?[0];
                 // ZPU's dynamic-rendering attachment path is deliberately
                 // bounded to the same formats accepted by vkCmdBeginRendering.
@@ -4185,7 +4191,86 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
     out.memory_heaps[0] = .{ .size = 256 * 1024 * 1024, .flags = 0 };
 }
 fn isDepthFormat(format: i32) bool {
-    return format == 124 or format == 126;
+    return format == 124 or format == 126 or format == format_d24_unorm_s8_uint;
+}
+const format_d24_unorm_s8_uint: i32 = 129;
+const image_aspect_depth_bit: u32 = 0x2;
+const image_aspect_stencil_bit: u32 = 0x4;
+
+fn isStencilFormat(format: i32) bool {
+    return format == format_d24_unorm_s8_uint;
+}
+
+fn validImageAspectMask(image: *const ImageObj, mask: u32) bool {
+    if (isDepthFormat(image.format)) {
+        const supported = image_aspect_depth_bit | (if (isStencilFormat(image.format)) image_aspect_stencil_bit else 0);
+        return mask != 0 and mask & ~supported == 0;
+    }
+    return mask == image_aspect_color_bit;
+}
+
+fn depthValueFromStorage(format: i32, bytes: []const u8, offset: usize) f32 {
+    const packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+    if (format == format_d24_unorm_s8_uint) {
+        return @as(f32, @floatFromInt(packed_word >> 8)) / 16_777_215.0;
+    }
+    return @bitCast(packed_word);
+}
+
+fn writeDepthValueToStorage(format: i32, bytes: []u8, offset: usize, value: f32) void {
+    if (format == format_d24_unorm_s8_uint) {
+        const old = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        const normalized = std.math.clamp(value, 0, 1);
+        const depth_bits: u32 = @intFromFloat(@round(normalized * 16_777_215.0));
+        std.mem.writeInt(u32, bytes[offset..][0..4], (depth_bits << 8) | (old & 0xff), .little);
+        return;
+    }
+    std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
+}
+
+fn clearDepthStencilBytes(image: *const ImageObj, bytes: []u8, depth: f32, stencil: u32, aspects: u32) void {
+    if (image.format != format_d24_unorm_s8_uint) {
+        if (aspects & image_aspect_depth_bit != 0) fillImagePattern(bytes, @bitCast(depth));
+        return;
+    }
+    const clear_depth = aspects & image_aspect_depth_bit != 0;
+    const clear_stencil = aspects & image_aspect_stencil_bit != 0;
+    const depth_bits: u32 = if (clear_depth) @intFromFloat(@round(std.math.clamp(depth, 0, 1) * 16_777_215.0)) else 0;
+    const stencil_bits = stencil & 0xff;
+    if (clear_depth and clear_stencil) {
+        const packed_word = (depth_bits << 8) | stencil_bits;
+        fillImagePattern(bytes, packed_word);
+        return;
+    }
+    var offset: usize = 0;
+    while (offset + 4 <= bytes.len) : (offset += 4) {
+        var packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        if (clear_depth) packed_word = (depth_bits << 8) | (packed_word & 0xff);
+        if (clear_stencil) packed_word = (packed_word & 0xffff_ff00) | stencil_bits;
+        std.mem.writeInt(u32, bytes[offset..][0..4], packed_word, .little);
+    }
+}
+
+fn clearDepthStencilRect(image: *const ImageObj, bytes: []u8, rect: Rect2D, depth: f32, stencil: u32, aspects: u32) void {
+    if (image.format != format_d24_unorm_s8_uint) {
+        if (aspects & image_aspect_depth_bit != 0) fillImagePatternRect(bytes, image.width, .{ .x = rect.offset.x, .y = rect.offset.y, .width = rect.extent.width, .height = rect.extent.height }, @bitCast(depth));
+        return;
+    }
+    const clear_depth = aspects & image_aspect_depth_bit != 0;
+    const clear_stencil = aspects & image_aspect_stencil_bit != 0;
+    const depth_bits: u32 = if (clear_depth) @intFromFloat(@round(std.math.clamp(depth, 0, 1) * 16_777_215.0)) else 0;
+    const stencil_bits = stencil & 0xff;
+    const x0: u32 = @intCast(rect.offset.x);
+    const y0: u32 = @intCast(rect.offset.y);
+    const x1 = x0 + rect.extent.width;
+    const y1 = y0 + rect.extent.height;
+    for (y0..y1) |y| for (x0..x1) |x| {
+        const offset = (y * image.width + x) * 4;
+        var packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        if (clear_depth) packed_word = (depth_bits << 8) | (packed_word & 0xff);
+        if (clear_stencil) packed_word = (packed_word & 0xffff_ff00) | stencil_bits;
+        std.mem.writeInt(u32, bytes[offset..][0..4], packed_word, .little);
+    };
 }
 // WebGL 1 requires the RGBA4, RGB565, and RGB5_A1 renderbuffer families before
 // ANGLE permits a context. Both Vulkan channel orders are required because
@@ -4244,6 +4329,7 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // render target or input attachment, and every plane shares one
         // allocation rather than exposing disjoint-memory semantics.
         format_g8_b8r8_2plane_420_unorm => 0x2 | 0x4,
+        format_d24_unorm_s8_uint => 0x2 | 0x20,
         124 => 0x2 | 0x20,
         126 => 0x2 | 0x20,
         else => 0,
@@ -4284,6 +4370,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
         37, 43 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
+        format_d24_unorm_s8_uint => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
@@ -6265,7 +6352,7 @@ fn getRenderingAreaGranularity(device: ?Device, info: ?*const RenderingAreaInfo,
     const out = output orelse return;
     if (ci.s_type != 1000470003 or ci.p_next != null or ci.view_mask != 0 or ci.color_attachment_count > 1 or
         (ci.color_attachment_count != 0 and (ci.color_attachment_formats == null or imageFormatUsage(ci.color_attachment_formats.?[0], 0) & 0x10 == 0)) or
-        (ci.depth_attachment_format != 0 and !isDepthFormat(ci.depth_attachment_format)) or ci.stencil_attachment_format != 0) return;
+        (ci.depth_attachment_format != 0 and !isDepthFormat(ci.depth_attachment_format)) or (ci.stencil_attachment_format != 0 and !isStencilFormat(ci.stencil_attachment_format))) return;
     lock();
     defer mutex.unlock();
     if (validDeviceLocked(d)) out.* = .{ .width = 1, .height = 1 };
@@ -6770,7 +6857,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
             const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
             if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
             const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
-            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !colorAttachmentFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !colorAttachmentFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or (dynamic_info.stencil_attachment_format != 0 and !isStencilFormat(dynamic_info.stencil_attachment_format)) or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
             inherited_dynamic = true;
             inherited_dynamic_view_mask = dynamic_info.view_mask;
             inherited_dynamic_color_format = if (dynamic_info.color_attachment_count == 0) 0 else dynamic_info.color_attachment_formats.?[0];
@@ -6992,14 +7079,14 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
         },
         .clear_attachments_deferred => |op| {
             const dynamic = dynamic_color != null or dynamic_depth != null;
-            const image = if (op.aspect_mask == 1) dynamic_color orelse (if (framebuffer) |fb| fb.color_image else null) else if (op.aspect_mask == 2) dynamic_depth orelse (if (framebuffer) |fb| fb.depth_image else null) else null;
+            const image = if (op.aspect_mask == image_aspect_color_bit) dynamic_color orelse (if (framebuffer) |fb| fb.color_image else null) else if (op.aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0) dynamic_depth orelse (if (framebuffer) |fb| fb.depth_image else null) else null;
             const target = image orelse return null;
-            const base_layer = std.math.add(u32, op.base_layer, if (dynamic) (if (op.aspect_mask == 1) dynamic_color_base_layer else dynamic_depth_base_layer) else 0) catch return null;
+            const base_layer = std.math.add(u32, op.base_layer, if (dynamic) (if (op.aspect_mask == image_aspect_color_bit) dynamic_color_base_layer else dynamic_depth_base_layer) else 0) catch return null;
             if (op.layer_count == 0 or base_layer >= target.array_layers or op.layer_count > target.array_layers - base_layer or op.rect.offset.x < 0 or op.rect.offset.y < 0 or op.rect.extent.width == 0 or op.rect.extent.height == 0) return null;
             const end_x = std.math.add(u64, @intCast(op.rect.offset.x), op.rect.extent.width) catch return null;
             const end_y = std.math.add(u64, @intCast(op.rect.offset.y), op.rect.extent.height) catch return null;
             if (end_x > target.width or end_y > target.height) return null;
-            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .depth_value = op.depth_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
+            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .depth_value = op.depth_value, .stencil_value = op.stencil_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
         },
         else => {},
     }
@@ -7042,7 +7129,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
         } else if (primary.impl.dynamic_rendering) {
             const primary_color_format = if (primary.impl.dynamic_color_image) |color| color.format else 0;
             const primary_samples = if (primary.impl.dynamic_color_image) |color| color.samples else if (primary.impl.dynamic_depth_image) |depth| depth.samples else 1;
-            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion) or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary_samples) {
+            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion) or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != primary.impl.inherited_dynamic_stencil_format or secondary.impl.inherited_dynamic_samples != primary_samples) {
                 primary.impl.invalid = true;
                 return;
             }
@@ -7223,12 +7310,11 @@ fn validRange(r: ImageSubresourceRange) bool {
     return r.aspect_mask == 1 and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < max_image_array_layers and r.layer_count <= max_image_array_layers - r.base_array_layer;
 }
 fn validRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
-    const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
-    return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
+    return validImageAspectMask(image, r.aspect_mask) and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validBarrierRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
-    const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
-    return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
+    const aspects_valid = if (isStencilFormat(image.format)) r.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit) else validImageAspectMask(image, r.aspect_mask);
+    return aspects_valid and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
     const aspect_valid = if (ycbcr420Nv12Format(image.format)) layers.aspect_mask == image_aspect_plane_0_bit or layers.aspect_mask == image_aspect_plane_1_bit else layers.aspect_mask == image_aspect_color_bit;
@@ -7354,14 +7440,22 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or !isDepthFormat(image.format) or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or !isDepthFormat(image.format) or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7)) {
         c.impl.invalid = true;
         return;
     }
-    for (ranges.?[0..count]) |range| if (!validRangeForImage(image, range)) {
+    var depth_aspect_requested = false;
+    for (ranges.?[0..count]) |range| {
+        if (!validRangeForImage(image, range)) {
+            c.impl.invalid = true;
+            return;
+        }
+        depth_aspect_requested = depth_aspect_requested or range.aspect_mask & image_aspect_depth_bit != 0;
+    }
+    if (depth_aspect_requested and (!std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1)) {
         c.impl.invalid = true;
         return;
-    };
+    }
     var unique_count: usize = 0;
     for (ranges.?[0..count], 0..) |range, index| {
         var duplicate = false;
@@ -7382,7 +7476,7 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
             break;
         };
         if (duplicate) continue;
-        record(c, .{ .clear_depth = .{ .image = image, .layout = layout, .depth = value.?.depth, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
+        record(c, .{ .clear_depth = .{ .image = image, .layout = layout, .depth = value.?.depth, .stencil = value.?.stencil, .aspect_mask = range.aspect_mask, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
     }
 }
 fn clearRectValid(rect: ClearRect, width: u32, height: u32, layers: u32) bool {
@@ -7437,11 +7531,11 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
         break :blk format;
     } else 0;
     for (attachments.?[0..attachment_count]) |attachment| {
-        if (attachment.aspect_mask != 1 and attachment.aspect_mask != 2) {
+        if (attachment.aspect_mask != image_aspect_color_bit and attachment.aspect_mask != image_aspect_depth_bit and attachment.aspect_mask != image_aspect_stencil_bit and attachment.aspect_mask != (image_aspect_depth_bit | image_aspect_stencil_bit)) {
             c.impl.invalid = true;
             return;
         }
-        if (attachment.aspect_mask == 1) {
+        if (attachment.aspect_mask == image_aspect_color_bit) {
             if (attachment.color_attachment != 0) {
                 c.impl.invalid = true;
                 return;
@@ -7456,11 +7550,12 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
                 return;
             }
         } else {
-            if (depth_image == null and !isDepthFormat(inherited_depth_format)) {
+            const actual_depth_format = if (depth_image) |depth| depth.format else inherited_depth_format;
+            if (!isDepthFormat(actual_depth_format) or (attachment.aspect_mask & image_aspect_stencil_bit != 0 and !isStencilFormat(actual_depth_format))) {
                 c.impl.invalid = true;
                 return;
             }
-            if (!std.math.isFinite(attachment.clear_value.depth_stencil.depth) or attachment.clear_value.depth_stencil.depth < 0 or attachment.clear_value.depth_stencil.depth > 1) {
+            if (attachment.aspect_mask & image_aspect_depth_bit != 0 and (!std.math.isFinite(attachment.clear_value.depth_stencil.depth) or attachment.clear_value.depth_stencil.depth < 0 or attachment.clear_value.depth_stencil.depth > 1)) {
                 c.impl.invalid = true;
                 return;
             }
@@ -7491,13 +7586,13 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     const expected_color_layout = if (color_image != null) recordedAttachmentLayout(c, true) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, true);
     const expected_depth_layout = if (depth_image != null) recordedAttachmentLayout(c, false) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, false);
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
-        const bytes = if (attachment.aspect_mask == 1) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
-        const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == 1) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
+        const bytes = if (attachment.aspect_mask == image_aspect_color_bit) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
+        const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == image_aspect_color_bit) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
         if (inherited_secondary and color_image == null and depth_image == null) {
-            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         } else {
-            const image = if (attachment.aspect_mask == 1) color_image.? else depth_image.?;
-            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+            const image = if (attachment.aspect_mask == image_aspect_color_bit) color_image.? else depth_image.?;
+            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         }
     };
 }
@@ -8134,7 +8229,7 @@ fn renderingAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
     // color/depth attachment layouts.  Undefined, transfer, shader, present,
     // preinitialized, and cross-aspect layouts are never valid while an
     // attachment is accessed by dynamic rendering.
-    return layout == 1 or (aspect_mask == 1 and layout == 2) or (aspect_mask == 2 and layout == 3);
+    return layout == 1 or (aspect_mask == image_aspect_color_bit and layout == 2) or ((aspect_mask == image_aspect_depth_bit or aspect_mask == image_aspect_stencil_bit) and layout == 3);
 }
 fn dependencyKeyMix(hash: *u64, value: u64) void {
     hash.* ^= value;
@@ -9487,7 +9582,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
             if (op.image.owner != owner or op.image.memory.?.owner != owner) return wrongSubmittingDevice();
-            if (!imageStorageValid(op.image)) return false;
+            if (!imageStorageValid(op.image) or !isDepthFormat(op.image.format) or !validImageAspectMask(op.image, op.aspect_mask)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -9509,6 +9604,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
                 const depth_slot = imageSlot(depth) orelse return deadResource();
                 if (depth.owner != owner or (depth.memory == null and depth.owned_bytes == null) or (depth.memory != null and !liveMemoryObject(depth.memory.?))) return wrongSubmittingDevice();
                 if (!imageStorageValid(depth)) return false;
+                if ((op.clear_depth and !isDepthFormat(depth.format)) or (op.clear_stencil and !isStencilFormat(depth.format))) return false;
                 if (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout) {
                     hit(.layout_mismatch);
                     return false;
@@ -9526,7 +9622,10 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
         .clear_attachments => |op| {
             const image_slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) return wrongSubmittingDevice();
-            const expected_layout = if (op.aspect_mask == 1) op.expected_color_layout else if (op.aspect_mask == 2) op.expected_depth_layout else -1;
+            if (op.aspect_mask == image_aspect_color_bit) {
+                if (!colorAttachmentFormat(op.image.format)) return false;
+            } else if (!isDepthFormat(op.image.format) or !validImageAspectMask(op.image, op.aspect_mask)) return false;
+            const expected_layout = if (op.aspect_mask == image_aspect_color_bit) op.expected_color_layout else op.expected_depth_layout;
             if (expected_layout >= 0 and layouts[image_slot] != expected_layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -12154,7 +12253,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 }
                 if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
                 if (depth_bytes) |depth_storage| {
-                    const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
+                    const stored_depth = depthValueFromStorage(depth.?.format, depth_storage, offset);
                     if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
                 }
                 if (color_bytes) |color_storage| {
@@ -12171,7 +12270,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
                     if (wrote == null) return;
                 }
-                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
+                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) writeDepthValueToStorage(depth.?.format, depth_storage, offset, depth_value);
                 bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
                 pixels_written += 1;
             }
@@ -13078,10 +13177,9 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
         },
         .clear_depth => |op| {
             const pattern: u32 = @bitCast(op.depth);
-            const bytes = imageBytes(op.image);
-            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
-            const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer).?);
-            fillImagePattern(bytes[start..][0 .. layer_size * op.layer_count], pattern);
+            for (0..op.layer_count) |layer| {
+                clearDepthStencilBytes(op.image, imageLayerBytes(op.image, op.base_layer + @as(u32, @intCast(layer))), op.depth, op.stencil, op.aspect_mask);
+            }
             op.image.clear_pattern = pattern;
             op.image.content_bounds = emptyRect();
             op.image.force_full_present = true;
@@ -13099,15 +13197,31 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             const diagnostic_before = if (renderDiagnosticsEnabled() and diagnostic_clear < 64) diagnosticDarkPixelCount(op.image) else 0;
             const full_color_clear = op.color_base_layer == 0 and op.layer_count == op.image.array_layers;
             const full_depth_clear = if (op.depth) |depth| op.depth_base_layer == 0 and op.layer_count == depth.array_layers else true;
+            if (op.depth) |depth| if (depth.format == format_d24_unorm_s8_uint and (op.clear_depth or op.clear_stencil)) {
+                const depth_aspects = (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0);
+                for (0..op.layer_count) |layer| {
+                    const index: u32 = @intCast(layer);
+                    if (op.clear_color) fillImagePattern(imageLayerBytes(op.image, op.color_base_layer + index), @bitCast(op.color));
+                    clearDepthStencilBytes(depth, imageLayerBytes(depth, op.depth_base_layer + index), op.depth_value, op.stencil_value, depth_aspects);
+                }
+                if (op.clear_color) {
+                    op.image.clear_pattern = @bitCast(op.color);
+                    op.image.content_bounds = emptyRect();
+                    op.image.force_full_present = true;
+                    op.image.complex_3d_content = false;
+                }
+                depth.clear_pattern = @bitCast(op.depth_value);
+                depth.content_bounds = emptyRect();
+                op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
+                return;
+            };
             if (!full_color_clear or !full_depth_clear) {
                 const color_pattern: u32 = @bitCast(op.color);
                 const depth_pattern: u32 = @bitCast(op.depth_value);
                 for (0..op.layer_count) |layer| {
                     const index: u32 = @intCast(layer);
                     if (op.clear_color) fillImagePattern(imageLayerBytes(op.image, op.color_base_layer + index), color_pattern);
-                    if (op.depth) |depth| {
-                        if (op.clear_depth) fillImagePattern(imageLayerBytes(depth, op.depth_base_layer + index), depth_pattern);
-                    }
+                    if (op.depth) |depth| if (op.clear_depth or op.clear_stencil) clearDepthStencilBytes(depth, imageLayerBytes(depth, op.depth_base_layer + index), op.depth_value, op.stencil_value, (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0));
                 }
                 if (op.clear_color) {
                     op.image.clear_pattern = color_pattern;
@@ -13116,7 +13230,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     op.image.complex_3d_content = false;
                 }
                 if (op.depth) |depth| {
-                    if (op.clear_depth) {
+                    if (op.clear_depth or op.clear_stencil) {
                         depth.clear_pattern = depth_pattern;
                         depth.content_bounds = emptyRect();
                     }
@@ -13156,7 +13270,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     }
                 } else {
                     if (op.clear_color) fillImagePattern(bytes, color_pattern);
-                    if (op.clear_depth) fillImagePattern(depth_bytes, depth_pattern);
+                    if (op.clear_depth or op.clear_stencil) clearDepthStencilBytes(depth, depth_bytes, op.depth_value, op.stencil_value, (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0));
                 }
                 if (op.clear_color) {
                     if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
@@ -13165,7 +13279,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     if (!sparse) op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
                 }
-                if (op.clear_depth) {
+                if (op.clear_depth or op.clear_stencil) {
                     depth.clear_pattern = depth_pattern;
                     depth.content_bounds = emptyRect();
                 }
@@ -13187,19 +13301,17 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
         .discard_image => |op| invalidateImageContents(op.image),
         .clear_attachments => |op| {
             const region = cpu_cube.Rect{ .x = op.rect.offset.x, .y = op.rect.offset.y, .width = op.rect.extent.width, .height = op.rect.extent.height };
-            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
-            const bytes = imageBytes(op.image);
             for (0..op.layer_count) |layer| {
-                const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer + @as(u32, @intCast(layer))).?);
-                if (op.aspect_mask == 1) {
-                    fillImagePatternRect(bytes[start..][0..layer_size], op.image.width, region, @bitCast(op.color));
+                const layer_bytes = imageLayerBytes(op.image, op.base_layer + @as(u32, @intCast(layer)));
+                if (op.aspect_mask == image_aspect_color_bit) {
+                    fillImagePatternRect(layer_bytes, op.image.width, region, @bitCast(op.color));
                 } else {
-                    fillImagePatternRect(bytes[start..][0..layer_size], op.image.width, region, @bitCast(op.depth_value));
+                    clearDepthStencilRect(op.image, layer_bytes, op.rect, op.depth_value, op.stencil_value, op.aspect_mask);
                 }
             }
             op.image.clear_pattern = null;
             op.image.content_bounds = unionRect(op.image.content_bounds, region);
-            if (op.aspect_mask == 1) op.image.force_full_present = true;
+            if (op.aspect_mask == image_aspect_color_bit) op.image.force_full_present = true;
             op.image.complex_3d_content = false;
         },
         .clear_attachments_deferred => {},
@@ -14258,6 +14370,8 @@ const RenderPassFramebufferMetadata = struct {
     color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
+    stencil_load_op: i32 = 2,
+    stencil_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
     depth_subpass_layout: i32 = 0,
     depth_final_layout: i32 = 0,
@@ -14327,6 +14441,8 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
         result.attachments[depth_index] = .{ .format = descriptions[depth_index].format, .samples = descriptions[depth_index].samples, .role = .depth };
         result.depth_load_op = descriptions[depth_index].load_op;
         result.depth_store_op = descriptions[depth_index].store_op;
+        result.stencil_load_op = descriptions[depth_index].stencil_load_op;
+        result.stencil_store_op = descriptions[depth_index].stencil_store_op;
         result.depth_initial_layout = descriptions[depth_index].initial_layout;
         result.depth_subpass_layout = depth_reference.layout;
         result.depth_final_layout = descriptions[depth_index].final_layout;
@@ -14395,6 +14511,8 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
             .color_feedback_input = framebuffer_metadata.color_feedback_input,
             .depth_load_op = framebuffer_metadata.depth_load_op,
             .depth_store_op = framebuffer_metadata.depth_store_op,
+            .stencil_load_op = framebuffer_metadata.stencil_load_op,
+            .stencil_store_op = framebuffer_metadata.stencil_store_op,
             .depth_initial_layout = framebuffer_metadata.depth_initial_layout,
             .depth_subpass_layout = framebuffer_metadata.depth_subpass_layout,
             .depth_final_layout = framebuffer_metadata.depth_final_layout,
@@ -14765,6 +14883,14 @@ test "dynamic rendering pipeline pNext validation is bounded and canonical" {
         try std.testing.expectEqual(@as(i32, 44), parsed.?.rendering.?.color_format);
         try std.testing.expectEqual(@as(i32, 126), parsed.?.rendering.?.depth_format);
     }
+    rendering.depth_attachment_format = format_d24_unorm_s8_uint;
+    rendering.stencil_attachment_format = format_d24_unorm_s8_uint;
+    parsed = graphicsPipelinePNext(@ptrCast(&rendering), 0);
+    try std.testing.expect(parsed != null and parsed.?.rendering != null);
+    try std.testing.expectEqual(format_d24_unorm_s8_uint, parsed.?.rendering.?.depth_format);
+    try std.testing.expectEqual(format_d24_unorm_s8_uint, parsed.?.rendering.?.stencil_format);
+    rendering.depth_attachment_format = 126;
+    rendering.stencil_attachment_format = 0;
     var attachmentless = rendering;
     attachmentless.color_attachment_count = 0;
     attachmentless.color_attachment_formats = null;
@@ -14791,6 +14917,9 @@ test "dynamic rendering pipeline pNext validation is bounded and canonical" {
     try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
     bad = rendering;
     bad.depth_attachment_format = 37;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
+    bad = rendering;
+    bad.stencil_attachment_format = 126;
     try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
     var flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = @ptrCast(&rendering), .flags = 0 };
     rendering.p_next = null;
@@ -16425,7 +16554,8 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         if (conversion.owner != d or conversion.conversion.format != image.format) return imageViewInvalid("ycbcr-format");
         break :blk conversion.conversion;
     } else null;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != image_aspect_color_bit and ci.subresource_range.aspect_mask != 2) or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+    const valid_view_aspect = if (isDepthFormat(image.format)) validImageAspectMask(image, ci.subresource_range.aspect_mask) else ci.subresource_range.aspect_mask == image_aspect_color_bit or ci.subresource_range.aspect_mask == image_aspect_depth_bit;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or !valid_view_aspect or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
             .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
@@ -16515,7 +16645,9 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
                     color = view.image;
                 },
                 .depth => {
-                    if (view.aspect_mask != 2 or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
+                    const depth_aspect_valid = view.aspect_mask == image_aspect_depth_bit or
+                        (isStencilFormat(view.format) and view.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit));
+                    if (!depth_aspect_valid or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
                     depth = view.image;
                 },
             }
@@ -17142,13 +17274,15 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const area_end_y = std.math.add(u64, area_y, begin.render_area.extent.height) catch std.math.maxInt(u64);
     var color = [4]f32{ 0, 0, 0, 0 };
     var depth_value: f32 = 1;
+    var stencil_value: u32 = 0;
     const clear_color = color_image != null and render_pass.color_load_op == 1;
     const clear_depth = depth != null and render_pass.depth_load_op == 1;
+    const clear_stencil = if (depth) |depth_image| isStencilFormat(depth_image.format) and render_pass.stencil_load_op == 1 else false;
     const depth_clear_index: usize = if (color_image != null) 1 else 0;
     var clear_values_valid = begin.clear_value_count <= render_pass.framebuffer_attachment_count and
         (begin.clear_value_count == 0 or begin.clear_values != null) and
         (!clear_color or begin.clear_value_count >= 1) and
-        (!clear_depth or begin.clear_value_count > depth_clear_index);
+        (!(clear_depth or clear_stencil) or begin.clear_value_count > depth_clear_index);
     if (clear_values_valid and begin.clear_value_count != 0) {
         if (clear_color) {
             color = begin.clear_values.?[0].color.float32;
@@ -17156,9 +17290,11 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
                 if (!std.math.isFinite(component)) clear_values_valid = false;
             }
         }
-        if (clear_depth) {
-            depth_value = begin.clear_values.?[depth_clear_index].depth_stencil.depth;
-            if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) clear_values_valid = false;
+        if (clear_depth or clear_stencil) {
+            const depth_stencil = begin.clear_values.?[depth_clear_index].depth_stencil;
+            depth_value = depth_stencil.depth;
+            stencil_value = depth_stencil.stencil;
+            if (clear_depth and (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1)) clear_values_valid = false;
         }
     }
     // UNDEFINED is an explicit discard request: the tracked previous layout
@@ -17173,13 +17309,13 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const first_color_layout = render_pass.subpass_color_layouts[0];
     const first_depth_layout = render_pass.subpass_depth_layouts[0];
     const layout_count: usize = @as(usize, @intFromBool(color_image != null)) + @as(usize, @intFromBool(depth != null));
-    const clear_count: usize = @as(usize, if (clear_color or clear_depth) 1 else 0);
+    const clear_count: usize = @as(usize, if (clear_color or clear_depth or clear_stencil) 1 else 0);
     // DONT_CARE (and the promoted LOAD_OP_NONE) invalidate attachment
     // contents at the start of the render pass. Record an explicit discard
     // after any initial-layout transition so the undefined-content contract
     // is visible to submission prevalidation and the CPU image metadata.
     const color_discard = color_image != null and (render_pass.color_load_op == attachment_load_op_dont_care or render_pass.color_load_op == attachment_load_op_none);
-    const depth_discard = depth != null and (render_pass.depth_load_op == attachment_load_op_dont_care or render_pass.depth_load_op == attachment_load_op_none);
+    const depth_discard = depth != null and ((render_pass.depth_load_op == attachment_load_op_dont_care or render_pass.depth_load_op == attachment_load_op_none) or (isStencilFormat(depth.?.format) and (render_pass.stencil_load_op == attachment_load_op_dont_care or render_pass.stencil_load_op == attachment_load_op_none)));
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
     const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count + discard_count;
     if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or (image != null and image.?.owner != command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > render_width or area_end_y > render_height) {
@@ -17201,15 +17337,15 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     if (depth) |depth_image| if (depth_old_layout != first_depth_layout) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_old_layout, .new_layout = first_depth_layout } });
     if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color_image.?, .layer_count = framebuffer.layers } });
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .layer_count = framebuffer.layers } });
-    if (clear_color or clear_depth) {
+    if (clear_color or clear_depth or clear_stencil) {
         if (color_image) |color_target| {
             var clear_bytes = [4]u8{ 0, 0, 0, 0 };
             if (clear_color) {
                 for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
                 if (color_target.format == 43 or color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
             }
-            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
-        } else if (depth) |depth_image| if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .layer_count = framebuffer.layers } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .depth_value = depth_value, .stencil_value = stencil_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
+        } else if (depth) |depth_image| if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .stencil = stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .layer_count = framebuffer.layers } });
     }
 }
 fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.c) void {
@@ -17260,16 +17396,33 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             return;
         };
         tracked_depth_layout = commandBufferImageLayout(command_buffer, depth_view_object.image);
-        if (depth_view_object.owner != command_buffer.impl.owner or depth_view_object.aspect_mask != 2 or depth_view_object.usage & 0x20 == 0 or !isDepthFormat(depth_view_object.image.format) or tracked_depth_layout != depth_attachment.image_layout or depth_view_object.base_array_layer >= depth_view_object.image.array_layers or depth_view_object.layer_count < ci.layer_count or ci.layer_count > depth_view_object.image.array_layers - depth_view_object.base_array_layer or (color != null and (depth_view_object.image.width != color.?.width or depth_view_object.image.height != color.?.height))) {
+        if (depth_view_object.owner != command_buffer.impl.owner or (depth_view_object.aspect_mask != image_aspect_depth_bit and depth_view_object.aspect_mask != (image_aspect_depth_bit | image_aspect_stencil_bit)) or depth_view_object.usage & 0x20 == 0 or !isDepthFormat(depth_view_object.image.format) or tracked_depth_layout != depth_attachment.image_layout or depth_view_object.base_array_layer >= depth_view_object.image.array_layers or depth_view_object.layer_count < ci.layer_count or ci.layer_count > depth_view_object.image.array_layers - depth_view_object.base_array_layer or (color != null and (depth_view_object.image.width != color.?.width or depth_view_object.image.height != color.?.height))) {
             command_buffer.impl.invalid = true;
             return;
         }
         depth = depth_view_object.image;
         depth_view = depth_view_object;
     }
-    if (ci.stencil_attachment != null) {
-        command_buffer.impl.invalid = true;
-        return;
+    var stencil_attachment: ?*const RenderingAttachmentInfo = null;
+    var stencil_view: ?*ImageViewObj = null;
+    var tracked_stencil_layout: i32 = -1;
+    if (ci.stencil_attachment) |attachment| {
+        if (depth == null or attachment.s_type != 1000044000 or attachment.p_next != null or attachment.resolve_mode != 0 or attachment.resolve_image_view != 0 or !validAttachmentLoadOp(attachment.load_op) or !validAttachmentStoreOp(attachment.store_op) or !supportedLayout(attachment.image_layout) or !renderingAttachmentLayoutValid(attachment.image_layout, image_aspect_stencil_bit)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        const stencil_view_object = validImageViewLocked(attachment.image_view) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        tracked_stencil_layout = commandBufferImageLayout(command_buffer, stencil_view_object.image);
+        const stencil_aspect_valid = stencil_view_object.aspect_mask == image_aspect_stencil_bit or stencil_view_object.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit);
+        if (stencil_view_object.owner != command_buffer.impl.owner or !stencil_aspect_valid or stencil_view_object.usage & 0x20 == 0 or !isStencilFormat(stencil_view_object.image.format) or stencil_view_object.image != depth.? or tracked_stencil_layout != attachment.image_layout or attachment.image_layout != ci.depth_attachment.?.image_layout or stencil_view_object.base_array_layer != depth_view.?.base_array_layer or stencil_view_object.layer_count < ci.layer_count or ci.layer_count > stencil_view_object.image.array_layers - stencil_view_object.base_array_layer) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        stencil_attachment = attachment;
+        stencil_view = stencil_view_object;
     }
     var clear_color = false;
     var clear_color_value = [4]u8{ 0, 0, 0, 0 };
@@ -17298,14 +17451,22 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             clear_depth = true;
         }
     }
+    var clear_stencil = false;
+    var clear_stencil_value: u32 = 0;
+    if (stencil_attachment) |attachment| {
+        if (attachment.load_op == 1) {
+            clear_stencil_value = attachment.clear_value.depth_stencil.stencil;
+            clear_stencil = true;
+        }
+    }
     // DONT_CARE and LOAD_OP_NONE make attachment contents undefined at the
     // beginning of dynamic rendering. Keep that operation explicit and
     // ordered before any load-op clear, while retaining the view's layer
     // range for arrayed attachments.
     const color_discard = color_attachment != null and (color_attachment.?.load_op == attachment_load_op_dont_care or color_attachment.?.load_op == attachment_load_op_none);
-    const depth_discard = depth != null and (ci.depth_attachment.?.load_op == attachment_load_op_dont_care or ci.depth_attachment.?.load_op == attachment_load_op_none);
+    const depth_discard = depth != null and ((ci.depth_attachment.?.load_op == attachment_load_op_dont_care or ci.depth_attachment.?.load_op == attachment_load_op_none) or (stencil_attachment != null and (stencil_attachment.?.load_op == attachment_load_op_dont_care or stencil_attachment.?.load_op == attachment_load_op_none)));
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
-    const clear_count: usize = @as(usize, @intFromBool(clear_color or clear_depth));
+    const clear_count: usize = @as(usize, @intFromBool(clear_color or clear_depth or clear_stencil));
     if (@as(usize, command_buffer.impl.count) + discard_count + clear_count > command_buffer.impl.commands.len) {
         command_buffer.impl.invalid = true;
         return;
@@ -17322,11 +17483,11 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color.?, .base_layer = color_view.?.base_array_layer, .layer_count = ci.layer_count } });
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .base_layer = depth_view.?.base_array_layer, .layer_count = ci.layer_count } });
-    if (clear_color or clear_depth) {
+    if (clear_color or clear_depth or clear_stencil) {
         if (color) |color_image| {
-            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .stencil_value = clear_stencil_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
         } else if (depth) |depth_image| {
-            if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .layer_count = ci.layer_count } });
+            if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .stencil = clear_stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .layer_count = ci.layer_count } });
         }
     }
     command_buffer.impl.dynamic_rendering = true;
@@ -17334,13 +17495,14 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     command_buffer.impl.render_contents = if (ci.flags & rendering_contents_secondary_bit != 0) 1 else 0;
     command_buffer.impl.dynamic_color_image = color;
     command_buffer.impl.dynamic_depth_image = depth;
+    command_buffer.impl.inherited_dynamic_stencil_format = if (stencil_view) |view| view.format else 0;
     command_buffer.impl.dynamic_color_base_layer = if (color_view) |view| view.base_array_layer else 0;
     command_buffer.impl.dynamic_depth_base_layer = if (depth_view) |view| view.base_array_layer else 0;
     command_buffer.impl.dynamic_layer_count = ci.layer_count;
     command_buffer.impl.dynamic_color_store_none = if (color_attachment) |attachment| attachment.store_op == attachment_store_op_none else false;
-    command_buffer.impl.dynamic_depth_store_none = if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_none else false;
+    command_buffer.impl.dynamic_depth_store_none = (if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_none else false) or (if (stencil_attachment) |attachment| attachment.store_op == attachment_store_op_none else false);
     command_buffer.impl.dynamic_color_store_discard = if (color_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false;
-    command_buffer.impl.dynamic_depth_store_discard = if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false;
+    command_buffer.impl.dynamic_depth_store_discard = (if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false) or (if (stencil_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false);
     // VK_KHR_dynamic_rendering_local_read state is scoped to the active
     // rendering instance; a later begin starts with the attachment identity
     // mappings reset rather than inheriting stale locations or input indices.
@@ -17378,6 +17540,7 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     command_buffer.impl.dynamic_depth_store_none = false;
     command_buffer.impl.dynamic_color_store_discard = false;
     command_buffer.impl.dynamic_depth_store_discard = false;
+    command_buffer.impl.inherited_dynamic_stencil_format = 0;
     command_buffer.impl.rendering_location_count = 0;
     command_buffer.impl.rendering_input_count = 0;
     command_buffer.impl.rendering_depth_input_index = null;
@@ -18091,7 +18254,7 @@ fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, 
     } else {
         if (depth_format != pipeline.rendering_depth_format) return false;
     }
-    return pipeline.rendering_stencil_format == 0;
+    return command_buffer.inherited_dynamic_stencil_format == pipeline.rendering_stencil_format;
 }
 fn pipelineUsesBlendConstants(pipeline: *const GraphicsPipelineObj) bool {
     if (pipeline.color_blend_enable == 0) return false;
@@ -19085,6 +19248,27 @@ test "scalar graphics profile executes descriptor uniform blocks" {
         if (std.mem.readInt(u32, depth_bytes[pixel * 4 ..][0..4], .little) != 0x3f80_0000) changed_depth = true;
     }
     try std.testing.expect(changed_depth);
+
+    // D24 depth comparisons decode the normalized high 24 bits and preserve
+    // each pixel's low-byte stencil value when a fragment writes depth.
+    depth.format = format_d24_unorm_s8_uint;
+    for (0..16) |pixel| std.mem.writeInt(u32, depth_bytes[pixel * 4 ..][0..4], 0xffff_ff5a, .little);
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(command, &context);
+    changed_depth = false;
+    var changed_depth_pixel: ?usize = null;
+    for (0..16) |pixel| {
+        const stored = std.mem.readInt(u32, depth_bytes[pixel * 4 ..][0..4], .little);
+        try std.testing.expectEqual(@as(u32, 0x5a), stored & 0xff);
+        if (stored >> 8 != 0x00ff_ffff) {
+            changed_depth = true;
+            if (changed_depth_pixel == null) changed_depth_pixel = pixel;
+        }
+    }
+    try std.testing.expect(changed_depth);
+    const changed_offset = changed_depth_pixel.? * 4;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), depthValueFromStorage(depth.format, depth_bytes[0..], changed_offset), 0.000001);
+    depth.format = 126;
 
     // The same descriptor snapshot must work for indexed and indirect draws;
     // these paths share the profile executor but take different argument
@@ -29647,6 +29831,233 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
     destroyCommandPool(ctx.device, pool, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
+}
+
+test "D24 S8 storage quantizes depth and preserves the untouched aspect" {
+    var storage: [8]u8 align(64) = undefined;
+    std.mem.writeInt(u32, storage[0..4], 0x1234_56ab, .little);
+    std.mem.writeInt(u32, storage[4..8], 0x6543_21cd, .little);
+    const image = ImageObj{ .owner = undefined, .width = 2, .height = 1, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x22, .layout = 1, .owned_bytes = storage[0..] };
+    try std.testing.expect(isDepthFormat(format_d24_unorm_s8_uint));
+    try std.testing.expect(isStencilFormat(format_d24_unorm_s8_uint));
+    try std.testing.expectEqual(@as(u32, 0x2 | 0x20), imageFormatUsage(format_d24_unorm_s8_uint, 0));
+    try std.testing.expect(validImageAspectMask(&image, image_aspect_depth_bit));
+    try std.testing.expect(validImageAspectMask(&image, image_aspect_stencil_bit));
+    try std.testing.expect(validImageAspectMask(&image, image_aspect_depth_bit | image_aspect_stencil_bit));
+    try std.testing.expect(!validImageAspectMask(&image, image_aspect_color_bit));
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+    var properties = std.mem.zeroes(FormatProperties);
+    try std.testing.expect(getFormatPropertiesLocked(context.physical, format_d24_unorm_s8_uint, &properties));
+    try std.testing.expectEqual(@as(u32, 0), properties.linear_tiling_features);
+    try std.testing.expectEqual(@as(u32, 0x200 | 0x8000), properties.optimal_tiling_features);
+    var image_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, 0x22, 0, &image_properties));
+
+    clearDepthStencilBytes(&image, storage[0..], 0.25, 0, image_aspect_depth_bit);
+    const first_after_depth = std.mem.readInt(u32, storage[0..4], .little);
+    const second_after_depth = std.mem.readInt(u32, storage[4..8], .little);
+    try std.testing.expectEqual(@as(u32, 0xab), first_after_depth & 0xff);
+    try std.testing.expectEqual(@as(u32, 0xcd), second_after_depth & 0xff);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), depthValueFromStorage(image.format, storage[0..], 0), 0.000001);
+
+    clearDepthStencilBytes(&image, storage[0..], 0, 0x156, image_aspect_stencil_bit);
+    const first_after_stencil = std.mem.readInt(u32, storage[0..4], .little);
+    const second_after_stencil = std.mem.readInt(u32, storage[4..8], .little);
+    try std.testing.expectEqual(first_after_depth & 0xffff_ff00, first_after_stencil & 0xffff_ff00);
+    try std.testing.expectEqual(second_after_depth & 0xffff_ff00, second_after_stencil & 0xffff_ff00);
+    try std.testing.expectEqual(@as(u32, 0x56), first_after_stencil & 0xff);
+    try std.testing.expectEqual(@as(u32, 0x56), second_after_stencil & 0xff);
+
+    clearDepthStencilRect(&image, storage[0..], .{ .offset = .{ .x = 1, .y = 0 }, .extent = .{ .width = 1, .height = 1 } }, 1, 0xaa, image_aspect_depth_bit | image_aspect_stencil_bit);
+    const first_after_rect = std.mem.readInt(u32, storage[0..4], .little);
+    const second_after_rect = std.mem.readInt(u32, storage[4..8], .little);
+    try std.testing.expectEqual(first_after_stencil, first_after_rect);
+    try std.testing.expectEqual(@as(u32, 0xffff_ffaa), second_after_rect);
+
+    writeDepthValueToStorage(image.format, storage[0..], 0, 0.5);
+    const first_after_write = std.mem.readInt(u32, storage[0..4], .little);
+    try std.testing.expectEqual(@as(u32, 0x56), first_after_write & 0xff);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), depthValueFromStorage(image.format, storage[0..], 0), 0.000001);
+}
+
+test "D24 S8 Vulkan images create and clear depth and stencil aspects independently" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+    var properties = std.mem.zeroes(FormatProperties);
+    try std.testing.expect(getFormatPropertiesLocked(context.physical, format_d24_unorm_s8_uint, &properties));
+    try std.testing.expectEqual(@as(u32, 0x200 | 0x8000), properties.optimal_tiling_features);
+    var format_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, 0x22, 0, &format_properties));
+
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &memory_info, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x22, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 8, 0, &mapped));
+    const initial_words: []u8 = @alignCast(@as([*]u8, @ptrCast(mapped.?))[0..8]);
+    std.mem.writeInt(u32, initial_words[0..4], 0x1234_56ab, .little);
+    std.mem.writeInt(u32, initial_words[4..8], 0x6543_21cd, .little);
+    unmapMemory(context.device, memory);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const both_aspects = ImageSubresourceRange{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(validBarrierRangeForImage(imageObjectForHandle(image).?, both_aspects));
+    try std.testing.expect(!validBarrierRangeForImage(imageObjectForHandle(image).?, .{ .aspect_mask = image_aspect_depth_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 }));
+    const barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1000, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = both_aspects };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    const depth_value = ClearDepthStencilValue{ .depth = 0.25, .stencil = 0 };
+    const depth_range = ImageSubresourceRange{ .aspect_mask = image_aspect_depth_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    cmdClearDepthStencilImage(commands[0], image, 1, &depth_value, 1, @ptrCast(&depth_range));
+    const stencil_value = ClearDepthStencilValue{ .depth = 0, .stencil = 0x156 };
+    const stencil_range = ImageSubresourceRange{ .aspect_mask = image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    cmdClearDepthStencilImage(commands[0], image, 1, &stencil_value, 1, @ptrCast(&stencil_range));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    mapped = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 8, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..8]);
+    const depth_bits: u32 = @intFromFloat(@round(0.25 * 16_777_215.0));
+    try std.testing.expectEqual((depth_bits << 8) | 0x56, std.mem.readInt(u32, result_words[0..4], .little));
+    try std.testing.expectEqual((depth_bits << 8) | 0x56, std.mem.readInt(u32, result_words[4..8], .little));
+    unmapMemory(context.device, memory);
+}
+
+test "D24 S8 combined-aspect views attach and clear through a traditional render pass" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &allocation, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = format_d24_unorm_s8_uint, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &view_info, null, &view));
+    defer destroyImageView(context.device, view, null);
+
+    const description = [_]AttachmentDescription{.{ .flags = 0, .format = format_d24_unorm_s8_uint, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 1, .stencil_store_op = 0, .initial_layout = 0, .final_layout = 3 }};
+    const reference = AttachmentReference{ .attachment = 0, .layout = 3 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = &reference, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &description, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(context.device, &render_pass_info, null, &render_pass));
+    defer destroyRenderPass(context.device, render_pass, null);
+    const attachment_views = [_]usize{view};
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = &attachment_views, .width = 2, .height = 2, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(context.device, &framebuffer_info, null, &framebuffer));
+    defer destroyFramebuffer(context.device, framebuffer, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const command_allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &command_allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var clear_value = std.mem.zeroes(ClearValue);
+    clear_value.depth_stencil = .{ .depth = 0.25, .stencil = 0xa5 };
+    const pass_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&clear_value) };
+    cmdBeginRenderPass(commands[0], &pass_begin, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 16, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    const depth_bits: u32 = @intFromFloat(@round(0.25 * 16_777_215.0));
+    for (0..4) |pixel| try std.testing.expectEqual((depth_bits << 8) | 0xa5, std.mem.readInt(u32, result_words[pixel * 4 ..][0..4], .little));
+    unmapMemory(context.device, memory);
+}
+
+test "D24 S8 dynamic rendering clears separate depth and stencil attachment state" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &allocation, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+    validImageLocked(image).?.layout = 1;
+
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = format_d24_unorm_s8_uint, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &view_info, null, &view));
+    defer destroyImageView(context.device, view, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const command_allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &command_allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var depth_clear = std.mem.zeroes(ClearValue);
+    depth_clear.depth_stencil.depth = 0.25;
+    var stencil_clear = std.mem.zeroes(ClearValue);
+    stencil_clear.depth_stencil.stencil = 0xa5;
+    const depth_attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = depth_clear };
+    const stencil_attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = stencil_clear };
+    const rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 0, .color_attachments = null, .depth_attachment = &depth_attachment, .stencil_attachment = &stencil_attachment };
+    cmdBeginRendering(commands[0], &rendering);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(format_d24_unorm_s8_uint, commands[0].impl.inherited_dynamic_stencil_format);
+    try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .clear_depth), std.meta.activeTag(commands[0].impl.commands[0]));
+    try std.testing.expectEqual(image_aspect_depth_bit | image_aspect_stencil_bit, commands[0].impl.commands[0].clear_depth.aspect_mask);
+    cmdEndRendering(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 16, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    const depth_bits: u32 = @intFromFloat(@round(0.25 * 16_777_215.0));
+    for (0..4) |pixel| try std.testing.expectEqual((depth_bits << 8) | 0xa5, std.mem.readInt(u32, result_words[pixel * 4 ..][0..4], .little));
+    unmapMemory(context.device, memory);
 }
 
 test "depth stencil image clear uses exact D32 depth semantics" {

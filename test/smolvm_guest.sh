@@ -19,6 +19,7 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 # explicit fallback rejection so a future reproduction cannot silently turn
 # into an ANGLE/GL or software-compositing run.
 chrome_launcher=$repo/tools/smolvm-chrome.sh
+chrome_env=$repo/tools/smolvm-chrome.env
 if grep -Fq -- '--enable-angle-features=exposeES32ForTesting' "$chrome_launcher"; then
     echo 'Chromium launcher must not enable ANGLE ES testing capabilities' >&2
     exit 1
@@ -42,9 +43,22 @@ for chrome_requirement in \
     'ZPU_MOSAIC_CPU_SET="$chrome_cpu_set"' \
     'benchmark) benchmark ;;' \
     'webgl) webgl ;;' \
-    '--require-webgl-draw'; do
+    '--require-webgl-draw' \
+    '--require-webgl-size "${width}x${height}"' \
+    '--exercise-game-controls'; do
     grep -F -- "$chrome_requirement" "$chrome_launcher" >/dev/null || {
         echo "Chromium two-core benchmark requirement is missing: $chrome_requirement" >&2
+        exit 1
+    }
+done
+for webgl_demo in \
+    'ZPU_WEBGL_DEMO_URLS=' \
+    'webgl_geometry_terrain.html' \
+    'webgl_materials_physical_clearcoat.html' \
+    'webgl_loader_gltf.html' \
+    'games_fps.html'; do
+    grep -F -- "$webgl_demo" "$chrome_env" >/dev/null || {
+        echo "WebGL real-demo suite is missing: $webgl_demo" >&2
         exit 1
     }
 done

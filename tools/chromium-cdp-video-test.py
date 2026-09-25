@@ -291,6 +291,16 @@ def main() -> None:
         action="store_true",
         help="also require the live WebGL canvas to contain more than one sampled RGBA value",
     )
+    parser.add_argument(
+        "--require-webgl-size",
+        metavar="WIDTHxHEIGHT",
+        help="require a live WebGL drawing buffer at exactly this size",
+    )
+    parser.add_argument(
+        "--exercise-game-controls",
+        action="store_true",
+        help="click the game canvas and briefly exercise forward/jump input",
+    )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
@@ -308,6 +318,19 @@ def main() -> None:
         parser.error("--require-webgl requires --compositor")
     if args.require_webgl_draw and not args.require_webgl:
         parser.error("--require-webgl-draw requires --require-webgl")
+    webgl_size = None
+    if args.require_webgl_size is not None:
+        if not args.require_webgl:
+            parser.error("--require-webgl-size requires --require-webgl")
+        try:
+            width_text, height_text = args.require_webgl_size.lower().split("x", 1)
+            webgl_size = {"width": int(width_text), "height": int(height_text)}
+        except (ValueError, TypeError):
+            parser.error("--require-webgl-size must be WIDTHxHEIGHT")
+        if webgl_size["width"] <= 0 or webgl_size["height"] <= 0:
+            parser.error("--require-webgl-size dimensions must be positive")
+    if args.exercise_game_controls and not args.require_webgl:
+        parser.error("--exercise-game-controls requires --require-webgl")
 
     devtools = DevTools(args.port)
     try:
@@ -373,6 +396,29 @@ def main() -> None:
         # focus again after issuing it so the compositor probe measures the
         # visible page, rather than a throttled background tab.
         devtools.call("Page.bringToFront", session_id=session_id)
+        if args.exercise_game_controls:
+            viewport_result = devtools.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "new Promise(resolve => { const deadline = performance.now() + 10000; function ready() { if (document.readyState === 'complete' && document.querySelector('canvas')) return resolve({ width: innerWidth, height: innerHeight }); if (performance.now() >= deadline) return resolve(null); setTimeout(ready, 25); } ready(); })",
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                },
+                session_id,
+            )
+            viewport = viewport_result.get("result", {}).get("value")
+            if not isinstance(viewport, dict):
+                raise RuntimeError("game page did not produce a canvas before input exercise")
+            x = viewport["width"] // 2
+            y = viewport["height"] // 2
+            devtools.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session_id)
+            devtools.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, session_id)
+            devtools.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}, session_id)
+            for key, code in (("w", "KeyW"), (" ", "Space")):
+                devtools.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": key, "code": code}, session_id)
+            time.sleep(1)
+            for key, code in ((" ", "Space"), ("w", "KeyW")):
+                devtools.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": key, "code": code}, session_id)
         if args.compositor:
             pointer_sweep = None
             if args.pointer_sweep:
@@ -477,15 +523,19 @@ def main() -> None:
                   let uniqueRgbaColors = 0, readbackError = null;
                   try {{
                     const samples = 8, pixels = new Uint8Array(samples * samples * 4);
-                    // The whole drawing buffer may be large; an evenly spaced
-                    // grid is enough to distinguish a cleared/failed target
-                    // from the terrain geometry without perturbing its frame
-                    // time with a full 2K readback.
-                    const sampleWidth = Math.max(1, Math.min(width, samples));
-                    const sampleHeight = Math.max(1, Math.min(height, samples));
-                    gl.readPixels(0, 0, sampleWidth, sampleHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                    // The whole drawing buffer may be large; sample one pixel
+                    // from each cell of an evenly spaced grid. This checks
+                    // scene coverage without transferring a full 2K frame.
+                    for (let row = 0; row < samples; row++) {{
+                      for (let column = 0; column < samples; column++) {{
+                        const x = Math.min(width - 1, Math.floor((column + .5) * width / samples));
+                        const y = Math.min(height - 1, Math.floor((row + .5) * height / samples));
+                        const offset = (row * samples + column) * 4;
+                        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels.subarray(offset, offset + 4));
+                      }}
+                    }}
                     const colors = new Set();
-                    for (let pixel = 0; pixel < sampleWidth * sampleHeight; pixel++) {{
+                    for (let pixel = 0; pixel < samples * samples; pixel++) {{
                       const offset = pixel * 4;
                       colors.add(`${{pixels[offset]}},${{pixels[offset + 1]}},${{pixels[offset + 2]}},${{pixels[offset + 3]}}`);
                     }}
@@ -497,7 +547,8 @@ def main() -> None:
                     uniqueRgbaColors, readbackError,
                   }};
                 }});
-                webgl = {{ canvases: canvases.length, contexts }};
+                webgl = {{ canvases: canvases.length, contexts,
+                  expectedDrawingBuffer: {json.dumps(webgl_size, separators=(',', ':'))} }};
               }}
               return {{
                 loadState: 'ready', callbacks,
@@ -595,6 +646,27 @@ def main() -> None:
                 ]
                 if not live_contexts:
                     raise SystemExit("no live WebGL canvas was available for the compositor sample")
+                page_errors = telemetry.get("pageErrors")
+                if page_errors:
+                    raise SystemExit(f"WebGL demo reported page errors: {page_errors!r}")
+                if webgl_size is not None and not any(
+                    context.get("drawingBuffer") == webgl_size
+                    for context in live_contexts
+                ):
+                    actual_sizes = [context.get("drawingBuffer") for context in live_contexts]
+                    raise SystemExit(
+                        f"no live WebGL drawing buffer matched {webgl_size}; observed {actual_sizes}"
+                    )
+                gpu_renderer = str(gpu_telemetry.get("glRenderer") or "").lower()
+                # A non-software GPU is not enough: Chromium might have
+                # selected a host or virtual hardware adapter. SystemInfo is
+                # browser-scoped and identifies the adapter used by this
+                # isolated SmolVM Chromium process.
+                if "zpu" not in gpu_renderer or "vulkan" not in gpu_renderer:
+                    raise SystemExit(
+                        "WebGL GPU telemetry does not identify the ZPU Vulkan renderer: "
+                        f"{gpu_renderer!r}"
+                    )
                 renderer_text = " ".join(
                     str(context.get("renderer", "")) for context in live_contexts
                 ).lower()
