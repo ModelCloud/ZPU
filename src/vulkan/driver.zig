@@ -17940,7 +17940,7 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
             }
         }
     }
-    if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null) or (dynamic_count == 0 and offsets != null)) {
+    if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null)) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_count actual={d} expected={d} offsets={}\n", .{ dynamic_count, expected_dynamic_count, offsets != null });
         command_buffer.impl.invalid = true;
         return;
@@ -29579,6 +29579,10 @@ test "descriptor updates and binds are atomic and allocation free" {
     try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin_info));
+    const ignored_dynamic_offset = [_]u32{123};
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, &ignored_dynamic_offset);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(validDescriptorSetLocked(set).?, command[0].impl.bound_descriptors.?);
     for (0..4096) |_| cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
