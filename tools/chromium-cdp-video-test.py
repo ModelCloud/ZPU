@@ -70,7 +70,7 @@ class DevTools:
         # Playback probes intentionally await several seconds of compositor
         # activity, so retain a bounded timeout that exceeds their default
         # sample window after the connection handshake completes.
-        self.connection.settimeout(60)
+        self.connection.settimeout(120)
         self.next_id = 1
         key = base64.b64encode(os.urandom(16)).decode()
         request = (
@@ -687,7 +687,7 @@ def main() -> None:
                     # measured interval.  Keep the DevTools bound larger than all
                     # three phases so a slow real-site load is reported as
                     # telemetry, not mistaken for a transport failure.
-                    timeout=args.duration + args.warmup + 25,
+                    timeout=args.duration + args.warmup + 85,
                 )
             finally:
                 if pointer_sweep is not None:

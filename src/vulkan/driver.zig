@@ -1182,6 +1182,7 @@ const ImageObj = struct {
     // lets Chromium create mipmapped upload images without losing the Vulkan
     // memory-size contract.
     mip_levels: u32 = 1,
+    mip_layouts: [max_image_mip_levels]i32 = [_]i32{0} ** max_image_mip_levels,
     array_layers: u32,
     samples: u32,
     format: i32,
@@ -1251,7 +1252,7 @@ const SamplerObj = struct {
     unnormalized_coordinates: bool = false,
     ycbcr: ?YcbcrConversion = null,
 };
-const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const max_profile_sampled_bindings = 8;
@@ -1742,6 +1743,10 @@ const max_child_objects = 64;
 const max_command_pool_objects = 4096;
 const max_buffer_objects = 4096;
 const max_image_view_objects = 4096;
+const ImageMipLayouts = [max_image_objects][max_image_mip_levels]i32;
+fn emptyImageMipLayouts() ImageMipLayouts {
+    return [_][max_image_mip_levels]i32{[_]i32{0} ** max_image_mip_levels} ** max_image_objects;
+}
 // Chromium may retain conversion objects through several compositor frames.
 // Keep this independent bounded registry so conversion churn cannot consume
 // the generic child-object pool.
@@ -4258,6 +4263,7 @@ fn isDepthFormat(format: i32) bool {
     return format == 124 or format == format_x8_d24_unorm_pack32 or format == 126 or format == format_d24_unorm_s8_uint;
 }
 const format_d24_unorm_s8_uint: i32 = 129;
+const format_d32_sfloat: i32 = 126;
 const format_x8_d24_unorm_pack32: i32 = 125;
 const format_s8_uint: i32 = 127;
 const image_aspect_depth_bit: u32 = 0x2;
@@ -6167,7 +6173,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&image_objects, &image_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .flags = ci.flags, .layout = ci.initial_layout };
+        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .mip_layouts = [_]i32{ci.initial_layout} ** max_image_mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .flags = ci.flags, .layout = ci.initial_layout };
         if (imageByteSize(object) == null) return .error_initialization_failed;
         state.* = .live;
         out.* = handle;
@@ -6407,7 +6413,11 @@ fn transitionImageLayout(device: ?Device, count: u32, transitions: ?[*]const Hos
         if (transition.s_type != 1000270006 or transition.p_next != null or image.owner != d or !hostCopyTransitionOldLayoutValid(transition.old_layout) or !hostCopyLayoutValid(transition.new_layout) or image.layout != transition.old_layout or !validRangeForImage(image, transition.subresource_range)) return .error_initialization_failed;
         for (transitions.?[0..index]) |prior| if (prior.image == transition.image) return .error_initialization_failed;
     }
-    for (transitions.?[0..count]) |transition| validImageLocked(transition.image).?.layout = transition.new_layout;
+    for (transitions.?[0..count]) |transition| {
+        const image = validImageLocked(transition.image).?;
+        image.layout = transition.new_layout;
+        image.mip_layouts[0] = transition.new_layout;
+    }
     return .success;
 }
 fn getDeviceBufferMemoryRequirements(device: ?Device, info: ?*const DeviceBufferMemoryRequirements, output: ?*MemoryRequirements2) callconv(.c) void {
@@ -7224,10 +7234,28 @@ fn record(cb: CommandBuffer, command: Command) void {
         }
     } else if (cb.impl.active_framebuffer) |framebuffer| {
         switch (owned) {
-            .render_clear => |*clear| clear.layer_count = framebuffer.layers,
-            .clear_depth => |*clear| clear.layer_count = framebuffer.layers,
-            .cube_draw => |*draw| draw.layer_count = framebuffer.layers,
-            .indirect_draw => |*draw| draw.layer_count = framebuffer.layers,
+            .discard_image => |*discard| {
+                if (framebuffer.color_image == discard.image) discard.base_layer = framebuffer.color_base_layer else if (framebuffer.depth_image == discard.image) discard.base_layer = framebuffer.depth_base_layer;
+            },
+            .render_clear => |*clear| {
+                clear.color_base_layer = framebuffer.color_base_layer;
+                clear.depth_base_layer = framebuffer.depth_base_layer;
+                clear.layer_count = framebuffer.layers;
+            },
+            .clear_depth => |*clear| {
+                clear.base_layer = framebuffer.depth_base_layer;
+                clear.layer_count = framebuffer.layers;
+            },
+            .cube_draw => |*draw| {
+                draw.color_base_layer = framebuffer.color_base_layer;
+                draw.depth_base_layer = framebuffer.depth_base_layer;
+                draw.layer_count = framebuffer.layers;
+            },
+            .indirect_draw => |*draw| {
+                draw.color_base_layer = framebuffer.color_base_layer;
+                draw.depth_base_layer = framebuffer.depth_base_layer;
+                draw.layer_count = framebuffer.layers;
+            },
             else => {},
         }
     }
@@ -7268,6 +7296,9 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.expected_depth_layout = depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
+                draw.color_base_layer = if (framebuffer) |fb| fb.color_base_layer else 0;
+                draw.depth_base_layer = if (framebuffer) |fb| fb.depth_base_layer else 0;
+                draw.layer_count = if (framebuffer) |fb| fb.layers else 1;
                 draw.expected_color_layout = color_layout;
                 draw.expected_depth_layout = depth_layout;
             }
@@ -7283,6 +7314,9 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.expected_depth_layout = depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
+                draw.color_base_layer = if (framebuffer) |fb| fb.color_base_layer else 0;
+                draw.depth_base_layer = if (framebuffer) |fb| fb.depth_base_layer else 0;
+                draw.layer_count = if (framebuffer) |fb| fb.layers else 1;
                 draw.expected_color_layout = color_layout;
                 draw.expected_depth_layout = depth_layout;
             }
@@ -7291,7 +7325,13 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
             const dynamic = dynamic_color != null or dynamic_depth != null;
             const image = if (op.aspect_mask == image_aspect_color_bit) dynamic_color orelse (if (framebuffer) |fb| fb.color_image else null) else if (op.aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0) dynamic_depth orelse (if (framebuffer) |fb| fb.depth_image else null) else null;
             const target = image orelse return null;
-            const base_layer = std.math.add(u32, op.base_layer, if (dynamic) (if (op.aspect_mask == image_aspect_color_bit) dynamic_color_base_layer else dynamic_depth_base_layer) else 0) catch return null;
+            const base_offset = if (dynamic)
+                (if (op.aspect_mask == image_aspect_color_bit) dynamic_color_base_layer else dynamic_depth_base_layer)
+            else if (framebuffer) |fb|
+                (if (op.aspect_mask == image_aspect_color_bit) fb.color_base_layer else fb.depth_base_layer)
+            else
+                0;
+            const base_layer = std.math.add(u32, op.base_layer, base_offset) catch return null;
             if (op.layer_count == 0 or base_layer >= target.array_layers or op.layer_count > target.array_layers - base_layer or op.rect.offset.x < 0 or op.rect.offset.y < 0 or op.rect.extent.width == 0 or op.rect.extent.height == 0) return null;
             const end_x = std.math.add(u64, @intCast(op.rect.offset.x), op.rect.extent.width) catch return null;
             const end_y = std.math.add(u64, @intCast(op.rect.offset.y), op.rect.extent.height) catch return null;
@@ -7720,6 +7760,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     const dynamic_rendering = c.impl.dynamic_rendering;
+    const active_framebuffer = if (dynamic_rendering) null else c.impl.active_framebuffer;
     const framebuffer = c.impl.active_framebuffer;
     const color = if (dynamic_rendering) c.impl.dynamic_color_image else (if (framebuffer) |value| value.color_image else null);
     const color_image = color;
@@ -7793,7 +7834,8 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     }
     for (rects.?[0..rect_count]) |rect| {
         if (color_image != null) {
-            const color_base = std.math.add(u32, rect.base_array_layer, if (dynamic_rendering) c.impl.dynamic_color_base_layer else 0) catch {
+            const color_base_offset = if (dynamic_rendering) c.impl.dynamic_color_base_layer else if (active_framebuffer) |fb_obj| fb_obj.color_base_layer else 0;
+            const color_base = std.math.add(u32, rect.base_array_layer, color_base_offset) catch {
                 c.impl.invalid = true;
                 return;
             };
@@ -7803,7 +7845,8 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
             }
         }
         if (depth_image) |depth| {
-            const depth_base = std.math.add(u32, rect.base_array_layer, if (dynamic_rendering) c.impl.dynamic_depth_base_layer else 0) catch {
+            const depth_base_offset = if (dynamic_rendering) c.impl.dynamic_depth_base_layer else if (active_framebuffer) |fb_obj| fb_obj.depth_base_layer else 0;
+            const depth_base = std.math.add(u32, rect.base_array_layer, depth_base_offset) catch {
                 c.impl.invalid = true;
                 return;
             };
@@ -7832,7 +7875,13 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
             }
         else
             null;
-        const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == image_aspect_color_bit) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
+        const base_offset = if (dynamic_rendering)
+            (if (attachment.aspect_mask == image_aspect_color_bit) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer)
+        else if (active_framebuffer) |fb_obj|
+            (if (attachment.aspect_mask == image_aspect_color_bit) fb_obj.color_base_layer else fb_obj.depth_base_layer)
+        else
+            0;
+        const base_layer = rect.base_array_layer + base_offset;
         if (inherited_secondary and color_image == null and depth_image == null) {
             record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .half_color = half_color, .float_color = float_color, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         } else {
@@ -7936,6 +7985,14 @@ fn validBlitRegion(src: *const ImageObj, dst: *const ImageObj, region: ImageBlit
     if (blitSpan(region.src_offsets[0].x, region.src_offsets[1].x, src_mip.width) == null or blitSpan(region.src_offsets[0].y, region.src_offsets[1].y, src_mip.height) == null or blitSpan(region.dst_offsets[0].x, region.dst_offsets[1].x, dst_mip.width) == null or blitSpan(region.dst_offsets[0].y, region.dst_offsets[1].y, dst_mip.height) == null) return false;
     return region.src_offsets[0].z == 0 and region.src_offsets[1].z == 1 and region.dst_offsets[0].z == 0 and region.dst_offsets[1].z == 1;
 }
+fn blitSubresourcesDisjoint(region: ImageBlit) bool {
+    if (region.src_subresource.mip_level != region.dst_subresource.mip_level) return true;
+    const src_start = region.src_subresource.base_array_layer;
+    const dst_start = region.dst_subresource.base_array_layer;
+    const src_end = src_start + region.src_subresource.layer_count;
+    const dst_end = dst_start + region.dst_subresource.layer_count;
+    return src_end <= dst_start or dst_end <= src_start;
+}
 fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_handle: usize, dst_layout: i32, count: u32, regions: ?[*]const ImageBlit, filter: i32) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -7952,11 +8009,11 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !blittableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !blittableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
-    for (regions.?[0..count]) |region| if (!validBlitRegion(src, dst, region)) {
+    for (regions.?[0..count]) |region| if (!validBlitRegion(src, dst, region) or (src == dst and !blitSubresourcesDisjoint(region))) {
         c.impl.invalid = true;
         return;
     };
@@ -8675,6 +8732,15 @@ fn transitionTracksBaseMip(transition: ImageTransitionCommand) bool {
 fn transitionCoversAllBaseLayers(transition: ImageTransitionCommand) bool {
     const range = transition.subresource_range orelse return true;
     return range.base_mip_level == 0 and range.base_array_layer == 0 and range.layer_count == transition.image.array_layers;
+}
+fn transitionCoversAllLayers(transition: ImageTransitionCommand) bool {
+    const range = transition.subresource_range orelse return true;
+    return range.base_array_layer == 0 and range.layer_count == transition.image.array_layers;
+}
+fn angleAttachmentLayoutResync(format: i32, current_layout: i32, old_layout: i32, new_layout: i32) bool {
+    return current_layout == new_layout and
+        ((format == 83 and old_layout == 5 and new_layout == 2) or
+            (format == format_d32_sfloat and old_layout == 4 and new_layout == 1000117001));
 }
 fn dynamicAttachmentLayout(command_buffer: *const CommandBufferObj, image: ?*ImageObj) i32 {
     return if (image) |value| commandBufferImageLayout(command_buffer, value) else -1;
@@ -9727,7 +9793,11 @@ fn prevalidateProfileUniforms(op: anytype, owner: *DeviceObj) bool {
     };
     for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
         const interface = profile.vertex.program.interfaces[uniform.interface];
-        const descriptor = descriptorUniformBinding(op.descriptors, interface.binding orelse return false) orelse return deadResource();
+        const binding = interface.binding orelse return false;
+        const descriptor = descriptorUniformBinding(op.descriptors, binding) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU profile vertex uniform missing binding={d} descriptorType={d}\n", .{ binding, op.descriptors.binding_types[binding] });
+            return deadResource();
+        };
         const buffer = descriptor.buffer orelse return deadResource();
         if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
         if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
@@ -9735,7 +9805,11 @@ fn prevalidateProfileUniforms(op: anytype, owner: *DeviceObj) bool {
     }
     for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
         const interface = profile.fragment.program.interfaces[uniform.interface];
-        const descriptor = descriptorUniformBinding(op.descriptors, interface.binding orelse return false) orelse return deadResource();
+        const binding = interface.binding orelse return false;
+        const descriptor = descriptorUniformBinding(op.descriptors, binding) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU profile fragment uniform missing set=0x{x} binding={d} descriptorType={d}\n", .{ @intFromPtr(op.descriptors), binding, op.descriptors.binding_types[binding] });
+            return deadResource();
+        };
         const buffer = descriptor.buffer orelse return deadResource();
         if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
         if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
@@ -9754,7 +9828,10 @@ fn prevalidateProfileSampledImages(op: anytype, owner: *DeviceObj) bool {
         const expected_descriptor_type: i32 = if (sampled_profile.sampler_required) 1 else 2;
         if (sampled_profile.binding >= source.binding_types.len or source.binding_types[sampled_profile.binding] != expected_descriptor_type) return false;
         const sampled = source.sampled_images[sampled_profile.binding];
-        const image = sampled.image orelse return deadResource();
+        const image = sampled.image orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU profile sampled image missing set={d} binding={d} descriptorType={d}\n", .{ sampled_profile.descriptor_set, sampled_profile.binding, source.binding_types[sampled_profile.binding] });
+            return deadResource();
+        };
         if (!liveImageObject(image) or !imageStorageValid(image)) return deadResource();
         if (image.owner != owner or (image.memory != null and image.memory.?.owner != owner)) return wrongSubmittingDevice();
         if (!imageStorageValid(image)) return false;
@@ -9847,6 +9924,30 @@ fn indirectFirstInstanceValid(op: IndirectDrawState) bool {
 }
 
 fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_objects]i32) bool {
+    var mip_layouts: ImageMipLayouts = undefined;
+    switch (command) {
+        .blit_image => |op| {
+            const src_slot = imageSlot(op.src) orelse return deadResource();
+            const dst_slot = imageSlot(op.dst) orelse return deadResource();
+            mip_layouts[src_slot] = op.src.mip_layouts;
+            mip_layouts[src_slot][0] = layouts[src_slot];
+            if (dst_slot != src_slot) {
+                mip_layouts[dst_slot] = op.dst.mip_layouts;
+                mip_layouts[dst_slot][0] = layouts[dst_slot];
+            }
+            return prevalidateCommandWithMipLayouts(command, owner, layouts, &mip_layouts);
+        },
+        .transition => |op| {
+            const slot = imageSlot(op.image) orelse return deadResource();
+            mip_layouts[slot] = op.image.mip_layouts;
+            mip_layouts[slot][0] = layouts[slot];
+            return prevalidateCommandWithMipLayouts(command, owner, layouts, &mip_layouts);
+        },
+        else => return prevalidateCommandWithMipLayouts(command, owner, layouts, null),
+    }
+}
+
+fn prevalidateCommandWithMipLayouts(command: Command, owner: *DeviceObj, layouts: *[max_image_objects]i32, mip_layouts: ?*ImageMipLayouts) bool {
     switch (command) {
         .fill => |op| {
             if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
@@ -10021,7 +10122,11 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
             if (!imageStorageValid(op.src) or !imageStorageValid(op.dst)) return false;
-            if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
+            const tracked_mips = mip_layouts orelse return false;
+            if ((op.src == op.dst and !blitSubresourcesDisjoint(op.region)) or
+                tracked_mips[src_slot][op.region.src_subresource.mip_level] != op.src_layout or
+                tracked_mips[dst_slot][op.region.dst_subresource.mip_level] != op.dst_layout)
+            {
                 hit(.layout_mismatch);
                 return false;
             }
@@ -10305,7 +10410,9 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
         .transition => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner) return wrongSubmittingDevice();
-            if (!transitionTracksBaseMip(op)) return true;
+            const tracked_mips = mip_layouts orelse return false;
+            const range = op.subresource_range orelse ImageSubresourceRange{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = op.image.array_layers };
+            const tracks_all_layers = transitionCoversAllLayers(op);
             // Combined D24/S8 images can reach ZPU through ANGLE's
             // attachment path with an externally established layout that
             // the scalar per-image tracker has not observed. A same-layout
@@ -10314,15 +10421,27 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             // layout. Keep layout-changing barriers strict.
             const d24_stencil_layout_resync = op.image.format == format_d24_unorm_s8_uint and
                 layouts[slot] == 0 and op.old_layout == op.new_layout;
-            if (transitionCoversAllBaseLayers(op) and op.old_layout != 0 and layouts[slot] != op.old_layout and !d24_stencil_layout_resync) {
-                if (failureDiagnosticsEnabled()) std.debug.print(
-                    "ZPU transition rejected image=0x{x} slot={} current={} old={} new={} format={} size={}x{} mips={}\n",
-                    .{ @intFromPtr(op.image), slot, layouts[slot], op.old_layout, op.new_layout, op.image.format, op.image.width, op.image.height, op.image.mip_levels },
-                );
-                hit(.layout_mismatch);
-                return false;
+            var mip = range.base_mip_level;
+            while (mip < range.base_mip_level + range.level_count) : (mip += 1) {
+                if (!tracks_all_layers) continue;
+                const current_layout = tracked_mips[slot][mip];
+                const base_mip_resync = mip == 0 and d24_stencil_layout_resync;
+                // ANGLE may replay these two attachment transitions after
+                // ZPU has already reached their destination layout. Treat
+                // those exact no-op layout pairs as synchronized dependencies;
+                // keep rejecting unrelated stale layout-changing barriers.
+                const angle_attachment_layout_resync = angleAttachmentLayoutResync(op.image.format, current_layout, op.old_layout, op.new_layout);
+                if (op.old_layout != 0 and current_layout != op.old_layout and !base_mip_resync and !angle_attachment_layout_resync) {
+                    if (failureDiagnosticsEnabled()) std.debug.print(
+                        "ZPU transition rejected image=0x{x} slot={} mip={} current={} old={} new={} format={} size={}x{} mips={}\n",
+                        .{ @intFromPtr(op.image), slot, mip, current_layout, op.old_layout, op.new_layout, op.image.format, op.image.width, op.image.height, op.image.mip_levels },
+                    );
+                    hit(.layout_mismatch);
+                    return false;
+                }
+                tracked_mips[slot][mip] = op.new_layout;
             }
-            layouts[slot] = op.new_layout;
+            if (transitionTracksBaseMip(op)) layouts[slot] = op.new_layout;
         },
         .event_set => |operation| {
             if (!liveEventObject(operation.event)) return deadResource();
@@ -14356,6 +14475,11 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
         },
         .transition => |op| {
             if (transitionTracksBaseMip(op)) op.image.layout = op.new_layout;
+            if (transitionCoversAllLayers(op)) {
+                const range = op.subresource_range orelse ImageSubresourceRange{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = op.image.array_layers };
+                var mip = range.base_mip_level;
+                while (mip < range.base_mip_level + range.level_count) : (mip += 1) op.image.mip_layouts[mip] = op.new_layout;
+            }
             if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_transitions.fetchAdd(1, .monotonic);
             // This coverage marker proves a successfully executed transition,
             // so hit() intentionally suppresses its rejection-only log line.
@@ -17627,6 +17751,27 @@ fn sampledYcbcrCompatible(view: *const ImageViewObj, sampler: *const SamplerObj)
     if (ycbcr420Nv12Format(view.image.format)) return view.ycbcr != null and sampler.ycbcr != null and std.meta.eql(view.ycbcr.?, sampler.ycbcr.?);
     return view.ycbcr == null and sampler.ycbcr == null;
 }
+fn sampledImageLayoutValid(layout: i32, view: *const ImageViewObj) bool {
+    if (layout == 1 or layout == 5) return true;
+    return layout == 4 and view.aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0 and isDepthStencilFormat(view.image.format);
+}
+test "sampled image descriptors accept depth-stencil read-only layout only for depth-stencil views" {
+    var color_image = ImageObj{ .owner = undefined, .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 44, .usage = 0x4, .layout = 0 };
+    const color_view = ImageViewObj{ .handle = 0, .owner = undefined, .image = &color_image, .format = 44, .usage = 0x4, .aspect_mask = image_aspect_color_bit, .components = .{ 0, 0, 0, 0 }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(sampledImageLayoutValid(1, &color_view));
+    try std.testing.expect(sampledImageLayoutValid(5, &color_view));
+    try std.testing.expect(!sampledImageLayoutValid(4, &color_view));
+
+    var depth_image = color_image;
+    depth_image.format = 126;
+    const depth_view = ImageViewObj{ .handle = 0, .owner = undefined, .image = &depth_image, .format = 126, .usage = 0x4, .aspect_mask = image_aspect_depth_bit, .components = .{ 0, 0, 0, 0 }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(sampledImageLayoutValid(4, &depth_view));
+
+    var stencil_image = color_image;
+    stencil_image.format = format_s8_uint;
+    const stencil_view = ImageViewObj{ .handle = 0, .owner = undefined, .image = &stencil_image, .format = format_s8_uint, .usage = 0x4, .aspect_mask = image_aspect_stencil_bit, .components = .{ 0, 0, 0, 0 }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(sampledImageLayoutValid(4, &stencil_view));
+}
 fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
@@ -17654,6 +17799,8 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     }
     var color: ?*ImageObj = null;
     var depth: ?*ImageObj = null;
+    var color_base_layer: u32 = 0;
+    var depth_base_layer: u32 = 0;
     var prior_view: ?*ImageViewObj = null;
     if (ci.attachments) |attachments| {
         for (attachments[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count], 0..) |handle, requirement, index| {
@@ -17661,7 +17808,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
                 if (failureDiagnosticsEnabled()) std.debug.print("ZPU framebuffer rejected stale view index={} view=0x{x}\n", .{ index, handle });
                 return .error_initialization_failed;
             };
-            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) {
+            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.layer_count < ci.layers) {
                 if (failureDiagnosticsEnabled()) std.debug.print(
                     "ZPU framebuffer rejected view index={} owner={} duplicate_view={} duplicate_image={} view_format={} required_format={} image_format={} samples={}/{} image={}x{} requested={}x{} mip={}+{} layer={}+{} image_layers={}\n",
                     .{ index, view.owner == d, view == prior_view, prior_view != null and view.image == prior_view.?.image, view.format, requirement.format, view.image.format, view.image.samples, requirement.samples, view.image.width, view.image.height, ci.width, ci.height, view.base_mip_level, view.level_count, view.base_array_layer, view.layer_count, view.image.array_layers },
@@ -17672,6 +17819,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
                 .color => {
                     if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or (render_pass.color_feedback_input and view.usage & 0x80 == 0) or color != null) return .error_initialization_failed;
                     color = view.image;
+                    color_base_layer = view.base_array_layer;
                 },
                 .depth => {
                     const depth_aspect_valid = view.aspect_mask == image_aspect_depth_bit or
@@ -17679,6 +17827,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
                         (isStencilFormat(view.format) and view.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit));
                     if (!depth_aspect_valid or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
                     depth = view.image;
+                    depth_base_layer = view.base_array_layer;
                 },
             }
             prior_view = view;
@@ -17701,7 +17850,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     }
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* != .live) {
-        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
+        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .color_base_layer = color_base_layer, .depth_base_layer = depth_base_layer, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -18094,22 +18243,43 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     const d = device orelse return;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
+    if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor update rejected device={} writes={d} copies={d} copiesPointer={}\n", .{ validDeviceLocked(d), write_count, copy_count, copies != null });
+        return;
+    }
     if (write_count == 0) return;
     const list = writes orelse return;
     const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_view_type: i32, texture_base_mip_level: u32, texture_level_count: u32, texture_base_array_layer: u32, texture_layer_count: u32, texture_binding: u8, writes_texture: bool, writes_sampler: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
-        if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
-        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
-        if (!set.owner.eql(d)) return;
+        if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor write rejected reason=metadata type={d} binding={d} sType={d} pNext={} arrayElement={d} count={d} texelViews={}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, descriptor_write.s_type, descriptor_write.p_next != null, descriptor_write.dst_array_element, descriptor_write.descriptor_count, descriptor_write.texel_buffer_view != null });
+            return;
+        }
+        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse {
+            if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=set binding={d} handle=0x{x}\n", .{ descriptor_write.dst_binding, descriptor_write.dst_set });
+            return;
+        };
+        if (!set.owner.eql(d)) {
+            if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=set_owner binding={d}\n", .{descriptor_write.dst_binding});
+            return;
+        }
         var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_view_type = 1, .texture_base_mip_level = 0, .texture_level_count = 1, .texture_base_array_layer = 0, .texture_layer_count = 1, .texture_binding = 0, .writes_texture = false, .writes_sampler = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
-            const buffer = validBufferLocked(info.buffer) orelse return;
-            if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) return;
+            const buffer = validBufferLocked(info.buffer) orelse {
+                if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=buffer binding={d} handle=0x{x}\n", .{ descriptor_write.dst_binding, info.buffer });
+                return;
+            };
+            if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) {
+                if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=buffer_state binding={d} owner={} usage=0x{x} memory={} memoryLive={} offset={d} size={d}\n", .{ descriptor_write.dst_binding, buffer.owner == d, buffer.usage, buffer.memory != null, buffer.memory != null and liveMemoryObject(buffer.memory.?), info.offset, buffer.size });
+                return;
+            }
             const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
-            if (range == 0 or range > buffer.size - info.offset) return;
+            if (range == 0 or range > buffer.size - info.offset) {
+                if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=range binding={d} offset={d} requested={d} resolved={d} size={d}\n", .{ descriptor_write.dst_binding, info.offset, info.range, range, buffer.size });
+                return;
+            }
             update.uniform = buffer;
             update.uniform_offset = info.offset;
             update.uniform_range = range;
@@ -18136,12 +18306,27 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.writes_sampler = true;
         } else if ((descriptor_write.descriptor_type == 1 or descriptor_write.descriptor_type == 2) and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
             const info = descriptor_write.image_info.?[0];
-            const view = validImageViewLocked(info.image_view) orelse return;
-            const sampler: ?*SamplerObj = if (descriptor_write.descriptor_type == 1) validSamplerLocked(info.sampler) orelse return else null;
-            if (view.owner != d or view.usage & 0x4 == 0 or (info.image_layout != 5 and !(descriptor_write.descriptor_type == 2 and info.image_layout == 1))) return;
+            const view = validImageViewLocked(info.image_view) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=view type={d} binding={d} handle=0x{x}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, info.image_view });
+                return;
+            };
+            const sampler: ?*SamplerObj = if (descriptor_write.descriptor_type == 1) validSamplerLocked(info.sampler) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=sampler binding={d} handle=0x{x}\n", .{ descriptor_write.dst_binding, info.sampler });
+                return;
+            } else null;
+            if (view.owner != d or view.usage & 0x4 == 0 or !sampledImageLayoutValid(info.image_layout, view)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=view_state type={d} binding={d} owner={} usage=0x{x} layout={d} viewType={d}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, view.owner == d, view.usage, info.image_layout, view.view_type });
+                return;
+            }
             if (sampler) |value| {
-                if (value.owner != d or !sampledYcbcrCompatible(view, value)) return;
-            } else if (info.sampler != 0 or view.ycbcr != null) return;
+                if (value.owner != d or !sampledYcbcrCompatible(view, value)) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=sampler_compatibility binding={d} owner={} ycbcr={}\n", .{ descriptor_write.dst_binding, value.owner == d, sampledYcbcrCompatible(view, value) });
+                    return;
+                }
+            } else if (info.sampler != 0 or view.ycbcr != null) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=samplerless binding={d} sampler=0x{x} ycbcr={}\n", .{ descriptor_write.dst_binding, info.sampler, view.ycbcr != null });
+                return;
+            }
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_components = view.components;
@@ -18163,7 +18348,10 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.input_components = view.components;
             update.input_binding = @intCast(descriptor_write.dst_binding);
             update.writes_input_attachment = true;
-        } else return;
+        } else {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor write rejected reason=layout_binding type={d} binding={d} setBindingType={d} bufferInfo={} imageInfo={} descriptorCount={d}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, if (descriptor_write.dst_binding < set.binding_types.len) set.binding_types[descriptor_write.dst_binding] else -1, descriptor_write.buffer_info != null, descriptor_write.image_info != null, descriptor_write.descriptor_count });
+            return;
+        }
         updates[index] = update;
     }
     for (updates[0..write_count]) |update| {
@@ -18286,7 +18474,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             if (entry.descriptor_type != 1 and entry.descriptor_type != 2) return;
             const view = validImageViewLocked(descriptor.image_view) orelse return;
             const sampler: ?*SamplerObj = if (entry.descriptor_type == 1) validSamplerLocked(descriptor.sampler) orelse return else null;
-            if (entry.dst_binding >= sampled_images.len or view.owner != d or view.usage & 0x4 == 0 or (descriptor.image_layout != 5 and !(entry.descriptor_type == 2 and descriptor.image_layout == 1))) return;
+            if (entry.dst_binding >= sampled_images.len or view.owner != d or view.usage & 0x4 == 0 or !sampledImageLayoutValid(descriptor.image_layout, view)) return;
             if (sampler) |value| {
                 if (value.owner != d or !sampledYcbcrCompatible(view, value)) return;
             } else if (descriptor.sampler != 0 or view.ycbcr != null) return;
@@ -18588,9 +18776,9 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .base_layer = depth_view.?.base_array_layer, .layer_count = ci.layer_count } });
     if (clear_color or clear_depth or clear_stencil) {
         if (color) |color_image| {
-            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .half_color = clear_color_half, .float_color = clear_color_float, .depth_value = clear_depth_value, .stencil_value = clear_stencil_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .half_color = clear_color_half, .float_color = clear_color_float, .depth_value = clear_depth_value, .stencil_value = clear_stencil_value, .color_base_layer = if (color_view) |view| view.base_array_layer else 0, .depth_base_layer = if (depth_view) |view| view.base_array_layer else 0, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
         } else if (depth) |depth_image| {
-            if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .stencil = clear_stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .layer_count = ci.layer_count } });
+            if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .stencil = clear_stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .base_layer = if (depth_view) |view| view.base_array_layer else 0, .layer_count = ci.layer_count } });
         }
     }
     command_buffer.impl.dynamic_rendering = true;
@@ -18770,24 +18958,39 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         for (descriptor.binding_types, 0..) |descriptor_type, binding| {
             if (descriptor_type != 8) continue;
             if (set_index != 0 or dynamic_index >= expected_dynamic_count) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_binding_position setIndex={d} dynamicIndex={d} expected={d}\n", .{ set_index, dynamic_index, expected_dynamic_count });
                 command_buffer.impl.invalid = true;
                 return;
             }
+            const dynamic_offset: u64 = offsets.?[dynamic_index];
             const uniform = descriptorUniformBinding(descriptor, @intCast(binding)) orelse {
+                // ANGLE may bind a layout that includes dynamic uniform slots
+                // unused by the current pipeline without initializing those
+                // descriptors. The slot still consumes a dynamic offset; a
+                // draw that actually reads it is rejected later when its
+                // shader resource is resolved.
+                if (set_index == 0 and descriptor.binding_types[binding] == 8 and dynamic_offset % 256 == 0) {
+                    dynamic_offsets[binding] = dynamic_offset;
+                    dynamic_index += 1;
+                    continue;
+                }
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_binding setIndex={d} binding={d} dynamicOffset={d}\n", .{ set_index, binding, dynamic_offset });
                 command_buffer.impl.invalid = true;
                 return;
             };
             const buffer = uniform.buffer orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_buffer setIndex={d} binding={d}\n", .{ set_index, binding });
                 command_buffer.impl.invalid = true;
                 return;
             };
-            const dynamic_offset: u64 = offsets.?[dynamic_index];
             if (!uniform.dynamic or !liveBufferObject(buffer) or buffer.owner != command_buffer.impl.owner or dynamic_offset % 256 != 0 or uniform.offset > std.math.maxInt(u64) - dynamic_offset) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_offset binding={d} dynamic={} live={} owner={} offset={d} base={d}\n", .{ binding, uniform.dynamic, liveBufferObject(buffer), buffer.owner == command_buffer.impl.owner, dynamic_offset, uniform.offset });
                 command_buffer.impl.invalid = true;
                 return;
             }
             const effective_offset = uniform.offset + dynamic_offset;
             if (effective_offset > buffer.size or uniform.range == 0 or uniform.range > buffer.size - effective_offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_range binding={d} effective={d} range={d} bufferSize={d} memory={}\n", .{ binding, effective_offset, uniform.range, buffer.size, buffer.memory != null and liveMemoryObject(buffer.memory.?) });
                 command_buffer.impl.invalid = true;
                 return;
             }
@@ -19259,7 +19462,7 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             const info = item.image_info.?[0];
             const view = validImageViewLocked(info.image_view) orelse return false;
             const sampler: ?*SamplerObj = if (item.descriptor_type == 1) validSamplerLocked(info.sampler) orelse return false else null;
-            if (view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or (info.image_layout != 5 and !(item.descriptor_type == 2 and info.image_layout == 1))) return false;
+            if (view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or !sampledImageLayoutValid(info.image_layout, view)) return false;
             if (sampler) |value| {
                 if (value.owner != command_buffer.impl.owner or !sampledYcbcrCompatible(view, value)) return false;
             } else if (info.sampler != 0 or view.ycbcr != null) return false;
@@ -20650,7 +20853,7 @@ fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipelin
 fn materializeDynamicUniformBindings(command_buffer: *const CommandBufferObj, snapshot: *DescriptorSetObj, descriptors: *const DescriptorSetObj) bool {
     for (descriptors.binding_types, 0..) |descriptor_type, binding| {
         if (descriptor_type != 8) continue;
-        var uniform = descriptorUniformBinding(descriptors, @intCast(binding)) orelse return false;
+        var uniform = descriptorUniformBinding(descriptors, @intCast(binding)) orelse continue;
         if (!uniform.dynamic) return false;
         const buffer = uniform.buffer orelse return false;
         const dynamic_offset = command_buffer.impl.dynamic_uniform_offsets[binding];
@@ -21823,7 +22026,16 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return queueSubmitFailed(@src().line);
     if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return queueSubmitFailed(@src().line);
     var layouts: [max_image_objects]i32 = undefined;
-    for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
+    var mip_layouts = emptyImageMipLayouts();
+    for (&image_objects, image_state, 0..) |*image, state, index| {
+        layouts[index] = if (state == .live) image.layout else 0;
+        if (state == .live) {
+            mip_layouts[index] = image.mip_layouts;
+            // The existing public tracker remains the source of truth for
+            // mip zero, including host transitions and attachment paths.
+            mip_layouts[index][0] = image.layout;
+        }
+    }
     var semaphore_states = [_]bool{false} ** max_child_objects;
     var timeline_states = [_]u64{0} ** max_child_objects;
     var submitted_command_buffers = [_]bool{false} ** max_child_objects;
@@ -21922,7 +22134,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             submitted_command_buffers[cb_slot] = true;
             for (valid_cb.impl.secondaries[0..valid_cb.impl.secondary_count]) |secondary| if ((stateForObject(CommandBufferObj, secondary, &command_buffer_objects, &command_buffer_state) orelse return .error_initialization_failed).* != .live or secondary.impl.state != 2) return queueSubmitFailed(@src().line);
             for (valid_cb.impl.commands[0..valid_cb.impl.count], 0..) |command, command_index| {
-                const prevalid = prevalidateCommand(command, q.owner, &layouts);
+                const prevalid = prevalidateCommandWithMipLayouts(command, q.owner, &layouts, @as(?*ImageMipLayouts, &mip_layouts));
                 const query_valid = queryCommandSequenceValid(command, list[0..count], submit_index, command_buffer_index, command_index);
                 if (!prevalid or !query_valid) {
                     if (failureDiagnosticsEnabled()) std.debug.print("ZPU queue submit command rejected submit={d} command_buffer={d} command={d} kind={s} prevalid={} query_valid={}\n", .{ submit_index, command_buffer_index, command_index, @tagName(command), prevalid, query_valid });
@@ -24011,6 +24223,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(validSamplerLocked(draw_sampler).?, validDescriptorSetLocked(sets[0]).?.sampler.?);
     try std.testing.expectEqual(draw_sampler_info.mag_filter, validSamplerLocked(draw_sampler).?.mag_filter);
     try std.testing.expectEqual(draw_sampler_info.address_mode_u, validSamplerLocked(draw_sampler).?.address_mode_u);
+    const general_sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 1, .min_filter = 1, .mipmap_mode = 0, .address_mode_u = 1, .address_mode_v = 1, .address_mode_w = 1, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 0, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
+    var general_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&general_sampler_info), null, &general_sampler));
+    var general_descriptor_image = descriptor_image;
+    general_descriptor_image.sampler = general_sampler;
+    general_descriptor_image.image_layout = 1;
+    var general_descriptor_write = descriptor_writes[1];
+    general_descriptor_write.image_info = @ptrCast(&general_descriptor_image);
+    updateDescriptorSets(device, 1, @ptrCast(&general_descriptor_write), 0, null);
+    try std.testing.expectEqual(validSamplerLocked(general_sampler).?, validDescriptorSetLocked(sets[0]).?.sampled_images[1].sampler.?);
+    general_descriptor_write.image_info = @ptrCast(&descriptor_image);
+    updateDescriptorSets(device, 1, @ptrCast(&general_descriptor_write), 0, null);
+    destroySampler(device, general_sampler, null);
 
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
@@ -26230,6 +26455,69 @@ test "framebuffer fetch accepts only a GENERAL self input attachment and descrip
     try std.testing.expect(!validRenderPassLocked(rejected).?.framebuffer_supported);
 }
 
+test "framebuffer image views render into their selected array layer" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    var memory: usize = 0;
+    defer if (memory != 0) freeMemory(ctx.device, memory, null);
+    var image: usize = 0;
+    defer if (image != 0) destroyImage(ctx.device, image, null);
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 2, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 };
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const image_object = validImageLocked(image).?;
+    @memset(imageLayerBytes(image_object, 0), 0x11);
+    @memset(imageLayerBytes(image_object, 1), 0x22);
+
+    var render_pass: usize = 0;
+    defer if (render_pass != 0) destroyRenderPass(ctx.device, render_pass, null);
+    const attachment = [_]AttachmentDescription{.{ .flags = 0, .format = 37, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 2 }};
+    const color_reference = AttachmentReference{ .attachment = 0, .layout = 2 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 1, .color_attachments = @ptrCast(&color_reference), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &attachment, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_pass_info, null, &render_pass));
+
+    var view: usize = 0;
+    defer if (view != 0) destroyImageView(ctx.device, view, null);
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 37, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 1, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+
+    var framebuffer: usize = 0;
+    defer if (framebuffer != 0) destroyFramebuffer(ctx.device, framebuffer, null);
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    try std.testing.expectEqual(@as(u32, 1), validFramebufferLocked(framebuffer).?.color_base_layer);
+
+    var pool: usize = 0;
+    defer if (pool != 0) destroyCommandPool(ctx.device, pool, null);
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    var commands: [1]CommandBuffer = undefined;
+    var commands_allocated = false;
+    defer if (commands_allocated) freeCommandBuffers(ctx.device, pool, 1, &commands);
+    const allocation_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocation_info, &commands));
+    commands_allocated = true;
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var clear_value = std.mem.zeroes(ClearValue);
+    clear_value.color.float32 = .{ 0, 0, 0, 0 };
+    const pass_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&clear_value) };
+    cmdBeginRenderPass(commands[0], &pass_begin, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    for (imageLayerBytes(image_object, 0)) |byte| try std.testing.expectEqual(@as(u8, 0x11), byte);
+    for (imageLayerBytes(image_object, 1)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
 test "samplerless sampled-image descriptor writes preserve image-view metadata" {
     const ctx = try createTestDeviceContext();
     defer destroyInstance(ctx.instance, null);
@@ -27868,7 +28156,7 @@ test "image blit and resolve commands preserve bounded pixels and ABI" {
     validImageLocked(resolved).?.layout = 1;
     const source_bytes = imageBytes(validImageLocked(src).?);
     for (0..4) |index| std.mem.writeInt(u32, source_bytes[index * 4 ..][0..4], @as(u32, @intCast(index + 1)), .little);
-    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
     const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
@@ -27894,6 +28182,60 @@ test "image blit and resolve commands preserve bounded pixels and ABI" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, destination_bytes[0..4], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, destination_bytes[(3 * 4 + 3) * 4 ..][0..4], .little));
     try std.testing.expectEqualSlices(u8, source_bytes, imageBytes(validImageLocked(resolved).?));
+
+    // Mip generation blits may use one image for both sides when their mip
+    // subresources do not overlap. Track layouts per mip through submission,
+    // then verify that those layouts remain available to a later submit.
+    var mip_info = image_info;
+    mip_info.extent = .{ .width = 4, .height = 4, .depth = 1 };
+    mip_info.mip_levels = 3;
+    var mip_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &mip_info, null, &mip_image));
+    const mip_image_object = validImageLocked(mip_image).?;
+    const mip_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = imageByteSize(mip_image_object).?, .memory_type_index = 0 };
+    var mip_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &mip_memory_info, null, &mip_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, mip_image, mip_memory, 0));
+    const mip_source = imageBytes(mip_image_object);
+    const mip_color = [_]u8{ 0x24, 0x68, 0xac, 0xff };
+    for (0..16) |pixel| @memcpy(mip_source[pixel * 4 ..][0..4], &mip_color);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const ignored_family = std.math.maxInt(u32);
+    const all_mips = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 3, .base_array_layer = 0, .layer_count = 1 };
+    var mip_barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x800, .old_layout = 0, .new_layout = 6, .src_queue_family_index = ignored_family, .dst_queue_family_index = ignored_family, .image = mip_image, .subresource_range = all_mips };
+    cmdPipelineBarrier(command[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mip_barrier));
+    mip_barrier.subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    mip_barrier.src_access_mask = 0x800;
+    mip_barrier.old_layout = 6;
+    cmdPipelineBarrier(command[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mip_barrier));
+    mip_barrier.subresource_range.base_mip_level = 1;
+    mip_barrier.new_layout = 7;
+    mip_barrier.dst_access_mask = 0x1000;
+    cmdPipelineBarrier(command[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mip_barrier));
+    const mip_blit = ImageBlit{
+        .src_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 4, .y = 4, .z = 1 } },
+        .dst_subresource = .{ .aspect_mask = 1, .mip_level = 1, .base_array_layer = 0, .layer_count = 1 },
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+    };
+    cmdBlitImage(command[0], mip_image, 6, mip_image, 7, 1, @ptrCast(&mip_blit), 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    const mip_offset = imageSubresourceOffset(mip_image_object, 1, 0).?;
+    for (0..4) |pixel| try std.testing.expectEqualSlices(u8, &mip_color, mip_source[mip_offset + pixel * 4 ..][0..4]);
+    try std.testing.expectEqual(@as(i32, 6), mip_image_object.mip_layouts[0]);
+    try std.testing.expectEqual(@as(i32, 7), mip_image_object.mip_layouts[1]);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBlitImage(command[0], mip_image, 6, mip_image, 7, 1, @ptrCast(&mip_blit), 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    destroyImage(ctx.device, mip_image, null);
+    freeMemory(ctx.device, mip_memory, null);
     freeCommandBuffers(ctx.device, pool, 1, &command);
     destroyCommandPool(ctx.device, pool, null);
     destroyImage(ctx.device, resolved, null);
@@ -30653,6 +30995,32 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     try std.testing.expectEqual(@as(i32, 0), command[0].impl.bound_descriptor_bind_point);
     try std.testing.expectEqual(@as(u32, 0x3f), command[0].impl.bound_descriptor_stage_flags);
     try std.testing.expect(graphicsDescriptorBindingValid(command[0].impl));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const saved_uniform_binding_zero = set_object.uniform_bindings[0];
+    const saved_uniform = set_object.uniform;
+    const saved_uniform_offset = set_object.uniform_offset;
+    const saved_uniform_range = set_object.uniform_range;
+    const saved_uniform_dynamic = set_object.uniform_dynamic;
+    set_object.uniform_bindings[0] = .{};
+    set_object.uniform = null;
+    set_object.uniform_offset = 0;
+    set_object.uniform_range = 0;
+    set_object.uniform_dynamic = false;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offsets[0]);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
+    var snapshot_with_unbound_dynamic_slot = set_object.*;
+    try std.testing.expect(materializeDynamicUniformBindings(command[0], &snapshot_with_unbound_dynamic_slot, set_object));
+    try std.testing.expect(snapshot_with_unbound_dynamic_slot.uniform_bindings[0].buffer == null);
+    try std.testing.expectEqual(@as(u64, 512), snapshot_with_unbound_dynamic_slot.uniform_bindings[1].offset);
+    try std.testing.expect(!snapshot_with_unbound_dynamic_slot.uniform_bindings[1].dynamic);
+    set_object.uniform_bindings[0] = saved_uniform_binding_zero;
+    set_object.uniform = saved_uniform;
+    set_object.uniform_offset = saved_uniform_offset;
+    set_object.uniform_range = saved_uniform_range;
+    set_object.uniform_dynamic = saved_uniform_dynamic;
     var unsupported_bind2 = bind2;
     unsupported_bind2.stage_flags = 0x40;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
@@ -31387,6 +31755,14 @@ test "D24 S8 storage quantizes depth and preserves the untouched aspect" {
     const first_after_write = std.mem.readInt(u32, storage[0..4], .little);
     try std.testing.expectEqual(@as(u32, 0x56), first_after_write & 0xff);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), depthValueFromStorage(image.format, storage[0..], 0), 0.000001);
+}
+
+test "ANGLE attachment layout resync accepts only known repeated transitions" {
+    try std.testing.expect(angleAttachmentLayoutResync(83, 2, 5, 2));
+    try std.testing.expect(angleAttachmentLayoutResync(format_d32_sfloat, 1000117001, 4, 1000117001));
+    try std.testing.expect(!angleAttachmentLayoutResync(83, 5, 5, 2));
+    try std.testing.expect(!angleAttachmentLayoutResync(83, 2, 4, 2));
+    try std.testing.expect(!angleAttachmentLayoutResync(format_d24_unorm_s8_uint, 7, 6, 7));
 }
 
 test "D24 S8 same-layout barriers reconcile an untracked attachment layout" {

@@ -370,6 +370,16 @@ fn uniformValueByteSize(ty: ir.Type, available: usize) Error!usize {
     if (available < compact_size) return error.Bounds;
     return compact_size;
 }
+fn uniformArrayStrideValid(member: ir.UniformMember) bool {
+    if (member.array_count == 0 or (member.array_stride == 0 and member.array_count != 1)) return false;
+    if (member.array_stride == 0) return true;
+    if (member.array_stride % 16 != 0) return false;
+    const element_size: u32 = if (member.ty.rows == 1)
+        @intCast(byteSize(member.ty) catch return false)
+    else
+        @as(u32, member.ty.columns) * 16;
+    return member.array_stride >= element_size;
+}
 fn readInputValue(ty: ir.Type, binding: Binding) Error!Value {
     var result = try readValue(ty, binding.bytes);
     if (binding.dpdx_bytes.len == 0 and binding.dpdy_bytes.len == 0) return result;
@@ -5112,7 +5122,7 @@ fn validate(program: *const ir.Program) Error!void {
             }
             for (interface.members[0..interface.member_count], 0..) |m, member_index| {
                 try validateType(m.ty);
-                if (m.array_count == 0 or (m.array_stride == 0 and m.array_count != 1) or (m.array_stride != 0 and (m.array_stride % 16 != 0 or m.ty.rows != 1))) {
+                if (!uniformArrayStrideValid(m)) {
                     if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid uniform member interface={} member={} array_count={} array_stride={} type={any}\n", .{ interface_index, member_index, m.array_count, m.array_stride, m.ty });
                     return error.InvalidStorage;
                 }
