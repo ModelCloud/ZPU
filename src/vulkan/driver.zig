@@ -1186,6 +1186,7 @@ const ImageObj = struct {
     samples: u32,
     format: i32,
     usage: u32,
+    flags: u32 = 0,
     layout: i32,
     memory: ?*MemoryObj = null,
     owned_bytes: ?[]align(64) u8 = null,
@@ -1470,7 +1471,8 @@ const ProfileUniform = struct {
     interface: u32,
     byte_size: u8 = 0,
 };
-const ProfileSampledImage = struct { interface: u32, binding: u32, descriptor_set: u8 = 1, sampler_required: bool = true };
+const ProfileSampledImage = struct { interface: u32, binding: u32, descriptor_set: u8 = 1, sampler_required: bool = true, cube: bool = false };
+const ProfileSampler = struct { interface: u32, binding: u32 };
 const ProfileInputAttachment = struct { interface: u32, binding: u32 };
 const ProfileGraphics = struct {
     vertex: render_ir_exec.Executor,
@@ -1495,6 +1497,8 @@ const ProfileGraphics = struct {
     fragment_needs_derivatives: bool = false,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_samplers: [8]ProfileSampler = undefined,
+    fragment_sampler_count: u8 = 0,
     fragment_input_attachments: [8]ProfileInputAttachment = undefined,
     fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
@@ -1520,6 +1524,8 @@ const ProfileGraphicsContract = struct {
     fragment_front_facing: ?u32 = null,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_samplers: [8]ProfileSampler = undefined,
+    fragment_sampler_count: u8 = 0,
     fragment_input_attachments: [8]ProfileInputAttachment = undefined,
     fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
@@ -1712,15 +1718,15 @@ const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?
 const BlitImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageBlit, filter: i32 };
 const ResolveImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageResolve };
 const ClearDepthCommand = struct { image: *ImageObj, layout: i32, depth: f32, stencil: u32 = 0, aspect_mask: u32 = 2, base_layer: u32 = 0, layer_count: u32 = 1 };
-const RenderClearCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, stencil_value: u32 = 0, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true, clear_stencil: bool = false };
-const ClearAttachmentsCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
-const DeferredClearAttachmentsCommand = struct { color: [4]u8, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
+const RenderClearCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, half_color: ?[4]u16 = null, depth_value: f32, stencil_value: u32 = 0, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true, clear_stencil: bool = false };
+const ClearAttachmentsCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, half_color: ?[4]u16 = null, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
+const DeferredClearAttachmentsCommand = struct { color: [4]u8, half_color: ?[4]u16 = null, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
 const DynamicState = struct { cull_mode: u32 = std.math.maxInt(u32), front_face: i32 = -1, primitive_topology: i32 = 3, primitive_topology_set: bool = false, primitive_restart_enable: u32 = 0, primitive_restart_enable_set: bool = false, rasterizer_discard_enable: u32 = 0, rasterizer_discard_enable_set: bool = false, depth_bias_enable: u32 = 0, depth_bias_enable_set: bool = false, depth_test_enable: u32 = 1, depth_test_enable_set: bool = false, depth_write_enable: u32 = 1, depth_write_enable_set: bool = false, depth_compare_op: i32 = 3, depth_compare_op_set: bool = false, depth_bounds_test_enable: u32 = 0, depth_bounds_test_enable_set: bool = false, stencil_test_enable: u32 = 0, stencil_test_enable_set: bool = false, stencil_fail_op: i32 = 0, stencil_pass_op: i32 = 0, stencil_depth_fail_op: i32 = 0, stencil_compare_op: i32 = 7, stencil_op_set: bool = false };
 const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, half_color: ?[4]u16 = null, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, dynamic_uniform_offsets: [max_profile_sampled_bindings]u64 = [_]u64{0} ** max_profile_sampled_bindings, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -4423,7 +4429,11 @@ fn nv12ImageByteSize(width: u32, height: u32) ?u64 {
 
 fn imageFormatMipChainLayerByteSize(format: i32, width: u32, height: u32, mip_levels: u32) ?u64 {
     if (ycbcr420Nv12Format(format)) return if (mip_levels == 1) nv12ImageByteSize(width, height) else null;
-    return imageMipChainLayerByteSize(width, height, mip_levels);
+    return imageMipChainLayerByteSizeForBpp(width, height, mip_levels, imageStorageBytesPerTexel(format));
+}
+
+fn imageStorageBytesPerTexel(format: i32) u64 {
+    return if (format == 97) 8 else 4;
 }
 
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
@@ -4447,8 +4457,14 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // R8G8 for interleaved chroma. Both are sampled/transfer resources;
         // neither is exposed as a color attachment in this bounded profile.
         16 => 0x1 | 0x2 | 0x4 | 0x10,
+        // R16G16_SFLOAT backs sampled WebGL intermediate images. Its
+        // byte-addressable half-float pair supports sampling and transfers.
+        83 => if (tiling == 0) 0x1 | 0x2 | 0x4 else 0,
         37, 43 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
+        // RGBA16_SFLOAT uses the byte-addressable half-float CPU store below
+        // for sampling, transfer, and the scalar single-color-attachment path.
+        97 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80 | 0x100,
         // Bounded NV12 support is sampled and transferred only. It is not a
         // render target or input attachment, and every plane shares one
         // allocation rather than exposing disjoint-memory semantics.
@@ -4496,8 +4512,10 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        83 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37, 43 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        97 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
@@ -4697,7 +4715,12 @@ fn validExternalHandleTypes(handle_types: u32) bool {
     return handle_types & ~external_handle_type_mask == 0;
 }
 fn imageCreateFlagsValid(flags: u32) bool {
-    return flags == 0 or flags == 8;
+    // VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT and CUBE_COMPATIBLE_BIT.
+    return flags & ~@as(u32, 0x18) == 0;
+}
+fn imageCreateShapeValid(flags: u32, width: u32, height: u32, layers: u32) bool {
+    if (flags & 0x10 == 0) return true;
+    return width == height and layers >= 6;
 }
 fn getPhysicalDeviceExternalBufferProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalBufferInfo, output: ?*ExternalBufferProperties) callconv(.c) void {
     const h = physical orelse return;
@@ -6030,6 +6053,9 @@ fn bindBufferMemory(device: ?Device, handle: usize, memory_handle: usize, offset
     return .success;
 }
 fn imageMipChainLayerByteSize(width: u32, height: u32, mip_levels: u32) ?u64 {
+    return imageMipChainLayerByteSizeForBpp(width, height, mip_levels, 4);
+}
+fn imageMipChainLayerByteSizeForBpp(width: u32, height: u32, mip_levels: u32, bytes_per_texel: u64) ?u64 {
     var total: u64 = 0;
     var mip_width = width;
     var mip_height = height;
@@ -6039,7 +6065,7 @@ fn imageMipChainLayerByteSize(width: u32, height: u32, mip_levels: u32) ?u64 {
             hit(.overflow_image_size);
             return null;
         };
-        const bytes = std.math.mul(u64, pixels, 4) catch {
+        const bytes = std.math.mul(u64, pixels, bytes_per_texel) catch {
             hit(.overflow_image_size);
             return null;
         };
@@ -6090,7 +6116,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage usage rejected format={d} tiling={d} usage=0x{x} allowed=0x{x}\n", .{ ci.format, ci.tiling, ci.usage, allowed_usage });
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ycbcr420Nv12Format(ci.format) and (ci.mip_levels != 1 or ci.array_layers != 1)) or (ci.tiling != 0 and ci.tiling != 1) or (isDepthStencilFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !imageCreateShapeValid(ci.flags, ci.extent.width, ci.extent.height, ci.array_layers) or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ycbcr420Nv12Format(ci.format) and (ci.mip_levels != 1 or ci.array_layers != 1)) or (ci.tiling != 0 and ci.tiling != 1) or (isDepthStencilFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage rejected alloc={} s_type={d} pnext={} flags=0x{x} type={d} allowed=0x{x} extent={d}x{d}x{d} mips={d} layers={d} samples={d} tiling={d} sharing={d} families={d} layout={d} format={d} usage=0x{x}\n", .{ alloc != null, ci.s_type, imageCreatePNextValid(ci.p_next, ci.format), ci.flags, ci.image_type, allowed_usage, ci.extent.width, ci.extent.height, ci.extent.depth, ci.mip_levels, ci.array_layers, ci.samples, ci.tiling, ci.sharing_mode, ci.queue_family_index_count, ci.initial_layout, ci.format, ci.usage });
         return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     }
@@ -6099,7 +6125,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&image_objects, &image_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
+        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .flags = ci.flags, .layout = ci.initial_layout };
         if (imageByteSize(object) == null) return .error_initialization_failed;
         state.* = .live;
         out.* = handle;
@@ -6183,7 +6209,7 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
     const allowed_usage = imageFormatUsage(info.format, info.tiling);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (ycbcr420Nv12Format(info.format) and (info.mip_levels != 1 or info.array_layers != 1)) or (info.tiling != 0 and info.tiling != 1) or (isDepthStencilFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !imageCreateShapeValid(info.flags, info.extent.width, info.extent.height, info.array_layers) or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (ycbcr420Nv12Format(info.format) and (info.mip_levels != 1 or info.array_layers != 1)) or (info.tiling != 0 and info.tiling != 1) or (isDepthStencilFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
     const bytes = imageMipChainByteSize(info.format, info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
     return .{ .size = bytes, .alignment = 4, .memory_type_bits = 1 };
 }
@@ -6206,11 +6232,11 @@ fn hostCopyMemcpyRegionValid(image: *const ImageObj, offset: Offset3D, extent: E
 fn hostCopyRowsValid(row_length: u32, image_height: u32, width: u32, height: u32) bool {
     return (row_length == 0 or row_length >= width) and (image_height == 0 or image_height >= height);
 }
-fn hostCopyLayerStride(row_length: u32, image_height: u32, width: u32, height: u32) ?usize {
+fn hostCopyLayerStride(row_length: u32, image_height: u32, width: u32, height: u32, bytes_per_texel: u64) ?usize {
     const row = if (row_length == 0) width else row_length;
     const rows = if (image_height == 0) height else image_height;
     const texels = std.math.mul(u64, row, rows) catch return null;
-    const bytes = std.math.mul(u64, texels, 4) catch return null;
+    const bytes = std.math.mul(u64, texels, bytes_per_texel) catch return null;
     return std.math.cast(usize, bytes);
 }
 fn hostImageMemoryRangesOverlap(a: *const ImageObj, b: *const ImageObj) bool {
@@ -6253,13 +6279,15 @@ fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callc
     for (ci.regions.?[0..ci.region_count]) |region| {
         const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
         const image_height = if (region.memory_image_height == 0) region.image_extent.height else region.memory_image_height;
-        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height) orelse return .error_initialization_failed;
+        const bytes_per_texel = imageStorageBytesPerTexel(image.format);
+        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height, bytes_per_texel) orelse return .error_initialization_failed;
         const source: [*]const u8 = @ptrCast(region.host_pointer.?);
         for (0..region.image_subresource.layer_count) |layer| {
             const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             const source_layer = source[layer * layer_stride ..][0..layer_stride];
-            const dst_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            copyHostRows(dst[dst_offset..], @as(usize, image.width) * 4, source_layer, @as(usize, row_length) * 4, @as(usize, region.image_extent.width) * 4, region.image_extent.height);
+            const dst_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * @as(usize, @intCast(bytes_per_texel));
+            const row_bytes = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
+            copyHostRows(dst[dst_offset..], @as(usize, image.width) * @as(usize, @intCast(bytes_per_texel)), source_layer, @as(usize, row_length) * @as(usize, @intCast(bytes_per_texel)), row_bytes, region.image_extent.height);
         }
     }
     invalidateImageContents(image);
@@ -6280,13 +6308,15 @@ fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callc
     for (ci.regions.?[0..ci.region_count]) |region| {
         const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
         const image_height = if (region.memory_image_height == 0) region.image_extent.height else region.memory_image_height;
-        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height) orelse return .error_initialization_failed;
+        const bytes_per_texel = imageStorageBytesPerTexel(image.format);
+        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height, bytes_per_texel) orelse return .error_initialization_failed;
         const destination: [*]u8 = @ptrCast(region.host_pointer.?);
         for (0..region.image_subresource.layer_count) |layer| {
             const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             const destination_layer = destination[layer * layer_stride ..][0..layer_stride];
-            const src_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            copyHostRows(destination_layer, @as(usize, row_length) * 4, src[src_offset..], @as(usize, image.width) * 4, @as(usize, region.image_extent.width) * 4, region.image_extent.height);
+            const src_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * @as(usize, @intCast(bytes_per_texel));
+            const row_bytes = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
+            copyHostRows(destination_layer, @as(usize, row_length) * @as(usize, @intCast(bytes_per_texel)), src[src_offset..], @as(usize, image.width) * @as(usize, @intCast(bytes_per_texel)), row_bytes, region.image_extent.height);
         }
     }
     return .success;
@@ -6313,9 +6343,10 @@ fn copyImageToImage(device: ?Device, info: ?*const CopyImageToImageInfo) callcon
             const src_layer_offset = imageLayerOffset(src_image, region.src_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             const dst_layer_offset = imageLayerOffset(dst_image, region.dst_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             for (0..region.extent.height) |row| {
-                const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * 4;
-                const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * 4;
-                const bytes = @as(usize, region.extent.width) * 4;
+                const bytes_per_texel = @as(usize, @intCast(imageStorageBytesPerTexel(src_image.format)));
+                const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * bytes_per_texel;
+                const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * bytes_per_texel;
+                const bytes = @as(usize, region.extent.width) * bytes_per_texel;
                 std.mem.copyForwards(u8, dst[dst_offset..][0..bytes], src[src_offset..][0..bytes]);
             }
         }
@@ -6439,10 +6470,12 @@ fn imageSubresourceLayout(device: ?Device, handle: usize, subresource: ImageSubr
     const image = validImageLocked(handle) orelse return null;
     const expected_aspect = if (isDepthFormat(image.format)) image_aspect_depth_bit else if (isStencilFormat(image.format)) image_aspect_stencil_bit else image_aspect_color_bit;
     if (!validDeviceLocked(d) or !validOwner(d, image.owner) or subresource.aspect_mask != expected_aspect or subresource.mip_level != 0 or subresource.array_layer >= image.array_layers) return null;
-    const layer_size = imageLayerByteSize(image) orelse return null;
-    const offset = std.math.mul(u64, layer_size, subresource.array_layer) catch return null;
-    const row_pitch = std.math.mul(u64, image.width, 4) catch return null;
-    return .{ .offset = offset, .size = layer_size, .row_pitch = row_pitch, .array_pitch = layer_size, .depth_pitch = layer_size };
+    const layer_size = std.math.mul(u64, image.width, image.height) catch return null;
+    const subresource_size = std.math.mul(u64, layer_size, imageStorageBytesPerTexel(image.format)) catch return null;
+    const array_pitch = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
+    const offset = imageSubresourceOffset(image, 0, subresource.array_layer) orelse return null;
+    const row_pitch = std.math.mul(u64, image.width, imageStorageBytesPerTexel(image.format)) catch return null;
+    return .{ .offset = offset, .size = subresource_size, .row_pitch = row_pitch, .array_pitch = array_pitch, .depth_pitch = subresource_size };
 }
 
 fn getImageSubresourceLayout(device: ?Device, handle: usize, subresource: ?*const ImageSubresource, output: ?*SubresourceLayout) callconv(.c) void {
@@ -7221,7 +7254,7 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
             const end_x = std.math.add(u64, @intCast(op.rect.offset.x), op.rect.extent.width) catch return null;
             const end_y = std.math.add(u64, @intCast(op.rect.offset.y), op.rect.extent.height) catch return null;
             if (end_x > target.width or end_y > target.height) return null;
-            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .depth_value = op.depth_value, .stencil_value = op.stencil_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
+            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .half_color = op.half_color, .depth_value = op.depth_value, .stencil_value = op.stencil_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
         },
         else => {},
     }
@@ -7500,7 +7533,7 @@ fn imageMipOffsetInLayer(image: *const ImageObj, mip_level: u32) ?usize {
     var mip: u32 = 0;
     while (mip < mip_level) : (mip += 1) {
         const pixels = std.math.mul(u64, width, height) catch return null;
-        offset = std.math.add(u64, offset, std.math.mul(u64, pixels, 4) catch return null) catch return null;
+        offset = std.math.add(u64, offset, std.math.mul(u64, pixels, imageStorageBytesPerTexel(image.format)) catch return null) catch return null;
         width = @max(@as(u32, 1), width / 2);
         height = @max(@as(u32, 1), height / 2);
     }
@@ -7543,6 +7576,18 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
         c.impl.invalid = true;
         return;
     };
+    const half_color: ?[4]u16 = if (image.format == 97) blk: {
+        var converted: [4]u16 = undefined;
+        for (value.float32, 0..) |component, index| {
+            if (!std.math.isFinite(component)) {
+                hit(.invalid_clear_color);
+                c.impl.invalid = true;
+                return;
+            }
+            converted[index] = @bitCast(@as(f16, @floatCast(component)));
+        }
+        break :blk converted;
+    } else null;
     var unique_count: usize = 0;
     for (list[0..count], 0..) |range, index| {
         var duplicate = false;
@@ -7563,7 +7608,7 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
             break;
         };
         if (duplicate) continue;
-        record(c, .{ .clear = .{ .image = image, .layout = layout, .color = bytes, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
+        record(c, .{ .clear = .{ .image = image, .layout = layout, .color = bytes, .half_color = half_color, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
     }
 }
 fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, value: ?*const ClearDepthStencilValue, count: u32, ranges: ?[*]const ImageSubresourceRange) callconv(.c) void {
@@ -7725,12 +7770,20 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     const expected_depth_layout = if (depth_image != null) recordedAttachmentLayout(c, false) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, false);
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
         const bytes = if (attachment.aspect_mask == image_aspect_color_bit) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
+        const target_color_format = if (color_image) |target| target.format else inherited_color_format;
+        const half_color: ?[4]u16 = if (attachment.aspect_mask == image_aspect_color_bit and target_color_format == 97)
+            halfColorFromComponents(attachment.clear_value.color.float32) orelse {
+                c.impl.invalid = true;
+                return;
+            }
+        else
+            null;
         const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == image_aspect_color_bit) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
         if (inherited_secondary and color_image == null and depth_image == null) {
-            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .half_color = half_color, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         } else {
             const image = if (attachment.aspect_mask == image_aspect_color_bit) color_image.? else depth_image.?;
-            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .half_color = half_color, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         }
     };
 }
@@ -7963,12 +8016,13 @@ fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImage
     const mip = imageMipExtent(image, image_region.image_subresource.mip_level) orelse return true;
     const image_row_texels = checkedBufferImageMul(@as(u64, @intCast(image_region.image_offset.y)), mip.width) orelse return true;
     const image_row_start = checkedBufferImageAdd(image_row_texels, @as(u64, @intCast(image_region.image_offset.x))) orelse return true;
-    const image_row_offset = checkedBufferImageMul(image_row_start, 4) orelse return true;
+    const image_bytes_per_texel = imageStorageBytesPerTexel(image.format);
+    const image_row_offset = checkedBufferImageMul(image_row_start, image_bytes_per_texel) orelse return true;
     const buffer_base = checkedBufferImageAdd(buffer.offset, buffer_region.buffer_offset) orelse return true;
     const buffer_stride = checkedBufferImageMul(buffer_row, buffer_bytes_per_texel) orelse return true;
     const buffer_width = checkedBufferImageMul(buffer_region.image_extent.width, buffer_bytes_per_texel) orelse return true;
-    const image_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
-    const image_width = checkedBufferImageMul(image_region.image_extent.width, 4) orelse return true;
+    const image_stride = checkedBufferImageMul(mip.width, image_bytes_per_texel) orelse return true;
+    const image_width = checkedBufferImageMul(image_region.image_extent.width, image_bytes_per_texel) orelse return true;
     for (0..buffer_region.image_subresource.layer_count) |buffer_layer| {
         const buffer_layer_offset = checkedBufferImageMul(buffer_layer_stride, buffer_layer) orelse return true;
         const buffer_layer_base = checkedBufferImageAdd(buffer_base, buffer_layer_offset) orelse return true;
@@ -7981,15 +8035,15 @@ fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImage
     }
     return false;
 }
-fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
+fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy, bytes_per_texel: u64) bool {
     const a_row = if (a.buffer_row_length == 0) a.image_extent.width else a.buffer_row_length;
     const b_row = if (b.buffer_row_length == 0) b.image_extent.width else b.buffer_row_length;
-    const a_layer_stride = bufferImageLayerStride(a) orelse return true;
-    const b_layer_stride = bufferImageLayerStride(b) orelse return true;
-    const a_stride = checkedBufferImageMul(a_row, 4) orelse return true;
-    const b_stride = checkedBufferImageMul(b_row, 4) orelse return true;
-    const a_width = checkedBufferImageMul(a.image_extent.width, 4) orelse return true;
-    const b_width = checkedBufferImageMul(b.image_extent.width, 4) orelse return true;
+    const a_layer_stride = bufferImageLayerStrideForBpp(a, bytes_per_texel) orelse return true;
+    const b_layer_stride = bufferImageLayerStrideForBpp(b, bytes_per_texel) orelse return true;
+    const a_stride = checkedBufferImageMul(a_row, bytes_per_texel) orelse return true;
+    const b_stride = checkedBufferImageMul(b_row, bytes_per_texel) orelse return true;
+    const a_width = checkedBufferImageMul(a.image_extent.width, bytes_per_texel) orelse return true;
+    const b_width = checkedBufferImageMul(b.image_extent.width, bytes_per_texel) orelse return true;
     for (0..a.image_subresource.layer_count) |a_layer| {
         const a_layer_offset = checkedBufferImageMul(a_layer_stride, a_layer) orelse return true;
         const a_base = checkedBufferImageAdd(a.buffer_offset, a_layer_offset) orelse return true;
@@ -8016,11 +8070,12 @@ fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers,
     const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), mip.width) orelse return true;
     const a_row_start = checkedBufferImageAdd(a_row_texels, @as(u64, @intCast(a_offset.x))) orelse return true;
     const b_row_start = checkedBufferImageAdd(b_row_texels, @as(u64, @intCast(b_offset.x))) orelse return true;
-    const a_row_offset = checkedBufferImageMul(a_row_start, 4) orelse return true;
-    const b_row_offset = checkedBufferImageMul(b_row_start, 4) orelse return true;
-    const row_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
-    const a_width = checkedBufferImageMul(a_extent.width, 4) orelse return true;
-    const b_width = checkedBufferImageMul(b_extent.width, 4) orelse return true;
+    const image_bytes_per_texel = imageStorageBytesPerTexel(image.format);
+    const a_row_offset = checkedBufferImageMul(a_row_start, image_bytes_per_texel) orelse return true;
+    const b_row_offset = checkedBufferImageMul(b_row_start, image_bytes_per_texel) orelse return true;
+    const row_stride = checkedBufferImageMul(mip.width, image_bytes_per_texel) orelse return true;
+    const a_width = checkedBufferImageMul(a_extent.width, image_bytes_per_texel) orelse return true;
+    const b_width = checkedBufferImageMul(b_extent.width, image_bytes_per_texel) orelse return true;
     for (0..a_layers.layer_count) |a_layer| {
         const a_layer_number = checkedBufferImageAdd(a_layers.base_array_layer, a_layer) orelse return true;
         const a_base = checkedBufferImageAdd(image.offset, imageSubresourceOffset(image, a_layers.mip_level, @intCast(a_layer_number)) orelse return true) orelse return true;
@@ -8041,12 +8096,14 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
     const destination_row_texels = checkedBufferImageMul(@as(u64, @intCast(destination.dst_offset.y)), destination_mip.width) orelse return true;
     const source_row_start = checkedBufferImageAdd(source_row_texels, @as(u64, @intCast(source.src_offset.x))) orelse return true;
     const destination_row_start = checkedBufferImageAdd(destination_row_texels, @as(u64, @intCast(destination.dst_offset.x))) orelse return true;
-    const source_row_offset = checkedBufferImageMul(source_row_start, 4) orelse return true;
-    const destination_row_offset = checkedBufferImageMul(destination_row_start, 4) orelse return true;
-    const source_stride = checkedBufferImageMul(source_mip.width, 4) orelse return true;
-    const destination_stride = checkedBufferImageMul(destination_mip.width, 4) orelse return true;
-    const source_width = checkedBufferImageMul(source.extent.width, 4) orelse return true;
-    const destination_width = checkedBufferImageMul(destination.extent.width, 4) orelse return true;
+    const source_bytes_per_texel = imageStorageBytesPerTexel(src.format);
+    const destination_bytes_per_texel = imageStorageBytesPerTexel(dst.format);
+    const source_row_offset = checkedBufferImageMul(source_row_start, source_bytes_per_texel) orelse return true;
+    const destination_row_offset = checkedBufferImageMul(destination_row_start, destination_bytes_per_texel) orelse return true;
+    const source_stride = checkedBufferImageMul(source_mip.width, source_bytes_per_texel) orelse return true;
+    const destination_stride = checkedBufferImageMul(destination_mip.width, destination_bytes_per_texel) orelse return true;
+    const source_width = checkedBufferImageMul(source.extent.width, source_bytes_per_texel) orelse return true;
+    const destination_width = checkedBufferImageMul(destination.extent.width, destination_bytes_per_texel) orelse return true;
     for (0..source.src_subresource.layer_count) |source_index| {
         const source_layer_number = checkedBufferImageAdd(source.src_subresource.base_array_layer, source_index) orelse return true;
         const source_base = checkedBufferImageAdd(src.offset, imageSubresourceOffset(src, source.src_subresource.mip_level, @intCast(source_layer_number)) orelse return true) orelse return true;
@@ -8067,7 +8124,7 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
 // filter them without format conversion. Depth formats retain their narrower
 // sampled/destination-only contracts.
 fn transferableColorFormat(format: i32) bool {
-    return format == 37 or format == 43 or format == 44;
+    return format == 37 or format == 43 or format == 44 or format == 97;
 }
 
 fn colorAttachmentFormat(format: i32) bool {
@@ -8079,6 +8136,7 @@ fn bufferImageBytesPerTexel(format: i32) ?u64 {
         9 => 1,
         16 => 2,
         37, 43, 44 => 4,
+        97 => 8,
         else => null,
     };
 }
@@ -8190,7 +8248,7 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
             return;
         }
     }
-    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (bufferRegionsOverlap(a, b)) {
+    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (bufferRegionsOverlap(a, b, bufferImageBytesPerTexel(src.format) orelse 0)) {
         c.impl.invalid = true;
         return;
     };
@@ -9626,13 +9684,22 @@ fn prevalidateProfileSampledImages(op: anytype, owner: *DeviceObj) bool {
         if (!liveImageObject(image) or !imageStorageValid(image)) return deadResource();
         if (image.owner != owner or (image.memory != null and image.memory.?.owner != owner)) return wrongSubmittingDevice();
         if (!imageStorageValid(image)) return false;
+        const expected_view_type: i32 = if (sampled_profile.cube) 3 else 1;
+        const expected_layer_count: u32 = if (sampled_profile.cube) 6 else 1;
+        if (sampled.view_type != expected_view_type or (sampled_profile.cube and (image.flags & 0x10 == 0 or image.width != image.height or sampled.base_array_layer % 6 != 0)) or sampled.base_mip_level >= image.mip_levels or sampled.level_count == 0 or sampled.level_count > image.mip_levels - sampled.base_mip_level or sampled.base_array_layer >= image.array_layers or expected_layer_count > image.array_layers - sampled.base_array_layer or sampled.layer_count != expected_layer_count) return false;
         if (sampled_profile.sampler_required) {
             const sampler = sampled.sampler orelse return deadResource();
             if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
             if (sampler.owner != owner) return wrongSubmittingDevice();
         } else {
-            if (sampled.sampler != null or sampled.ycbcr != null or sampled.view_type != 1 or sampled.base_mip_level != 0 or sampled.level_count == 0 or sampled.level_count > image.mip_levels or sampled.base_array_layer != 0 or sampled.layer_count != 1) return false;
+            if (sampled.sampler != null or sampled.ycbcr != null or sampled.view_type != expected_view_type or (sampled_profile.cube and (image.flags & 0x10 == 0 or image.width != image.height or sampled.base_array_layer % 6 != 0)) or sampled.base_mip_level >= image.mip_levels or sampled.level_count == 0 or sampled.level_count > image.mip_levels - sampled.base_mip_level or sampled.base_array_layer >= image.array_layers or expected_layer_count > image.array_layers - sampled.base_array_layer or sampled.layer_count != expected_layer_count) return false;
         }
+    }
+    for (profile.fragment_samplers[0..profile.fragment_sampler_count]) |sampler_profile| {
+        if (sampler_profile.binding >= op.descriptors.binding_types.len or op.descriptors.binding_types[sampler_profile.binding] != 0) return false;
+        const sampler = op.descriptors.sampled_images[sampler_profile.binding].sampler orelse return deadResource();
+        if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+        if (sampler.owner != owner) return wrongSubmittingDevice();
     }
     return true;
 }
@@ -10215,6 +10282,41 @@ fn fillImagePattern(bytes: []u8, pattern: u32) void {
     @memset(std.mem.bytesAsSlice(u32, aligned), pattern);
 }
 
+fn halfColorForImageClear(color: [4]u8, half_color: ?[4]u16) [4]u16 {
+    if (half_color) |value| return value;
+    var result: [4]u16 = undefined;
+    for (color, 0..) |component, index| result[index] = @bitCast(@as(f16, @floatCast(@as(f32, @floatFromInt(component)) / 255.0)));
+    return result;
+}
+
+fn imageClearPattern(format: i32, color: [4]u8) ?u32 {
+    return if (format == 97) null else @bitCast(color);
+}
+
+fn fillImageClearColor(bytes: []u8, format: i32, color: [4]u8, half_color: ?[4]u16) void {
+    if (format != 97) {
+        fillImagePattern(bytes, @bitCast(color));
+        return;
+    }
+    const components = halfColorForImageClear(color, half_color);
+    for (0..bytes.len / 8) |pixel| for (components, 0..) |component, index| {
+        std.mem.writeInt(u16, bytes[pixel * 8 + index * 2 ..][0..2], component, .little);
+    };
+}
+
+fn fillImageClearColorRect(bytes: []u8, width: u32, format: i32, color: [4]u8, half_color: ?[4]u16, rect: cpu_cube.Rect) void {
+    if (format != 97) {
+        fillImagePatternRect(bytes, width, rect, @bitCast(color));
+        return;
+    }
+    if (rect.width == 0 or rect.height == 0) return;
+    const components = halfColorForImageClear(color, half_color);
+    for (@intCast(rect.y)..@intCast(rect.y + @as(i32, @intCast(rect.height)))) |y| for (@intCast(rect.x)..@intCast(rect.x + @as(i32, @intCast(rect.width)))) |x| {
+        const pixel_offset = (y * width + x) * 8;
+        for (components, 0..) |component, index| std.mem.writeInt(u16, bytes[pixel_offset + index * 2 ..][0..2], component, .little);
+    };
+}
+
 fn emptyRect() cpu_cube.Rect {
     return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 }
@@ -10268,13 +10370,54 @@ fn sampleLinear(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [4]u
     return result;
 }
 
+fn readHalfFloat(bytes: []const u8, offset: usize) f32 {
+    const bits = std.mem.readInt(u16, bytes[offset..][0..2], .little);
+    return @as(f32, @floatCast(@as(f16, @bitCast(bits))));
+}
+
+fn halfColorFromComponents(components: [4]f32) ?[4]u16 {
+    var result: [4]u16 = undefined;
+    for (components, 0..) |component, index| {
+        if (!std.math.isFinite(component)) return null;
+        result[index] = @bitCast(@as(f16, @floatCast(component)));
+    }
+    return result;
+}
+
+fn writeHalfFloat(bytes: []u8, offset: usize, value: f32) void {
+    std.mem.writeInt(u16, bytes[offset..][0..2], @bitCast(@as(f16, @floatCast(value))), .little);
+}
+
+fn sampleLinearRgba16(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [4]f32 {
+    const clamped_x = std.math.clamp(x, 0, @as(f32, @floatFromInt(width - 1)));
+    const clamped_y = std.math.clamp(y, 0, @as(f32, @floatFromInt(height - 1)));
+    const x0: usize = @intFromFloat(@floor(clamped_x));
+    const y0: usize = @intFromFloat(@floor(clamped_y));
+    const x1 = @min(x0 + 1, width - 1);
+    const y1 = @min(y0 + 1, height - 1);
+    const tx = clamped_x - @as(f32, @floatFromInt(x0));
+    const ty = clamped_y - @as(f32, @floatFromInt(y0));
+    const offsets = .{ (y0 * width + x0) * 8, (y0 * width + x1) * 8, (y1 * width + x0) * 8, (y1 * width + x1) * 8 };
+    var result: [4]f32 = undefined;
+    for (0..4) |channel| {
+        const component = channel * 2;
+        const a = readHalfFloat(bytes, offsets[0] + component);
+        const b = readHalfFloat(bytes, offsets[1] + component);
+        const c = readHalfFloat(bytes, offsets[2] + component);
+        const d = readHalfFloat(bytes, offsets[3] + component);
+        result[channel] = (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+    }
+    return result;
+}
+
 fn executeBlitImage(item: BlitImageCommand) void {
     const src = imageBytes(item.src);
     const dst = imageBytes(item.dst);
     const src_mip = imageMipExtent(item.src, item.region.src_subresource.mip_level).?;
     const dst_mip = imageMipExtent(item.dst, item.region.dst_subresource.mip_level).?;
     const src_pixels = std.math.mul(u64, src_mip.width, src_mip.height) catch unreachable;
-    const src_layer_size: usize = @intCast(std.math.mul(u64, src_pixels, 4) catch unreachable);
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(item.src.format));
+    const src_layer_size: usize = @intCast(std.math.mul(u64, src_pixels, bytes_per_texel) catch unreachable);
     const src_width = blitSpan(item.region.src_offsets[0].x, item.region.src_offsets[1].x, src_mip.width).?;
     const src_height = blitSpan(item.region.src_offsets[0].y, item.region.src_offsets[1].y, src_mip.height).?;
     const dst_width = blitSpan(item.region.dst_offsets[0].x, item.region.dst_offsets[1].x, dst_mip.width).?;
@@ -10290,7 +10433,7 @@ fn executeBlitImage(item: BlitImageCommand) void {
             var x: u32 = 0;
             while (x < dst_width) : (x += 1) {
                 const dx = if (item.region.dst_offsets[0].x < item.region.dst_offsets[1].x) @as(usize, @intCast(item.region.dst_offsets[0].x)) + x else @as(usize, @intCast(item.region.dst_offsets[0].x)) - x - 1;
-                const destination = dst_layer_offset + (dy * dst_mip.width + dx) * 4;
+                const destination = dst_layer_offset + (dy * dst_mip.width + dx) * bytes_per_texel;
                 if (item.filter == 1) {
                     const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(dst_width));
                     const t = u * @as(f32, @floatFromInt(src_width)) - 0.5;
@@ -10298,12 +10441,18 @@ fn executeBlitImage(item: BlitImageCommand) void {
                     const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(dst_height));
                     const ty = v * @as(f32, @floatFromInt(src_height)) - 0.5;
                     const syf = if (item.region.src_offsets[0].y < item.region.src_offsets[1].y) @as(f32, @floatFromInt(item.region.src_offsets[0].y)) + ty else @as(f32, @floatFromInt(item.region.src_offsets[0].y - 1)) - ty;
-                    const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], src_mip.width, src_mip.height, sx, syf);
-                    @memcpy(dst[destination..][0..4], &sample);
+                    const source_pixels = src[src_layer_offset..][0..src_layer_size];
+                    if (item.src.format == 97) {
+                        const sample = sampleLinearRgba16(source_pixels, src_mip.width, src_mip.height, sx, syf);
+                        for (sample, 0..) |component, channel| writeHalfFloat(dst, destination + channel * 2, component);
+                    } else {
+                        const sample = sampleLinear(source_pixels, src_mip.width, src_mip.height, sx, syf);
+                        @memcpy(dst[destination..][0..4], &sample);
+                    }
                 } else {
                     const sx = blitCoordinate(item.region.src_offsets[0].x, item.region.src_offsets[1].x, x, dst_width, src_width);
-                    const source = src_layer_offset + (sy * src_mip.width + sx) * 4;
-                    std.mem.copyForwards(u8, dst[destination..][0..4], src[source..][0..4]);
+                    const source = src_layer_offset + (sy * src_mip.width + sx) * bytes_per_texel;
+                    std.mem.copyForwards(u8, dst[destination..][0..bytes_per_texel], src[source..][0..bytes_per_texel]);
                 }
             }
         }
@@ -10316,15 +10465,16 @@ fn executeResolveImage(item: ResolveImageCommand) void {
     const dst = imageBytes(item.dst);
     const src_mip = imageMipExtent(item.src, item.region.src_subresource.mip_level).?;
     const dst_mip = imageMipExtent(item.dst, item.region.dst_subresource.mip_level).?;
+    const bytes_per_texel = @as(usize, @intCast(imageStorageBytesPerTexel(item.src.format)));
     var layer: u32 = 0;
     while (layer < item.region.src_subresource.layer_count) : (layer += 1) {
         const src_layer_offset = imageSubresourceOffset(item.src, item.region.src_subresource.mip_level, item.region.src_subresource.base_array_layer + layer).?;
         const dst_layer_offset = imageSubresourceOffset(item.dst, item.region.dst_subresource.mip_level, item.region.dst_subresource.base_array_layer + layer).?;
         var y: u32 = 0;
         while (y < item.region.extent.height) : (y += 1) {
-            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * src_mip.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
-            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * dst_mip.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
-            const bytes = @as(usize, item.region.extent.width) * 4;
+            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * src_mip.width + @as(usize, @intCast(item.region.src_offset.x))) * bytes_per_texel;
+            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * dst_mip.width + @as(usize, @intCast(item.region.dst_offset.x))) * bytes_per_texel;
+            const bytes = @as(usize, item.region.extent.width) * bytes_per_texel;
             std.mem.copyForwards(u8, dst[destination..][0..bytes], src[source..][0..bytes]);
         }
     }
@@ -10748,6 +10898,25 @@ fn colorStorageIndices(format: i32) ?[4]usize {
 }
 
 fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+    if (format == 97) {
+        if (bytes.len < 8 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+        const source = source_values;
+        for (source) |value| if (!std.math.isFinite(value)) return null;
+        var destination: [4]f32 = undefined;
+        for (&destination, 0..) |*value, channel| value.* = readHalfFloat(bytes, channel * 2);
+        var result = source;
+        if (blend.enable != 0) {
+            for (0..4) |channel| {
+                const alpha = channel == 3;
+                const src_factor = profileBlendFactor(if (alpha) blend.src_alpha_factor else blend.src_color_factor, source, destination, blend.constants, channel, alpha) orelse return null;
+                const dst_factor = profileBlendFactor(if (alpha) blend.dst_alpha_factor else blend.dst_color_factor, source, destination, blend.constants, channel, alpha) orelse return null;
+                result[channel] = profileBlendEquation(if (alpha) blend.alpha_op else blend.color_op, source[channel] * src_factor, destination[channel] * dst_factor) orelse return null;
+                if (!std.math.isFinite(result[channel])) return null;
+            }
+        }
+        for (0..4) |channel| if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) writeHalfFloat(bytes, channel * 2, result[channel]);
+        return 1;
+    }
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     var source = source_values;
@@ -10781,6 +10950,7 @@ fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, 
 /// operation order and u8 conversion; it only removes repeated factor and
 /// equation dispatch after the caller has selected this exact fixed state.
 fn profileWriteSourceOverColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32) ?u32 {
+    if (format == 97) return profileWriteColorComponents(bytes, format, source_values, color_write_mask, .{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 });
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     var source = source_values;
@@ -10870,6 +11040,14 @@ fn profileTextureCopyPreparedIsOpaque(prepared: render_ir_exec.TextureCopyPrepar
 /// state has no destination contribution.  Other pipelines remain on the
 /// general bounded blend implementation above.
 fn profileWriteOpaqueColorComponents(bytes: []u8, format: i32, components: [4]f32) ?u32 {
+    if (format == 97) {
+        if (bytes.len < 8) return null;
+        for (components, 0..) |component, channel| {
+            if (!std.math.isFinite(component)) return null;
+            writeHalfFloat(bytes, channel * 2, component);
+        }
+        return 1;
+    }
     if (bytes.len < 4) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     for (components, 0..) |component, channel| {
@@ -10926,6 +11104,35 @@ test "opaque profile color write matches disabled and alpha-one source blending"
         try std.testing.expectEqualSlices(u8, &disabled, &opaque_bytes);
         try std.testing.expectEqualSlices(u8, &blended, &opaque_bytes);
     }
+}
+
+test "RGBA16F profile writes preserve floating point range and masked channels" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 1.5, -0.5, 4, 0.25 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var pixel: [8]u8 = undefined;
+    for ([_]f32{ 0.25, 0.5, 0.75, 1 }, 0..) |value, index| writeHalfFloat(&pixel, index * 2, value);
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&pixel, 97, false, &output, 0x5, .{}));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&pixel, 0));
+    try std.testing.expectEqual(@as(f32, 0.5), readHalfFloat(&pixel, 2));
+    try std.testing.expectEqual(@as(f32, 4), readHalfFloat(&pixel, 4));
+    try std.testing.expectEqual(@as(f32, 1), readHalfFloat(&pixel, 6));
+}
+
+test "RGBA16F source-over blending does not clamp float attachment values" {
+    const source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 2, -0.5, 1.25, 0.5 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var generic: [8]u8 = undefined;
+    var specialized: [8]u8 = undefined;
+    for ([_]f32{ 0.25, 1.5, -2, 0.5 }, 0..) |value, index| {
+        writeHalfFloat(&generic, index * 2, value);
+        writeHalfFloat(&specialized, index * 2, value);
+    }
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&generic, 97, false, &output, 0xf, source_over));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteSourceOverColor(&specialized, 97, false, &output, 0xf));
+    try std.testing.expectEqualSlices(u8, &generic, &specialized);
+    try std.testing.expectEqual(@as(f32, 2.125), readHalfFloat(&generic, 0));
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&generic, 2));
 }
 
 test "scalar profile color writes preserve R8 red storage" {
@@ -11135,24 +11342,70 @@ test "scalar profile depth bias applies constant slope and clamp terms" {
     try std.testing.expect(profileDepthBias(vertices, area, .{ std.math.inf(f32), 0, 0 }) == null);
 }
 
-fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descriptor_set: u8, sampler_required: bool) ?render_ir_exec.SampledImage {
+fn profileSampler(descriptors: *const DescriptorSetObj, binding: u32) ?render_ir_exec.Sampler {
+    if (binding >= descriptors.sampled_images.len) return null;
+    const value = descriptors.sampled_images[binding].sampler orelse return null;
+    if (value.unnormalized_coordinates) return null;
+    const mag_filter: render_ir_exec.SampledImage.Filter = switch (value.mag_filter) {
+        0 => .nearest,
+        1 => .linear,
+        else => return null,
+    };
+    const min_filter: render_ir_exec.SampledImage.Filter = switch (value.min_filter) {
+        0 => .nearest,
+        1 => .linear,
+        else => return null,
+    };
+    const border: [4]f32 = switch (value.border_color) {
+        0, 1 => .{ 0, 0, 0, 0 },
+        2, 3 => .{ 0, 0, 0, 1 },
+        4, 5 => .{ 1, 1, 1, 1 },
+        else => return null,
+    };
+    return .{
+        .mag_filter = mag_filter,
+        .min_filter = min_filter,
+        .mipmap_mode = std.enums.fromInt(render_ir_exec.Sampler.MipmapMode, value.mipmap_mode) orelse return null,
+        .address_u = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_u) orelse return null,
+        .address_v = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_v) orelse return null,
+        .border = border,
+        .lod_bias = value.mip_lod_bias,
+        .min_lod = value.min_lod,
+        .max_lod = value.max_lod,
+    };
+}
+
+fn profileImageUsesCube(program: *const render_ir.Program, interface: u32) bool {
+    for (program.instructions) |instruction| {
+        if (instruction.operands.len == 0 or instruction.operands[0] != interface) continue;
+        if (instruction.op == .image_cube_sample_implicit_lod or instruction.op == .image_cube_sample_explicit_lod) return true;
+    }
+    return false;
+}
+
+fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descriptor_set: u8, sampler_required: bool, cube: bool) ?render_ir_exec.SampledImage {
     const table = if (descriptor_set == 1) &descriptors.sampled_images_set1 else &descriptors.sampled_images;
     if (binding >= table.len) return null;
     const sampled = table[binding];
     const image = sampled.image orelse return null;
     const sampler = sampled.sampler;
-    if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler_required != (sampler != null)) return null;
+    if (!liveImageObject(image) or image.samples != 1 or sampler_required != (sampler != null)) return null;
+    const expected_view_type: i32 = if (cube) 3 else 1;
+    const expected_layer_count: u32 = if (cube) 6 else 1;
+    if (sampled.view_type != expected_view_type or sampled.layer_count != expected_layer_count or sampled.base_array_layer >= image.array_layers or expected_layer_count > image.array_layers - sampled.base_array_layer or (cube and (image.flags & 0x10 == 0 or image.width != image.height or sampled.base_array_layer % 6 != 0)) or sampled.level_count == 0 or sampled.level_count > image.mip_levels or sampled.base_mip_level >= image.mip_levels or sampled.level_count > image.mip_levels - sampled.base_mip_level) return null;
     if (sampler_required) {
         const value = sampler.?;
         if (value.unnormalized_coordinates or value.mag_filter != value.min_filter) return null;
-    } else if (sampled.ycbcr != null or sampled.view_type != 1 or sampled.base_mip_level != 0 or sampled.level_count == 0 or sampled.base_array_layer != 0 or sampled.layer_count != 1) return null;
+    }
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
         9 => .r8_unorm,
         16 => .rg8_unorm,
+        83 => .rg16_sfloat,
         2, 4, 6 => .rgba8_unorm,
         3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
         43, 44 => .bgra8_unorm,
+        97 => .rgba16_sfloat,
         format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
         else => return null,
     };
@@ -11171,7 +11424,8 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descr
     } else .{ 0, 0, 0, 0 };
     const bytes = imageBytes(image);
     if (format == .ycbcr_420_2plane) {
-        const conversion = sampled.ycbcr orelse return null;
+        if (cube or !sampler_required or sampled.ycbcr == null or sampled.base_mip_level != 0 or sampled.level_count != 1 or sampled.base_array_layer != 0 or image.array_layers != 1) return null;
+        const conversion = sampled.ycbcr.?;
         const model: render_ir_exec.SampledImage.YcbcrModel = switch (conversion.model) {
             1 => .identity,
             2 => .bt709,
@@ -11204,21 +11458,46 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descr
             .ycbcr_range = range,
         };
     }
-    return .{
-        .pixels = bytes,
-        .width = image.width,
-        .height = image.height,
-        .row_stride = std.math.mul(u32, image.width, if (format == .r8_unorm) 1 else if (format == .rg8_unorm) 2 else 4) catch return null,
-        .bytes_per_texel = if (format == .r8_unorm) 1 else if (format == .rg8_unorm) 2 else 4,
+    if (sampled.ycbcr != null) return null;
+    const bytes_per_texel: u32 = if (format == .r8_unorm) 1 else if (format == .rg8_unorm) 2 else if (format == .rgba16_sfloat) 8 else 4;
+    const base_width = imageMipExtent(image, sampled.base_mip_level) orelse return null;
+    const base_offset = imageSubresourceOffset(image, sampled.base_mip_level, sampled.base_array_layer) orelse return null;
+    const view_byte_count = if (cube) blk: {
+        const face_stride = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
+        const all_faces = std.math.mul(u64, face_stride, 6) catch return null;
+        const base_mip_offset = imageMipOffsetInLayer(image, sampled.base_mip_level) orelse return null;
+        break :blk std.math.sub(u64, all_faces, base_mip_offset) catch return null;
+    } else imageFormatMipChainLayerByteSize(image.format, base_width.width, base_width.height, sampled.level_count) orelse return null;
+    const view_start = std.math.cast(usize, base_offset) orelse return null;
+    const view_size = std.math.cast(usize, view_byte_count) orelse return null;
+    if (view_start > bytes.len or view_size > bytes.len - view_start) return null;
+    var result = render_ir_exec.SampledImage{
+        .pixels = bytes[view_start..][0..view_size],
+        .width = base_width.width,
+        .height = base_width.height,
+        .row_stride = std.math.mul(u32, base_width.width, bytes_per_texel) catch return null,
+        .bytes_per_texel = bytes_per_texel,
         .format = format,
         .swizzle = sampled.components,
         .filter = filter,
         .address_u = address_u,
         .address_v = address_v,
         .border = border,
+        .mip_count = @intCast(sampled.level_count),
+        .cube = cube,
+        .cube_face_stride = if (cube) std.math.cast(usize, imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null) orelse return null else 0,
     };
+    const base_mip_offset = imageMipOffsetInLayer(image, sampled.base_mip_level) orelse return null;
+    for (0..sampled.level_count) |level| {
+        const mip_level = sampled.base_mip_level + @as(u32, @intCast(level));
+        const extent = imageMipExtent(image, mip_level) orelse return null;
+        const offset = imageMipOffsetInLayer(image, mip_level) orelse return null;
+        result.mip_offsets[level] = offset - base_mip_offset;
+        result.mip_widths[level] = extent.width;
+        result.mip_heights[level] = extent.height;
+    }
+    return result;
 }
-
 /// Input-attachment reads are framebuffer fetches, not filtered texture
 /// samples.  Keep the implemented profile intentionally narrow: the
 /// descriptor must name the live color target currently being rendered, with
@@ -11227,20 +11506,22 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
     if (binding >= descriptors.input_attachments.len) return null;
     const input = descriptors.input_attachments[binding];
     const image = input.image orelse return null;
-    if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * 4) return null;
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(color.format));
+    if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * bytes_per_texel) return null;
     const format: render_ir_exec.SampledImage.Format = switch (color.format) {
         2, 4, 6 => .rgba8_unorm,
         3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
         43, 44 => .bgra8_unorm,
+        97 => .rgba16_sfloat,
         else => return null,
     };
     return .{
         .pixels = color_bytes,
         .width = color.width,
         .height = color.height,
-        .row_stride = color.width * 4,
-        .bytes_per_texel = 4,
+        .row_stride = color.width * @as(u32, @intCast(bytes_per_texel)),
+        .bytes_per_texel = @intCast(bytes_per_texel),
         .format = format,
         .swizzle = input.components,
         .filter = .nearest,
@@ -11363,7 +11644,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var vertex_outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| vertex_outputs[slot] = .{ .interface = interface, .bytes = &vertex_output_bytes[slot] };
     var varying_bytes: [3][8][16]u8 = undefined;
-    var fragment_bindings: [24]render_ir_exec.Binding = undefined;
+    var fragment_bindings: [40]render_ir_exec.Binding = undefined;
     var fragment_binding_storage: [8][16]u8 = undefined;
     var fragment_dpdx_storage: [8][16]u8 = undefined;
     var fragment_dpdy_storage: [8][16]u8 = undefined;
@@ -11395,11 +11676,19 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     var fragment_sampled_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count], 0..) |sampled_profile, index| {
-        const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required) orelse {
+        const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required, sampled_profile.cube) orelse {
             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampled-image setup failed set={} binding={d} interface={d} sampler_required={}\n", .{ sampled_profile.descriptor_set, sampled_profile.binding, sampled_profile.interface, sampled_profile.sampler_required });
             return;
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
+    }
+    var fragment_sampler_bindings: [8]render_ir_exec.Binding = undefined;
+    for (profile.fragment_samplers[0..profile.fragment_sampler_count], 0..) |sampler_profile, index| {
+        const sampler = profileSampler(op.descriptors, sampler_profile.binding) orelse {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampler setup failed set=0 binding={d} interface={d}\n", .{ sampler_profile.binding, sampler_profile.interface });
+            return;
+        };
+        fragment_sampler_bindings[index] = .{ .interface = sampler_profile.interface, .sampler = sampler };
     }
     // Resolve the exact sample-modulate profile's interface slots once per
     // draw. The regular binding path remains the fallback for every other
@@ -11639,7 +11928,19 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
     }
     var fragment_output_bytes: [16]u8 = undefined;
-    var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
+    var fragment_output_scratch: [8][16]u8 = undefined;
+    var fragment_outputs: [8]render_ir_exec.Output = undefined;
+    var fragment_output_count: usize = 0;
+    for (profile.fragment.program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage != .output) continue;
+        if (fragment_output_count == fragment_outputs.len) return;
+        fragment_outputs[fragment_output_count] = .{
+            .interface = @intCast(interface_index),
+            .bytes = if (interface_index == profile.fragment_output) &fragment_output_bytes else &fragment_output_scratch[fragment_output_count],
+        };
+        fragment_output_count += 1;
+    }
+    if (fragment_output_count == 0) return;
 
     // Chromium's captured VP9 compositor is a four-vertex strip whose two
     // triangles form one axis-aligned, affine rectangle. Validate all four
@@ -11721,8 +12022,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     c0[1] + vertical * (c1[1] - c0[1]),
                 };
                 const fragment_color = profile.fragment.executeVp9ColorTransformPreparedCoordinatesColor(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates) catch break :blk false;
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                if (profileWriteOpaqueColorComponents(color_bytes.?[offset..][0..4], color.?.format, fragment_color) == null) break :blk false;
+                const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
+                const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)));
+                if (profileWriteOpaqueColorComponents(color_bytes.?[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, fragment_color) == null) break :blk false;
             }
         }
         vp9_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
@@ -11808,8 +12110,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     t0[1] + vertical * (t1[1] - t0[1]),
                 };
                 profile.fragment.executeTextureCopyPreparedCoordinates(texture_copy_prepared.?, coordinates, &fragment_output_bytes) catch return;
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                if (profileWriteColor(color_bytes.?[offset..][0..4], color.?.format, false, &fragment_output_bytes, op.pipeline.color_write_mask, blend) == null) return;
+                const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
+                const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)));
+                if (profileWriteColor(color_bytes.?[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, false, &fragment_output_bytes, op.pipeline.color_write_mask, blend) == null) return;
             }
         }
         texture_copy_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
@@ -12054,16 +12357,21 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 fragment_bindings[fragment_binding_count] = binding;
                 fragment_binding_count += 1;
             }
+            for (fragment_sampler_bindings[0..profile.fragment_sampler_count]) |binding| {
+                if (fragment_binding_count == fragment_bindings.len) return;
+                fragment_bindings[fragment_binding_count] = binding;
+                fragment_binding_count += 1;
+            }
             for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
                 if (fragment_binding_count == fragment_bindings.len) return;
                 fragment_bindings[fragment_binding_count] = binding;
                 fragment_binding_count += 1;
             }
-            const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+            const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
                 if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
                 return;
             };
-            if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+            if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
                 if (renderDiagnosticsEnabled()) std.debug.print(
                     "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
                     .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index },
@@ -12143,12 +12451,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 if (b0 < 0 or b1 < 0 or b2 < 0) continue;
                 const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
                 if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
+                const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(target.format)));
+                const depth_offset = if (depth) |depth_image|
+                    pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(depth_image.format)))
+                else
+                    offset;
                 // The scalar profile accepts only pure fragment programs:
                 // its IR has no kill, depth output, or external write. Test
                 // depth before running the expensive fragment interpreter so
                 // hidden terrain faces do not shade pixels they cannot write.
-                if (!profileEarlyDepthTest(op, depth, depth_bytes, offset, depth_value)) continue;
+                if (!profileEarlyDepthTest(op, depth, depth_bytes, depth_offset, depth_value)) continue;
                 var direct_fragment_color: ?[4]f32 = null;
                 if (direct_constant_black) {
                     direct_fragment_color = .{ 0, 0, 0, 0 };
@@ -12354,6 +12667,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         fragment_bindings[fragment_binding_count] = binding;
                         fragment_binding_count += 1;
                     }
+                    for (fragment_sampler_bindings[0..profile.fragment_sampler_count]) |binding| {
+                        if (fragment_binding_count == fragment_bindings.len) return;
+                        fragment_bindings[fragment_binding_count] = binding;
+                        fragment_binding_count += 1;
+                    }
                     for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
                         if (fragment_binding_count == fragment_bindings.len) return;
                         fragment_bindings[fragment_binding_count] = binding;
@@ -12461,12 +12779,12 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             };
                             break :direct true;
                         }
-                        break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                        break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
                             if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
                             return;
                         };
                     };
-                    if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
+                    if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
                         if (renderDiagnosticsEnabled()) std.debug.print(
                             "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
                             .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
@@ -12521,19 +12839,19 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 }
                 if (color_bytes) |color_storage| {
                     const wrote = if (direct_vp9_opaque_write)
-                        profileWriteOpaqueColor(color_storage[offset..][0..4], color.?.format, &fragment_output_bytes)
+                        profileWriteOpaqueColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, &fragment_output_bytes)
                     else if (direct_fragment_color) |components|
                         if (direct_source_over_write)
-                            profileWriteSourceOverColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask)
+                            profileWriteSourceOverColorComponents(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, components, op.pipeline.color_write_mask)
                         else
-                            profileWriteColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask, draw_blend)
+                            profileWriteColorComponents(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, components, op.pipeline.color_write_mask, draw_blend)
                     else if (direct_source_over_write)
-                        profileWriteSourceOverColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask)
+                        profileWriteSourceOverColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask)
                     else
-                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
+                        profileWriteColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
                     if (wrote == null) return;
                 }
-                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) writeDepthValueToStorage(depth.?.format, depth_storage, offset, depth_value);
+                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) writeDepthValueToStorage(depth.?.format, depth_storage, depth_offset, depth_value);
                 bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
                 pixels_written += 1;
             }
@@ -13432,12 +13750,12 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
-            const pattern: u32 = @bitCast(op.color);
             const bytes = imageBytes(op.image);
             const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
             const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer).?);
-            fillImagePattern(bytes[start..][0 .. layer_size * op.layer_count], pattern);
-            op.image.clear_pattern = pattern;
+            const clear_bytes = bytes[start..][0 .. layer_size * op.layer_count];
+            fillImageClearColor(clear_bytes, op.image.format, op.color, op.half_color);
+            op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
             op.image.content_bounds = emptyRect();
             op.image.force_full_present = true;
             op.image.complex_3d_content = false;
@@ -13468,11 +13786,11 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 const depth_aspects = (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0);
                 for (0..op.layer_count) |layer| {
                     const index: u32 = @intCast(layer);
-                    if (op.clear_color) fillImagePattern(imageLayerBytes(op.image, op.color_base_layer + index), @bitCast(op.color));
+                    if (op.clear_color) fillImageClearColor(imageLayerBytes(op.image, op.color_base_layer + index), op.image.format, op.color, op.half_color);
                     clearDepthStencilBytes(depth, imageLayerBytes(depth, op.depth_base_layer + index), op.depth_value, op.stencil_value, depth_aspects);
                 }
                 if (op.clear_color) {
-                    op.image.clear_pattern = @bitCast(op.color);
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
@@ -13483,15 +13801,14 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 return;
             };
             if (!full_color_clear or !full_depth_clear) {
-                const color_pattern: u32 = @bitCast(op.color);
                 const depth_pattern: u32 = @bitCast(op.depth_value);
                 for (0..op.layer_count) |layer| {
                     const index: u32 = @intCast(layer);
-                    if (op.clear_color) fillImagePattern(imageLayerBytes(op.image, op.color_base_layer + index), color_pattern);
+                    if (op.clear_color) fillImageClearColor(imageLayerBytes(op.image, op.color_base_layer + index), op.image.format, op.color, op.half_color);
                     if (op.depth) |depth| if (op.clear_depth or op.clear_stencil) clearDepthStencilBytes(depth, imageLayerBytes(depth, op.depth_base_layer + index), op.depth_value, op.stencil_value, (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0));
                 }
                 if (op.clear_color) {
-                    op.image.clear_pattern = color_pattern;
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
@@ -13514,7 +13831,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 const depth_bytes = imageBytes(depth);
                 const color_pattern: u32 = @bitCast(op.color);
                 const depth_pattern: u32 = @bitCast(op.depth_value);
-                const sparse = op.clear_color and op.clear_depth and bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
+                const sparse = op.image.format != 97 and op.clear_color and op.clear_depth and bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
                 if (op.clear_color and op.clear_depth) {
                     if (sparse) {
                         if (op.image.dirty_tiles) |tiles| {
@@ -13531,17 +13848,20 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                                 fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
                             }
                         }
+                    } else if (op.image.format == 97) {
+                        fillImageClearColor(bytes, op.image.format, op.color, op.half_color);
+                        fillImagePattern(depth_bytes, depth_pattern);
                     } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
-                        fillImagePattern(bytes, color_pattern);
+                        fillImageClearColor(bytes, op.image.format, op.color, op.half_color);
                         fillImagePattern(depth_bytes, depth_pattern);
                     }
                 } else {
-                    if (op.clear_color) fillImagePattern(bytes, color_pattern);
+                    if (op.clear_color) fillImageClearColor(bytes, op.image.format, op.color, op.half_color);
                     if (op.clear_depth or op.clear_stencil) clearDepthStencilBytes(depth, depth_bytes, op.depth_value, op.stencil_value, (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0));
                 }
                 if (op.clear_color) {
                     if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
-                    op.image.clear_pattern = color_pattern;
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     if (!sparse) op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
@@ -13552,8 +13872,8 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 }
             } else {
                 if (op.clear_color) {
-                    fillImagePattern(bytes, @bitCast(op.color));
-                    op.image.clear_pattern = @bitCast(op.color);
+                    fillImageClearColor(bytes, op.image.format, op.color, op.half_color);
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
@@ -13571,7 +13891,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             for (0..op.layer_count) |layer| {
                 const layer_bytes = imageLayerBytes(op.image, op.base_layer + @as(u32, @intCast(layer)));
                 if (op.aspect_mask == image_aspect_color_bit) {
-                    fillImagePatternRect(layer_bytes, op.image.width, region, @bitCast(op.color));
+                    fillImageClearColorRect(layer_bytes, op.image.width, op.image.format, op.color, op.half_color, region);
                 } else {
                     clearDepthStencilRect(op.image, layer_bytes, op.rect, op.depth_value, op.stencil_value, op.aspect_mask);
                 }
@@ -13753,18 +14073,19 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             const dst = imageBytes(op.dst);
             const src_mip = imageMipExtent(op.src, op.region.src_subresource.mip_level).?;
             const dst_mip = imageMipExtent(op.dst, op.region.dst_subresource.mip_level).?;
+            const bytes_per_texel = @as(usize, @intCast(imageStorageBytesPerTexel(op.src.format)));
             var layer: u32 = 0;
             while (layer < op.region.src_subresource.layer_count) : (layer += 1) {
                 const src_layer_offset = imageSubresourceOffset(op.src, op.region.src_subresource.mip_level, op.region.src_subresource.base_array_layer + layer).?;
                 const dst_layer_offset = imageSubresourceOffset(op.dst, op.region.dst_subresource.mip_level, op.region.dst_subresource.base_array_layer + layer).?;
-                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * src_mip.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
-                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * dst_mip.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
-                const len = @as(usize, op.region.extent.width) * 4;
+                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * src_mip.width + @as(usize, @intCast(op.region.src_offset.x))) * bytes_per_texel;
+                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * dst_mip.width + @as(usize, @intCast(op.region.dst_offset.x))) * bytes_per_texel;
+                const len = @as(usize, op.region.extent.width) * bytes_per_texel;
                 // Command recording rejects overlapping image ranges, so the
                 // whole layer can use one non-overlap copy. Besides removing
                 // one helper call per row, this lets tight full-image copies
                 // collapse to one contiguous memcpy.
-                copyTransferRows(dst[do..], @as(usize, dst_mip.width) * 4, src[so..], @as(usize, src_mip.width) * 4, len, op.region.extent.height);
+                copyTransferRows(dst[do..], @as(usize, dst_mip.width) * bytes_per_texel, src[so..], @as(usize, src_mip.width) * bytes_per_texel, len, op.region.extent.height);
             }
             invalidateImageContents(op.dst);
         },
@@ -14063,16 +14384,17 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     while (layer < region.image_subresource.layer_count) : (layer += 1) {
         const image_layer_offset = imageSubresourceOffset(image, region.image_subresource.mip_level, region.image_subresource.base_array_layer + layer).?;
         const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer));
-        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * mip.width + @as(usize, @intCast(region.image_offset.x)))) * 4;
+        const image_bytes_per_texel = imageStorageBytesPerTexel(image.format);
+        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * mip.width + @as(usize, @intCast(region.image_offset.x)))) * @as(usize, @intCast(image_bytes_per_texel));
         // Buffer/image overlap is rejected by cmdCopyBufferToImage and
         // cmdCopyImageToBuffer before this recorded command executes. Copying
         // a complete layer in one call avoids per-row dispatch overhead while
         // retaining explicit strides for pitched transfers.
         if (image.format != 9 and image.format != 16) {
             if (to_image)
-                copyTransferRows(pixels[io..], @as(usize, mip.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
+                copyTransferRows(pixels[io..], @as(usize, mip.width) * @as(usize, @intCast(image_bytes_per_texel)), b[bo..], @as(usize, row) * @as(usize, @intCast(bytes_per_texel)), len, region.image_extent.height)
             else
-                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, mip.width) * 4, len, region.image_extent.height);
+                copyTransferRows(b[bo..], @as(usize, row) * @as(usize, @intCast(bytes_per_texel)), pixels[io..], @as(usize, mip.width) * @as(usize, @intCast(image_bytes_per_texel)), len, region.image_extent.height);
         } else {
             // Keep the public R8/R8G8 transfer layouts while using the
             // driver's existing four-byte sampled storage. This is the path
@@ -14169,6 +14491,75 @@ test "mipmapped buffer image transfers use the selected subresource footprint" {
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, &buffer_storage);
+}
+
+test "RGBA16F mip and array storage keeps eight-byte texel transfer strides" {
+    const owner: Device = @ptrFromInt(8);
+    var buffer_storage: [32]u8 align(64) = undefined;
+    for (&buffer_storage, 0..) |*byte, index| byte.* = @intCast(index + 1);
+    var image_storage: [80]u8 align(64) = [_]u8{0} ** 80;
+    var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .mip_levels = 2, .array_layers = 2, .samples = 1, .format = 97, .usage = 3, .layout = 1, .owned_bytes = image_storage[0..] };
+    const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 1, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    try std.testing.expectEqual(@as(u64, 8), imageStorageBytesPerTexel(97));
+    try std.testing.expectEqual(@as(?u64, 40), imageFormatMipChainLayerByteSize(97, 2, 2, 2));
+    try std.testing.expectEqual(@as(?u64, 80), imageByteSize(&image));
+    try std.testing.expectEqual(@as(?u64, 32), bufferImageEndForBpp(region, 8));
+    try std.testing.expectEqual(@as(?usize, 72), imageSubresourceOffset(&image, 1, 1));
+    copyBufferImage(&buffer, &image, region, true);
+    try std.testing.expectEqualSlices(u8, &buffer_storage, image_storage[40..72]);
+
+    @memset(&buffer_storage, 0);
+    copyBufferImage(&buffer, &image, region, false);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32 }, &buffer_storage);
+}
+
+test "RGBA16F linear blits average half-float channels when generating mips" {
+    var source_bytes: [32]u8 align(64) = [_]u8{0} ** 32;
+    const source_values = [_]f16{
+        0, 0, 0, 1,
+        1, 1, 1, 1,
+        1, 0, 0, 1,
+        0, 1, 0, 1,
+    };
+    for (source_values, 0..) |value, index| std.mem.writeInt(u16, source_bytes[index * 2 ..][0..2], @bitCast(value), .little);
+    var destination_bytes: [8]u8 align(64) = [_]u8{0} ** 8;
+    var source = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 97, .usage = 3, .layout = 1, .owned_bytes = source_bytes[0..] };
+    var destination = ImageObj{ .owner = @ptrFromInt(8), .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 97, .usage = 3, .layout = 1, .owned_bytes = destination_bytes[0..] };
+    const subresource = ImageSubresourceLayers{ .aspect_mask = image_aspect_color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const region = ImageBlit{
+        .src_subresource = subresource,
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+        .dst_subresource = subresource,
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 } },
+    };
+    executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
+    const expected = [_]f16{ 0.5, 0.5, 0.25, 1 };
+    for (expected, 0..) |value, index| try std.testing.expectEqual(value, @as(f16, @bitCast(std.mem.readInt(u16, destination_bytes[index * 2 ..][0..2], .little))));
+}
+
+test "RGBA16F attachment clears preserve half-float values and rectangular bounds" {
+    var bytes: [32]u8 = [_]u8{0xa5} ** 32;
+    const first = [_]u16{
+        @bitCast(@as(f16, 1.5)),
+        @bitCast(@as(f16, -0.25)),
+        @bitCast(@as(f16, 2)),
+        @bitCast(@as(f16, 0.5)),
+    };
+    fillImageClearColor(&bytes, 97, .{ 0, 0, 0, 0 }, first);
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
+    try std.testing.expectEqual(@as(f32, -0.25), readHalfFloat(&bytes, 2));
+    const replacement = [_]u16{
+        @bitCast(@as(f16, 0.25)),
+        @bitCast(@as(f16, 0.5)),
+        @bitCast(@as(f16, 0.75)),
+        @bitCast(@as(f16, 1)),
+    };
+    fillImageClearColorRect(&bytes, 2, 97, .{ 0, 0, 0, 0 }, replacement, .{ .x = 1, .y = 0, .width = 1, .height = 2 });
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&bytes, 8));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&bytes, 24));
 }
 
 const max_canonical_bytes = 2 * spirv.max_code_bytes + 64 * 1024;
@@ -15888,7 +16279,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
                 return error.Invalid;
             },
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_samplers = contract.fragment_samplers, .fragment_sampler_count = contract.fragment_sampler_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
@@ -15939,9 +16330,14 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
 
 fn frontendSampledImagesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, layout: *const PipelineLayoutObj) bool {
     for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| {
-        if (interface.storage != .sampled_image and interface.storage != .image) continue;
+        if (interface.storage != .sampled_image and interface.storage != .image and interface.storage != .sampler) continue;
         const descriptor_set: u32 = if (interface.storage == .sampled_image) 1 else 0;
-        const descriptor_type: i32 = if (interface.storage == .sampled_image) 1 else 2;
+        const descriptor_type: i32 = switch (interface.storage) {
+            .sampled_image => 1,
+            .image => 2,
+            .sampler => 0,
+            else => unreachable,
+        };
         if (program.stage != .fragment or interface.descriptor_set != descriptor_set or interface.binding == null or (descriptor_set == 1 and layout.set_count < 2)) return false;
         const set_layout = if (descriptor_set == 0) layout.set0 else layout.set1;
         if (set_layout.bytes.len < 36) return false;
@@ -16001,10 +16397,11 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (result.vertex_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
-        .sampled_image, .input_attachment, .image => return null,
+        .sampled_image, .input_attachment, .image, .sampler => return null,
     };
     if (result.vertex_output == 0 or (vertex_inputs == 0 and result.vertex_index_interface == null)) return null;
     var fragment_outputs: u32 = 0;
+    var fragment_output_locations = [_]bool{false} ** 8;
     for (fragment.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
             if (interface.builtin_frag_coord) {
@@ -16043,14 +16440,20 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         .sampled_image => {
             if (interface.descriptor_set != 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
             for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == 1 and prior.binding == interface.binding.?) return null;
-            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 1, .sampler_required = true };
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 1, .sampler_required = true, .cube = profileImageUsesCube(fragment, @intCast(index)) };
             result.fragment_sampled_image_count += 1;
         },
         .image => {
             if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
             for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == 0 and prior.binding == interface.binding.?) return null;
-            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 0, .sampler_required = false };
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 0, .sampler_required = false, .cube = profileImageUsesCube(fragment, @intCast(index)) };
             result.fragment_sampled_image_count += 1;
+        },
+        .sampler => {
+            if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampler_count == result.fragment_samplers.len) return null;
+            for (result.fragment_samplers[0..result.fragment_sampler_count]) |prior| if (prior.binding == interface.binding.?) return null;
+            result.fragment_samplers[result.fragment_sampler_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
+            result.fragment_sampler_count += 1;
         },
         .input_attachment => {
             // The profile intentionally supports only the one-set
@@ -16061,13 +16464,23 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.fragment_input_attachment_count += 1;
         },
         .output => {
-            if (fragment_outputs != 0 or interface.location == null or interface.location.? != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
-            result.fragment_output = @intCast(index);
-            result.fragment_bool = interface.ty.scalar == .bool;
+            if (interface.location == null or interface.location.? >= fragment_output_locations.len or
+                (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1)) or
+                (interface.ty.scalar == .bool and interface.location.? != 0)) return null;
+            const location: usize = @intCast(interface.location.?);
+            if (fragment_output_locations[location]) return null;
+            fragment_output_locations[location] = true;
+            // The current framebuffer bridge has one color attachment. Keep
+            // location zero as the materialized color and let the executor
+            // write higher, unattached locations to bounded scratch buffers.
+            if (location == 0) {
+                result.fragment_output = @intCast(index);
+                result.fragment_bool = interface.ty.scalar == .bool;
+            }
             fragment_outputs += 1;
         },
     };
-    if (fragment_outputs != 1) return null;
+    if (fragment_outputs == 0 or !fragment_output_locations[0]) return null;
     const bindings = if (vi.bindings) |items| items[0..vi.binding_count] else &.{};
     const attributes = if (vi.attributes) |items| items[0..vi.attribute_count] else &.{};
     if (attributes.len != vertex_inputs) return null;
@@ -16157,7 +16570,15 @@ fn cpuCubeShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stag
 }
 
 fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) void {
-    const path = std.c.getenv("ZPU_DUMP_REJECTED_SPIRV") orelse return;
+    const unique_dir = std.c.getenv("ZPU_DUMP_REJECTED_SPIRV_DIR");
+    var unique_path: [512]u8 = undefined;
+    const path: [*:0]const u8 = if (unique_dir) |dir| blk: {
+        const formatted = std.fmt.bufPrintZ(&unique_path, "{s}/{s}-{x}.spv", .{ std.mem.span(dir), @tagName(stage), shader.module.identity.digest }) catch {
+            std.debug.print("ZPU rejected SPIR-V dump path is too long\n", .{});
+            return;
+        };
+        break :blk formatted.ptr;
+    } else std.c.getenv("ZPU_DUMP_REJECTED_SPIRV") orelse return;
     const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
     if (fd < 0) {
         std.debug.print("ZPU rejected SPIR-V dump open failed path={s}\n", .{std.mem.span(path)});
@@ -16175,6 +16596,7 @@ fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) voi
 }
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
+    spirv_frontend.setFailureDiagnosticsEnabled(failureDiagnosticsEnabled());
     if (cpuCubeShaderCompatible(shader, stage, name, specs.len)) return null;
     if (stage == .fragment and specs.len == 0 and std.mem.eql(u8, name, "main") and std.mem.eql(u8, &shader.module.identity.digest, &chromium_vp9_color_transform_raw_identity)) {
         return spirv_frontend.compile(stage_allocator, std.mem.bytesAsSlice(u32, &chromium_vp9_color_transform_inline_bytes), stage, name, specs) catch |err| switch (err) {
@@ -16879,7 +17301,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const ci = info orelse return imageViewInvalid("create-info");
     const out = output orelse return imageViewInvalid("output");
     const pnext = imageViewCreatePNextState(ci.p_next);
-    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !validComponentSwizzles(ci.components) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 3 and ci.view_type != 5 and ci.view_type != 6) or !validComponentSwizzles(ci.components) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=structure s_type={} pnext_valid={} flags=0x{x} view_type={} components={any} mip={} levels={} aspect=0x{x} base_layer={} layers={} usage_present={} usage=0x{x}\n",
             .{ ci.s_type, pnext.valid, ci.flags, ci.view_type, ci.components, ci.subresource_range.base_mip_level, ci.subresource_range.level_count, ci.subresource_range.aspect_mask, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, pnext.has_usage, pnext.usage },
@@ -16896,7 +17318,16 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         break :blk conversion.conversion;
     } else null;
     const valid_view_aspect = if (isDepthStencilFormat(image.format)) validImageAspectMask(image, ci.subresource_range.aspect_mask) else ci.subresource_range.aspect_mask == image_aspect_color_bit or ci.subresource_range.aspect_mask == image_aspect_depth_bit;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or !valid_view_aspect or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+    const cube_view = ci.view_type == 3 or ci.view_type == 6;
+    const cube_view_valid = if (!cube_view)
+        true
+    else if (image.flags & 0x10 == 0 or image.width != image.height or ci.subresource_range.base_array_layer % 6 != 0)
+        false
+    else if (ci.view_type == 3)
+        ci.subresource_range.layer_count == 6
+    else
+        ci.subresource_range.layer_count >= 6 and ci.subresource_range.layer_count % 6 == 0;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or !valid_view_aspect or !cube_view_valid or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
             .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
@@ -17409,13 +17840,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_view_type: i32, texture_base_mip_level: u32, texture_level_count: u32, texture_base_array_layer: u32, texture_layer_count: u32, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_view_type: i32, texture_base_mip_level: u32, texture_level_count: u32, texture_base_array_layer: u32, texture_layer_count: u32, texture_binding: u8, writes_texture: bool, writes_sampler: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_view_type = 1, .texture_base_mip_level = 0, .texture_level_count = 1, .texture_base_array_layer = 0, .texture_layer_count = 1, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_view_type = 1, .texture_base_mip_level = 0, .texture_level_count = 1, .texture_base_array_layer = 0, .texture_layer_count = 1, .texture_binding = 0, .writes_texture = false, .writes_sampler = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -17439,6 +17870,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.storage_offset = info.offset;
             update.storage_range = range;
             update.writes_storage = true;
+        } else if (descriptor_write.descriptor_type == 0 and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 0 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+            const info = descriptor_write.image_info.?[0];
+            const sampler = validSamplerLocked(info.sampler) orelse return;
+            if (info.image_view != 0 or info.image_layout != 0 or sampler.owner != d) return;
+            update.sampler = sampler;
+            update.texture_binding = @intCast(descriptor_write.dst_binding);
+            update.writes_sampler = true;
         } else if ((descriptor_write.descriptor_type == 1 or descriptor_write.descriptor_type == 2) and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
             const info = descriptor_write.image_info.?[0];
             const view = validImageViewLocked(info.image_view) orelse return;
@@ -17492,6 +17930,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
+        if (update.writes_sampler) update.set.sampled_images[update.texture_binding] = .{ .sampler = update.sampler };
         if (update.writes_input_attachment) update.set.input_attachments[update.input_binding] = .{ .image = update.input_attachment, .components = update.input_components };
     }
 }
@@ -17511,7 +17950,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1 and entry.descriptor_type != 2) or entry.stride == 0 or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or ((entry.descriptor_type == 1 or entry.descriptor_type == 2) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 0 and entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1 and entry.descriptor_type != 2) or entry.stride == 0 or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8 or entry.descriptor_type == 0) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or ((entry.descriptor_type == 1 or entry.descriptor_type == 2) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -17580,6 +18019,11 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             update.storage_binding = entry.dst_binding;
             update.storage_offset = descriptor.offset;
             update.storage_range = range;
+        } else if (entry.descriptor_type == 0 and entry.dst_binding < sampled_images.len and set.binding_types[entry.dst_binding] == 0) {
+            const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
+            const sampler = validSamplerLocked(descriptor.sampler) orelse return;
+            if (descriptor.image_view != 0 or descriptor.image_layout != 0 or sampler.owner != d) return;
+            sampled_images[entry.dst_binding] = .{ .sampler = sampler };
         } else {
             const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
             if (entry.descriptor_type != 1 and entry.descriptor_type != 2) return;
@@ -17709,11 +18153,19 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     if (clear_color or clear_depth or clear_stencil) {
         if (color_image) |color_target| {
             var clear_bytes = [4]u8{ 0, 0, 0, 0 };
+            var half_color: ?[4]u16 = null;
             if (clear_color) {
-                for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
-                if (color_target.format == 43 or color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
+                if (color_target.format == 97) {
+                    half_color = halfColorFromComponents(color) orelse {
+                        command_buffer.impl.invalid = true;
+                        return;
+                    };
+                } else {
+                    for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
+                    if (color_target.format == 43 or color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
+                }
             }
-            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .depth_value = depth_value, .stencil_value = stencil_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .half_color = half_color, .depth_value = depth_value, .stencil_value = stencil_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
         } else if (depth) |depth_image| if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .stencil = stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .layer_count = framebuffer.layers } });
     }
 }
@@ -17800,6 +18252,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     var clear_color = false;
     var clear_color_value = [4]u8{ 0, 0, 0, 0 };
+    var clear_color_half: ?[4]u16 = null;
     if (color_attachment) |attachment| {
         if (attachment.load_op == 1) {
             const clear_components = attachment.clear_value.color.float32;
@@ -17808,7 +18261,14 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
                 return;
             }
             clear_color = true;
-            clear_color_value = .{ @intFromFloat(std.math.clamp(clear_components[2], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[1], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[0], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[3], 0, 1) * 255) };
+            if (color.?.format == 97) {
+                clear_color_half = halfColorFromComponents(clear_components) orelse {
+                    command_buffer.impl.invalid = true;
+                    return;
+                };
+            } else {
+                clear_color_value = .{ @intFromFloat(std.math.clamp(clear_components[2], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[1], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[0], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[3], 0, 1) * 255) };
+            }
         }
     }
     var clear_depth = false;
@@ -17859,7 +18319,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .base_layer = depth_view.?.base_array_layer, .layer_count = ci.layer_count } });
     if (clear_color or clear_depth or clear_stencil) {
         if (color) |color_image| {
-            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .stencil_value = clear_stencil_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .half_color = clear_color_half, .depth_value = clear_depth_value, .stencil_value = clear_stencil_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
         } else if (depth) |depth_image| {
             if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .stencil = clear_stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .layer_count = ci.layer_count } });
         }
@@ -18519,6 +18979,12 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             candidate.storage_binding = item.dst_binding;
             candidate.storage_offset = info.offset;
             candidate.storage_range = range;
+        } else if (item.descriptor_type == 0 and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == 0 and item.image_info != null and item.buffer_info == null) {
+            if (candidate.counts[0] == 0) return false;
+            const info = item.image_info.?[0];
+            const sampler = validSamplerLocked(info.sampler) orelse return false;
+            if (info.image_view != 0 or info.image_layout != 0 or sampler.owner != command_buffer.impl.owner) return false;
+            candidate.sampled_images[item.dst_binding] = .{ .sampler = sampler };
         } else if ((item.descriptor_type == 1 or item.descriptor_type == 2) and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == item.descriptor_type and item.image_info != null and item.buffer_info == null) {
             if (candidate.counts[@intCast(item.descriptor_type)] == 0) return false;
             const info = item.image_info.?[0];
@@ -19396,6 +19862,37 @@ test "scalar graphics profile contract is explicit and allocation free" {
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &vi) != null);
+}
+
+test "scalar graphics profile routes unattached fragment outputs through bounded scratch" {
+    var vertex = try spirv_frontend.compile(std.testing.allocator, &spirv_frontend.rich_vertex, .vertex, "main", &.{});
+    defer vertex.deinit(std.testing.allocator);
+    var fragment = try spirv_frontend.compile(std.testing.allocator, &spirv_frontend.bool_fragment, .fragment, "main", &.{});
+    defer fragment.deinit(std.testing.allocator);
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 16, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 109, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const extra_count = 2;
+    const interfaces = try std.testing.allocator.alloc(render_ir.Interface, fragment.interfaces.len + extra_count);
+    defer std.testing.allocator.free(interfaces);
+    @memcpy(interfaces[0..fragment.interfaces.len], fragment.interfaces);
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    interfaces[fragment.interfaces.len] = .{ .storage = .output, .ty = vec4, .location = 1 };
+    interfaces[fragment.interfaces.len + 1] = .{ .storage = .output, .ty = vec4, .location = 7 };
+    var multi_output_fragment = fragment;
+    multi_output_fragment.interfaces = interfaces;
+    const contract = profileGraphicsContract(&vertex, &multi_output_fragment, &vi).?;
+    try std.testing.expect(contract.fragment_bool);
+    var primary_output: ?u32 = null;
+    for (fragment.interfaces, 0..) |interface, index| if (interface.storage == .output and interface.location == 0) {
+        primary_output = @intCast(index);
+    };
+    try std.testing.expectEqual(primary_output.?, contract.fragment_output);
+
+    interfaces[fragment.interfaces.len + 1].location = 8;
+    try std.testing.expect(profileGraphicsContract(&vertex, &multi_output_fragment, &vi) == null);
+    interfaces[fragment.interfaces.len + 1].location = 1;
+    try std.testing.expect(profileGraphicsContract(&vertex, &multi_output_fragment, &vi) == null);
 }
 
 test "scalar graphics profile feeds VertexIndex to an attribute-free vertex shader" {
@@ -25192,6 +25689,7 @@ test "all physical queries cover success boundaries and invalid handles" {
         .{ .format = 5, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 6, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 7, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 83, .linear = 0, .optimal = 0xD001, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x7 },
         .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 43, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
@@ -28494,6 +28992,41 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     destroyImageView(ctx.device, view, null);
     destroyImage(ctx.device, image, null);
     freeMemory(ctx.device, image_memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "cube compatible float images require square six layer groups and cube views" {
+    const ctx = try createTestDeviceContext();
+    var format_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(ctx.physical, 97, 1, 0, 4, 0x10, &format_properties));
+    const cube_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0x10, .image_type = 1, .format = 97, .extent = .{ .width = 8, .height = 8, .depth = 1 }, .mip_levels = 1, .array_layers = 7, .samples = 1, .tiling = 0, .usage = 4, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &cube_info, null, &image));
+    var requirements: MemoryRequirements = undefined;
+    getImageMemoryRequirements(ctx.device, image, &requirements);
+    try std.testing.expectEqual(@as(u64, 8 * 8 * 8 * 7), requirements.size);
+
+    const cube_view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 3, .format = 97, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 6 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &cube_view_info, null, &view));
+
+    var invalid_info = cube_info;
+    invalid_info.extent.height = 4;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &invalid_info, null, &image));
+    invalid_info = cube_info;
+    invalid_info.array_layers = 5;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &invalid_info, null, &image));
+
+    var invalid_view = cube_view_info;
+    invalid_view.subresource_range.layer_count = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &invalid_view, null, &view));
+    invalid_view = cube_view_info;
+    invalid_view.subresource_range.base_array_layer = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &invalid_view, null, &view));
+
+    destroyImageView(ctx.device, view, null);
+    destroyImage(ctx.device, image, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
 }

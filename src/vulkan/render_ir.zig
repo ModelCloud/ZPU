@@ -372,6 +372,16 @@ pub const Op = enum(u8) {
     /// Fetch one level-zero texel from a samplerless 2D image. Operands are
     /// resource interface, signed integer coordinates, and signed LOD.
     image_fetch,
+    /// Sample a 2D image with a separate sampler and explicit floating-point
+    /// LOD. Operands are image interface, normalized coordinates, LOD value,
+    /// and sampler interface.
+    image_sample_explicit_lod,
+    /// Sample a bound cube image using a three-dimensional direction and
+    /// implicit LOD. Appended to preserve serialized operation values.
+    image_cube_sample_implicit_lod,
+    /// Sample a separate cube image and sampler using a direction and
+    /// explicit floating-point LOD.
+    image_cube_sample_explicit_lod,
 };
 
 pub const Instruction = struct {
@@ -381,8 +391,8 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment, image };
-pub const max_uniform_members: usize = 16;
+pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment, image, sampler };
+pub const max_uniform_members: usize = 32;
 pub const UniformMember = struct {
     ty: Type = .{ .scalar = .u32 },
     offset: u32 = 0,
@@ -535,8 +545,12 @@ pub fn identify(bytes: []const u8) Identity {
 
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
+        .constant, .input, .uniform, .storage, .label, .branch, .return_ => false,
+        .local => operand_index == 0,
         .image_sample_implicit_lod, .image_read_input_attachment, .image_fetch => operand_index != 0,
+        .image_sample_explicit_lod => operand_index == 1 or operand_index == 2,
+        .image_cube_sample_implicit_lod => operand_index != 0,
+        .image_cube_sample_explicit_lod => operand_index == 1 or operand_index == 2,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => operand_index == 0,
         .constant_composite => true,

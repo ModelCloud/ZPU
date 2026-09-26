@@ -55,7 +55,7 @@ pub const Value = struct {
 };
 
 pub const SampledImage = struct {
-    pub const Format = enum { r8_unorm, rg8_unorm, rgba8_unorm, bgra8_unorm, ycbcr_420_2plane, ycbcr_420_3plane };
+    pub const Format = enum { r8_unorm, rg8_unorm, rg16_sfloat, rgba8_unorm, bgra8_unorm, rgba16_sfloat, ycbcr_420_2plane, ycbcr_420_3plane };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
     pub const YcbcrModel = enum { identity, bt601, bt709, bt2020 };
@@ -69,6 +69,11 @@ pub const SampledImage = struct {
     // internal layout, while standalone IR fixtures may use the format's
     // natural packed layout.
     bytes_per_texel: u32 = 4,
+    // Cube-compatible views keep their six faces in Vulkan array-layer
+    // order. The executor selects one face before running the existing 2D
+    // filtering and mip logic.
+    cube: bool = false,
+    cube_face_stride: usize = 0,
     format: Format,
     filter: Filter,
     address_u: AddressMode,
@@ -86,6 +91,23 @@ pub const SampledImage = struct {
     plane_2_row_stride: u32 = 0,
     ycbcr_model: YcbcrModel = .bt601,
     ycbcr_range: YcbcrRange = .narrow,
+    mip_count: u8 = 1,
+    mip_offsets: [16]usize = [_]usize{0} ** 16,
+    mip_widths: [16]u32 = [_]u32{0} ** 16,
+    mip_heights: [16]u32 = [_]u32{0} ** 16,
+};
+
+pub const Sampler = struct {
+    pub const MipmapMode = enum { nearest, linear };
+    mag_filter: SampledImage.Filter = .nearest,
+    min_filter: SampledImage.Filter = .nearest,
+    mipmap_mode: MipmapMode = .nearest,
+    address_u: SampledImage.AddressMode = .clamp_to_edge,
+    address_v: SampledImage.AddressMode = .clamp_to_edge,
+    border: [4]f32 = .{ 0, 0, 0, 0 },
+    lod_bias: f32 = 0,
+    min_lod: f32 = 0,
+    max_lod: f32 = 0,
 };
 
 pub const Binding = struct {
@@ -95,6 +117,7 @@ pub const Binding = struct {
     dpdy_bytes: []const u8 = &.{},
     sampled_image: ?SampledImage = null,
     input_attachment: ?SampledImage = null,
+    sampler: ?Sampler = null,
 };
 pub const Output = struct { interface: u32, bytes: []u8 };
 
@@ -352,6 +375,14 @@ fn findInputAttachment(bindings: []const Binding, index: u32) Error!SampledImage
     };
     return found orelse error.MissingInput;
 }
+fn findSampler(bindings: []const Binding, index: u32) Error!Sampler {
+    var found: ?Sampler = null;
+    for (bindings) |binding| if (binding.interface == index) {
+        if (found != null or binding.sampler == null) return error.InvalidOperand;
+        found = binding.sampler;
+    };
+    return found orelse error.MissingInput;
+}
 fn addressCoordinate(value: i32, size: u32, mode: SampledImage.AddressMode) ?u32 {
     const signed_size: i32 = @intCast(size);
     return switch (mode) {
@@ -467,6 +498,26 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
         if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
         return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, @as(f32, @floatFromInt(image.pixels[offset + 1])) / 255, 0, 1 });
     }
+    if (image.format == .rg16_sfloat) {
+        if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
+        const r_bits = std.mem.readInt(u16, image.pixels[offset..][0..2], .little);
+        const g_bits = std.mem.readInt(u16, image.pixels[offset + 2 ..][0..2], .little);
+        return applySwizzle(image, .{
+            @as(f32, @floatCast(@as(f16, @bitCast(r_bits)))),
+            @as(f32, @floatCast(@as(f16, @bitCast(g_bits)))),
+            0,
+            1,
+        });
+    }
+    if (image.format == .rgba16_sfloat) {
+        if (image.bytes_per_texel < 8 or image.pixels.len - offset < 8) return error.Bounds;
+        var rgba: [4]f32 = undefined;
+        for (0..4) |lane| {
+            const half_bits = std.mem.readInt(u16, image.pixels[offset + lane * 2 ..][0..2], .little);
+            rgba[lane] = @as(f32, @floatCast(@as(f16, @bitCast(half_bits))));
+        }
+        return applySwizzle(image, rgba);
+    }
     if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
     const pixel = image.pixels[offset..][0..4];
     const r = if (image.format == .rgba8_unorm) pixel[0] else pixel[2];
@@ -547,6 +598,167 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
     return result;
 }
 
+const CubeCoordinate = struct { face: u32, uv: [2]f32 };
+
+fn cubeDirectionCoordinates(direction: Value) Error!CubeCoordinate {
+    if (direction.ty.scalar != .f32 or direction.ty.columns != 3 or direction.ty.rows != 1) return error.InvalidType;
+    const x: f32 = @bitCast(direction.bits[0]);
+    const y: f32 = @bitCast(direction.bits[1]);
+    const z: f32 = @bitCast(direction.bits[2]);
+    if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return error.NumericDomain;
+    const ax = @abs(x);
+    const ay = @abs(y);
+    const az = @abs(z);
+    const major = @max(ax, @max(ay, az));
+    if (major == 0) return error.NumericDomain;
+    var face: u32 = undefined;
+    var sc: f32 = undefined;
+    var tc: f32 = undefined;
+    if (ax >= ay and ax >= az) {
+        if (x >= 0) {
+            face = 0; // +X
+            sc = -z;
+            tc = -y;
+        } else {
+            face = 1; // -X
+            sc = z;
+            tc = -y;
+        }
+    } else if (ay >= az) {
+        if (y >= 0) {
+            face = 2; // +Y
+            sc = x;
+            tc = z;
+        } else {
+            face = 3; // -Y
+            sc = x;
+            tc = -z;
+        }
+    } else if (z >= 0) {
+        face = 4; // +Z
+        sc = x;
+        tc = -y;
+    } else {
+        face = 5; // -Z
+        sc = -x;
+        tc = -y;
+    }
+    return .{ .face = face, .uv = .{ (sc / major + 1) * 0.5, (tc / major + 1) * 0.5 } };
+}
+
+fn cubeFaceImage(source: SampledImage, face: u32) Error!SampledImage {
+    if (!source.cube or source.cube_face_stride == 0 or face >= 6) return error.InvalidType;
+    const face_offset = std.math.mul(usize, source.cube_face_stride, face) catch return error.Bounds;
+    if (face_offset > source.pixels.len) return error.Bounds;
+    var image = source;
+    image.pixels = source.pixels[face_offset..];
+    image.cube = false;
+    image.cube_face_stride = 0;
+    return image;
+}
+
+fn cubeUvValue(cube: CubeCoordinate) Value {
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(cube.uv[0]);
+    coordinates.bits[1] = @bitCast(cube.uv[1]);
+    return coordinates;
+}
+
+fn sampleCube(image: SampledImage, direction: Value, bias: Value) Error!Value {
+    const mapped = try cubeDirectionCoordinates(direction);
+    return sample(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), bias);
+}
+
+fn sampleCubeExplicitLod(image: SampledImage, direction: Value, lod: Value, sampler: Sampler) Error!Value {
+    const mapped = try cubeDirectionCoordinates(direction);
+    return sampleExplicitLod(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), lod, sampler);
+}
+
+fn combinedImageSampler(image: SampledImage) Sampler {
+    return .{
+        .mag_filter = image.filter,
+        .min_filter = image.filter,
+        .address_u = image.address_u,
+        .address_v = image.address_v,
+        .border = image.border,
+    };
+}
+
+fn explicitSampleSampler(bindings: []const Binding, operands: []const u32) Error!struct { image: SampledImage, sampler: Sampler } {
+    const image = try findSampledImage(bindings, operands[0]);
+    return .{
+        .image = image,
+        .sampler = if (operands.len == 3) combinedImageSampler(image) else try findSampler(bindings, operands[3]),
+    };
+}
+
+fn sampleMipLevel(source: SampledImage, coordinates: Value, level: u32, filter: SampledImage.Filter, sampler: Sampler) Error![4]f32 {
+    if (level >= source.mip_count or level >= source.mip_offsets.len) return error.Bounds;
+    var image = source;
+    const width = if (source.mip_widths[level] == 0) source.width else source.mip_widths[level];
+    const height = if (source.mip_heights[level] == 0) source.height else source.mip_heights[level];
+    const offset = source.mip_offsets[level];
+    if (offset > source.pixels.len) return error.Bounds;
+    image.pixels = source.pixels[offset..];
+    image.width = width;
+    image.height = height;
+    image.row_stride = std.math.mul(u32, width, source.bytes_per_texel) catch return error.Bounds;
+    image.mip_count = 1;
+    image.filter = filter;
+    image.address_u = sampler.address_u;
+    image.address_v = sampler.address_v;
+    image.border = sampler.border;
+
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const normalized_u = normalizedCoordinate(u, image.address_u);
+    const normalized_v = normalizedCoordinate(v, image.address_v);
+    if (normalized_u == null or normalized_v == null) return sampler.border;
+    const fx = normalized_u.? * @as(f32, @floatFromInt(width)) - 0.5;
+    const fy = normalized_v.? * @as(f32, @floatFromInt(height)) - 0.5;
+    if (filter == .nearest) return try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+    const x0: i32 = @intFromFloat(@floor(fx));
+    const y0: i32 = @intFromFloat(@floor(fy));
+    const tx = fx - @floor(fx);
+    const ty = fy - @floor(fy);
+    const p00 = try texel(image, x0, y0);
+    const p10 = try texel(image, x0 + 1, y0);
+    const p01 = try texel(image, x0, y0 + 1);
+    const p11 = try texel(image, x0 + 1, y0 + 1);
+    var rgba: [4]f32 = undefined;
+    for (0..4) |lane| rgba[lane] =
+        (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+        (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+    return rgba;
+}
+
+fn sampleExplicitLod(image: SampledImage, coordinates: Value, lod_value: Value, sampler: Sampler) Error!Value {
+    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.mip_count == 0 or image.mip_count > image.mip_offsets.len) return error.Bounds;
+    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or lod_value.ty.scalar != .f32 or lod_value.ty.columns != 1 or lod_value.ty.rows != 1) return error.InvalidType;
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const requested_lod: f32 = @bitCast(lod_value.bits[0]);
+    if (!std.math.isFinite(u) or !std.math.isFinite(v) or !std.math.isFinite(requested_lod) or !std.math.isFinite(sampler.lod_bias) or !std.math.isFinite(sampler.min_lod) or !std.math.isFinite(sampler.max_lod) or sampler.max_lod < sampler.min_lod) return error.NumericDomain;
+    const max_level = @as(f32, @floatFromInt(image.mip_count - 1));
+    const clamped_min_lod = std.math.clamp(sampler.min_lod, 0, max_level);
+    const clamped_max_lod = std.math.clamp(sampler.max_lod, clamped_min_lod, max_level);
+    const lod = std.math.clamp(requested_lod + sampler.lod_bias, clamped_min_lod, clamped_max_lod);
+    const filter = if (lod <= 0) sampler.mag_filter else sampler.min_filter;
+    const lower_f = @floor(lod);
+    const lower: u32 = @intFromFloat(lower_f);
+    const upper = @min(lower + 1, image.mip_count - 1);
+    const lower_rgba = try sampleMipLevel(image, coordinates, if (sampler.mipmap_mode == .nearest and lod - lower_f >= 0.5) upper else lower, filter, sampler);
+    var rgba = lower_rgba;
+    if (sampler.mipmap_mode == .linear and upper != lower) {
+        const upper_rgba = try sampleMipLevel(image, coordinates, upper, filter, sampler);
+        const fraction = lod - lower_f;
+        for (0..4) |lane| rgba[lane] = lower_rgba[lane] * (1 - fraction) + upper_rgba[lane] * fraction;
+    }
+    var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
+    for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    return result;
+}
+
 test "sample applies normalized addressing before bounded texel indexing" {
     const pixels = [_]u8{
         1,  2,  3,  4,  11, 12, 13, 14,
@@ -578,6 +790,43 @@ test "sample applies normalized addressing before bounded texel indexing" {
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(border.bits[3])));
 }
 
+test "cube sampling maps Vulkan face directions to six array layers" {
+    const pixels = [_]u8{
+        10, 0, 0, 255, 20, 0, 0, 255, 30, 0, 0, 255,
+        40, 0, 0, 255, 50, 0, 0, 255, 60, 0, 0, 255,
+    };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 4,
+        .format = .rgba8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .cube = true,
+        .cube_face_stride = 4,
+    };
+    const directions = [_][3]f32{
+        .{ 1, 0, 0 },  .{ -1, 0, 0 }, .{ 0, 1, 0 },
+        .{ 0, -1, 0 }, .{ 0, 0, 1 },  .{ 0, 0, -1 },
+    };
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    for (directions, 0..) |direction, face| {
+        var value = Value{ .ty = .{ .scalar = .f32, .columns = 3 } };
+        for (direction, 0..) |component, lane| value.bits[lane] = @bitCast(component);
+        const mapped = try cubeDirectionCoordinates(value);
+        try std.testing.expectEqual(@as(u32, @intCast(face)), mapped.face);
+        try std.testing.expectEqual(@as(f32, 0.5), mapped.uv[0]);
+        try std.testing.expectEqual(@as(f32, 0.5), mapped.uv[1]);
+        const sampled = try sampleCube(image, value, bias);
+        try std.testing.expectEqual(@as(f32, @floatFromInt((face + 1) * 10)) / 255, @as(f32, @bitCast(sampled.bits[0])));
+    }
+    const zero = Value{ .ty = .{ .scalar = .f32, .columns = 3 } };
+    try std.testing.expectError(error.NumericDomain, cubeDirectionCoordinates(zero));
+}
+
 test "sample decodes packed R8 coverage as red with opaque alpha" {
     const pixels = [_]u8{ 0, 64, 128, 255 };
     const image = SampledImage{
@@ -599,6 +848,31 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     const result = try sample(image, coordinates, bias);
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[0])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample decodes RG16F channels with zero blue and opaque alpha" {
+    var pixels = [_]u8{0} ** 4;
+    std.mem.writeInt(u16, pixels[0..2], @bitCast(@as(f16, 0.5)), .little);
+    std.mem.writeInt(u16, pixels[2..4], @bitCast(@as(f16, 2)), .little);
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 4,
+        .bytes_per_texel = 4,
+        .format = .rg16_sfloat,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    const result = try sample(image, coordinates, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 2), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
 }
@@ -714,6 +988,49 @@ test "sample applies Vulkan image-view component swizzle" {
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 40.0 / 255.0), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "explicit LOD selects and blends RGBA16F mip levels with separate sampler state" {
+    var pixels = [_]u8{0} ** 24;
+    const mip_values = [_]f16{
+        1, 0, 0, 1,
+        0, 1, 0, 1,
+        0, 0, 1, 0.5,
+    };
+    for (mip_values, 0..) |value, index| std.mem.writeInt(u16, pixels[index * 2 ..][0..2], @bitCast(value), .little);
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 1,
+        .row_stride = 16,
+        .bytes_per_texel = 8,
+        .format = .rgba16_sfloat,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .mip_count = 2,
+        .mip_offsets = .{ 0, 16 } ++ [_]usize{0} ** 14,
+        .mip_widths = .{ 2, 1 } ++ [_]u32{0} ** 14,
+        .mip_heights = .{ 1, 1 } ++ [_]u32{0} ** 14,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.75));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    var lod = Value{ .ty = .{ .scalar = .f32 } };
+    lod.bits[0] = @bitCast(@as(f32, 0));
+    const nearest_sampler = Sampler{ .min_filter = .nearest, .mag_filter = .nearest, .mipmap_mode = .nearest, .min_lod = 1, .max_lod = 1 };
+    const selected = try sampleExplicitLod(image, coordinates, lod, nearest_sampler);
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(selected.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(selected.bits[1])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(selected.bits[2])));
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(selected.bits[3])));
+
+    lod.bits[0] = @bitCast(@as(f32, 0.5));
+    const blended = try sampleExplicitLod(image, coordinates, lod, .{ .min_filter = .nearest, .mag_filter = .nearest, .mipmap_mode = .linear, .min_lod = 0, .max_lod = 1 });
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(blended.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(blended.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(blended.bits[2])));
+    try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(blended.bits[3])));
 }
 fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);
@@ -3139,10 +3456,11 @@ pub const Executor = struct {
         for (bindings, 0..) |binding, i| {
             if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
             const storage = self.program.interfaces[binding.interface].storage;
-            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image and storage != .input_attachment and storage != .image) return error.InvalidStorage;
+            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image and storage != .input_attachment and storage != .image and storage != .sampler) return error.InvalidStorage;
             const image_resource = storage == .sampled_image or storage == .image;
             if (image_resource != (binding.sampled_image != null) or (image_resource and binding.bytes.len != 0)) return error.InvalidStorage;
             if ((storage == .input_attachment) != (binding.input_attachment != null) or (storage == .input_attachment and binding.bytes.len != 0)) return error.InvalidStorage;
+            if ((storage == .sampler) != (binding.sampler != null) or (storage == .sampler and (binding.bytes.len != 0 or binding.sampled_image != null or binding.input_attachment != null))) return error.InvalidStorage;
             for (bindings[0..i]) |prior| if (prior.interface == binding.interface) return error.InvalidOperand;
         }
         var out_offset: usize = 0;
@@ -3195,7 +3513,13 @@ pub const Executor = struct {
             var result = Value{ .ty = instruction.ty };
             switch (instruction.op) {
                 .local => {
-                    self.locals[pc] = result;
+                    if (instruction.operands.len == 1) {
+                        const initial_value = try valueRef(self.values, pc, instruction.operands[0]);
+                        if (!same(initial_value.ty, instruction.ty)) return error.InvalidType;
+                        self.locals[pc] = initial_value;
+                    } else {
+                        self.locals[pc] = result;
+                    }
                     result.bits[0] = @intCast(pc);
                 },
                 .local_access => {
@@ -3308,6 +3632,23 @@ pub const Executor = struct {
                     try findSampledImage(bindings, instruction.operands[0]),
                     try valueRef(self.values, pc, instruction.operands[1]),
                     try valueRef(self.values, pc, instruction.operands[2]),
+                ),
+                .image_sample_explicit_lod => result = try sampleExplicitLod(
+                    (try explicitSampleSampler(bindings, instruction.operands)).image,
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
+                    (try explicitSampleSampler(bindings, instruction.operands)).sampler,
+                ),
+                .image_cube_sample_implicit_lod => result = try sampleCube(
+                    try findSampledImage(bindings, instruction.operands[0]),
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
+                ),
+                .image_cube_sample_explicit_lod => result = try sampleCubeExplicitLod(
+                    (try explicitSampleSampler(bindings, instruction.operands)).image,
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
+                    (try explicitSampleSampler(bindings, instruction.operands)).sampler,
                 ),
                 .image_read_input_attachment => result = try inputAttachmentLoad(
                     try findInputAttachment(bindings, instruction.operands[0]),
@@ -4354,7 +4695,7 @@ fn validate(program: *const ir.Program) Error!void {
                     return error.InvalidStorage;
                 }
             }
-        } else if (interface.storage == .sampled_image or interface.storage == .input_attachment or interface.storage == .image) {
+        } else if (interface.storage == .sampled_image or interface.storage == .input_attachment or interface.storage == .image or interface.storage == .sampler) {
             if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) {
                 if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid sampled image interface={} type={any} set={any} binding={any} block={} members={}\n", .{ interface_index, interface.ty, interface.descriptor_set, interface.binding, interface.block, interface.member_count });
                 return error.InvalidStorage;
@@ -4367,13 +4708,17 @@ fn validate(program: *const ir.Program) Error!void {
         const n = instruction.operands.len;
         const arity_ok = switch (instruction.op) {
             .constant => n == 0,
-            .local, .label, .branch, .return_ => n == 0,
+            .local => n <= 1,
+            .label, .branch, .return_ => n == 0,
             .local_access, .local_store => n == 2,
             .local_load, .branch_conditional => n == 1,
             .phi => n >= 2,
             .constant_composite, .composite => n > 0,
             .input, .uniform, .storage => n == 1,
             .image_sample_implicit_lod => n == 3,
+            .image_sample_explicit_lod => n == 3 or n == 4,
+            .image_cube_sample_implicit_lod => n == 3,
+            .image_cube_sample_explicit_lod => n == 3 or n == 4,
             .image_read_input_attachment => n == 2,
             .image_fetch => n == 3,
             .access => n >= 2 and n <= 3,
@@ -4423,7 +4768,7 @@ fn validate(program: *const ir.Program) Error!void {
             }
             if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
-        if (instruction.op == .image_sample_implicit_lod) {
+        if (instruction.op == .image_sample_implicit_lod or instruction.op == .image_cube_sample_implicit_lod) {
             const x = instruction.operands[0];
             if (x >= program.interfaces.len or program.interfaces[x].storage != .sampled_image) {
                 if (failureDiagnosticsEnabled()) {
@@ -4431,6 +4776,17 @@ fn validate(program: *const ir.Program) Error!void {
                     std.debug.print("ZPU render executor invalid sampled-image reference pc={} interface={} actual={s}\n", .{ pc, x, actual });
                 }
                 return error.InvalidStorage;
+            }
+            if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
+        }
+        if (instruction.op == .image_sample_explicit_lod or instruction.op == .image_cube_sample_explicit_lod) {
+            const image_index = instruction.operands[0];
+            if (image_index >= program.interfaces.len) return error.InvalidStorage;
+            if (instruction.operands.len == 3) {
+                if (program.interfaces[image_index].storage != .sampled_image) return error.InvalidStorage;
+            } else {
+                const sampler_index = instruction.operands[3];
+                if (program.interfaces[image_index].storage != .image or sampler_index >= program.interfaces.len or program.interfaces[sampler_index].storage != .sampler) return error.InvalidStorage;
             }
             if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
         }
@@ -4455,9 +4811,14 @@ fn validate(program: *const ir.Program) Error!void {
             const source_ty = program.instructions[operand].ty;
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
-                .image_sample_implicit_lod => if (oi == 1) {
-                    if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
+                .image_sample_implicit_lod, .image_cube_sample_implicit_lod => if (oi == 1) {
+                    const expected_columns: u3 = if (instruction.op == .image_cube_sample_implicit_lod) 3 else 2;
+                    if (source_ty.scalar != .f32 or source_ty.columns != expected_columns or source_ty.rows != 1) return error.InvalidType;
                 } else if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
+                .image_sample_explicit_lod, .image_cube_sample_explicit_lod => if (oi == 1) {
+                    const expected_columns: u3 = if (instruction.op == .image_cube_sample_explicit_lod) 3 else 2;
+                    if (source_ty.scalar != .f32 or source_ty.columns != expected_columns or source_ty.rows != 1) return error.InvalidType;
+                } else if (oi == 2 and (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1)) return error.InvalidType,
                 .image_read_input_attachment => if (oi == 1) {
                     if (source_ty.scalar != .i32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
                 },
@@ -4466,7 +4827,12 @@ fn validate(program: *const ir.Program) Error!void {
                 } else if (source_ty.scalar != .i32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose, .dpdx, .dpdy, .fwidth => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .iadd, .isub, .imul => {
+                    if ((instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) or
+                        (source_ty.scalar != .i32 and source_ty.scalar != .u32) or
+                        source_ty.columns != instruction.ty.columns or source_ty.rows != instruction.ty.rows) return error.InvalidType;
+                },
+                .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose, .dpdx, .dpdy, .fwidth => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_determinant => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType,
                 .f_matrix_inverse => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType,
                 .f_length => if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns < 2 or source_ty.columns > 4) return error.InvalidType,
@@ -4544,6 +4910,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .local_access => if (oi == 0) {
                     if (source_ty.columns < 2 or source_ty.columns > 4 or (source_ty.rows != 1 and (source_ty.scalar != .f32 or source_ty.rows < 2 or source_ty.rows > 4))) return error.InvalidType;
                 } else if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
+                .local => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .local_load => {},
                 .local_store => if (oi == 1 and source_ty.scalar != program.instructions[instruction.operands[0]].ty.scalar) return error.InvalidType,
                 .branch_conditional => if (source_ty.scalar != .bool or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
@@ -4869,8 +5236,12 @@ fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void 
 }
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
+        .constant, .input, .uniform, .storage, .label, .branch, .return_ => false,
+        .local => i == 0,
         .image_sample_implicit_lod, .image_read_input_attachment, .image_fetch => i != 0,
+        .image_sample_explicit_lod => i == 1 or i == 2,
+        .image_cube_sample_implicit_lod => i != 0,
+        .image_cube_sample_explicit_lod => i == 1 or i == 2,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => i == 0,
         .access => i != 0,
@@ -7661,15 +8032,43 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
                 output_count = 1;
             }
         },
-        .image_sample_implicit_lod => {
+        .image_sample_implicit_lod, .image_cube_sample_implicit_lod => {
             interfaces[0] = .{ .storage = .sampled_image, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 1, .binding = 0 };
             interface_count = 1;
             @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
-            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } };
+            const is_cube = op == .image_cube_sample_implicit_lod;
+            if (is_cube) @memcpy(input_bytes[0..24], &([_]u8{ 64, 128, 192, 255 } ** 6));
+            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..if (is_cube) 24 else 4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge, .cube = is_cube, .cube_face_stride = if (is_cube) 4 else 0 } };
             binding_count = 1;
-            const coordinate = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
+            const coordinate = if (is_cube) blk: {
+                var direction: [12]u8 = undefined;
+                std.mem.writeInt(u32, direction[0..4], @bitCast(@as(f32, 1)), .little);
+                std.mem.writeInt(u32, direction[4..8], @bitCast(@as(f32, 0)), .little);
+                std.mem.writeInt(u32, direction[8..12], @bitCast(@as(f32, 0)), .little);
+                break :blk try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .f32, .columns = 3 }, &.{}, &direction);
+            } else try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
             const bias = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, bias }, &.{});
+        },
+        .image_sample_explicit_lod, .image_cube_sample_explicit_lod => {
+            interfaces[0] = .{ .storage = .image, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0 };
+            interfaces[1] = .{ .storage = .sampler, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 1 };
+            interface_count = 2;
+            @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
+            const is_cube = op == .image_cube_sample_explicit_lod;
+            if (is_cube) @memcpy(input_bytes[0..24], &([_]u8{ 64, 128, 192, 255 } ** 6));
+            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..if (is_cube) 24 else 4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge, .cube = is_cube, .cube_face_stride = if (is_cube) 4 else 0 } };
+            bindings[1] = .{ .interface = 1, .sampler = .{} };
+            binding_count = 2;
+            const coordinate = if (is_cube) blk: {
+                var direction: [12]u8 = undefined;
+                std.mem.writeInt(u32, direction[0..4], @bitCast(@as(f32, 1)), .little);
+                std.mem.writeInt(u32, direction[4..8], @bitCast(@as(f32, 0)), .little);
+                std.mem.writeInt(u32, direction[8..12], @bitCast(@as(f32, 0)), .little);
+                break :blk try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .f32, .columns = 3 }, &.{}, &direction);
+            } else try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
+            const lod = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, lod, 1 }, &.{});
         },
         .image_read_input_attachment => {
             interfaces[0] = .{ .storage = .input_attachment, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0 };
@@ -8259,6 +8658,12 @@ test "generated bounded operation by type-family property matrix is complete" {
     }
     try runPropertyCase(.image_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.image_sample_implicit_lod)] += 1;
+    try runPropertyCase(.image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_sample_explicit_lod)] += 1;
+    try runPropertyCase(.image_cube_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_cube_sample_implicit_lod)] += 1;
+    try runPropertyCase(.image_cube_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_cube_sample_explicit_lod)] += 1;
     try runPropertyCase(.image_read_input_attachment, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.image_read_input_attachment)] += 1;
     try runPropertyCase(.image_fetch, .{ .scalar = .f32, .columns = 4 }, null, null);
@@ -8266,15 +8671,15 @@ test "generated bounded operation by type-family property matrix is complete" {
     inline for ([_]ir.Op{ .local, .local_access, .local_load, .local_store, .label, .branch, .branch_conditional, .phi, .return_ }) |op|
         totals[@intFromEnum(op)] = 1;
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4, 1 };
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4, 1, 1, 1, 1 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 712), total);
-    std.debug.print("generated property matrix: operations=184 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 715), total);
+    std.debug.print("generated property matrix: operations=187 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -8419,13 +8824,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 185), malformed);
+    try std.testing.expectEqual(@as(usize, 188), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=185 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=187 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

@@ -10,14 +10,25 @@ pub const max_profile_bound: u32 = 8192;
 pub const max_interfaces: usize = 64;
 pub const max_specializations: usize = 64;
 pub const max_uniform_block_bytes: u32 = 16 * 1024;
+const max_spirv_struct_members: usize = ir.max_uniform_members;
 const max_debug_string_words: u16 = 256;
 const max_entry_point_operands: u16 = 3 + 64 + @as(u16, max_interfaces);
 
 pub const Error = error{ Malformed, Unsupported, LimitExceeded, OutOfMemory };
 
+var diagnose_failures = std.atomic.Value(bool).init(false);
+
+pub fn setFailureDiagnosticsEnabled(enabled: bool) void {
+    diagnose_failures.store(enabled, .monotonic);
+}
+
+fn failureDiagnosticsEnabled() bool {
+    return diagnose_failures.load(.monotonic);
+}
+
 pub const Specialization = struct { id: u32, bytes: []const u8 };
 
-const Kind = enum { none, void, bool, int, float, vector, matrix, array, image, sampled_image, pointer, structure, function, ext_inst_import, constant, variable, function_value, label };
+const Kind = enum { none, void, bool, int, float, vector, matrix, array, image, sampler, sampled_image, pointer, structure, function, ext_inst_import, constant, variable, function_value, label };
 const Node = struct {
     kind: Kind = .none,
     type_id: u32 = 0,
@@ -87,10 +98,11 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 23, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 24, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 25, .operands = .{ .min = 8, .max = 8 } },
+    .{ .opcode = 26, .operands = .{ .min = 1, .max = 1 } },
     .{ .opcode = 27, .operands = .{ .min = 2, .max = 2 } },
     .{ .opcode = 28, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 29, .operands = .{ .min = 2, .max = 2 } },
-    .{ .opcode = 30, .operands = .{ .min = 1, .max = 17 } },
+    .{ .opcode = 30, .operands = .{ .min = 1, .max = 33 } },
     .{ .opcode = 32, .operands = .{ .min = 3, .max = 3 } },
     // Function signatures may retain pointer parameters after an upstream
     // optimizer inlines every call.  They are declarations, not executable
@@ -119,6 +131,8 @@ const opcode_schema = [_]OpcodeMeta{
     .{ .opcode = 83, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 84, .operands = .{ .min = 3, .max = 3 } },
     .{ .opcode = 87, .operands = .{ .min = 4, .max = 6 } },
+    .{ .opcode = 86, .operands = .{ .min = 4, .max = 4 } }, // OpSampledImage
+    .{ .opcode = 88, .operands = .{ .min = 6, .max = 7 } }, // OpImageSampleExplicitLod (Lod or constant-zero Grad)
     // Profile v1 admits only a 2D, single-sample, level-zero image fetch.
     .{ .opcode = 95, .operands = .{ .min = 6, .max = 6 } },
     .{ .opcode = 98, .operands = .{ .min = 4, .max = 4 } }, // OpImageRead, SubpassData only
@@ -261,10 +275,10 @@ const type_schema = [_]ValueMeta{
     .{ .value = 19, .supported = true }, .{ .value = 20, .supported = true },
     .{ .value = 21, .supported = true }, .{ .value = 22, .supported = true },
     .{ .value = 23, .supported = true }, .{ .value = 24, .supported = true },
-    .{ .value = 25, .supported = true }, .{ .value = 27, .supported = true },
-    .{ .value = 28, .supported = true }, .{ .value = 29, .supported = true },
-    .{ .value = 30, .supported = true }, .{ .value = 32, .supported = true },
-    .{ .value = 33, .supported = true },
+    .{ .value = 25, .supported = true }, .{ .value = 26, .supported = true },
+    .{ .value = 27, .supported = true }, .{ .value = 28, .supported = true },
+    .{ .value = 29, .supported = true }, .{ .value = 30, .supported = true },
+    .{ .value = 32, .supported = true }, .{ .value = 33, .supported = true },
 };
 const decoration_schema = [_]ValueMeta{
     .{ .value = 0, .supported = true },
@@ -294,7 +308,10 @@ fn valueMeta(schema: []const ValueMeta, value: u32) ?ValueMeta {
 fn validateProfileSchema(module: *const decode.Module) Error!void {
     for (module.instructions) |instruction| {
         const meta = opcodeMeta(instruction.opcode) orelse return error.Unsupported;
-        if (instruction.words.len < meta.operands.min or instruction.words.len > meta.operands.max) return error.Malformed;
+        if (instruction.words.len < meta.operands.min or instruction.words.len > meta.operands.max) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU SPIR-V schema malformed opcode={d} words={d} allowed={d}..{d}\n", .{ instruction.opcode, instruction.words.len, meta.operands.min, meta.operands.max });
+            return error.Malformed;
+        }
         if (instruction.opcode >= 19 and instruction.opcode <= 33 and valueMeta(&type_schema, instruction.opcode) == null) return error.Unsupported;
     }
 }
@@ -325,6 +342,80 @@ fn stringOperand(words: []const u32) Error!struct { value: []const u8, word_coun
 fn id(nodes: []const Node, value: u32) Error!usize {
     if (value == 0 or value >= nodes.len) return error.Malformed;
     return @intCast(value);
+}
+
+fn sampledImageDimension(nodes: []const Node, sampled_image_type_id: u32) Error!u32 {
+    const sampled_image_type = nodes[try id(nodes, sampled_image_type_id)];
+    if (sampled_image_type.kind != .sampled_image) return error.Malformed;
+    const image_type = nodes[try id(nodes, sampled_image_type.a)];
+    if (image_type.kind != .image) return error.Malformed;
+    return image_type.b;
+}
+
+fn outputLocalRoot(nodes: []const Node, pointer_id: u32, output_local_interfaces: []const u32) Error!?u32 {
+    var current_id = pointer_id;
+    var depth: usize = 0;
+    while (depth < 64) : (depth += 1) {
+        const pointer = nodes[try id(nodes, current_id)];
+        if (pointer.kind == .variable) {
+            if (pointer.a == 3 and output_local_interfaces[current_id] != std.math.maxInt(u32)) return current_id;
+            return null;
+        }
+        if (pointer.kind != .function_value or pointer.opcode != 65 or pointer.words.len == 0) return null;
+        current_id = pointer.words[0];
+    }
+    return error.LimitExceeded;
+}
+
+fn appendLoweredInstruction(
+    allocator: std.mem.Allocator,
+    lowered: *std.ArrayList(ir.Instruction),
+    op: ir.Op,
+    ty: ir.Type,
+    operands_source: []const u32,
+    literal_source: []const u8,
+) Error!u32 {
+    const operands = allocator.dupe(u32, operands_source) catch return error.OutOfMemory;
+    errdefer allocator.free(operands);
+    const literal = allocator.dupe(u8, literal_source) catch return error.OutOfMemory;
+    errdefer allocator.free(literal);
+    try lowered.append(allocator, .{ .op = op, .ty = ty, .operands = operands, .literal = literal });
+    return @intCast(lowered.items.len - 1);
+}
+
+fn aggregateSlot(value_id: u32, member_index: usize) usize {
+    return @as(usize, value_id) * max_spirv_struct_members + member_index;
+}
+
+fn flattenedStructResult(node: Node) bool {
+    return node.kind == .function_value and
+        ((node.opcode == 12 and (node.b == 36 or node.b == 52)) or (node.opcode >= 149 and node.opcode <= 152));
+}
+
+fn appendStructLocals(
+    allocator: std.mem.Allocator,
+    lowered: *std.ArrayList(ir.Instruction),
+    nodes: []const Node,
+    variable_id: u32,
+    structure_type_id: u32,
+    initializer_id: ?u32,
+    aggregate_locals: []u32,
+    aggregate_values: []const u32,
+) Error!void {
+    const structure = nodes[try id(nodes, structure_type_id)];
+    if (structure.kind != .structure or structure.words.len == 0 or structure.words.len > max_spirv_struct_members) return error.Unsupported;
+    for (structure.words, 0..) |member_type, member_index| {
+        const member = nodes[try id(nodes, member_type)];
+        if (member.kind == .structure or member.kind == .array) return error.Unsupported;
+        const shape = try resultShape(nodes, member_type);
+        var local_operands: [1]u32 = undefined;
+        const operand_count: usize = if (initializer_id != null) 1 else 0;
+        if (initializer_id) |initializer| {
+            local_operands[0] = aggregate_values[aggregateSlot(initializer, member_index)];
+            if (local_operands[0] == std.math.maxInt(u32) or !sameShape(shape, lowered.items[local_operands[0]].ty)) return error.Malformed;
+        }
+        aggregate_locals[aggregateSlot(variable_id, member_index)] = try appendLoweredInstruction(allocator, lowered, .local, shape, local_operands[0..operand_count], &.{});
+    }
 }
 
 fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
@@ -606,6 +697,52 @@ fn scalarU32Constant(nodes: []const Node, value_id: u32) Error!u32 {
     return node.words[0];
 }
 
+fn nonnegativeScalarIntegerConstant(nodes: []const Node, value_id: u32) Error!u32 {
+    const node = nodes[try id(nodes, value_id)];
+    if (node.kind != .constant or node.opcode != 43 or node.words.len != 1) return error.Unsupported;
+    const shape = try resultShape(nodes, node.type_id);
+    if ((shape.scalar != .u32 and shape.scalar != .i32) or shape.columns != 1 or shape.rows != 1 or (shape.scalar == .i32 and node.words[0] & 0x8000_0000 != 0)) return error.Unsupported;
+    return node.words[0];
+}
+
+const UniformStructArrayAccess = struct {
+    variable_id: u32,
+    block_type_id: u32,
+    member_index: u32,
+    structure_type_id: u32,
+};
+
+/// Recognize the captured bounded uniform access `block.member[0]` where the
+/// member is a one-element array of a plain structure. Its fields are lowered
+/// individually to uniform byte offsets, so this does not admit dynamic or
+/// nested aggregate loads.
+fn uniformStructArrayPointer(nodes: []const Node, pointer_id: u32) Error!?UniformStructArrayAccess {
+    const access = nodes[try id(nodes, pointer_id)];
+    if (access.kind != .function_value or access.opcode != 65 or access.words.len != 3) return null;
+    const variable_id = access.words[0];
+    const variable = nodes[try id(nodes, variable_id)];
+    if (variable.kind != .variable or (variable.a != 2 and variable.a != 9)) return null;
+    const variable_pointer = nodes[try id(nodes, variable.type_id)];
+    if (variable_pointer.kind != .pointer) return error.Malformed;
+    const block = nodes[try id(nodes, variable_pointer.b)];
+    if (block.kind != .structure) return null;
+    const member_index = try nonnegativeScalarIntegerConstant(nodes, access.words[1]);
+    if (member_index >= block.words.len) return null;
+    const member_type_id = block.words[member_index];
+    const member_type = nodes[try id(nodes, member_type_id)];
+    if (member_type.kind != .array or member_type.b != 1) return null;
+    const structure = nodes[try id(nodes, member_type.a)];
+    if (structure.kind != .structure) return null;
+    if (try nonnegativeScalarIntegerConstant(nodes, access.words[2]) != 0) return null;
+    const access_pointer = nodes[try id(nodes, access.type_id)];
+    if (access_pointer.kind != .pointer or access_pointer.a != variable.a or access_pointer.b != member_type.a) return error.Malformed;
+    return .{ .variable_id = variable_id, .block_type_id = variable_pointer.b, .member_index = member_index, .structure_type_id = member_type.a };
+}
+
+fn uniformStructArrayMemberCount(nodes: []const Node, access: UniformStructArrayAccess) Error!u32 {
+    return @intCast((nodes[try id(nodes, access.block_type_id)]).words.len);
+}
+
 fn positiveScalarIntegerConstant(nodes: []const Node, value_id: u32) Error!u32 {
     const node = nodes[try id(nodes, value_id)];
     if (node.kind != .constant or node.opcode != 43 or node.words.len != 1) return error.Unsupported;
@@ -728,7 +865,7 @@ fn interfacesUnique(items: []const ir.Interface) bool {
     if (items.len < 2) return true;
     for (items[1..], items[0 .. items.len - 1]) |item, prior| {
         if (item.storage != prior.storage) continue;
-        if (item.storage == .uniform or item.storage == .sampled_image or item.storage == .input_attachment) {
+        if (item.storage == .uniform or item.storage == .sampled_image or item.storage == .input_attachment or item.storage == .image or item.storage == .sampler) {
             if (item.descriptor_set == prior.descriptor_set and item.binding == prior.binding) return false;
         } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_frag_coord and prior.builtin_frag_coord) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.builtin_vertex_index and prior.builtin_vertex_index) or (item.location != null and item.location == prior.location)) return false;
     }
@@ -818,12 +955,45 @@ fn inlineMappedId(mappings: []const InlineMapping, source: u32) u32 {
     return source;
 }
 
+fn recordInlinePredecessorOverride(
+    allocator: std.mem.Allocator,
+    overrides: *std.ArrayList(InlineMapping),
+    source: u32,
+    destination: u32,
+) Error!void {
+    for (overrides.items) |*mapping| if (mapping.source == source) {
+        mapping.destination = destination;
+        return;
+    };
+    try overrides.append(allocator, .{ .source = source, .destination = destination });
+}
+
+fn patchInlinePhiPredecessors(
+    output: []u32,
+    phi_offsets: []const usize,
+    mappings: []const InlineMapping,
+    overrides: []const InlineMapping,
+) Error!void {
+    for (phi_offsets) |start| {
+        if (start >= output.len) return error.Malformed;
+        const word_count: usize = output[start] >> 16;
+        if (word_count < 5 or start + word_count > output.len or (word_count - 3) % 2 != 0) return error.Malformed;
+        var predecessor_offset = start + 4;
+        while (predecessor_offset < start + word_count) : (predecessor_offset += 2) {
+            for (overrides) |override| {
+                const prior = inlineMappedId(mappings, override.source);
+                if (output[predecessor_offset] == prior) output[predecessor_offset] = override.destination;
+            }
+        }
+    }
+}
+
 fn inlineDefinitionId(opcode: u16, words: []const u32) Error!?u32 {
     if (opcode == 248) return if (words.len == 1) words[0] else error.Malformed;
     if (opcode == 12 or opcode == 57 or opcode == 59 or opcode == 61 or opcode == 65 or
         opcode == 77 or opcode == 78 or opcode == 79 or opcode == 80 or
         opcode == 81 or opcode == 82 or opcode == 83 or opcode == 84 or
-        opcode == 87 or opcode == 95 or opcode == 98 or (opcode >= 109 and opcode <= 209) or opcode == 245)
+        opcode == 86 or opcode == 87 or opcode == 88 or opcode == 95 or opcode == 98 or (opcode >= 109 and opcode <= 209) or opcode == 245)
     {
         if (words.len < 2) return error.Malformed;
         return words[1];
@@ -847,14 +1017,18 @@ fn inlineOperandIsId(opcode: u16, operand_index: usize) bool {
         81 => operand_index == 2, // OpCompositeExtract indexes are literals
         82 => operand_index == 2 or operand_index == 3, // OpCompositeInsert indexes are literals
         83, 84 => operand_index == 2,
+        86 => operand_index == 2 or operand_index == 3,
         87 => operand_index == 2 or operand_index == 3 or operand_index >= 5, // skip the optional image-operands mask
+        88 => operand_index == 2 or operand_index == 3 or operand_index == 5 or operand_index == 6, // skip the image-operands mask
         95 => operand_index == 2 or operand_index == 3 or operand_index == 5, // Lod mask is the only admitted image operand
         98 => operand_index == 2 or operand_index == 3,
         109...209 => operand_index >= 2,
         245 => operand_index >= 2, // OpPhi type is operand zero
+        246 => operand_index < 2, // loop merge and continue blocks
         247 => operand_index == 0, // merge block; control mask is literal
         248, 249, 254 => operand_index == 0,
         250 => operand_index <= 2, // optional branch weights are literals
+        251 => operand_index == 1 or (operand_index >= 3 and operand_index % 2 == 1), // switch targets; case literals are skipped
         else => false,
     };
 }
@@ -900,7 +1074,10 @@ fn appendInlinedCall(
 ) Error!u32 {
     const call_words = call.words;
     if (call.opcode != 57 or call_words.len < 3) return error.Unsupported;
-    if (depth >= 64 or expansion_count.* >= 64) return error.LimitExceeded;
+    if (depth >= 64 or expansion_count.* >= max_profile_bound) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU SPIR-V inline expansion limit depth={d} calls={d} function={d}\n", .{ depth, expansion_count.*, call_words[2] });
+        return error.LimitExceeded;
+    }
     expansion_count.* += 1;
     const range = findInlineFunction(module, call_words[2]) orelse return error.Malformed;
     const function = module.instructions[range.start];
@@ -928,18 +1105,6 @@ fn appendInlinedCall(
     if (body_start == range.end or call_words.len - 3 != parameter_count) return error.Malformed;
     if (parameter_count != signature.len - 2) return error.Malformed;
 
-    var has_nested_call = false;
-    var has_control_flow = false;
-    for (body_start..range.end) |instruction_index| {
-        const opcode = module.instructions[instruction_index].opcode;
-        has_nested_call = has_nested_call or opcode == 57;
-        has_control_flow = has_control_flow or opcode == 245 or opcode == 247 or opcode == 249 or opcode == 250 or opcode == 251;
-    }
-    // A nested call creates a continuation block. Keep this expansion bounded
-    // to straight-line callers so predecessor labels feeding a surrounding
-    // phi cannot be changed by the inserted block.
-    if (has_nested_call and has_control_flow) return error.Unsupported;
-
     var mappings: std.ArrayList(InlineMapping) = .empty;
     defer mappings.deinit(allocator);
     try mappings.ensureTotalCapacity(allocator, parameter_count + range.end - body_start);
@@ -963,17 +1128,26 @@ fn appendInlinedCall(
 
     var returns: std.ArrayList(InlineReturn) = .empty;
     defer returns.deinit(allocator);
-    var current_label: ?u32 = null;
+    var predecessor_overrides: std.ArrayList(InlineMapping) = .empty;
+    defer predecessor_overrides.deinit(allocator);
+    var phi_offsets: std.ArrayList(usize) = .empty;
+    defer phi_offsets.deinit(allocator);
+    var current_source_label: ?u32 = null;
+    var current_output_label: ?u32 = null;
     for (body_start..range.end) |instruction_index| {
         const instruction = module.instructions[instruction_index];
-        if (instruction.opcode == 248) current_label = instruction.words[0];
+        if (instruction.opcode == 248) {
+            current_source_label = instruction.words[0];
+            current_output_label = inlineMappedId(mappings.items, instruction.words[0]);
+        }
         if (instruction.opcode == 253 or instruction.opcode == 254) {
-            if (current_label == null or (instruction.opcode == 253) != isVoidType(module, function.words[0])) return error.Malformed;
+            if (current_source_label == null or current_output_label == null or (instruction.opcode == 253) != isVoidType(module, function.words[0])) return error.Malformed;
             const return_value = if (instruction.opcode == 254) inlineMappedId(mappings.items, instruction.words[0]) else 0;
-            try returns.append(allocator, .{ .value = return_value, .label = inlineMappedId(mappings.items, current_label.?) });
+            try returns.append(allocator, .{ .value = return_value, .label = current_output_label.? });
             try appendInlineInstruction(allocator, output, 249, &.{continuation_label}, &.{});
         } else if (instruction.opcode == 57) {
-            current_label = try appendInlinedCall(
+            if (current_source_label == null) return error.Malformed;
+            current_output_label = try appendInlinedCall(
                 allocator,
                 module,
                 output,
@@ -984,10 +1158,19 @@ fn appendInlinedCall(
                 expansion_count,
             );
         } else {
+            if (instruction.opcode == 245) try phi_offsets.append(allocator, output.items.len);
+            if (instruction.opcode == 249 or instruction.opcode == 250 or instruction.opcode == 251) {
+                const source_label = current_source_label orelse return error.Malformed;
+                const output_label = current_output_label orelse return error.Malformed;
+                const original_output_label = inlineMappedId(mappings.items, source_label);
+                if (output_label != original_output_label)
+                    try recordInlinePredecessorOverride(allocator, &predecessor_overrides, source_label, output_label);
+            }
             try appendInlineInstruction(allocator, output, instruction.opcode, instruction.words, mappings.items);
         }
     }
     if (returns.items.len == 0) return error.Malformed;
+    try patchInlinePhiPredecessors(output.items, phi_offsets.items, mappings.items, predecessor_overrides.items);
     try appendInlineInstruction(allocator, output, 248, &.{continuation_label}, &.{});
     if (!isVoidType(module, function.words[0])) {
         const result_id = inlineMappedId(outer_mappings, call_words[1]);
@@ -1034,21 +1217,28 @@ fn inlineSelectedCalls(
     const function_id = selected_function orelse return null;
     const selected_range = findInlineFunction(module, function_id) orelse return error.Malformed;
     var call_count: usize = 0;
-    var selected_has_control_flow = false;
-    for (selected_range.start..selected_range.end) |instruction_index| if (module.instructions[instruction_index].opcode == 57) {
-        call_count += 1;
-    } else if (module.instructions[instruction_index].opcode == 245 or module.instructions[instruction_index].opcode == 247 or module.instructions[instruction_index].opcode == 249 or module.instructions[instruction_index].opcode == 250 or module.instructions[instruction_index].opcode == 251) {
-        selected_has_control_flow = true;
-    };
+    for (selected_range.start..selected_range.end) |instruction_index| {
+        if (module.instructions[instruction_index].opcode == 57) call_count += 1;
+    }
     if (call_count == 0) return null;
-    if (entry_count != 1 or call_count > 64 or module.bound > max_profile_bound) return error.Unsupported;
-    if (selected_has_control_flow) return error.Unsupported;
-
+    if (entry_count != 1 or call_count > 64 or module.bound > max_profile_bound) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU SPIR-V inline rejected entry_count={d} call_count={d} bound={d}\n",
+            .{ entry_count, call_count, module.bound },
+        );
+        return error.Unsupported;
+    }
     var output: std.ArrayList(u32) = .empty;
     errdefer output.deinit(allocator);
+    var predecessor_overrides: std.ArrayList(InlineMapping) = .empty;
+    defer predecessor_overrides.deinit(allocator);
+    var phi_offsets: std.ArrayList(usize) = .empty;
+    defer phi_offsets.deinit(allocator);
     try output.appendSlice(allocator, module.words[0..5]);
     var next_id = module.bound;
     var current_function: u32 = 0;
+    var current_source_label: ?u32 = null;
+    var current_output_label: ?u32 = null;
     var inlined_calls: usize = 0;
     var expansion_count: usize = 0;
     for (module.instructions) |instruction| {
@@ -1064,14 +1254,27 @@ fn inlineSelectedCalls(
             if (instruction.opcode == 57) {
                 inlined_calls += 1;
                 if (inlined_calls > 64) return error.LimitExceeded;
-                _ = try appendInlinedCall(allocator, module, &output, &next_id, instruction, &.{}, 0, &expansion_count);
+                if (current_source_label == null) return error.Malformed;
+                current_output_label = try appendInlinedCall(allocator, module, &output, &next_id, instruction, &.{}, 0, &expansion_count);
             } else {
+                if (instruction.opcode == 248) {
+                    current_source_label = instruction.words[0];
+                    current_output_label = instruction.words[0];
+                }
+                if (instruction.opcode == 245) try phi_offsets.append(allocator, output.items.len);
+                if (instruction.opcode == 249 or instruction.opcode == 250 or instruction.opcode == 251) {
+                    const source_label = current_source_label orelse return error.Malformed;
+                    const output_label = current_output_label orelse return error.Malformed;
+                    if (output_label != source_label)
+                        try recordInlinePredecessorOverride(allocator, &predecessor_overrides, source_label, output_label);
+                }
                 try appendInlineInstruction(allocator, &output, instruction.opcode, instruction.words, &.{});
             }
         }
         if (instruction.opcode == 56) current_function = 0;
     }
     if (inlined_calls != call_count) return error.Malformed;
+    try patchInlinePhiPredecessors(output.items, phi_offsets.items, &.{}, predecessor_overrides.items);
     output.items[3] = next_id;
     return try output.toOwnedSlice(allocator);
 }
@@ -1103,16 +1306,16 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
     const decorations = allocator.alloc(Decorations, module.bound) catch return error.OutOfMemory;
     defer allocator.free(decorations);
     @memset(decorations, .{});
-    const member_offsets = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    const member_offsets = allocator.alloc(?u32, @as(usize, module.bound) * max_spirv_struct_members) catch return error.OutOfMemory;
     defer allocator.free(member_offsets);
     @memset(member_offsets, null);
-    const member_matrix_strides = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    const member_matrix_strides = allocator.alloc(?u32, @as(usize, module.bound) * max_spirv_struct_members) catch return error.OutOfMemory;
     defer allocator.free(member_matrix_strides);
     @memset(member_matrix_strides, null);
-    const member_col_major = allocator.alloc(bool, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    const member_col_major = allocator.alloc(bool, @as(usize, module.bound) * max_spirv_struct_members) catch return error.OutOfMemory;
     defer allocator.free(member_col_major);
     @memset(member_col_major, false);
-    const member_builtins = allocator.alloc(?u32, @as(usize, module.bound) * 16) catch return error.OutOfMemory;
+    const member_builtins = allocator.alloc(?u32, @as(usize, module.bound) * max_spirv_struct_members) catch return error.OutOfMemory;
     defer allocator.free(member_builtins);
     @memset(member_builtins, null);
 
@@ -1132,6 +1335,10 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
 
     for (module.instructions, 0..) |instruction, instruction_index| {
         const w = instruction.words;
+        errdefer if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU SPIR-V frontend instruction failed index={d} opcode={d} operands={any}\n",
+            .{ instruction_index, instruction.opcode, w },
+        );
         const instruction_meta = opcodeMeta(instruction.opcode).?;
         instruction_functions[instruction_index] = current_function;
         switch (instruction.opcode) {
@@ -1223,8 +1430,8 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 if (payload < meta.operands.min or payload > meta.operands.max) return error.Malformed;
                 if (!meta.supported or (w[2] != 0 and w[2] != 5 and w[2] != 7 and w[2] != 11 and w[2] != 35)) return error.Unsupported;
                 const target = try id(nodes, w[0]);
-                if (w[1] >= 16) return error.Unsupported;
-                const member_index = target * 16 + w[1];
+                if (w[1] >= max_spirv_struct_members) return error.Unsupported;
+                const member_index = target * max_spirv_struct_members + w[1];
                 if (w[2] == 0) {
                     continue;
                 } else if (w[2] == 35) {
@@ -1270,14 +1477,18 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             25 => {
                 const sampled_type = try resultShape(nodes, w[1]);
                 if (sampled_type.scalar != .f32 or sampled_type.columns != 1 or sampled_type.rows != 1) return error.Unsupported;
-                // Sampled 2D images, samplerless 2D images, and single-sample
-                // SubpassData input attachments are the only image domains
-                // admitted by the bounded fragment profile.
-                if (w[2] == 1 and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 1 and w[7] == 0) {
+                // Sampled 2D and cube images, samplerless 2D/cube images, and
+                // single-sample SubpassData attachments are admitted by the
+                // bounded fragment profile. Cube arrays remain unsupported.
+                if ((w[2] == 1 or w[2] == 3) and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 1 and w[7] == 0) {
                     try define(nodes, w[0], .{ .kind = .image, .a = w[1], .b = w[2] });
                 } else if (w[2] == 6 and w[3] == 0 and w[4] == 0 and w[5] == 0 and w[6] == 2 and w[7] == 0) {
                     try define(nodes, w[0], .{ .kind = .image, .a = w[1], .b = w[2] });
                 } else return error.Unsupported;
+            },
+            26 => {
+                if (w.len != 1) return error.Malformed;
+                try define(nodes, w[0], .{ .kind = .sampler });
             },
             27 => {
                 if (nodes[try id(nodes, w[1])].kind != .image) return error.Malformed;
@@ -1287,7 +1498,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 const count = try positiveScalarIntegerConstant(nodes, w[2]);
                 if (count > 64) return error.Unsupported;
                 const element = nodes[try id(nodes, w[1])];
-                if (element.kind != .float and element.kind != .int and element.kind != .vector and element.kind != .matrix) return error.Unsupported;
+                if (element.kind != .float and element.kind != .int and element.kind != .vector and element.kind != .matrix and !(element.kind == .structure and count == 1)) return error.Unsupported;
                 try define(nodes, w[0], .{ .kind = .array, .a = w[1], .b = count });
             },
             29 => {
@@ -1296,7 +1507,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 try define(nodes, w[0], .{ .kind = .array, .a = w[1] });
             },
             30 => {
-                if (w.len < 1 or w.len > 17) return if (w.len < 1) error.Malformed else error.LimitExceeded;
+                if (w.len < 1 or w.len > max_spirv_struct_members + 1) return if (w.len < 1) error.Malformed else error.LimitExceeded;
                 try define(nodes, w[0], .{ .kind = .structure, .words = w[1..] });
             },
             32 => {
@@ -1313,7 +1524,13 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             41, 42, 46 => {
                 if (w.len != 2) return error.Malformed;
                 if (instruction.opcode == 46 and nodes[try id(nodes, w[0])].kind == .structure) {
-                    if (!try projectableLocalAggregateType(nodes, w[0])) return error.Unsupported;
+                    const aggregate = nodes[try id(nodes, w[0])];
+                    if (aggregate.words.len == 0 or aggregate.words.len > max_spirv_struct_members) return error.Unsupported;
+                    for (aggregate.words) |member_type| {
+                        const member = nodes[try id(nodes, member_type)];
+                        if (member.kind != .bool and member.kind != .int and member.kind != .float and member.kind != .vector and member.kind != .matrix) return error.Unsupported;
+                        _ = try resultShape(nodes, member_type);
+                    }
                 } else {
                     const shape = try resultShape(nodes, w[0]);
                     if (instruction.opcode == 46 and
@@ -1343,7 +1560,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 if (pointer.kind != .pointer or pointer.a != w[2]) return error.Malformed;
                 if (w.len == 4) {
                     const initializer = nodes[try id(nodes, w[3])];
-                    if (initializer.type_id != pointer.b or !try constantZero(nodes, w[3])) return error.Unsupported;
+                    if (initializer.type_id != pointer.b or initializer.kind != .constant) return error.Unsupported;
                 }
                 try define(nodes, w[1], .{ .kind = .variable, .type_id = w[0], .a = w[2] });
             },
@@ -1362,6 +1579,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 if (!in_function or (label_seen and !block_terminated) or w.len != 1) return error.Malformed;
                 try define(nodes, w[0], .{ .kind = .label });
                 label_seen = true;
+                terminated = false;
                 block_terminated = false;
             },
             247 => {
@@ -1490,11 +1708,16 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 }
                 block_terminated = true;
             },
-            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
-                if (!in_function or !label_seen or terminated or block_terminated) return error.Malformed;
+            61, 62, 65, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209 => {
+                if (!in_function or !label_seen or terminated or block_terminated) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU SPIR-V malformed instruction after terminator opcode={d} function={d} label_seen={} terminated={} block_terminated={} words={any}\n", .{ instruction.opcode, current_function, label_seen, terminated, block_terminated, w });
+                    return error.Malformed;
+                }
                 const valid_arity = switch (instruction.opcode) {
                     61, 84 => w.len == 3,
+                    86 => w.len == 4,
                     87 => w.len == 4 or (w.len == 6 and w[4] == 1),
+                    88 => (w.len == 6 and w[4] == 2) or (w.len == 7 and w[4] == 4),
                     95 => w.len == 6 and w[4] == 2,
                     98 => w.len == 4,
                     62 => w.len == 2,
@@ -1530,7 +1753,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         if (decoration.spec_id != null and !(node.kind == .constant and node.opcode >= 48 and node.opcode <= 50)) return error.Unsupported;
         if ((decoration.location != null or decoration.index_zero or decoration.binding != null or decoration.descriptor_set != null or decoration.builtin_position or decoration.builtin_frag_coord or decoration.builtin_front_facing or decoration.builtin_vertex_index or decoration.builtin_instance_index or decoration.flat) and node.kind != .variable) return error.Unsupported;
         if (decoration.block and node.kind != .structure) return error.Unsupported;
-        for (member_offsets[node_index * 16 ..][0..16], 0..) |offset, member_index| if (offset != null and (node.kind != .structure or member_index >= node.words.len)) return if (node.kind == .none) error.Malformed else error.Unsupported;
+        for (member_offsets[node_index * max_spirv_struct_members ..][0..max_spirv_struct_members], 0..) |offset, member_index| if (offset != null and (node.kind != .structure or member_index >= node.words.len)) return if (node.kind == .none) error.Malformed else error.Unsupported;
     }
     for (specs) |spec| {
         var matched = false;
@@ -1560,6 +1783,10 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
     for (module.instructions, instruction_functions) |instruction, instruction_function| {
         if (instruction_function != 0 and instruction_function != entry.function) continue;
         const w = instruction.words;
+        errdefer if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU SPIR-V frontend operand validation failed opcode={d} operands={any}\n",
+            .{ instruction.opcode, w },
+        );
         switch (instruction.opcode) {
             12 => {
                 if (w.len < 5 or w.len > 7) return error.Malformed;
@@ -1587,22 +1814,31 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 }
             },
             44, 80 => {
-                const result = try resultShape(nodes, w[0]);
-                if (result.rows == 1 and result.columns > 1) {
-                    var columns: u32 = 0;
-                    for (w[2..]) |operand| {
-                        const part = try valueShape(nodes, operand);
-                        if (part.scalar != result.scalar or part.rows != 1) return error.Malformed;
-                        columns = std.math.add(u32, columns, part.columns) catch return error.LimitExceeded;
+                const aggregate = nodes[try id(nodes, w[0])];
+                if (aggregate.kind == .structure) {
+                    if (aggregate.words.len == 0 or aggregate.words.len > max_spirv_struct_members or w.len - 2 != aggregate.words.len) return error.Unsupported;
+                    for (aggregate.words, w[2..]) |member_type, operand_id| {
+                        const member = nodes[try id(nodes, member_type)];
+                        if (member.kind == .structure or member.kind == .array or !sameShape(try resultShape(nodes, member_type), try valueShape(nodes, operand_id))) return error.Malformed;
                     }
-                    if (columns != result.columns) return error.Malformed;
-                } else if (result.rows > 1) {
-                    if (w.len - 2 != result.columns) return error.Malformed;
-                    for (w[2..]) |operand| {
-                        const part = try valueShape(nodes, operand);
-                        if (part.scalar != .f32 or part.columns != result.rows or part.rows != 1) return error.Malformed;
-                    }
-                } else return error.Unsupported;
+                } else {
+                    const result = try resultShape(nodes, w[0]);
+                    if (result.rows == 1 and result.columns > 1) {
+                        var columns: u32 = 0;
+                        for (w[2..]) |operand| {
+                            const part = try valueShape(nodes, operand);
+                            if (part.scalar != result.scalar or part.rows != 1) return error.Malformed;
+                            columns = std.math.add(u32, columns, part.columns) catch return error.LimitExceeded;
+                        }
+                        if (columns != result.columns) return error.Malformed;
+                    } else if (result.rows > 1) {
+                        if (w.len - 2 != result.columns) return error.Malformed;
+                        for (w[2..]) |operand| {
+                            const part = try valueShape(nodes, operand);
+                            if (part.scalar != .f32 or part.columns != result.rows or part.rows != 1) return error.Malformed;
+                        }
+                    } else return error.Unsupported;
+                }
             },
             61 => {
                 const pointer_value = nodes[try id(nodes, w[2])];
@@ -1610,21 +1846,68 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 if (pointer.kind != .pointer) return error.Malformed;
                 if (pointer.a == 0) {
                     const loaded = nodes[try id(nodes, w[0])];
-                    if ((loaded.kind != .sampled_image and loaded.kind != .image) or pointer.b != w[0]) return error.Malformed;
+                    if ((loaded.kind != .sampled_image and loaded.kind != .image and loaded.kind != .sampler) or pointer.b != w[0]) return error.Malformed;
+                } else if (nodes[try id(nodes, w[0])].kind == .structure) {
+                    if (pointer.b != w[0]) return error.Malformed;
+                    if (pointer.a == 2 or pointer.a == 9) {
+                        const aggregate = (try uniformStructArrayPointer(nodes, w[2])) orelse return error.Unsupported;
+                        if (aggregate.structure_type_id != w[0]) return error.Unsupported;
+                    } else if (pointer.a == 3 or pointer.a == 7) {
+                        const aggregate = nodes[try id(nodes, w[0])];
+                        for (aggregate.words) |member_type| {
+                            const member = nodes[try id(nodes, member_type)];
+                            if (member.kind == .structure or member.kind == .array) return error.Unsupported;
+                            _ = try resultShape(nodes, member_type);
+                        }
+                    } else return error.Unsupported;
                 } else if (!sameShape(try resultShape(nodes, w[0]), try resultShape(nodes, pointer.b))) return error.Malformed;
-                if (pointer.a != 0 and pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 7 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
+                if (pointer.a != 0 and pointer.a != 1 and pointer.a != 2 and pointer.a != 3 and pointer.a != 6 and pointer.a != 7 and pointer.a != 9 and !(requested_stage == .compute and pointer.a == 12)) return error.Unsupported;
             },
             87 => {
                 const result = try resultShape(nodes, w[0]);
                 if (requested_stage != .fragment or result.scalar != .f32 or result.columns != 4 or result.rows != 1) return error.Unsupported;
                 const sampled = nodes[try id(nodes, w[2])];
                 if (sampled.kind != .function_value or sampled.opcode != 61 or nodes[try id(nodes, sampled.type_id)].kind != .sampled_image) return error.Unsupported;
+                const dimension = try sampledImageDimension(nodes, sampled.type_id);
+                if (dimension != 1 and dimension != 3) return error.Unsupported;
                 const coordinates = try valueShape(nodes, w[3]);
-                if (coordinates.scalar != .f32 or coordinates.columns != 2 or coordinates.rows != 1) return error.Unsupported;
+                const coordinate_columns: u3 = if (dimension == 3) 3 else 2;
+                if (coordinates.scalar != .f32 or coordinates.columns != coordinate_columns or coordinates.rows != 1) return error.Unsupported;
                 if (w.len == 6) {
                     if (w[4] != 1) return error.Unsupported;
                     const bias = try valueShape(nodes, w[5]);
                     if (bias.scalar != .f32 or bias.columns != 1 or bias.rows != 1) return error.Unsupported;
+                }
+            },
+            86 => {
+                if (nodes[try id(nodes, w[0])].kind != .sampled_image) return error.Malformed;
+                const image = nodes[try id(nodes, w[2])];
+                const sampler = nodes[try id(nodes, w[3])];
+                if (image.kind != .function_value or image.opcode != 61 or image.words.len != 1 or nodes[try id(nodes, image.type_id)].kind != .image or (nodes[try id(nodes, image.type_id)].b != 1 and nodes[try id(nodes, image.type_id)].b != 3)) return error.Unsupported;
+                if (sampler.kind != .function_value or sampler.opcode != 61 or sampler.words.len != 1 or nodes[try id(nodes, sampler.type_id)].kind != .sampler) return error.Unsupported;
+            },
+            88 => {
+                const result = try resultShape(nodes, w[0]);
+                if (requested_stage != .fragment or result.scalar != .f32 or result.columns != 4 or result.rows != 1 or !((w.len == 6 and w[4] == 2) or (w.len == 7 and w[4] == 4))) return error.Unsupported;
+                const sampled = nodes[try id(nodes, w[2])];
+                const combined = sampled.kind == .function_value and sampled.opcode == 61 and sampled.words.len == 1 and nodes[try id(nodes, sampled.type_id)].kind == .sampled_image;
+                const separate = sampled.kind == .function_value and sampled.opcode == 86 and sampled.words.len == 2;
+                if (!combined and !separate) return error.Unsupported;
+                if (combined) {
+                    const resource = nodes[try id(nodes, sampled.words[0])];
+                    const pointer = nodes[try id(nodes, resource.type_id)];
+                    if (resource.kind != .variable or resource.a != 0 or pointer.kind != .pointer or pointer.b != sampled.type_id) return error.Unsupported;
+                }
+                const dimension = try sampledImageDimension(nodes, sampled.type_id);
+                if (dimension != 1 and dimension != 3) return error.Unsupported;
+                const coordinates = try valueShape(nodes, w[3]);
+                const coordinate_columns: u3 = if (dimension == 3) 3 else 2;
+                if (coordinates.scalar != .f32 or coordinates.columns != coordinate_columns or coordinates.rows != 1) return error.Unsupported;
+                if (w[4] == 2) {
+                    const lod = try valueShape(nodes, w[5]);
+                    if (lod.scalar != .f32 or lod.columns != 1 or lod.rows != 1) return error.Unsupported;
+                } else {
+                    if (!try constantZero(nodes, w[5]) or !try constantZero(nodes, w[6]) or !sameShape(coordinates, try valueShape(nodes, w[5])) or !sameShape(coordinates, try valueShape(nodes, w[6]))) return error.Unsupported;
                 }
             },
             95 => {
@@ -1649,10 +1932,22 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             62 => {
                 const pointer_value = nodes[try id(nodes, w[0])];
                 const pointer = nodes[try id(nodes, pointer_value.type_id)];
-                if (pointer.kind != .pointer or (pointer.a != 3 and pointer.a != 7 and !(requested_stage == .compute and pointer.a == 12))) return error.Unsupported;
+                if (pointer.kind != .pointer or (pointer.a != 3 and pointer.a != 6 and pointer.a != 7 and !(requested_stage == .compute and pointer.a == 12))) return error.Unsupported;
                 const pointee = nodes[try id(nodes, pointer.b)];
-                const pointee_shape = if (requested_stage == .compute and pointer.a == 12 and pointee.kind == .structure and pointee.words.len == 1) try resultShape(nodes, pointee.words[0]) else try resultShape(nodes, pointer.b);
-                if (!sameShape(pointee_shape, try valueShape(nodes, w[1]))) return error.Malformed;
+                const value = nodes[try id(nodes, w[1])];
+                if (requested_stage == .compute and pointer.a == 12 and pointee.kind == .structure and pointee.words.len == 1) {
+                    if (!sameShape(try resultShape(nodes, pointee.words[0]), try valueShape(nodes, w[1]))) return error.Malformed;
+                } else if (pointee.kind == .structure) {
+                    if (value.type_id != pointer.b or (value.kind != .constant and value.kind != .function_value)) return error.Malformed;
+                    for (pointee.words) |member_type| {
+                        const member = nodes[try id(nodes, member_type)];
+                        if (member.kind == .structure or member.kind == .array) return error.Unsupported;
+                        _ = try resultShape(nodes, member_type);
+                    }
+                } else {
+                    const pointee_shape = if (requested_stage == .compute and pointer.a == 12 and pointee.kind == .structure and pointee.words.len == 1) try resultShape(nodes, pointee.words[0]) else try resultShape(nodes, pointer.b);
+                    if (!sameShape(pointee_shape, try valueShape(nodes, w[1]))) return error.Malformed;
+                }
             },
             65 => {
                 const result_pointer = nodes[try id(nodes, w[0])];
@@ -1688,23 +1983,33 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 for (w[4..]) |selector| if (selector == std.math.maxInt(u32) or selector >= @as(u32, left.columns) + right.columns) return error.Unsupported;
             },
             81 => {
-                const source = try valueShape(nodes, w[2]);
-                if (w.len != 4 or w[3] >= source.columns) return error.Unsupported;
+                if (w.len != 4) return error.Unsupported;
                 const result = try resultShape(nodes, w[0]);
                 const source_node = nodes[try id(nodes, w[2])];
-                if (source_node.kind == .function_value and source_node.opcode == 12 and source_node.b == 52) {
+                if (source_node.kind == .function_value and source_node.opcode == 61 and source_node.words.len == 1 and (try uniformStructArrayPointer(nodes, source_node.words[0])) != null) {
+                    const aggregate = (try uniformStructArrayPointer(nodes, source_node.words[0])).?;
+                    const structure = nodes[try id(nodes, aggregate.structure_type_id)];
+                    if (w[3] >= structure.words.len or !sameShape(result, try resultShape(nodes, structure.words[w[3]]))) return error.Malformed;
+                } else if ((source_node.kind == .constant or source_node.kind == .function_value) and nodes[try id(nodes, source_node.type_id)].kind == .structure) {
                     const structure = nodes[try id(nodes, source_node.type_id)];
-                    if (structure.kind != .structure or structure.words.len != 2 or w[3] >= 2) return error.Unsupported;
-                    if (!sameShape(result, try resultShape(nodes, structure.words[w[3]]))) return error.Malformed;
+                    if (w[3] >= structure.words.len or !sameShape(result, try resultShape(nodes, structure.words[w[3]]))) return error.Malformed;
                 } else {
-                    var expected = source;
-                    if (source.rows == 1) {
-                        expected.columns = 1;
+                    const source = try valueShape(nodes, w[2]);
+                    if (w[3] >= source.columns) return error.Unsupported;
+                    if (source_node.kind == .function_value and source_node.opcode == 12 and source_node.b == 52) {
+                        const structure = nodes[try id(nodes, source_node.type_id)];
+                        if (structure.kind != .structure or structure.words.len != 2 or w[3] >= 2) return error.Unsupported;
+                        if (!sameShape(result, try resultShape(nodes, structure.words[w[3]]))) return error.Malformed;
                     } else {
-                        expected.columns = source.rows;
-                        expected.rows = 1;
+                        var expected = source;
+                        if (source.rows == 1) {
+                            expected.columns = 1;
+                        } else {
+                            expected.columns = source.rows;
+                            expected.rows = 1;
+                        }
+                        if (!sameShape(expected, result)) return error.Malformed;
                     }
-                    if (!sameShape(expected, result)) return error.Malformed;
                 }
             },
             82 => {
@@ -1770,6 +2075,14 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                     if (result.scalar != .u32 or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
                 } else if (instruction.opcode == 135 or instruction.opcode == 138 or instruction.opcode == 139) {
                     if (result.scalar != .i32 or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
+                } else if (instruction.opcode == 128 or instruction.opcode == 130 or instruction.opcode == 132) {
+                    const left = try valueShape(nodes, w[2]);
+                    const right = try valueShape(nodes, w[3]);
+                    if (!scalarClass(result, .integer) or
+                        (left.scalar != .i32 and left.scalar != .u32) or
+                        (right.scalar != .i32 and right.scalar != .u32) or
+                        left.columns != result.columns or left.rows != result.rows or
+                        right.columns != result.columns or right.rows != result.rows) return error.Malformed;
                 } else {
                     const class: ScalarClass = if (instruction.opcode == 128 or instruction.opcode == 130 or instruction.opcode == 132) .integer else .float;
                     if (!scalarClass(result, class) or !sameShape(result, try valueShape(nodes, w[2])) or !sameShape(result, try valueShape(nodes, w[3]))) return error.Malformed;
@@ -1947,7 +2260,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         const pointer = nodes[try id(nodes, variable.type_id)];
         const pointee = nodes[try id(nodes, pointer.b)];
         const storage: ir.Storage = switch (variable.a) {
-            0 => if (pointee.kind == .sampled_image) .sampled_image else if (pointee.kind == .image and pointee.b == 6) .input_attachment else if (pointee.kind == .image and pointee.b == 1) .image else return error.Unsupported,
+            0 => if (pointee.kind == .sampled_image) .sampled_image else if (pointee.kind == .sampler) .sampler else if (pointee.kind == .image and pointee.b == 6) .input_attachment else if (pointee.kind == .image and (pointee.b == 1 or pointee.b == 3)) .image else return error.Unsupported,
             1 => .input,
             3 => .output,
             2 => .uniform,
@@ -1974,7 +2287,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
             for (pointee.words, 0..) |member, member_index| {
-                const builtin = member_builtins[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
+                const builtin = member_builtins[@as(usize, pointer.b) * max_spirv_struct_members + member_index] orelse return error.Unsupported;
                 if (builtin == 1) {
                     const point_size = try resultShape(nodes, member);
                     if (point_size.scalar != .f32 or point_size.columns != 1 or point_size.rows != 1) return error.Unsupported;
@@ -2005,7 +2318,10 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             if (pointee.kind != .sampled_image or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
             shape = .{ .scalar = .f32, .columns = 4 };
         } else if (storage == .image) {
-            if (requested_stage != .fragment or pointee.kind != .image or pointee.b != 1 or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
+            if (requested_stage != .fragment or pointee.kind != .image or (pointee.b != 1 and pointee.b != 3) or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
+            shape = .{ .scalar = .f32, .columns = 4 };
+        } else if (storage == .sampler) {
+            if (requested_stage != .fragment or pointee.kind != .sampler or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
             shape = .{ .scalar = .f32, .columns = 4 };
         } else if (storage == .input_attachment) {
             if (requested_stage != .fragment or pointee.kind != .image or pointee.b != 6 or decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat or decorations[index].block) return error.Unsupported;
@@ -2015,14 +2331,57 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             shape = .{ .scalar = .u32 }; // structural uniform marker; members are validated below
             interface.block = true;
             interface.member_count = @intCast(pointee.words.len);
+            var nested_struct_array_seen = false;
+            var nested_struct_member_count: usize = 0;
             const Range = struct { start: u32 = 0, end: u32 = 0 };
             var ranges: [ir.max_uniform_members]Range = .{Range{}} ** ir.max_uniform_members;
             for (pointee.words, 0..) |member, member_index| {
                 const member_node = nodes[try id(nodes, member)];
+                const offset = member_offsets[@as(usize, pointer.b) * max_spirv_struct_members + member_index] orelse return error.Unsupported;
+                const matrix_stride = member_matrix_strides[@as(usize, pointer.b) * max_spirv_struct_members + member_index];
+                const col_major = member_col_major[@as(usize, pointer.b) * max_spirv_struct_members + member_index];
+                if (member_node.kind == .array and nodes[try id(nodes, member_node.a)].kind == .structure) {
+                    if (nested_struct_array_seen or member_node.b != 1 or matrix_stride != null or col_major) return error.Unsupported;
+                    const nested = nodes[try id(nodes, member_node.a)];
+                    if (nested.words.len == 0 or pointee.words.len + nested.words.len > ir.max_uniform_members) return error.LimitExceeded;
+                    const stride = decorations[try id(nodes, member)].array_stride orelse return error.Unsupported;
+                    if (stride == 0 or stride % 16 != 0 or offset % 16 != 0) return error.Unsupported;
+                    var nested_ranges: [max_spirv_struct_members]Range = .{Range{}} ** max_spirv_struct_members;
+                    for (nested.words, 0..) |nested_member, nested_index| {
+                        const nested_node = nodes[try id(nodes, nested_member)];
+                        if (nested_node.kind == .array or nested_node.kind == .structure) return error.Unsupported;
+                        const nested_shape = try resultShape(nodes, nested_member);
+                        const nested_offset = member_offsets[@as(usize, member_node.a) * max_spirv_struct_members + nested_index] orelse return error.Unsupported;
+                        const nested_matrix_stride = member_matrix_strides[@as(usize, member_node.a) * max_spirv_struct_members + nested_index];
+                        const nested_col_major = member_col_major[@as(usize, member_node.a) * max_spirv_struct_members + nested_index];
+                        const nested_layout = try uniformSizeAlignment(nested_shape);
+                        const nested_size = if (nested_shape.rows > 1) blk: {
+                            if (nested_matrix_stride != 16 or !nested_col_major) return error.Unsupported;
+                            break :blk nested_layout.size;
+                        } else blk: {
+                            if (nested_matrix_stride != null or nested_col_major) return error.Unsupported;
+                            break :blk nested_layout.size;
+                        };
+                        if (nested_offset % nested_layout.alignment != 0) return error.Unsupported;
+                        const nested_end = std.math.add(u32, nested_offset, nested_size) catch return error.LimitExceeded;
+                        if (nested_end > stride) return error.Unsupported;
+                        for (nested_ranges[0..nested_index]) |prior| if (nested_offset < prior.end and prior.start < nested_end) return error.Unsupported;
+                        nested_ranges[nested_index] = .{ .start = nested_offset, .end = nested_end };
+                        const flattened = .{ .ty = nested_shape, .offset = std.math.add(u32, offset, nested_offset) catch return error.LimitExceeded };
+                        if (nested_index == 0) {
+                            interface.members[member_index] = .{ .ty = flattened.ty, .offset = flattened.offset };
+                        }
+                        interface.members[pointee.words.len + nested_index] = .{ .ty = flattened.ty, .offset = flattened.offset };
+                    }
+                    const end = std.math.add(u32, offset, stride) catch return error.LimitExceeded;
+                    if (end > max_uniform_block_bytes) return error.LimitExceeded;
+                    for (ranges[0..member_index]) |prior| if (offset < prior.end and prior.start < end) return error.Unsupported;
+                    ranges[member_index] = .{ .start = offset, .end = end };
+                    nested_struct_array_seen = true;
+                    nested_struct_member_count = nested.words.len;
+                    continue;
+                }
                 const member_shape = try resultShape(nodes, if (member_node.kind == .array) member_node.a else member);
-                const offset = member_offsets[@as(usize, pointer.b) * 16 + member_index] orelse return error.Unsupported;
-                const matrix_stride = member_matrix_strides[@as(usize, pointer.b) * 16 + member_index];
-                const col_major = member_col_major[@as(usize, pointer.b) * 16 + member_index];
                 var array_count: u32 = 1;
                 var array_stride: u32 = 0;
                 const layout = try uniformSizeAlignment(member_shape);
@@ -2046,6 +2405,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 ranges[member_index] = .{ .start = offset, .end = end };
                 interface.members[member_index] = .{ .ty = member_shape, .offset = offset, .array_count = array_count, .array_stride = array_stride };
             }
+            interface.member_count = @intCast(pointee.words.len + nested_struct_member_count);
             if (storage == .uniform) {
                 if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             } else if (decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
@@ -2054,7 +2414,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 shape = try resultShape(nodes, pointee.words[0]);
                 interface.block = true;
                 interface.member_count = 1;
-                interface.members[0] = .{ .ty = shape, .offset = member_offsets[@as(usize, pointer.b) * 16] orelse return error.Unsupported };
+                interface.members[0] = .{ .ty = shape, .offset = member_offsets[@as(usize, pointer.b) * max_spirv_struct_members] orelse return error.Unsupported };
                 if (interface.members[0].offset != 0) return error.Unsupported;
             } else shape = try resultShape(nodes, pointer.b);
             if (decorations[index].binding == null or decorations[index].descriptor_set == null or decorations[index].location != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
@@ -2232,11 +2592,12 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         for (module.instructions, instruction_functions) |instruction, instruction_function| {
             if (instruction_function != entry.function) continue;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
+                12, 59, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => instruction.words[1],
                 248 => instruction.words[0],
                 else => null,
             };
             if (result_id) |result| needed[try id(nodes, result)] = true;
+            if (instruction.opcode == 59 and instruction.words.len == 4) needed[try id(nodes, instruction.words[3])] = true;
             if (instruction.opcode == 62) needed[try id(nodes, instruction.words[1])] = true;
             if (instruction.opcode == 250) needed[try id(nodes, instruction.words[0])] = true;
         }
@@ -2256,11 +2617,21 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             const instruction = module.instructions[reverse_index];
             const w = instruction.words;
             const result_id: ?u32 = switch (instruction.opcode) {
-                12, 41, 42, 43, 44, 46, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
+                12, 41, 42, 43, 44, 46, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
                 else => null,
             };
             const result = result_id orelse continue;
             if (!needed[try id(nodes, result)]) continue;
+            if (instruction.opcode == 59) {
+                if (w.len == 4) {
+                    const initializer_index = try id(nodes, w[3]);
+                    if (!needed[initializer_index]) {
+                        needed[initializer_index] = true;
+                        changed = true;
+                    }
+                }
+                continue;
+            }
             const first_operand: usize = switch (instruction.opcode) {
                 12 => 4,
                 41, 42, 43, 46, 48, 49, 50 => continue,
@@ -2268,6 +2639,33 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                     const operand_count: usize = if (w.len == 6) 2 else 1;
                     for (0..operand_count) |sample_operand_index| {
                         const operand = if (sample_operand_index == 0) w[3] else w[5];
+                        const operand_index = try id(nodes, operand);
+                        if (!needed[operand_index]) {
+                            needed[operand_index] = true;
+                            changed = true;
+                        }
+                    }
+                    continue;
+                },
+                88 => {
+                    const sample_operand_count: usize = if (w.len == 7) 3 else 2;
+                    const sample_operands = [_]u32{ w[3], w[5], if (w.len == 7) w[6] else w[5] };
+                    for (sample_operands[0..sample_operand_count]) |operand| {
+                        const operand_index = try id(nodes, operand);
+                        if (!needed[operand_index]) {
+                            needed[operand_index] = true;
+                            changed = true;
+                        }
+                    }
+                    const sampled_index = try id(nodes, w[2]);
+                    if (!needed[sampled_index]) {
+                        needed[sampled_index] = true;
+                        changed = true;
+                    }
+                    continue;
+                },
+                86 => {
+                    for (w[2..4]) |operand| {
                         const operand_index = try id(nodes, operand);
                         if (!needed[operand_index]) {
                             needed[operand_index] = true;
@@ -2375,6 +2773,16 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
     const canonical_ids = allocator.alloc(u32, module.bound) catch return error.OutOfMemory;
     defer allocator.free(canonical_ids);
     @memset(canonical_ids, std.math.maxInt(u32));
+    const aggregate_capacity = std.math.mul(usize, module.bound, max_spirv_struct_members) catch return error.LimitExceeded;
+    const aggregate_values = allocator.alloc(u32, aggregate_capacity) catch return error.OutOfMemory;
+    defer allocator.free(aggregate_values);
+    @memset(aggregate_values, std.math.maxInt(u32));
+    const aggregate_locals = allocator.alloc(u32, aggregate_capacity) catch return error.OutOfMemory;
+    defer allocator.free(aggregate_locals);
+    @memset(aggregate_locals, std.math.maxInt(u32));
+    const output_local_interfaces = allocator.alloc(u32, module.bound) catch return error.OutOfMemory;
+    defer allocator.free(output_local_interfaces);
+    @memset(output_local_interfaces, std.math.maxInt(u32));
     var lowered: std.ArrayList(ir.Instruction) = .empty;
     errdefer {
         for (lowered.items) |item| {
@@ -2383,20 +2791,85 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         }
         lowered.deinit(allocator);
     }
+    // Mirror position output blocks into local vectors so component stores
+    // and reloads preserve the shader's intermediate values.
+    for (interface_ids.items) |variable_id| {
+        const variable = nodes[try id(nodes, variable_id)];
+        if (variable.kind != .variable or variable.a != 3) continue;
+        const pointer = nodes[try id(nodes, variable.type_id)];
+        if (pointer.kind != .pointer) return error.Malformed;
+        const pointee = nodes[try id(nodes, pointer.b)];
+        var has_component_access = false;
+        for (module.instructions, instruction_functions) |candidate, candidate_function| {
+            if (candidate_function != entry.function or candidate.opcode != 65 or candidate.words.len < 5 or candidate.words[2] != variable_id) continue;
+            if (pointee.kind == .structure and try constantZero(nodes, candidate.words[3])) has_component_access = true;
+        }
+        if (!has_component_access) continue;
+        var output_interface: ?u32 = null;
+        if (pointee.kind == .structure) {
+            for (pointee.words, 0..) |member_type, member_index| {
+                if (member_builtins[@as(usize, pointer.b) * max_spirv_struct_members + member_index] != 0) continue;
+                const member_shape = try resultShape(nodes, member_type);
+                for (interfaces.items, 0..) |interface, interface_index| if (interface.storage == .output and interface.builtin_position and interface.ty.scalar == member_shape.scalar and interface.ty.columns == member_shape.columns and interface.ty.rows == member_shape.rows) {
+                    output_interface = @intCast(interface_index);
+                };
+            }
+        } else if (decorations[try id(nodes, variable_id)].builtin_position) {
+            for (interfaces.items, 0..) |interface, interface_index| if (interface.storage == .output and interface.builtin_position) {
+                output_interface = @intCast(interface_index);
+            };
+        }
+        const interface_index = output_interface orelse continue;
+        const local_id = try appendLoweredInstruction(allocator, &lowered, .local, interfaces.items[interface_index].ty, &.{}, &.{});
+        canonical_ids[try id(nodes, variable_id)] = local_id;
+        output_local_interfaces[try id(nodes, variable_id)] = interface_index;
+    }
     var active_predecessor: u32 = std.math.maxInt(u32);
     for (module.instructions, instruction_functions, reachable, predecessor) |instruction, instruction_function, is_reachable, selected_predecessor| {
         if (instruction_function != 0 and instruction_function != entry.function) continue;
         if (instruction_function == entry.function and !is_reachable) continue;
         const w = instruction.words;
+        if (instruction_function == 0 and instruction.opcode == 59 and needed[try id(nodes, w[1])]) {
+            const variable = nodes[try id(nodes, w[1])];
+            if (variable.kind == .variable and variable.a == 6) {
+                const pointer = nodes[try id(nodes, variable.type_id)];
+                if (pointer.kind != .pointer or w.len < 3 or w.len > 4) return error.Malformed;
+                if (nodes[try id(nodes, pointer.b)].kind == .structure) {
+                    try appendStructLocals(allocator, &lowered, nodes, w[1], pointer.b, if (w.len == 4) w[3] else null, aggregate_locals, aggregate_values);
+                    canonical_ids[try id(nodes, w[1])] = std.math.maxInt(u32);
+                    continue;
+                }
+                var local_operand: [1]u32 = undefined;
+                const operand_count: usize = if (w.len == 4) 1 else 0;
+                if (operand_count != 0) {
+                    local_operand[0] = canonical_ids[try id(nodes, w[3])];
+                    if (local_operand[0] == std.math.maxInt(u32) or !sameShape(try resultShape(nodes, pointer.b), try valueShape(nodes, w[3]))) return error.Unsupported;
+                }
+                canonical_ids[try id(nodes, w[1])] = try appendLoweredInstruction(allocator, &lowered, .local, try resultShape(nodes, pointer.b), local_operand[0..operand_count], &.{});
+                continue;
+            }
+        }
         if (instruction.opcode == 248) active_predecessor = selected_predecessor;
         if (general_control_flow and instruction_function == entry.function) {
             if (instruction.opcode == 59) {
                 const variable = nodes[try id(nodes, w[1])];
                 if (variable.a != 7 or (w.len != 3 and w.len != 4)) return error.Unsupported;
                 const pointer = nodes[try id(nodes, variable.type_id)];
+                if (nodes[try id(nodes, pointer.b)].kind == .structure) {
+                    try appendStructLocals(allocator, &lowered, nodes, w[1], pointer.b, if (w.len == 4) w[3] else null, aggregate_locals, aggregate_values);
+                    canonical_ids[try id(nodes, w[1])] = std.math.maxInt(u32);
+                    continue;
+                }
                 const projected = try localStructProjection(nodes, &module, instruction_functions, entry.function, w[1]);
                 const shape = try resultShape(nodes, projected orelse pointer.b);
-                const operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                var local_operands: [1]u32 = undefined;
+                const local_operand_count: usize = if (w.len == 4) 1 else 0;
+                if (w.len == 4) {
+                    if (!sameShape(shape, try valueShape(nodes, w[3]))) return error.Unsupported;
+                    local_operands[0] = canonical_ids[try id(nodes, w[3])];
+                    if (local_operands[0] == std.math.maxInt(u32)) return error.Malformed;
+                }
+                const operands = allocator.dupe(u32, local_operands[0..local_operand_count]) catch return error.OutOfMemory;
                 const literal = allocator.dupe(u8, &.{}) catch {
                     allocator.free(operands);
                     return error.OutOfMemory;
@@ -2551,7 +3024,33 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         if (instruction.opcode == 62) {
             const target_pointer = nodes[try id(nodes, w[0])];
             const target = if (target_pointer.kind == .function_value and target_pointer.opcode == 65) nodes[try id(nodes, target_pointer.words[0])] else target_pointer;
-            if (target.kind == .variable and target.a == 7) {
+            if (target_pointer.kind == .variable and (target_pointer.a == 6 or target_pointer.a == 7)) {
+                const pointer = nodes[try id(nodes, target_pointer.type_id)];
+                const value = nodes[try id(nodes, w[1])];
+                if (pointer.kind == .pointer and nodes[try id(nodes, pointer.b)].kind == .structure) {
+                    const structure = nodes[try id(nodes, pointer.b)];
+                    if (value.type_id != pointer.b) return error.Malformed;
+                    for (structure.words, 0..) |member_type, member_index| {
+                        const local_pointer = aggregate_locals[aggregateSlot(w[0], member_index)];
+                        const member_value = aggregate_values[aggregateSlot(w[1], member_index)];
+                        if (local_pointer == std.math.maxInt(u32) or member_value == std.math.maxInt(u32)) return error.Malformed;
+                        _ = try appendLoweredInstruction(allocator, &lowered, .local_store, try resultShape(nodes, member_type), &.{ local_pointer, member_value }, &.{});
+                    }
+                    continue;
+                }
+            }
+            if (try outputLocalRoot(nodes, w[0], output_local_interfaces)) |variable_id| {
+                const pointer = canonical_ids[try id(nodes, w[0])];
+                const value = canonical_ids[try id(nodes, w[1])];
+                if (pointer == std.math.maxInt(u32) or value == std.math.maxInt(u32)) return error.Malformed;
+                _ = try appendLoweredInstruction(allocator, &lowered, .local_store, try valueShape(nodes, w[1]), &.{ pointer, value }, &.{});
+                const interface_index = output_local_interfaces[try id(nodes, variable_id)];
+                const output_shape = interfaces.items[interface_index].ty;
+                const current_value = try appendLoweredInstruction(allocator, &lowered, .local_load, output_shape, &.{canonical_ids[try id(nodes, variable_id)]}, &.{});
+                _ = try appendLoweredInstruction(allocator, &lowered, .output, output_shape, &.{ interface_index, current_value }, &.{});
+                continue;
+            }
+            if (target.kind == .variable and (target.a == 6 or target.a == 7)) {
                 if (!general_control_flow) continue;
                 const pointer = canonical_ids[try id(nodes, w[0])];
                 const value = canonical_ids[try id(nodes, w[1])];
@@ -2576,7 +3075,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 if (member.kind != .constant or member.words.len != 1) return error.Unsupported;
                 const target_type = nodes[try id(nodes, nodes[try id(nodes, target.type_id)].b)];
                 if (target_type.kind != .structure or member.words[0] >= target_type.words.len) return error.Unsupported;
-                member_builtin = member_builtins[@as(usize, nodes[try id(nodes, target.type_id)].b) * 16 + member.words[0]];
+                member_builtin = member_builtins[@as(usize, nodes[try id(nodes, target.type_id)].b) * max_spirv_struct_members + member.words[0]];
             }
             for (interfaces.items, 0..) |item, interface_index| {
                 if (requested_stage == .compute and target.a == 12) {
@@ -2592,24 +3091,156 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             continue;
         }
         const result_id: ?u32 = switch (instruction.opcode) {
-            12, 41, 42, 43, 44, 46, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 87, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
+            12, 41, 42, 43, 44, 46, 48, 49, 50, 61, 65, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 95, 98, 109, 110, 111, 112, 113, 114, 115, 116, 124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 154...163, 164...169, 170...205, 207...209, 245 => w[1],
             else => null,
         };
         const rid = result_id orelse continue;
         if (!needed[try id(nodes, rid)]) continue;
         const node = nodes[try id(nodes, rid)];
-        if (instruction.opcode == 61 and (nodes[try id(nodes, node.type_id)].kind == .sampled_image or nodes[try id(nodes, node.type_id)].kind == .image)) continue;
-        if (general_control_flow and instruction.opcode == 65) {
-            const base_id = w[2];
-            const base = nodes[try id(nodes, base_id)];
-            if (base.kind == .variable and base.a == 7) {
-                const base_pointer = nodes[try id(nodes, base.type_id)];
-                if (base_pointer.kind == .pointer and nodes[try id(nodes, base_pointer.b)].kind == .structure) {
-                    _ = try localStructProjection(nodes, &module, instruction_functions, entry.function, base_id);
-                    canonical_ids[try id(nodes, rid)] = canonical_ids[try id(nodes, base_id)];
-                    if (canonical_ids[try id(nodes, rid)] == std.math.maxInt(u32)) return error.Malformed;
+        if ((instruction.opcode == 65 and (try uniformStructArrayPointer(nodes, rid)) != null) or
+            (instruction.opcode == 61 and nodes[try id(nodes, node.type_id)].kind == .structure and (try uniformStructArrayPointer(nodes, node.words[0])) != null))
+        {
+            canonical_ids[try id(nodes, rid)] = std.math.maxInt(u32);
+            continue;
+        }
+        if (instruction.opcode == 81) {
+            const aggregate = nodes[try id(nodes, node.words[0])];
+            if (flattenedStructResult(aggregate)) {
+                const source = canonical_ids[try id(nodes, node.words[0])];
+                if (source == std.math.maxInt(u32)) return error.Malformed;
+                canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(
+                    allocator,
+                    &lowered,
+                    .extract,
+                    try resultShape(nodes, node.type_id),
+                    &.{ source, node.words[1] },
+                    &.{},
+                );
+                continue;
+            }
+            if (aggregate.kind == .function_value and aggregate.opcode == 61 and aggregate.words.len == 1) {
+                if (try uniformStructArrayPointer(nodes, aggregate.words[0])) |uniform_aggregate| {
+                    const component: usize = node.words[1];
+                    const structure = nodes[try id(nodes, uniform_aggregate.structure_type_id)];
+                    if (component >= structure.words.len) return error.Unsupported;
+                    const variable = nodes[try id(nodes, uniform_aggregate.variable_id)];
+                    const decoration = decorations[try id(nodes, uniform_aggregate.variable_id)];
+                    const storage: ir.Storage = if (variable.a == 2) .uniform else .push_constant;
+                    var interface_index: ?u32 = null;
+                    for (interfaces.items, 0..) |item, index| if (item.storage == storage and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set) {
+                        interface_index = @intCast(index);
+                    };
+                    const selected_interface = interface_index orelse return error.Unsupported;
+                    const member_index = try uniformStructArrayMemberCount(nodes, uniform_aggregate) + @as(u32, @intCast(component));
+                    if (member_index >= interfaces.items[selected_interface].member_count) return error.Unsupported;
+                    var member_literal: [4]u8 = undefined;
+                    std.mem.writeInt(u32, &member_literal, member_index, .little);
+                    const member_constant = try appendLoweredInstruction(allocator, &lowered, .constant, .{ .scalar = .u32 }, &.{}, &member_literal);
+                    canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(
+                        allocator,
+                        &lowered,
+                        .access,
+                        try resultShape(nodes, structure.words[component]),
+                        &.{ selected_interface, member_constant },
+                        &.{},
+                    );
                     continue;
                 }
+            }
+            if ((aggregate.kind == .constant or aggregate.kind == .function_value) and nodes[try id(nodes, aggregate.type_id)].kind == .structure) {
+                const component: usize = node.words[1];
+                const structure = nodes[try id(nodes, aggregate.type_id)];
+                if (component >= structure.words.len) return error.Unsupported;
+                const projected = aggregate_values[aggregateSlot(node.words[0], component)];
+                if (projected == std.math.maxInt(u32)) return error.Malformed;
+                canonical_ids[try id(nodes, rid)] = projected;
+                continue;
+            }
+        }
+        if (nodes[try id(nodes, node.type_id)].kind == .structure and !flattenedStructResult(node)) {
+            const structure = nodes[try id(nodes, node.type_id)];
+            if (instruction.opcode == 46) {
+                for (structure.words, 0..) |member_type, member_index| {
+                    const member_shape = try resultShape(nodes, member_type);
+                    var zero_literal: [16]u8 = .{0} ** 16;
+                    const zero_len: usize = if (member_shape.scalar == .bool) 1 else @as(usize, member_shape.columns) * member_shape.rows * 4;
+                    aggregate_values[aggregateSlot(rid, member_index)] = try appendLoweredInstruction(allocator, &lowered, .constant, member_shape, &.{}, zero_literal[0..zero_len]);
+                }
+            } else if (instruction.opcode == 80) {
+                if (node.words.len != structure.words.len) return error.Malformed;
+                for (node.words, 0..) |operand_id, member_index| {
+                    const value = canonical_ids[try id(nodes, operand_id)];
+                    if (value == std.math.maxInt(u32)) return error.Malformed;
+                    aggregate_values[aggregateSlot(rid, member_index)] = value;
+                }
+            } else if (instruction.opcode == 61) {
+                const pointer_id = node.words[0];
+                const pointer_value = nodes[try id(nodes, pointer_id)];
+                const root_id = if (pointer_value.kind == .function_value and pointer_value.opcode == 65 and pointer_value.words.len != 0) pointer_value.words[0] else pointer_id;
+                for (structure.words, 0..) |member_type, member_index| {
+                    const local_pointer = aggregate_locals[aggregateSlot(root_id, member_index)];
+                    if (local_pointer == std.math.maxInt(u32)) return error.Unsupported;
+                    aggregate_values[aggregateSlot(rid, member_index)] = try appendLoweredInstruction(allocator, &lowered, .local_load, try resultShape(nodes, member_type), &.{local_pointer}, &.{});
+                }
+            } else if (instruction.opcode == 83) {
+                if (node.words.len != 1) return error.Malformed;
+                const source_id = node.words[0];
+                for (structure.words, 0..) |_, member_index| {
+                    const value = aggregate_values[aggregateSlot(source_id, member_index)];
+                    if (value == std.math.maxInt(u32)) return error.Malformed;
+                    aggregate_values[aggregateSlot(rid, member_index)] = value;
+                }
+            } else return error.Unsupported;
+            canonical_ids[try id(nodes, rid)] = std.math.maxInt(u32);
+            continue;
+        }
+        if (instruction.opcode == 86) continue;
+        if (instruction.opcode == 61 and (nodes[try id(nodes, node.type_id)].kind == .sampled_image or nodes[try id(nodes, node.type_id)].kind == .image or nodes[try id(nodes, node.type_id)].kind == .sampler)) continue;
+        if (general_control_flow and instruction.opcode == 65) {
+            const base_id = node.words[0];
+            const base = nodes[try id(nodes, base_id)];
+            if (base.kind == .variable and (base.a == 6 or base.a == 7)) {
+                const base_pointer = nodes[try id(nodes, base.type_id)];
+                if (base_pointer.kind == .pointer and nodes[try id(nodes, base_pointer.b)].kind == .structure) {
+                    const structure = nodes[try id(nodes, base_pointer.b)];
+                    if (node.words.len < 2) return error.Unsupported;
+                    const member_index: usize = try nonnegativeScalarIntegerConstant(nodes, node.words[1]);
+                    if (member_index >= structure.words.len) return error.Malformed;
+                    const member_pointer = aggregate_locals[aggregateSlot(base_id, member_index)];
+                    if (member_pointer == std.math.maxInt(u32)) return error.Malformed;
+                    if (node.words.len == 2) {
+                        canonical_ids[try id(nodes, rid)] = member_pointer;
+                    } else if (node.words.len == 3) {
+                        const selector = canonical_ids[try id(nodes, node.words[2])];
+                        if (selector == std.math.maxInt(u32)) return error.Malformed;
+                        const access_pointer = nodes[try id(nodes, node.type_id)];
+                        if (access_pointer.kind != .pointer) return error.Malformed;
+                        canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(allocator, &lowered, .local_access, try resultShape(nodes, access_pointer.b), &.{ member_pointer, selector }, &.{});
+                    } else return error.Unsupported;
+                    continue;
+                }
+            }
+        }
+        if (instruction.opcode == 65) {
+            if (try outputLocalRoot(nodes, node.words[0], output_local_interfaces)) |variable_id| {
+                const base_pointer_id = node.words[0];
+                const variable_pointer = nodes[try id(nodes, nodes[try id(nodes, variable_id)].type_id)];
+                const structure_member_access = base_pointer_id == variable_id and variable_pointer.kind == .pointer and nodes[try id(nodes, variable_pointer.b)].kind == .structure;
+                const selector_start: usize = if (structure_member_access) 2 else 1;
+                if (structure_member_access and (node.words.len < 2 or !try constantZero(nodes, node.words[1]))) return error.Unsupported;
+                const base_canonical = canonical_ids[try id(nodes, base_pointer_id)];
+                if (base_canonical == std.math.maxInt(u32)) return error.Malformed;
+                if (node.words.len == selector_start) {
+                    canonical_ids[try id(nodes, rid)] = base_canonical;
+                    continue;
+                }
+                if (node.words.len != selector_start + 1) return error.Unsupported;
+                const selector = canonical_ids[try id(nodes, node.words[selector_start])];
+                if (selector == std.math.maxInt(u32)) return error.Malformed;
+                const access_pointer = nodes[try id(nodes, node.type_id)];
+                if (access_pointer.kind != .pointer) return error.Malformed;
+                canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(allocator, &lowered, .local_access, try resultShape(nodes, access_pointer.b), &.{ base_canonical, selector }, &.{});
+                continue;
             }
         }
         const shape = if (instruction.opcode == 65) blk: {
@@ -2710,6 +3341,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             83 => .copy_object,
             84 => .transpose,
             87 => .image_sample_implicit_lod,
+            88 => .image_sample_explicit_lod,
             95 => .image_fetch,
             98 => .image_read_input_attachment,
             109, 110, 111, 112, 113, 114, 115 => .convert,
@@ -2810,9 +3442,10 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 nodes[try id(nodes, pointer_node.words[0])]
             else
                 pointer_node;
-            if (root.kind == .variable and root.a == 7)
+            if (root.kind == .variable and (root.a == 6 or root.a == 7))
                 op = if (instruction.opcode == 61) .local_load else .local_access;
         }
+        if (instruction.opcode == 61 and try outputLocalRoot(nodes, node.words[0], output_local_interfaces) != null) op = .local_load;
         var operands: std.ArrayList(u32) = .empty;
         defer operands.deinit(allocator);
         var literal: [16]u8 = .{0} ** 16;
@@ -2820,6 +3453,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         if (instruction.opcode == 87) {
             const sampled_load = nodes[try id(nodes, node.words[0])];
             if (sampled_load.kind != .function_value or sampled_load.opcode != 61 or sampled_load.words.len != 1) return error.Unsupported;
+            if (try sampledImageDimension(nodes, sampled_load.type_id) == 3) op = .image_cube_sample_implicit_lod;
             const resource_id = try id(nodes, sampled_load.words[0]);
             const resource = nodes[resource_id];
             if (resource.kind != .variable or resource.a != 0) return error.Unsupported;
@@ -2843,6 +3477,68 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
             } else canonical_ids[try id(nodes, node.words[3])];
             if (bias == std.math.maxInt(u32)) return error.Malformed;
             try operands.appendSlice(allocator, &.{ semantic_index orelse return error.Unsupported, coordinates, bias });
+        } else if (instruction.opcode == 88) {
+            const sampled_image = nodes[try id(nodes, node.words[0])];
+            if (sampled_image.kind != .function_value) return error.Unsupported;
+            const dimension = try sampledImageDimension(nodes, sampled_image.type_id);
+            if (dimension == 3) op = .image_cube_sample_explicit_lod;
+            const coordinates = canonical_ids[try id(nodes, node.words[1])];
+            if (coordinates == std.math.maxInt(u32)) return error.Malformed;
+            if (sampled_image.opcode == 61 and sampled_image.words.len == 1) {
+                const resource_id = try id(nodes, sampled_image.words[0]);
+                const resource = nodes[resource_id];
+                if (resource.kind != .variable or resource.a != 0) return error.Unsupported;
+                const decoration = decorations[resource_id];
+                var sampled_interface: ?u32 = null;
+                for (interfaces.items, 0..) |item, interface_index| {
+                    if (item.storage == .sampled_image and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set)
+                        sampled_interface = @intCast(interface_index);
+                }
+                const sample_lod = if (node.words[2] == 2) canonical_ids[try id(nodes, node.words[3])] else blk: {
+                    const zero_operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                    const zero_literal = allocator.dupe(u8, &.{ 0, 0, 0, 0 }) catch {
+                        allocator.free(zero_operands);
+                        return error.OutOfMemory;
+                    };
+                    try lowered.append(allocator, .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = zero_operands, .literal = zero_literal });
+                    break :blk @as(u32, @intCast(lowered.items.len - 1));
+                };
+                if (sample_lod == std.math.maxInt(u32)) return error.Malformed;
+                try operands.appendSlice(allocator, &.{ sampled_interface orelse return error.Unsupported, coordinates, sample_lod });
+            } else {
+                if (sampled_image.opcode != 86 or sampled_image.words.len != 2) return error.Unsupported;
+                const image_load = nodes[try id(nodes, sampled_image.words[0])];
+                const sampler_load = nodes[try id(nodes, sampled_image.words[1])];
+                if (image_load.kind != .function_value or image_load.opcode != 61 or image_load.words.len != 1 or sampler_load.kind != .function_value or sampler_load.opcode != 61 or sampler_load.words.len != 1) return error.Unsupported;
+                const image_id = try id(nodes, image_load.words[0]);
+                const sampler_id = try id(nodes, sampler_load.words[0]);
+                const image_variable = nodes[image_id];
+                const sampler_variable = nodes[sampler_id];
+                if (image_variable.kind != .variable or image_variable.a != 0 or sampler_variable.kind != .variable or sampler_variable.a != 0) return error.Unsupported;
+                const image_decoration = decorations[image_id];
+                const sampler_decoration = decorations[sampler_id];
+                var image_interface: ?u32 = null;
+                var sampler_interface: ?u32 = null;
+                for (interfaces.items, 0..) |item, interface_index| {
+                    if (item.storage == .image and item.binding == image_decoration.binding and item.descriptor_set == image_decoration.descriptor_set) image_interface = @intCast(interface_index);
+                    if (item.storage == .sampler and item.binding == sampler_decoration.binding and item.descriptor_set == sampler_decoration.descriptor_set) sampler_interface = @intCast(interface_index);
+                }
+                const sample_lod = if (node.words[2] == 2) canonical_ids[try id(nodes, node.words[3])] else blk: {
+                    const zero_operands = allocator.dupe(u32, &.{}) catch return error.OutOfMemory;
+                    const zero_literal = allocator.dupe(u8, &.{ 0, 0, 0, 0 }) catch {
+                        allocator.free(zero_operands);
+                        return error.OutOfMemory;
+                    };
+                    lowered.append(allocator, .{ .op = .constant, .ty = .{ .scalar = .f32 }, .operands = zero_operands, .literal = zero_literal }) catch {
+                        allocator.free(zero_operands);
+                        allocator.free(zero_literal);
+                        return error.OutOfMemory;
+                    };
+                    break :blk @as(u32, @intCast(lowered.items.len - 1));
+                };
+                if (sample_lod == std.math.maxInt(u32)) return error.Malformed;
+                try operands.appendSlice(allocator, &.{ image_interface orelse return error.Unsupported, coordinates, sample_lod, sampler_interface orelse return error.Unsupported });
+            }
         } else if (instruction.opcode == 95) {
             const image_load = nodes[try id(nodes, node.words[0])];
             if (image_load.kind != .function_value or image_load.opcode != 61 or image_load.words.len != 1) return error.Unsupported;
@@ -2953,7 +3649,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                                 const member = nodes[try id(nodes, node.words[1])];
                                 if (member.kind != .constant or member.words.len != 1) return error.Unsupported;
                                 const structure_id = nodes[try id(nodes, pointer_node.type_id)].b;
-                                const builtin = member_builtins[@as(usize, structure_id) * 16 + member.words[0]] orelse return error.Unsupported;
+                                const builtin = member_builtins[@as(usize, structure_id) * max_spirv_struct_members + member.words[0]] orelse return error.Unsupported;
                                 member_matches = builtin == 0 and item.builtin_position;
                                 direct_builtin = false;
                             }
@@ -2982,6 +3678,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                     // output and subsequently reload it before the final
                     // store. It must not be misclassified as an input.
                     3, 12 => .storage,
+                    6, 7 => .local_load,
                     else => .input,
                 } else .extract;
             }
@@ -5794,6 +6491,91 @@ test "captured Three.js fragment image fetch preserves samplerless set-zero reso
         try std.testing.expectEqual(ir.Type{ .scalar = .i32 }, program.instructions[instruction.operands[2]].ty);
     }
     try std.testing.expect(fetches > 0 and returns >= 7);
+}
+
+test "captured Three.js clearcoat fragment compiles separate samplers and explicit LOD" {
+    const bytes align(4) = @embedFile("fixtures/threejs_clearcoat_fragment.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+
+    var image_interface: ?u32 = null;
+    var sampler_interface: ?u32 = null;
+    for (program.interfaces, 0..) |interface, index| {
+        if (interface.descriptor_set != 0) continue;
+        if (interface.storage == .image and interface.binding == 0) image_interface = @intCast(index);
+        if (interface.storage == .sampler and interface.binding == 2) sampler_interface = @intCast(index);
+    }
+    try std.testing.expect(image_interface != null and sampler_interface != null);
+
+    var samples: usize = 0;
+    for (program.instructions) |instruction| {
+        if (instruction.op != .image_sample_explicit_lod) continue;
+        samples += 1;
+        try std.testing.expectEqual(@as(usize, 4), instruction.operands.len);
+        try std.testing.expectEqual(image_interface.?, instruction.operands[0]);
+        try std.testing.expectEqual(sampler_interface.?, instruction.operands[3]);
+        try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 2 }, program.instructions[instruction.operands[1]].ty);
+        try std.testing.expectEqual(ir.Type{ .scalar = .f32 }, program.instructions[instruction.operands[2]].ty);
+    }
+    try std.testing.expect(samples > 0);
+}
+
+test "captured Three.js clearcoat cube fragment lowers implicit direction sampling" {
+    const bytes align(4) = @embedFile("fixtures/threejs_clearcoat_cube_implicit_fragment.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+
+    var cube_image: ?u32 = null;
+    for (program.interfaces, 0..) |interface, index| {
+        if (interface.storage == .sampled_image and interface.descriptor_set == 1) cube_image = @intCast(index);
+    }
+    try std.testing.expect(cube_image != null);
+    var samples: usize = 0;
+    for (program.instructions) |instruction| {
+        if (instruction.op != .image_cube_sample_implicit_lod) continue;
+        samples += 1;
+        try std.testing.expectEqual(cube_image.?, instruction.operands[0]);
+        try std.testing.expectEqual(ir.Type{ .scalar = .f32, .columns = 3 }, program.instructions[instruction.operands[1]].ty);
+    }
+    try std.testing.expect(samples > 0);
+}
+
+test "captured Three.js clearcoat environment fragment inlines sampled helper control flow" {
+    const bytes align(4) = @embedFile("fixtures/threejs_clearcoat_env_fragment.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expect(program.instructions.len > 0);
+    var combined_explicit_sample = false;
+    for (program.instructions) |instruction| if (instruction.op == .image_sample_explicit_lod or instruction.op == .image_cube_sample_explicit_lod) {
+        if (instruction.operands.len == 3) {
+            combined_explicit_sample = true;
+            try std.testing.expectEqual(ir.Storage.sampled_image, program.interfaces[instruction.operands[0]].storage);
+        }
+    };
+    try std.testing.expect(combined_explicit_sample);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+}
+
+test "captured Three.js clearcoat material fragment inlines nested loop helpers" {
+    const bytes align(4) = @embedFile("fixtures/threejs_clearcoat_material_fragment.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expect(program.instructions.len > 0);
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+}
+
+test "captured Three.js clearcoat vertex shader compiles through bounded helper control flow" {
+    const bytes align(4) = @embedFile("fixtures/threejs_clearcoat_vertex.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expect(program.instructions.len > 0);
 }
 
 test "Chromium Skia vertex shader executes push constants and structured outputs" {

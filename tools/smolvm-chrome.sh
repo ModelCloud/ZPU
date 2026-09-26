@@ -410,6 +410,8 @@ benchmark_chrome() {
     fi
     local guest_tool=/run/zpu-runtime/chromium-cdp-video-test.py
     local transfer_tool=/workspace/.zpu-chrome-transfer/chromium-cdp-video-test.py
+    local guest_results=/workspace/.zpu-chrome-results
+    local guest_rejected_spirv=/workspace/.zpu-rejected-spv
     local guest_pid=/run/zpu-runtime/chromium.pid
     local guest_log=/run/zpu-runtime/chromium.log
     local guest_profile=/run/zpu-runtime/chromium-profile
@@ -433,6 +435,8 @@ benchmark_chrome() {
         install -m 700 '$transfer_tool' '$guest_tool'
         rm -f '$transfer_tool'
     " || return $?
+    run smolvm machine exec --name "$machine" -- install -d -m 700 "$guest_results" || return $?
+    run smolvm machine exec --name "$machine" -- sh -c "rm -rf '$guest_rejected_spirv'; install -d -m 700 '$guest_rejected_spirv'" || return $?
     IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
     for site in "${benchmark_url_list[@]}"; do
         game_options=()
@@ -447,7 +451,7 @@ benchmark_chrome() {
         fi
         safe_url=${site#https://}
         safe_url=${safe_url//[^A-Za-z0-9._-]/_}
-        result="/run/zpu-runtime/chromium-${safe_url}.json"
+        result="$guest_results/chromium-${safe_url}.json"
         # Each site gets a fresh GPU process. Reusing one leaves page-specific
         # swapchain pacing state behind and made Bing depend on whether Google
         # ran first, which is not a valid per-site performance measurement.
@@ -461,8 +465,9 @@ benchmark_chrome() {
             ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
             ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
             ZPU_DUMP_REJECTED_SPIRV=/run/zpu-runtime/rejected.spv \
+            ZPU_DUMP_REJECTED_SPIRV_DIR="$guest_rejected_spirv" \
             ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
-            sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+            sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log' '$result'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
         run smolvm machine exec --name "$machine" -- sh -c '
             pid=$1 log=$2
             for i in $(seq 1 100); do
@@ -490,6 +495,12 @@ benchmark_chrome() {
             fi
             if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$guest_log"; then
                 run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+            fi
+            if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -d "$guest_rejected_spirv"; then
+                local rejected_archive=/workspace/.zpu-chrome-transfer/rejected-${safe_url}.tar.gz
+                run smolvm machine exec --name "$machine" -- tar -C "$guest_rejected_spirv" -czf "$rejected_archive" . || return $?
+                run smolvm machine cp "$machine:$rejected_archive" "$benchmark_results_dir/rejected-spv-${safe_url}.tar.gz" || return $?
+                run smolvm machine exec --name "$machine" -- rm -f "$rejected_archive" || return $?
             fi
             run smolvm machine exec --name "$machine" -- cat "$result" || true
             run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
