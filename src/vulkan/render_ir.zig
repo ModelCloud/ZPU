@@ -369,6 +369,9 @@ pub const Op = enum(u8) {
     dpdx,
     dpdy,
     fwidth,
+    /// Fetch one level-zero texel from a samplerless 2D image. Operands are
+    /// resource interface, signed integer coordinates, and signed LOD.
+    image_fetch,
 };
 
 pub const Instruction = struct {
@@ -378,7 +381,7 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment };
+pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment, image };
 pub const max_uniform_members: usize = 16;
 pub const UniformMember = struct {
     ty: Type = .{ .scalar = .u32 },
@@ -533,7 +536,7 @@ pub fn identify(bytes: []const u8) Identity {
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
         .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
-        .image_sample_implicit_lod, .image_read_input_attachment => operand_index != 0,
+        .image_sample_implicit_lod, .image_read_input_attachment, .image_fetch => operand_index != 0,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => operand_index == 0,
         .constant_composite => true,

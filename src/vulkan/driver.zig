@@ -1231,7 +1231,7 @@ const YcbcrConversion = struct {
     force_explicit_reconstruction: u32,
 };
 const SamplerYcbcrConversionObj = struct { handle: usize, owner: Device, conversion: YcbcrConversion };
-const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, ycbcr: ?YcbcrConversion = null, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, ycbcr: ?YcbcrConversion = null, view_type: i32 = 1, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -1277,6 +1277,9 @@ const DescriptorSetObj = struct {
     // Keep a bounded sampled-image table for the native profile ABI while
     // retaining the historical binding-0 aliases used by the cpu_cube ABI.
     sampled_images: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
+    // Graphics snapshots keep set 1 separate so a set-0 samplerless image
+    // does not collide with a set-1 combined image sampler at the same binding.
+    sampled_images_set1: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
     // Input attachments carry no sampler. They are only consumed by the
     // bounded framebuffer-fetch profile after validation against its target.
     input_attachments: [max_profile_sampled_bindings]DescriptorInputAttachment = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings,
@@ -1309,7 +1312,17 @@ fn descriptorUniformBytes(set: *const DescriptorSetObj, binding: u32) ?[]const u
     if (range == 0 or offset > bytes.len or range > bytes.len - offset) return null;
     return bytes[offset..][0..range];
 }
-const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 }, ycbcr: ?YcbcrConversion = null };
+const DescriptorSampledImage = struct {
+    image: ?*ImageObj = null,
+    sampler: ?*SamplerObj = null,
+    components: [4]i32 = .{ 0, 0, 0, 0 },
+    ycbcr: ?YcbcrConversion = null,
+    view_type: i32 = 1,
+    base_mip_level: u32 = 0,
+    level_count: u32 = 1,
+    base_array_layer: u32 = 0,
+    layer_count: u32 = 1,
+};
 const DescriptorInputAttachment = struct { image: ?*ImageObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
@@ -1441,7 +1454,7 @@ const ProfileUniform = struct {
     interface: u32,
     byte_size: u8 = 0,
 };
-const ProfileSampledImage = struct { interface: u32, binding: u32 };
+const ProfileSampledImage = struct { interface: u32, binding: u32, descriptor_set: u8 = 1, sampler_required: bool = true };
 const ProfileInputAttachment = struct { interface: u32, binding: u32 };
 const ProfileGraphics = struct {
     vertex: render_ir_exec.Executor,
@@ -5439,6 +5452,7 @@ fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     set.texture = null;
     set.sampler = null;
     set.sampled_images = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
+    set.sampled_images_set1 = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
     set.input_attachments = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings;
     set.source_set = null;
     set.sampled_source_set = null;
@@ -9588,15 +9602,21 @@ fn prevalidateProfileSampledImages(op: anytype, owner: *DeviceObj) bool {
         else => return true,
     };
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count]) |sampled_profile| {
-        if (sampled_profile.binding >= op.descriptors.sampled_images.len) return false;
-        const sampled = op.descriptors.sampled_images[sampled_profile.binding];
+        const source = if (sampled_profile.descriptor_set == 1) op.descriptors.sampled_source_set orelse return false else op.descriptors;
+        const expected_descriptor_type: i32 = if (sampled_profile.sampler_required) 1 else 2;
+        if (sampled_profile.binding >= source.binding_types.len or source.binding_types[sampled_profile.binding] != expected_descriptor_type) return false;
+        const sampled = source.sampled_images[sampled_profile.binding];
         const image = sampled.image orelse return deadResource();
-        const sampler = sampled.sampler orelse return deadResource();
         if (!liveImageObject(image) or !imageStorageValid(image)) return deadResource();
         if (image.owner != owner or (image.memory != null and image.memory.?.owner != owner)) return wrongSubmittingDevice();
         if (!imageStorageValid(image)) return false;
-        if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
-        if (sampler.owner != owner) return wrongSubmittingDevice();
+        if (sampled_profile.sampler_required) {
+            const sampler = sampled.sampler orelse return deadResource();
+            if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+            if (sampler.owner != owner) return wrongSubmittingDevice();
+        } else {
+            if (sampled.sampler != null or sampled.ycbcr != null or sampled.view_type != 1 or sampled.base_mip_level != 0 or sampled.level_count == 0 or sampled.level_count > image.mip_levels or sampled.base_array_layer != 0 or sampled.layer_count != 1) return false;
+        }
     }
     return true;
 }
@@ -11053,12 +11073,17 @@ test "scalar profile depth bias applies constant slope and clamp terms" {
     try std.testing.expect(profileDepthBias(vertices, area, .{ std.math.inf(f32), 0, 0 }) == null);
 }
 
-fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?render_ir_exec.SampledImage {
-    if (binding >= descriptors.sampled_images.len) return null;
-    const sampled = descriptors.sampled_images[binding];
+fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descriptor_set: u8, sampler_required: bool) ?render_ir_exec.SampledImage {
+    const table = if (descriptor_set == 1) &descriptors.sampled_images_set1 else &descriptors.sampled_images;
+    if (binding >= table.len) return null;
+    const sampled = table[binding];
     const image = sampled.image orelse return null;
-    const sampler = sampled.sampler orelse return null;
-    if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler.unnormalized_coordinates or sampler.mag_filter != sampler.min_filter) return null;
+    const sampler = sampled.sampler;
+    if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler_required != (sampler != null)) return null;
+    if (sampler_required) {
+        const value = sampler.?;
+        if (value.unnormalized_coordinates or value.mag_filter != value.min_filter) return null;
+    } else if (sampled.ycbcr != null or sampled.view_type != 1 or sampled.base_mip_level != 0 or sampled.level_count == 0 or sampled.base_array_layer != 0 or sampled.layer_count != 1) return null;
     const format: render_ir_exec.SampledImage.Format = switch (image.format) {
         9 => .r8_unorm,
         16 => .rg8_unorm,
@@ -11069,19 +11094,19 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
         format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
         else => return null,
     };
-    const filter: render_ir_exec.SampledImage.Filter = switch (sampler.mag_filter) {
+    const filter: render_ir_exec.SampledImage.Filter = if (sampler) |value| switch (value.mag_filter) {
         0 => .nearest,
         1 => .linear,
         else => return null,
-    };
-    const address_u = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, sampler.address_mode_u) orelse return null;
-    const address_v = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, sampler.address_mode_v) orelse return null;
-    const border: [4]f32 = switch (sampler.border_color) {
+    } else .nearest;
+    const address_u = if (sampler) |value| std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_u) orelse return null else .clamp_to_edge;
+    const address_v = if (sampler) |value| std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_v) orelse return null else .clamp_to_edge;
+    const border: [4]f32 = if (sampler) |value| switch (value.border_color) {
         0, 1 => .{ 0, 0, 0, 0 },
         2, 3 => .{ 0, 0, 0, 1 },
         4, 5 => .{ 1, 1, 1, 1 },
         else => return null,
-    };
+    } else .{ 0, 0, 0, 0 };
     const bytes = imageBytes(image);
     if (format == .ycbcr_420_2plane) {
         const conversion = sampled.ycbcr orelse return null;
@@ -11121,8 +11146,8 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
         .pixels = bytes,
         .width = image.width,
         .height = image.height,
-        .row_stride = image.width * 4,
-        .bytes_per_texel = 4,
+        .row_stride = std.math.mul(u32, image.width, if (format == .r8_unorm) 1 else if (format == .rg8_unorm) 2 else 4) catch return null,
+        .bytes_per_texel = if (format == .r8_unorm) 1 else if (format == .rg8_unorm) 2 else 4,
         .format = format,
         .swizzle = sampled.components,
         .filter = filter,
@@ -11308,8 +11333,8 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     }
     var fragment_sampled_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count], 0..) |sampled_profile, index| {
-        const sampled = profileSampledImage(op.descriptors, sampled_profile.binding) orelse {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampled-image setup failed binding={d} interface={d}\n", .{ sampled_profile.binding, sampled_profile.interface });
+        const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required) orelse {
+            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampled-image setup failed set={} binding={d} interface={d} sampler_required={}\n", .{ sampled_profile.descriptor_set, sampled_profile.binding, sampled_profile.interface, sampled_profile.sampler_required });
             return;
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
@@ -15824,14 +15849,19 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
 }
 
 fn frontendSampledImagesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, layout: *const PipelineLayoutObj) bool {
-    for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .sampled_image) {
-        if (program.stage != .fragment or interface.descriptor_set != 1 or interface.binding == null or layout.set_count < 2 or layout.set1.bytes.len < 36) return false;
-        const count = std.mem.readInt(u32, layout.set1.bytes[32..36], .little);
-        if (layout.set1.bytes.len != 36 + @as(usize, count) * 16) return false;
+    for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| {
+        if (interface.storage != .sampled_image and interface.storage != .image) continue;
+        const descriptor_set: u32 = if (interface.storage == .sampled_image) 1 else 0;
+        const descriptor_type: i32 = if (interface.storage == .sampled_image) 1 else 2;
+        if (program.stage != .fragment or interface.descriptor_set != descriptor_set or interface.binding == null or (descriptor_set == 1 and layout.set_count < 2)) return false;
+        const set_layout = if (descriptor_set == 0) layout.set0 else layout.set1;
+        if (set_layout.bytes.len < 36) return false;
+        const count = std.mem.readInt(u32, set_layout.bytes[32..36], .little);
+        if (set_layout.bytes.len != 36 + @as(usize, count) * 16) return false;
         var found = false;
         for (0..count) |index| {
-            const item = layout.set1.bytes[36 + index * 16 ..][0..16];
-            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 1 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
+            const item = set_layout.bytes[36 + index * 16 ..][0..16];
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == descriptor_type and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
         }
         if (!found) return false;
     };
@@ -15882,7 +15912,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (result.vertex_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
-        .sampled_image, .input_attachment => return null,
+        .sampled_image, .input_attachment, .image => return null,
     };
     if (result.vertex_output == 0 or (vertex_inputs == 0 and result.vertex_index_interface == null)) return null;
     var fragment_outputs: u32 = 0;
@@ -15923,8 +15953,14 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         },
         .sampled_image => {
             if (interface.descriptor_set != 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
-            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.binding == interface.binding.?) return null;
-            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
+            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == 1 and prior.binding == interface.binding.?) return null;
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 1, .sampler_required = true };
+            result.fragment_sampled_image_count += 1;
+        },
+        .image => {
+            if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
+            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == 0 and prior.binding == interface.binding.?) return null;
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 0, .sampler_required = false };
             result.fragment_sampled_image_count += 1;
         },
         .input_attachment => {
@@ -16780,7 +16816,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .ycbcr = ycbcr, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .ycbcr = ycbcr, .view_type = ci.view_type, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = handle;
         return .success;
@@ -17284,13 +17320,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_view_type: i32, texture_base_mip_level: u32, texture_level_count: u32, texture_base_array_layer: u32, texture_layer_count: u32, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_view_type = 1, .texture_base_mip_level = 0, .texture_level_count = 1, .texture_base_array_layer = 0, .texture_layer_count = 1, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
         if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
@@ -17314,15 +17350,23 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.storage_offset = info.offset;
             update.storage_range = range;
             update.writes_storage = true;
-        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 1 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+        } else if ((descriptor_write.descriptor_type == 1 or descriptor_write.descriptor_type == 2) and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
             const info = descriptor_write.image_info.?[0];
-            const sampler = validSamplerLocked(info.sampler) orelse return;
             const view = validImageViewLocked(info.image_view) orelse return;
-            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
+            const sampler: ?*SamplerObj = if (descriptor_write.descriptor_type == 1) validSamplerLocked(info.sampler) orelse return else null;
+            if (view.owner != d or view.usage & 0x4 == 0 or (info.image_layout != 5 and !(descriptor_write.descriptor_type == 2 and info.image_layout == 1))) return;
+            if (sampler) |value| {
+                if (value.owner != d or !sampledYcbcrCompatible(view, value)) return;
+            } else if (info.sampler != 0 or view.ycbcr != null) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_components = view.components;
             update.texture_ycbcr = view.ycbcr;
+            update.texture_view_type = view.view_type;
+            update.texture_base_mip_level = view.base_mip_level;
+            update.texture_level_count = view.level_count;
+            update.texture_base_array_layer = view.base_array_layer;
+            update.texture_layer_count = view.layer_count;
             update.texture_binding = @intCast(descriptor_write.dst_binding);
             update.writes_texture = true;
         } else if (descriptor_write.descriptor_type == 10 and descriptor_write.dst_binding < update.set.input_attachments.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 10 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
@@ -17355,7 +17399,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.storage_range = update.storage_range;
         }
         if (update.writes_texture) {
-            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components, .ycbcr = update.texture_ycbcr };
+            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components, .ycbcr = update.texture_ycbcr, .view_type = update.texture_view_type, .base_mip_level = update.texture_base_mip_level, .level_count = update.texture_level_count, .base_array_layer = update.texture_base_array_layer, .layer_count = update.texture_layer_count };
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
@@ -17378,7 +17422,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1 and entry.descriptor_type != 2) or entry.stride == 0 or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or ((entry.descriptor_type == 1 or entry.descriptor_type == 2) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -17449,13 +17493,17 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             update.storage_range = range;
         } else {
             const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
-            const sampler = validSamplerLocked(descriptor.sampler) orelse return;
+            if (entry.descriptor_type != 1 and entry.descriptor_type != 2) return;
             const view = validImageViewLocked(descriptor.image_view) orelse return;
-            if (entry.dst_binding >= sampled_images.len or sampler.owner != d or view.owner != d or descriptor.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
+            const sampler: ?*SamplerObj = if (entry.descriptor_type == 1) validSamplerLocked(descriptor.sampler) orelse return else null;
+            if (entry.dst_binding >= sampled_images.len or view.owner != d or view.usage & 0x4 == 0 or (descriptor.image_layout != 5 and !(entry.descriptor_type == 2 and descriptor.image_layout == 1))) return;
+            if (sampler) |value| {
+                if (value.owner != d or !sampledYcbcrCompatible(view, value)) return;
+            } else if (descriptor.sampler != 0 or view.ycbcr != null) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_binding = @intCast(entry.dst_binding);
-            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr };
+            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr, .view_type = view.view_type, .base_mip_level = view.base_mip_level, .level_count = view.level_count, .base_array_layer = view.base_array_layer, .layer_count = view.layer_count };
         }
     }
     set.uniform_bindings = update.uniform_bindings;
@@ -18376,15 +18424,18 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             candidate.storage_binding = item.dst_binding;
             candidate.storage_offset = info.offset;
             candidate.storage_range = range;
-        } else if (item.descriptor_type == 1 and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == 1 and item.image_info != null and item.buffer_info == null) {
-            if (candidate.counts[1] == 0) return false;
+        } else if ((item.descriptor_type == 1 or item.descriptor_type == 2) and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == item.descriptor_type and item.image_info != null and item.buffer_info == null) {
+            if (candidate.counts[@intCast(item.descriptor_type)] == 0) return false;
             const info = item.image_info.?[0];
-            const sampler = validSamplerLocked(info.sampler) orelse return false;
             const view = validImageViewLocked(info.image_view) orelse return false;
-            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return false;
+            const sampler: ?*SamplerObj = if (item.descriptor_type == 1) validSamplerLocked(info.sampler) orelse return false else null;
+            if (view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or (info.image_layout != 5 and !(item.descriptor_type == 2 and info.image_layout == 1))) return false;
+            if (sampler) |value| {
+                if (value.owner != command_buffer.impl.owner or !sampledYcbcrCompatible(view, value)) return false;
+            } else if (info.sampler != 0 or view.ycbcr != null) return false;
             candidate.texture = view.image;
             candidate.sampler = sampler;
-            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components, .ycbcr = view.ycbcr };
+            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components, .ycbcr = view.ycbcr, .view_type = view.view_type, .base_mip_level = view.base_mip_level, .level_count = view.level_count, .base_array_layer = view.base_array_layer, .layer_count = view.layer_count };
         } else return false;
     };
     command_buffer.impl.push_descriptor = candidate;
@@ -19312,6 +19363,7 @@ test "scalar graphics profile admits bounded sampled bindings and aliases" {
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 1 },
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 2 },
+        .{ .storage = .image, .ty = vec4, .descriptor_set = 0, .binding = 0 },
         .{ .storage = .output, .ty = vec4, .location = 0 },
     };
     const name = [_]u8{ 'm', 'a', 'i', 'n' };
@@ -19323,8 +19375,10 @@ test "scalar graphics profile admits bounded sampled bindings and aliases" {
     const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
     const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
     try std.testing.expectEqual(@as(u8, 2), contract.varying_count);
-    try std.testing.expectEqual(@as(u8, 3), contract.fragment_sampled_image_count);
+    try std.testing.expectEqual(@as(u8, 4), contract.fragment_sampled_image_count);
     try std.testing.expectEqual(@as(u32, 2), contract.fragment_sampled_images[2].binding);
+    try std.testing.expectEqual(@as(u8, 0), contract.fragment_sampled_images[3].descriptor_set);
+    try std.testing.expect(!contract.fragment_sampled_images[3].sampler_required);
 }
 
 test "scalar graphics profile decodes normalized vertex inputs" {
@@ -19674,8 +19728,11 @@ fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool
 }
 const GraphicsDescriptorRequirements = struct { set0: bool, set1: bool, layout: bool };
 fn profileGraphicsDescriptorRequirements(profile: *const ProfileGraphics) GraphicsDescriptorRequirements {
-    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0 or profile.fragment_input_attachment_count != 0;
-    const set1 = profile.fragment_sampled_image_count != 0;
+    var set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0 or profile.fragment_input_attachment_count != 0;
+    var set1 = false;
+    for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count]) |image| {
+        if (image.descriptor_set == 0) set0 = true else if (image.descriptor_set == 1) set1 = true else return .{ .set0 = false, .set1 = false, .layout = false };
+    }
     return .{ .set0 = set0, .set1 = set1, .layout = set0 or set1 };
 }
 fn graphicsDescriptorRequirements(pipeline: *const GraphicsPipelineObj) GraphicsDescriptorRequirements {
@@ -19700,7 +19757,10 @@ test "graphics descriptor requirements exclude push-constant-only pipelines" {
 
     profile.vertex_uniform_count = 0;
     profile.fragment_sampled_image_count = 1;
+    profile.fragment_sampled_images[0] = .{ .interface = 0, .binding = 0 };
     try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = false, .set1 = true, .layout = true }, profileGraphicsDescriptorRequirements(&profile));
+    profile.fragment_sampled_images[0] = .{ .interface = 0, .binding = 0, .descriptor_set = 0, .sampler_required = false };
+    try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = true, .set1 = false, .layout = true }, profileGraphicsDescriptorRequirements(&profile));
 }
 fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipeline: *const GraphicsPipelineObj) bool {
     const requirements = graphicsDescriptorRequirements(pipeline);
@@ -19754,7 +19814,7 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
     if (command_buffer.impl.bound_sampled_descriptors) |sampled| {
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
-        snapshot.sampled_images = sampled.sampled_images;
+        snapshot.sampled_images_set1 = sampled.sampled_images;
         snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
@@ -19785,8 +19845,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         const sampled = command_buffer.impl.bound_sampled_descriptors orelse return null;
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
-        snapshot.sampled_images = sampled.sampled_images;
-        snapshot.input_attachments = sampled.input_attachments;
+        snapshot.sampled_images_set1 = sampled.sampled_images;
         snapshot.sampled_source_set = sampled;
     }
     snapshot.synthetic = true;
@@ -25271,6 +25330,88 @@ test "framebuffer fetch accepts only a GENERAL self input attachment and descrip
     try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &malformed_info, null, &rejected));
     defer destroyRenderPass(ctx.device, rejected, null);
     try std.testing.expect(!validRenderPassLocked(rejected).?.framebuffer_supported);
+}
+
+test "samplerless sampled-image descriptor writes preserve image-view metadata" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x4, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    defer destroyImage(ctx.device, image, null);
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    defer destroyImageView(ctx.device, view, null);
+
+    const layout_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 2, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&layout_binding) };
+    var layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &layout));
+    defer destroyDescriptorSetLayout(ctx.device, layout, null);
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 2, .descriptor_count = 1 };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    defer destroyDescriptorPool(ctx.device, pool, null);
+    const allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&layout) };
+    var set: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate_info, @ptrCast(&set)));
+
+    const descriptor = DescriptorImageInfo{ .sampler = 0, .image_view = view, .image_layout = 5 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 2, .image_info = @ptrCast(&descriptor), .buffer_info = null, .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    const set_object = validDescriptorSetLocked(set).?;
+    try std.testing.expectEqual(validImageLocked(image).?, set_object.sampled_images[0].image.?);
+    try std.testing.expect(set_object.sampled_images[0].sampler == null);
+    try std.testing.expectEqual(@as(i32, 1), set_object.sampled_images[0].view_type);
+    try std.testing.expectEqual(@as(u32, 0), set_object.sampled_images[0].base_mip_level);
+
+    const template_entry = [_]DescriptorUpdateTemplateEntry{.{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 2, .offset = 0, .stride = @sizeOf(DescriptorImageInfo) }};
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = &template_entry, .template_type = 0, .descriptor_set_layout = layout, .pipeline_bind_point = 0, .pipeline_layout = 0, .set = 0 };
+    var template: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
+    defer destroyDescriptorUpdateTemplate(ctx.device, template, null);
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    try std.testing.expectEqual(validImageLocked(image).?, set_object.sampled_images[0].image.?);
+}
+
+test "pipeline layouts keep set-zero images separate from set-one samplers" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    const image_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 2, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const image_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&image_binding) };
+    var image_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &image_layout_info, null, &image_layout));
+    defer destroyDescriptorSetLayout(ctx.device, image_layout, null);
+    const sampler_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const sampler_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&sampler_binding) };
+    var sampler_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &sampler_layout_info, null, &sampler_layout));
+    defer destroyDescriptorSetLayout(ctx.device, sampler_layout, null);
+    const layouts = [_]usize{ image_layout, sampler_layout };
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = layouts.len, .set_layouts = &layouts, .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+    defer destroyPipelineLayout(ctx.device, pipeline_layout, null);
+
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    var fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .image, .ty = vec4, .descriptor_set = 0, .binding = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = &.{}, .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = &fragment_interfaces, .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const layout = validPipelineLayoutLocked(pipeline_layout).?;
+    try std.testing.expect(frontendSampledImagesCompatible(&vertex, &fragment, layout));
+    fragment_interfaces[0].binding = 1;
+    try std.testing.expect(!frontendSampledImagesCompatible(&vertex, &fragment, layout));
 }
 
 test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
