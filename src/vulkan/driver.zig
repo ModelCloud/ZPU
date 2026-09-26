@@ -16342,7 +16342,7 @@ fn samplerCreatePNextState(raw: ?*const anyopaque) SamplerCreatePNextState {
 fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const info = create_info orelse return .error_initialization_failed;
     const pnext = samplerCreatePNextState(info.p_next);
-    if (alloc != null or info.s_type != 31 or !pnext.valid or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.min_lod < 0 or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
+    if (alloc != null or info.s_type != 31 or !pnext.valid or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (pnext.reduction_mode != 0) return .error_feature_not_present;
@@ -22305,6 +22305,30 @@ test "vkcube presentation path records submits and presents two swapchain images
     var sampler: usize = 0;
     try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&sampler_info), null, &sampler));
     destroySampler(device, sampler, null);
+    // ANGLE uses these broad sampler LOD bounds to preserve an unclamped
+    // implicit LOD range. Vulkan requires maxLod >= minLod but does not require
+    // minLod to be non-negative.
+    var angle_sampler_info = sampler_info;
+    angle_sampler_info.mag_filter = 1;
+    angle_sampler_info.min_filter = 1;
+    angle_sampler_info.mipmap_mode = 1;
+    angle_sampler_info.address_mode_u = 2;
+    angle_sampler_info.address_mode_v = 2;
+    angle_sampler_info.compare_op = 3;
+    angle_sampler_info.min_lod = -1000;
+    angle_sampler_info.max_lod = 1000;
+    angle_sampler_info.border_color = 1;
+    var angle_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, &angle_sampler_info, null, &angle_sampler));
+    try std.testing.expectEqual(@as(f32, -1000), validSamplerLocked(angle_sampler).?.min_lod);
+    try std.testing.expectEqual(@as(f32, 1000), validSamplerLocked(angle_sampler).?.max_lod);
+    destroySampler(device, angle_sampler, null);
+    var inverted_lod_info = sampler_info;
+    inverted_lod_info.min_lod = 1;
+    inverted_lod_info.max_lod = 0;
+    unpublished_sampler = 0xabcd;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &inverted_lod_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xabcd), unpublished_sampler);
     // The promoted reduction-mode node is accepted in its default form,
     // while the optional MIN/MAX feature remains truthfully disabled.
     var weighted_reduction = SamplerReductionModeCreateInfo{ .s_type = 1000130001, .p_next = null, .reduction_mode = 0 };
