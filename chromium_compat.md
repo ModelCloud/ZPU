@@ -293,18 +293,21 @@ lavapipe, and other software renderer strings. The FPS case also clicks the
 canvas and sends forward/jump input before measurement. A passing page load or
 a 60 Hz rAF loop without those checks is not evidence of ZPU WebGL support.
 
-The prior live probe reached ANGLE on ZPU but failed before WebGL context
+The earlier live probe reached ANGLE on ZPU but failed before WebGL context
 creation because D24/S8 and multisample attachment semantics were missing.
 The current format profile adds D24/S8 plus standalone X8_D24 and S8 image
 queries, format-correct aspect clears, and raster depth conversion for D24 and
-X8_D24. The expanded profile has not yet been rerun against a live
-SmolVM/Chromium guest. Multisample attachment semantics and general stencil
-test/operation execution remain missing. ZPU's drawable
-graphics profile also accepts only the fixed `cpu_cube_v1` shaders, so
-arbitrary ANGLE-generated SPIR-V still fails closed. A passing Tier B gate
-requires the real demo suite to create and render WebGL contexts, plus an
-evidence-backed ANGLE format/feature matrix; it must not be enabled by merely
-advertising additional Vulkan formats.
+X8_D24. A live rerun on 2026-09-26 rendered the Three.js terrain page at
+512×288, but measured a 19.3 s p99 frame interval; the captured image also has
+visible raster artifacts. This confirms the bounded terrain shaders reach the
+drawable profile, but it does not meet the suite's 17 ms target, especially at
+the required 2560×1440 size. Multisample attachment semantics and general
+stencil test/operation execution remain missing. The drawable scalar profile
+accepts a bounded SPIR-V frontend subset; unsupported ANGLE-generated modules
+still fail closed. A passing Tier B gate requires the real demo suite to create
+and render WebGL contexts at the configured size, plus an evidence-backed
+ANGLE format/feature matrix; it must not be enabled by merely advertising
+additional Vulkan formats.
 
 ### Tier C — WebGPU / Skia Graphite, via Dawn
 
