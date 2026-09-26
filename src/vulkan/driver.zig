@@ -1448,6 +1448,7 @@ const ProfileGraphics = struct {
     fragment: render_ir_exec.Executor,
     inputs: [16]ProfileVertexInput = undefined,
     input_count: u8 = 0,
+    vertex_index_interface: ?u32 = null,
     vertex_output: u32,
     vertex_outputs: [16]u32 = [_]u32{0} ** 16,
     vertex_output_count: u8 = 1,
@@ -1473,6 +1474,7 @@ const ProfileGraphics = struct {
 const ProfileGraphicsContract = struct {
     inputs: [16]ProfileVertexInput = undefined,
     input_count: u8 = 0,
+    vertex_index_interface: ?u32 = null,
     vertex_output: u32,
     vertex_outputs: [16]u32 = [_]u32{0} ** 16,
     vertex_output_count: u8 = 1,
@@ -10573,7 +10575,7 @@ const ProfileVertexEvaluation = struct {
 /// four vertices before replacing the triangle scan conversion; all ordinary
 /// draws continue through the original per-triangle setup below.
 fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, uniform_bindings: []const render_ir_exec.Binding) ?ProfileVertexEvaluation {
-    var bindings: [21]render_ir_exec.Binding = undefined;
+    var bindings: [22]render_ir_exec.Binding = undefined;
     var binding_storage: [16][16]u8 = undefined;
     var output_storage: [16][16]u8 = undefined;
     var outputs: [16]render_ir_exec.Output = undefined;
@@ -10590,6 +10592,14 @@ fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, u
         if (start > source.len or source.len - start < input.source_byte_size or binding_count == bindings.len) return null;
         const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &binding_storage[binding_count]) orelse return null;
         bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
+        binding_count += 1;
+    }
+    var vertex_index_storage: [4]u8 = undefined;
+    if (profile.vertex_index_interface) |interface| {
+        const vertex_index = profileVertexIndexValue(op, emitted) orelse return null;
+        std.mem.writeInt(u32, &vertex_index_storage, vertex_index, .little);
+        if (binding_count == bindings.len) return null;
+        bindings[binding_count] = .{ .interface = interface, .bytes = &vertex_index_storage };
         binding_count += 1;
     }
     for (uniform_bindings) |uniform| {
@@ -10949,6 +10959,11 @@ fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
     return @intCast(adjusted);
 }
 
+fn profileVertexIndexValue(op: anytype, emitted: u32) ?u32 {
+    if (op.indexed) |indexed| return profileIndexValue(indexed, emitted);
+    return std.math.add(u32, op.base_vertex, emitted) catch null;
+}
+
 fn profileTriangleVertex(topology: i32, triangle: u32, corner: usize) ?u32 {
     return switch (topology) {
         3 => std.math.add(
@@ -11255,7 +11270,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     if (triangle_count == 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
     var bounds = emptyRect();
     var pixels_written: usize = 0;
-    var vertex_bindings: [21]render_ir_exec.Binding = undefined;
+    var vertex_bindings: [22]render_ir_exec.Binding = undefined;
     var vertex_binding_storage: [16][16]u8 = undefined;
     var vertex_output_bytes: [16][16]u8 = undefined;
     var vertex_outputs: [16]render_ir_exec.Output = undefined;
@@ -11741,6 +11756,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
             var binding_count: usize = 0;
+            const emitted = profileTriangleVertex(
+                op.primitive_topology,
+                @intCast(triangle_index),
+                corner,
+            ) orelse return;
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse {
                     if (renderDiagnosticsEnabled()) std.debug.print(
@@ -11750,11 +11770,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     return;
                 };
                 const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-                const emitted = profileTriangleVertex(
-                    op.primitive_topology,
-                    @intCast(triangle_index),
-                    corner,
-                ) orelse return;
                 const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return) else std.math.add(u64, op.base_vertex, emitted) catch return;
                 const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return) catch return;
@@ -11807,6 +11822,14 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     );
                 }
                 vertex_bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
+                binding_count += 1;
+            }
+            var vertex_index_storage: [4]u8 = undefined;
+            if (profile.vertex_index_interface) |interface| {
+                const vertex_index = profileVertexIndexValue(op, emitted) orelse return;
+                std.mem.writeInt(u32, &vertex_index_storage, vertex_index, .little);
+                if (binding_count == vertex_bindings.len) return;
+                vertex_bindings[binding_count] = .{ .interface = interface, .bytes = &vertex_index_storage };
                 binding_count += 1;
             }
             for (vertex_uniform_bindings[0..vertex_uniform_count]) |uniform| {
@@ -15751,7 +15774,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
                 return error.Invalid;
             },
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
     return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
 }
@@ -15826,6 +15849,11 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
     var vertex_inputs: u32 = 0;
     for (vertex.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
+            if (interface.builtin_vertex_index) {
+                if (result.vertex_index_interface != null or interface.location != null or interface.ty.scalar != .i32 or interface.ty.columns != 1 or interface.ty.rows != 1) return null;
+                result.vertex_index_interface = @intCast(index);
+                continue;
+            }
             if (vertex_inputs == 16 or interface.location == null or
                 (interface.ty.scalar != .f32 and !(interface.ty.scalar == .u32 and interface.ty.columns == 2)) or
                 (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
@@ -15856,7 +15884,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
         },
         .sampled_image, .input_attachment => return null,
     };
-    if (result.vertex_output == 0 or vertex_inputs == 0) return null;
+    if (result.vertex_output == 0 or (vertex_inputs == 0 and result.vertex_index_interface == null)) return null;
     var fragment_outputs: u32 = 0;
     for (fragment.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
@@ -18893,7 +18921,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     defer vertex_executor.deinit();
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
-    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
     pipeline.color_write_mask = 0xf;
@@ -19218,6 +19246,59 @@ test "scalar graphics profile contract is explicit and allocation free" {
     for (0..4096) |_| try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &vi) != null);
 }
 
+test "scalar graphics profile feeds VertexIndex to an attribute-free vertex shader" {
+    const vertex_bytes align(4) = @embedFile("fixtures/threejs_vertex_index.spv").*;
+    var vertex = try spirv_frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &vertex_bytes), .vertex, "main", &.{});
+    defer vertex.deinit(std.testing.allocator);
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const fragment_interfaces = [_]render_ir.Interface{.{ .storage = .output, .ty = vec4, .location = 0 }};
+    const color_literal = [_]u8{ 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63 };
+    const color_output_operands = [_]u32{ 0, 0 };
+    const fragment_instructions = [_]render_ir.Instruction{
+        .{ .op = .constant, .ty = vec4, .operands = &.{}, .literal = &color_literal },
+        .{ .op = .output, .ty = vec4, .operands = &color_output_operands, .literal = &.{} },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = @constCast(&fragment_instructions), .bytes = &.{}, .identity = identity };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null, .attribute_count = 0, .attributes = null };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 0), contract.input_count);
+    try std.testing.expect(contract.vertex_index_interface != null);
+
+    var vertex_executor = try render_ir_exec.Executor.init(std.testing.allocator, &vertex);
+    defer vertex_executor.deinit();
+    var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment);
+    defer fragment_executor.deinit();
+    var profile = ProfileGraphics{
+        .vertex = vertex_executor,
+        .fragment = fragment_executor,
+        .vertex_index_interface = contract.vertex_index_interface,
+        .vertex_output = contract.vertex_output - 1,
+        .vertex_outputs = contract.vertex_outputs,
+        .vertex_output_count = contract.vertex_output_count,
+        .vertex_position_slot = contract.vertex_position_slot,
+        .varyings = contract.varyings,
+        .varying_count = contract.varying_count,
+        .fragment_output = contract.fragment_output,
+        .fragment_bool = contract.fragment_bool,
+    };
+    const draw = .{
+        .indexed = @as(?IndexedDrawState, null),
+        .base_vertex = @as(u32, 0),
+        .instance_index = @as(u32, 0),
+        .vertex_bindings = VertexBindingState{},
+        .pipeline = .{ .dynamic_vertex_input_binding_stride = false },
+        .viewport = Viewport{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 },
+    };
+    const expected = [_][2]f32{ .{ 0, 0 }, .{ 8, 0 }, .{ 0, 8 } };
+    for (expected, 0..) |screen, vertex_index| {
+        const evaluated = profileEvaluateVertex(draw, &profile, @intCast(vertex_index), &.{}) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(screen[0], evaluated.screen.x);
+        try std.testing.expectEqual(screen[1], evaluated.screen.y);
+    }
+}
+
 test "scalar graphics profile admits bounded sampled bindings and aliases" {
     const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
     const vertex_interfaces = [_]render_ir.Interface{
@@ -19430,7 +19511,7 @@ test "scalar graphics profile executes descriptor uniform blocks" {
     defer vertex_executor.deinit();
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
-    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
     pipeline.color_write_mask = 0xf;

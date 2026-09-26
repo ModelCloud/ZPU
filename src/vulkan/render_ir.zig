@@ -395,6 +395,7 @@ pub const Interface = struct {
     builtin_position: bool = false,
     builtin_frag_coord: bool = false,
     builtin_front_facing: bool = false,
+    builtin_vertex_index: bool = false,
     flat: bool = false,
     block: bool = false,
     member_count: u8 = 0,
@@ -495,7 +496,10 @@ pub fn serialize(allocator: std.mem.Allocator, stage: Stage, entry_name: []const
         try list.append(allocator, @intFromBool(item.builtin_frag_coord));
         try list.append(allocator, @intFromBool(item.builtin_front_facing));
         try list.append(allocator, @intFromBool(item.flat));
-        try list.append(allocator, @intFromBool(item.block));
+        // Reuse the unused high bit of this serialized interface flag byte
+        // for BuiltIn VertexIndex so existing profile identities remain
+        // stable when they do not declare that input.
+        try list.append(allocator, @intFromBool(item.block) | (@as(u8, @intFromBool(item.builtin_vertex_index)) << 1));
         try list.append(allocator, item.member_count);
         for (item.members[0..item.member_count]) |member| {
             try list.append(allocator, @intFromEnum(member.ty.scalar));

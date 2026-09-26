@@ -342,6 +342,16 @@ fn resultShape(nodes: []const Node, type_id: u32) Error!ir.Type {
             if (node.b < 2 or node.b > 4 or column.scalar != .f32 or column.columns < 2 or column.columns > 4 or column.rows != 1) return error.Unsupported;
             break :blk .{ .scalar = .f32, .columns = @intCast(node.b), .rows = column.columns };
         },
+        // Local fixed arrays of at most four scalar/vector elements use the
+        // same bounded lane storage as matrix columns. This preserves the
+        // element width for dynamic OpAccessChain/OpLoad lowering.
+        .array => blk: {
+            const element = try resultShape(nodes, node.a);
+            if (node.b < 2 or node.b > 4 or element.rows != 1 or element.columns < 1 or element.columns > 4) return error.Unsupported;
+            if (node.b * element.columns > 16) return error.Unsupported;
+            if (element.columns > 1 and element.scalar != .f32) return error.Unsupported;
+            break :blk .{ .scalar = element.scalar, .columns = @intCast(node.b), .rows = element.columns };
+        },
         // The bounded arithmetic profile represents the two scalar members
         // returned by OpIAddCarry/OpISubBorrow/OpUMulExtended/OpSMulExtended
         // as a two-lane value. General arrays and structures remain outside
@@ -717,7 +727,7 @@ fn interfacesUnique(items: []const ir.Interface) bool {
         if (item.storage != prior.storage) continue;
         if (item.storage == .uniform or item.storage == .sampled_image or item.storage == .input_attachment) {
             if (item.descriptor_set == prior.descriptor_set and item.binding == prior.binding) return false;
-        } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_frag_coord and prior.builtin_frag_coord) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.location != null and item.location == prior.location)) return false;
+        } else if ((item.builtin_position and prior.builtin_position) or (item.builtin_frag_coord and prior.builtin_frag_coord) or (item.builtin_front_facing and prior.builtin_front_facing) or (item.builtin_vertex_index and prior.builtin_vertex_index) or (item.location != null and item.location == prior.location)) return false;
     }
     return true;
 }
@@ -1225,7 +1235,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                     if (member_col_major[member_index]) return error.Malformed;
                     member_col_major[member_index] = true;
                 } else {
-                    if (w[3] > 1) return error.Unsupported;
+                    if (w[3] != 0 and w[3] != 1 and w[3] != 3 and w[3] != 4) return error.Unsupported;
                     if (member_builtins[member_index] != null) return error.Malformed;
                     member_builtins[member_index] = w[3];
                 }
@@ -1926,14 +1936,18 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         if (decorations[index].builtin_vertex_index or decorations[index].builtin_instance_index) {
             const builtin_type = try resultShape(nodes, pointer.b);
             if (requested_stage != .vertex or storage != .input or builtin_type.scalar != .i32 or builtin_type.columns != 1 or builtin_type.rows != 1 or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].flat) return error.Unsupported;
+            var loaded = false;
             for (module.instructions, instruction_functions) |instruction, instruction_function| {
-                if (instruction_function == entry.function and instruction.opcode == 61 and instruction.words.len >= 3 and instruction.words[2] == interface_id) return error.Unsupported;
+                if (instruction_function == entry.function and instruction.opcode == 61 and instruction.words.len >= 3 and instruction.words[2] == interface_id) loaded = true;
             }
+            if (loaded and decorations[index].builtin_vertex_index) {
+                try interfaces.append(allocator, .{ .storage = .input, .ty = builtin_type, .builtin_vertex_index = true });
+            } else if (loaded) return error.Unsupported;
             continue;
         }
         if (decorations[index].index_zero and !(requested_stage == .fragment and storage == .output and decorations[index].location == 0)) return error.Unsupported;
         var shape: ir.Type = undefined;
-        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_frag_coord = decorations[index].builtin_frag_coord, .builtin_front_facing = decorations[index].builtin_front_facing, .flat = decorations[index].flat };
+        var interface = ir.Interface{ .storage = storage, .ty = .{ .scalar = .u32 }, .location = decorations[index].location, .descriptor_set = decorations[index].descriptor_set, .binding = decorations[index].binding, .builtin_position = decorations[index].builtin_position, .builtin_frag_coord = decorations[index].builtin_frag_coord, .builtin_front_facing = decorations[index].builtin_front_facing, .builtin_vertex_index = decorations[index].builtin_vertex_index, .flat = decorations[index].flat };
         if (variable.a == 3 and storage == .output and pointee.kind == .structure) {
             if (requested_stage != .vertex or !decorations[try id(nodes, pointer.b)].block or decorations[index].location != null or decorations[index].binding != null or decorations[index].descriptor_set != null or decorations[index].builtin_position or decorations[index].builtin_frag_coord or decorations[index].builtin_front_facing or decorations[index].flat) return error.Unsupported;
             var position_seen = false;
@@ -1942,6 +1956,14 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 if (builtin == 1) {
                     const point_size = try resultShape(nodes, member);
                     if (point_size.scalar != .f32 or point_size.columns != 1 or point_size.rows != 1) return error.Unsupported;
+                    continue;
+                }
+                if (builtin == 3 or builtin == 4) {
+                    for (module.instructions, instruction_functions) |instruction, instruction_function| {
+                        if (instruction_function != entry.function or instruction.opcode != 65 or instruction.words.len < 4 or instruction.words[2] != interface_id) continue;
+                        const selector = nodes[try id(nodes, instruction.words[3])];
+                        if (selector.kind == .constant and selector.words.len == 1 and selector.words[0] == member_index) return error.Unsupported;
+                    }
                     continue;
                 }
                 if (builtin != 0 or position_seen) return error.Unsupported;
@@ -2883,7 +2905,7 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                                 member_matches = builtin == 0 and item.builtin_position;
                                 direct_builtin = false;
                             }
-                            if (member_matches and item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set and (!direct_builtin or (item.builtin_position == decoration.builtin_position and item.builtin_frag_coord == decoration.builtin_frag_coord and item.builtin_front_facing == decoration.builtin_front_facing)))
+                            if (member_matches and item.storage == expected_storage and item.location == decoration.location and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set and (!direct_builtin or (item.builtin_position == decoration.builtin_position and item.builtin_frag_coord == decoration.builtin_frag_coord and item.builtin_front_facing == decoration.builtin_front_facing and item.builtin_vertex_index == decoration.builtin_vertex_index)))
                                 semantic_index = @intCast(interface_index);
                         }
                         if (semantic_index == null) {
@@ -5646,6 +5668,36 @@ test "Three.js terrain vertex shader inlines helpers and compiles bounded contro
         unpack = unpack or instruction.op == .f_unpack_snorm4x8;
     }
     try std.testing.expect(push_constants and position and branch and phi and unpack);
+}
+
+test "Three.js vertex index builtin selects the indexed vertex position" {
+    const bytes align(4) = @embedFile("fixtures/threejs_vertex_index.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+
+    var vertex_index_interface: ?u32 = null;
+    var position_interface: ?u32 = null;
+    for (program.interfaces, 0..) |interface, index| {
+        if (interface.builtin_vertex_index) vertex_index_interface = @intCast(index);
+        if (interface.storage == .output and interface.builtin_position) position_interface = @intCast(index);
+    }
+    try std.testing.expect(vertex_index_interface != null and position_interface != null);
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    const expected = [_][4]f32{
+        .{ -1, -1, 0, 1 },
+        .{ 3, -1, 0, 1 },
+        .{ -1, 3, 0, 1 },
+    };
+    for (expected, 0..) |position, vertex_index| {
+        var index_bytes: [4]u8 = undefined;
+        var position_bytes: [16]u8 = undefined;
+        std.mem.writeInt(u32, &index_bytes, @intCast(vertex_index), .little);
+        try executor.execute(&.{.{ .interface = vertex_index_interface.?, .bytes = &index_bytes }}, &.{.{ .interface = position_interface.?, .bytes = &position_bytes }});
+        for (position, 0..) |lane, i| try std.testing.expectEqual(lane, @as(f32, @bitCast(std.mem.readInt(u32, position_bytes[i * 4 ..][0..4], .little))));
+    }
 }
 
 test "Three.js terrain fragment shader inlines nested pointer helpers" {

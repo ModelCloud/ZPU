@@ -3185,9 +3185,13 @@ pub const Executor = struct {
                 .local_access => {
                     const pointer = try valueRef(self.values, pc, instruction.operands[0]);
                     const selector = try valueRef(self.values, pc, instruction.operands[1]);
-                    if (pointer.bits[1] != 0 or selector.bits[0] >= pointer.ty.columns or pointer.ty.rows != 1) return error.Bounds;
+                    if (selector.bits[0] >= pointer.ty.columns) return error.Bounds;
+                    const prior_offset: usize = if (pointer.bits[1] == 0) 0 else pointer.bits[1] - 1;
+                    const element_width: usize = if (pointer.ty.rows == 1) 1 else pointer.ty.rows;
+                    const offset = std.math.add(usize, prior_offset, std.math.mul(usize, selector.bits[0], element_width) catch return error.Bounds) catch return error.Bounds;
+                    if (pointer.bits[0] >= self.locals.len or offset + element_width > self.locals[pointer.bits[0]].lanes()) return error.Bounds;
                     result.bits[0] = pointer.bits[0];
-                    result.bits[1] = selector.bits[0] + 1;
+                    result.bits[1] = @intCast(offset + 1);
                 },
                 .local_load => {
                     const pointer = try valueRef(self.values, pc, instruction.operands[0]);
@@ -3197,11 +3201,14 @@ pub const Executor = struct {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
                         result = source;
                     } else {
-                        if (instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.ty.scalar or pointer.bits[1] - 1 >= source.lanes()) return error.InvalidType;
-                        const lane = pointer.bits[1] - 1;
-                        result.bits[0] = source.bits[lane];
-                        result.dpdx_bits[0] = source.dpdx_bits[lane];
-                        result.dpdy_bits[0] = source.dpdy_bits[lane];
+                        const lane: usize = pointer.bits[1] - 1;
+                        const width = try lanes(instruction.ty);
+                        if (instruction.ty.scalar != source.ty.scalar or lane > source.lanes() or width > source.lanes() - lane) return error.InvalidType;
+                        for (0..width) |component| {
+                            result.bits[component] = source.bits[lane + component];
+                            result.dpdx_bits[component] = source.dpdx_bits[lane + component];
+                            result.dpdy_bits[component] = source.dpdy_bits[lane + component];
+                        }
                         result.derivatives_valid = source.derivatives_valid;
                     }
                 },
@@ -3214,11 +3221,13 @@ pub const Executor = struct {
                         self.locals[pointer.bits[0]] = source;
                     } else {
                         const target = &self.locals[pointer.bits[0]];
-                        if (source.lanes() != 1 or source.ty.scalar != target.ty.scalar or pointer.bits[1] - 1 >= target.lanes()) return error.InvalidType;
-                        const lane = pointer.bits[1] - 1;
-                        target.bits[lane] = source.bits[0];
-                        target.dpdx_bits[lane] = source.dpdx_bits[0];
-                        target.dpdy_bits[lane] = source.dpdy_bits[0];
+                        const lane: usize = pointer.bits[1] - 1;
+                        if (source.ty.scalar != target.ty.scalar or lane > target.lanes() or source.lanes() > target.lanes() - lane) return error.InvalidType;
+                        for (0..source.lanes()) |component| {
+                            target.bits[lane + component] = source.bits[component];
+                            target.dpdx_bits[lane + component] = source.dpdx_bits[component];
+                            target.dpdy_bits[lane + component] = source.dpdy_bits[component];
+                        }
                         target.derivatives_valid = target.derivatives_valid and source.derivatives_valid;
                     }
                 },
@@ -4503,7 +4512,7 @@ fn validate(program: *const ir.Program) Error!void {
                 .copy_object => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .quantize_f16 => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .local_access => if (oi == 0) {
-                    if (source_ty.rows != 1 or source_ty.columns < 2) return error.InvalidType;
+                    if (source_ty.columns < 2 or source_ty.columns > 4 or (source_ty.rows != 1 and (source_ty.scalar != .f32 or source_ty.rows < 2 or source_ty.rows > 4))) return error.InvalidType;
                 } else if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
                 .local_load => {},
                 .local_store => if (oi == 1 and source_ty.scalar != program.instructions[instruction.operands[0]].ty.scalar) return error.InvalidType,
