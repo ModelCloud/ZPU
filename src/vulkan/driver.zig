@@ -15205,7 +15205,7 @@ fn queueSubmitFailed(line: u32) Result {
 
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
     const pnext = graphicsPipelinePNext(ci.p_next, ci.flags) orelse return pipelineInvalid(@src().line);
-    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) {
+    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU graphics pipeline create-info rejected sType={} stages={} stages_null={} tessellation={} base=0x{x} base_index={}\n",
             .{ ci.s_type, ci.stage_count, ci.stages == null, ci.tessellation != null, ci.base_pipeline, ci.base_pipeline_index },
@@ -22112,6 +22112,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    const unused_tessellation = PipelineTessellationStateCreateInfo{ .s_type = 21, .p_next = null, .flags = 0, .patch_control_points = 3 };
+    var unused_tessellation_info = pipeline_info;
+    unused_tessellation_info.tessellation = &unused_tessellation;
+    var unused_tessellation_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&unused_tessellation_info), null, &unused_tessellation_pipeline));
+    destroyPipeline(device, unused_tessellation_pipeline[0], null);
     var masked_attachment = blend_attachment;
     masked_attachment.color_write_mask = 0x5;
     var masked_blend = color_blend;
