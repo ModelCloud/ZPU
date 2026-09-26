@@ -1254,6 +1254,22 @@ const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_im
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const max_profile_sampled_bindings = 8;
+// Terrain and CAD meshes commonly exceed a few thousand vertices. Keep the
+// scalar fallback bounded against pathological workloads while admitting a
+// million-vertex draw, which covers the live Three.js terrain probe.
+const max_profile_graphics_vertices: u32 = 1_048_576;
+
+fn profileGraphicsVertexCountSupported(vertex_count: u32) bool {
+    return vertex_count != 0 and vertex_count <= max_profile_graphics_vertices;
+}
+
+test "scalar graphics profile accepts large bounded terrain draws" {
+    try std.testing.expect(profileGraphicsVertexCountSupported(4_096));
+    try std.testing.expect(profileGraphicsVertexCountSupported(390_150));
+    try std.testing.expect(profileGraphicsVertexCountSupported(max_profile_graphics_vertices));
+    try std.testing.expect(!profileGraphicsVertexCountSupported(0));
+    try std.testing.expect(!profileGraphicsVertexCountSupported(max_profile_graphics_vertices + 1));
+}
 const DescriptorUniformBinding = struct { buffer: ?*BufferObj = null, offset: u64 = 0, range: u64 = 0, dynamic: bool = false };
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
@@ -10589,6 +10605,27 @@ const ProfileVertexEvaluation = struct {
     varyings: [8][16]u8,
 };
 
+const profile_vertex_cache_slot_count = 128;
+const ProfileVertexCacheEntry = struct {
+    vertex_index: u32 = 0,
+    valid: bool = false,
+    evaluation: ProfileVertexEvaluation = undefined,
+};
+
+fn profileVertexCacheSlot(vertex_index: u32) usize {
+    return @intCast((vertex_index *% 0x9e37_79b9) & (profile_vertex_cache_slot_count - 1));
+}
+
+test "profile vertex cache slots are bounded and mix adjacent indices" {
+    var seen = [_]bool{false} ** profile_vertex_cache_slot_count;
+    for (0..profile_vertex_cache_slot_count) |index| {
+        const slot = profileVertexCacheSlot(@intCast(index));
+        try std.testing.expect(slot < profile_vertex_cache_slot_count);
+        try std.testing.expect(!seen[slot]);
+        seen[slot] = true;
+    }
+}
+
 /// Run one bounded profile vertex exactly as the scalar triangle path does,
 /// but retain its screen-space position and declared varying outputs in a
 /// compact value.  Narrow quad specializations use this only to validate all
@@ -11292,7 +11329,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         4 => if (op.vertex_count >= 3) op.vertex_count - 2 else return,
         else => return,
     };
-    if (triangle_count == 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
+    if (triangle_count == 0 or !profileGraphicsVertexCountSupported(op.vertex_count) or op.instance_count == 0) return;
     var bounds = emptyRect();
     var pixels_written: usize = 0;
     var vertex_bindings: [22]render_ir_exec.Binding = undefined;
@@ -11778,6 +11815,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_source_over_write = draw_blend.enable == 1 and draw_blend.src_color_factor == 1 and draw_blend.dst_color_factor == 7 and draw_blend.color_op == 0 and
         draw_blend.src_alpha_factor == 1 and draw_blend.dst_alpha_factor == 7 and draw_blend.alpha_op == 0;
     var vertices: [3]ProfileScreenVertex = undefined;
+    const cache_large_indexed_vertices = op.indexed != null and op.vertex_count > 4_096;
+    var vertex_cache = [_]ProfileVertexCacheEntry{.{}} ** profile_vertex_cache_slot_count;
+    var vertex_cache_hits: u64 = 0;
+    var vertex_cache_misses: u64 = 0;
     for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
             var binding_count: usize = 0;
@@ -11786,6 +11827,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 @intCast(triangle_index),
                 corner,
             ) orelse return;
+            const vertex_index = profileVertexIndexValue(op, emitted) orelse return;
+            const cache_slot = profileVertexCacheSlot(vertex_index);
+            if (cache_large_indexed_vertices) {
+                const cached = vertex_cache[cache_slot];
+                if (cached.valid and cached.vertex_index == vertex_index) {
+                    vertex_cache_hits += 1;
+                    vertices[corner] = cached.evaluation.screen;
+                    for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                        @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], cached.evaluation.varyings[varying_index][0 .. varying.lanes * 4]);
+                    }
+                    continue;
+                }
+                vertex_cache_misses += 1;
+            }
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse {
                     if (renderDiagnosticsEnabled()) std.debug.print(
@@ -11795,8 +11850,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     return;
                 };
                 const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-                const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return) else std.math.add(u64, op.base_vertex, emitted) catch return;
-                const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
+                const element_index = if (input.input_rate == 0) @as(u64, vertex_index) else op.instance_index;
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return) catch return;
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
                 const source = bufferBytes(buffer);
@@ -11851,7 +11905,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             var vertex_index_storage: [4]u8 = undefined;
             if (profile.vertex_index_interface) |interface| {
-                const vertex_index = profileVertexIndexValue(op, emitted) orelse return;
                 std.mem.writeInt(u32, &vertex_index_storage, vertex_index, .little);
                 if (binding_count == vertex_bindings.len) return;
                 vertex_bindings[binding_count] = .{ .interface = interface, .bytes = &vertex_index_storage };
@@ -11887,6 +11940,13 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
             for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], vertex_output_bytes[varying.vertex_slot][0 .. varying.lanes * 4]);
+            if (cache_large_indexed_vertices) {
+                var evaluation = ProfileVertexEvaluation{ .screen = vertices[corner], .varyings = undefined };
+                for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                    @memcpy(evaluation.varyings[varying_index][0 .. varying.lanes * 4], varying_bytes[corner][varying_index][0 .. varying.lanes * 4]);
+                }
+                vertex_cache[cache_slot] = .{ .vertex_index = vertex_index, .valid = true, .evaluation = evaluation };
+            }
             if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_geometry.fetchAdd(1, .monotonic) < 6) {
                 std.debug.print(
                     "ZPU VP9 geometry triangle={d} corner={d} screen={d:.5},{d:.5},{d:.5},w={d:.5} luma={d:.7},{d:.7} chroma={d:.7},{d:.7}\n",
@@ -12457,6 +12517,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     // A parallel Mosaic lane owns disjoint pixels but must not race on image
     // content metadata. Its caller publishes a conservative whole-target
     // envelope after every lane has completed.
+    if (profileTimingDiagnosticsEnabled() and cache_large_indexed_vertices) std.debug.print(
+        "ZPU indexed profile summary vertices={d} cache_hits={} cache_misses={} pixels={} bounds={d},{d} {d}x{d}\n",
+        .{ op.vertex_count, vertex_cache_hits, vertex_cache_misses, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height },
+    );
     if (!publish_metadata) return;
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
     if (color) |color_image| {
