@@ -380,25 +380,121 @@ def main() -> None:
                 },
                 session_id=session_id,
             )
+        page_probe_script = """
+          Object.defineProperty(window, '__zpuNativeRaf', {
+            value: window.requestAnimationFrame.bind(window),
+            writable: false, configurable: false
+          });
+          window.__zpuPageErrors = [];
+          addEventListener('error', event => {
+            if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+              String(event.message || event.error || 'script error'));
+          });
+          addEventListener('unhandledrejection', event => {
+            if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+              `unhandled rejection: ${String(event.reason)}`);
+          });
+        """
+        if args.require_webgl:
+            page_probe_script += """
+              window.__zpuWebGLContexts = [];
+              const originalGetContext = HTMLCanvasElement.prototype.getContext;
+              HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                const context = originalGetContext.call(this, type, ...args);
+                if (context && ['webgl', 'webgl2', 'experimental-webgl'].includes(String(type).toLowerCase()) &&
+                    !window.__zpuWebGLContexts.some(item => item.gl === context)) {
+                  window.__zpuWebGLContexts.push({ canvas: this, gl: context, api: String(type) });
+                }
+                return context;
+              };
+            """
+        if args.require_webgl_draw:
+            page_probe_script += """
+              window.__zpuWebGLDrawSerial = 0;
+              window.__zpuWebGLPixelCapture = null;
+              const takeWebGLSamples = () => window.__zpuWebGLContexts.map(({gl, api}) => {
+                const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
+                const contextLost = gl.isContextLost();
+                if (contextLost || width <= 0 || height <= 0) return {
+                  context: api, drawingBuffer: {width, height}, contextLost,
+                  drawingBufferSampled: false, uniqueRgbaColors: 0,
+                  sampledRgbaColors: [], readbackError: null
+                };
+                const regionSize = 32;
+                const x = Math.max(0, Math.floor((width - regionSize) / 2));
+                const y = Math.max(0, Math.floor((height - regionSize) / 2));
+                const regionWidth = Math.min(regionSize, width - x);
+                const regionHeight = Math.min(regionSize, height - y);
+                const pixels = new Uint8Array(regionWidth * regionHeight * 4);
+                const sampledPixels = new Uint8Array(8 * 8 * 4);
+                let readbackError = null, readbackGlError = null;
+                const drainGlErrors = () => {
+                  const errors = [];
+                  for (let count = 0; count < 8; count++) {
+                    const error = gl.getError();
+                    if (error === gl.NO_ERROR) break;
+                    errors.push(error);
+                  }
+                  return errors;
+                };
+                try {
+                  const errorsBeforeFinish = drainGlErrors();
+                  gl.finish();
+                  const errorsAfterFinish = drainGlErrors();
+                  gl.readPixels(x, y, regionWidth, regionHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                  const errorsAfterReadPixels = drainGlErrors();
+                  for (let row = 0; row < 8; row++) for (let column = 0; column < 8; column++) {
+                    const sourceX = Math.min(regionWidth - 1, Math.floor((column + .5) * regionWidth / 8));
+                    const sourceY = Math.min(regionHeight - 1, Math.floor((row + .5) * regionHeight / 8));
+                    const sourceOffset = (sourceY * regionWidth + sourceX) * 4;
+                    sampledPixels.set(pixels.subarray(sourceOffset, sourceOffset + 4), (row * 8 + column) * 4);
+                  }
+                  const colors = new Set();
+                  for (let pixel = 0; pixel < 64; pixel++) {
+                    const offset = pixel * 4;
+                    colors.add(`${sampledPixels[offset]},${sampledPixels[offset + 1]},${sampledPixels[offset + 2]},${sampledPixels[offset + 3]}`);
+                  }
+                  readbackGlError = errorsBeforeFinish.length || errorsAfterFinish.length || errorsAfterReadPixels.length
+                    ? { errorsBeforeFinish, errorsAfterFinish, errorsAfterReadPixels } : gl.NO_ERROR;
+                  return {
+                    context: api, drawingBuffer: {width, height}, contextLost: gl.isContextLost(),
+                    drawingBufferSampled: true, drawSampleRegion: {x, y, width: regionWidth, height: regionHeight},
+                    uniqueRgbaColors: colors.size, sampledRgbaColors: [...colors],
+                    readbackError, readbackGlError, drawSerial: window.__zpuWebGLDrawSerial
+                  };
+                } catch (error) { readbackError = String(error); }
+                return {
+                  context: api, drawingBuffer: {width, height}, contextLost: gl.isContextLost(),
+                  drawingBufferSampled: false, drawSampleRegion: {x, y, width: regionWidth, height: regionHeight},
+                  uniqueRgbaColors: 0, sampledRgbaColors: [], readbackError, readbackGlError
+                };
+              });
+              window.__zpuTakeWebGLSamples = takeWebGLSamples;
+              const originalRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+              window.requestAnimationFrame = callback => originalRequestAnimationFrame(now => {
+                callback(now);
+                if (window.__zpuCaptureWebGL && !window.__zpuWebGLPixelCapture &&
+                    window.__zpuWebGLDrawSerial > window.__zpuWebGLCaptureBaseline) {
+                  window.__zpuWebGLPixelCapture = takeWebGLSamples();
+                }
+              });
+              for (const Constructor of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+                if (!Constructor) continue;
+                for (const name of ['drawArrays', 'drawElements', 'drawRangeElements', 'drawArraysInstanced', 'drawElementsInstanced']) {
+                  if (!Object.prototype.hasOwnProperty.call(Constructor.prototype, name)) continue;
+                  const original = Constructor.prototype[name];
+                  if (typeof original !== 'function') continue;
+                  Constructor.prototype[name] = function(...args) {
+                    const result = original.apply(this, args);
+                    window.__zpuWebGLDrawSerial++;
+                    return result;
+                  };
+                }
+              }
+            """
         devtools.call(
             "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": """
-                  Object.defineProperty(window, '__zpuNativeRaf', {
-                    value: window.requestAnimationFrame.bind(window),
-                    writable: false, configurable: false
-                  });
-                  window.__zpuPageErrors = [];
-                  addEventListener('error', event => {
-                    if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
-                      String(event.message || event.error || 'script error'));
-                  });
-                  addEventListener('unhandledrejection', event => {
-                    if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
-                      `unhandled rejection: ${String(event.reason)}`);
-                  });
-                """,
-            },
+            {"source": page_probe_script},
             session_id=session_id,
         )
         # Headless Chromium otherwise treats a CDP-created tab as background
@@ -518,48 +614,46 @@ def main() -> None:
               const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
               let webgl = null;
               if ({str(args.require_webgl).lower()}) {{
-                // A DOM canvas alone is not WebGL evidence: Chromium can
-                // allocate a canvas while ANGLE has fallen back or while its
-                // renderbuffer setup has failed. Inspect the live context and
-                // sample it after the frame cadence interval instead.
-                await new Promise(resolve => (window.__zpuNativeRaf || requestAnimationFrame)(resolve));
+                // The center-patch readback must run after the page's draw
+                // callback and before Chromium presents the default buffer.
+                const webglDrawCaptureEnabled = {str(args.require_webgl_draw).lower()};
+                let capturedWebglSamples = null;
+                if (webglDrawCaptureEnabled) {{
+                  window.__zpuCaptureWebGL = true;
+                  window.__zpuWebGLCaptureBaseline = window.__zpuWebGLDrawSerial;
+                  await new Promise(resolve => {{
+                    let frames = 0;
+                    function waitForCapture() {{
+                      if (window.__zpuWebGLPixelCapture || frames >= 4) {{ resolve(); return; }}
+                      frames++;
+                      window.requestAnimationFrame(waitForCapture);
+                    }}
+                    window.requestAnimationFrame(waitForCapture);
+                  }});
+                  capturedWebglSamples = window.__zpuWebGLPixelCapture ||
+                    (window.__zpuTakeWebGLSamples ? window.__zpuTakeWebGLSamples() : []);
+                }}
                 const canvases = [...document.querySelectorAll('canvas')];
-                const contexts = canvases.map((canvas, index) => {{
-                  let gl = null, api = null;
-                  for (const candidate of ['webgl2', 'webgl', 'experimental-webgl']) {{
-                    try {{ gl = canvas.getContext(candidate); }} catch (_) {{ gl = null; }}
-                    if (gl) {{ api = candidate; break; }}
-                  }}
-                  if (!gl) return {{ index, context: null }};
+                const trackedContexts = window.__zpuWebGLContexts || [];
+                const contexts = trackedContexts.map((tracked, index) => {{
+                  const {{ canvas, gl, api }} = tracked;
                   const debug = gl.getExtension('WEBGL_debug_renderer_info');
                   const renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
                   const version = gl.getParameter(gl.VERSION);
+                  const supportedExtensions = gl.getSupportedExtensions() || [];
+                  const colorBufferFloatExtension = Boolean(gl.getExtension('EXT_color_buffer_float'));
                   const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
-                  let uniqueRgbaColors = 0, readbackError = null;
-                  try {{
-                    const samples = 8, pixels = new Uint8Array(samples * samples * 4);
-                    // The whole drawing buffer may be large; sample one pixel
-                    // from each cell of an evenly spaced grid. This checks
-                    // scene coverage without transferring a full 2K frame.
-                    for (let row = 0; row < samples; row++) {{
-                      for (let column = 0; column < samples; column++) {{
-                        const x = Math.min(width - 1, Math.floor((column + .5) * width / samples));
-                        const y = Math.min(height - 1, Math.floor((row + .5) * height / samples));
-                        const offset = (row * samples + column) * 4;
-                        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels.subarray(offset, offset + 4));
-                      }}
-                    }}
-                    const colors = new Set();
-                    for (let pixel = 0; pixel < samples * samples; pixel++) {{
-                      const offset = pixel * 4;
-                      colors.add(`${{pixels[offset]}},${{pixels[offset + 1]}},${{pixels[offset + 2]}},${{pixels[offset + 3]}}`);
-                    }}
-                    uniqueRgbaColors = colors.size;
-                  }} catch (error) {{ readbackError = String(error); }}
+                  const sampled = capturedWebglSamples?.[index] || {{}};
                   return {{
                     index, context: api, renderer: String(renderer), version: String(version),
                     drawingBuffer: {{ width, height }}, contextLost: gl.isContextLost(),
-                    uniqueRgbaColors, readbackError,
+                    colorBufferFloatExtension, supportedExtensions,
+                    drawingBufferSampled: Boolean(sampled.drawingBufferSampled),
+                    drawSampleRegion: sampled.drawSampleRegion || null,
+                    uniqueRgbaColors: sampled.uniqueRgbaColors || 0,
+                    sampledRgbaColors: sampled.sampledRgbaColors || [],
+                    readbackError: sampled.readbackError || null,
+                    readbackGlError: sampled.readbackGlError ?? null,
                   }};
                 }});
                 webgl = {{ canvases: canvases.length, contexts,

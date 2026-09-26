@@ -6,7 +6,7 @@ const std = @import("std");
 pub const profile_version: u32 = 1;
 pub const serialization_version: u32 = 7;
 pub const max_values: usize = 4096;
-pub const max_instructions: usize = 4096;
+pub const max_instructions: usize = 6144;
 
 pub const Stage = enum(u8) { vertex = 0, fragment = 1, compute = 2 };
 pub const Scalar = enum(u8) { bool = 0, i32 = 1, u32 = 2, f32 = 3 };

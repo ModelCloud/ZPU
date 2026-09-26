@@ -3683,12 +3683,14 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 } else .extract;
             }
         }
-        const owned_operands = allocator.dupe(u32, operands.items) catch return error.OutOfMemory;
-        errdefer allocator.free(owned_operands);
-        const owned_literal = allocator.dupe(u8, literal[0..literal_len]) catch return error.OutOfMemory;
-        errdefer allocator.free(owned_literal);
-        try lowered.append(allocator, .{ .op = op, .ty = shape, .operands = owned_operands, .literal = owned_literal });
-        canonical_ids[try id(nodes, rid)] = @intCast(lowered.items.len - 1);
+        canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(
+            allocator,
+            &lowered,
+            op,
+            shape,
+            operands.items,
+            literal[0..literal_len],
+        );
         if (lowered.items.len > ir.max_instructions) return error.LimitExceeded;
     }
     const owned_interfaces = allocator.dupe(ir.Interface, interfaces.items) catch return error.OutOfMemory;
@@ -6299,6 +6301,35 @@ test "allocation failures never publish a partial frontend program" {
         result.deinit(failing.allocator());
         break;
     }
+}
+
+test "frontend instruction limit cleanup releases appended operands once" {
+    var words: std.ArrayList(u32) = .empty;
+    defer words.deinit(std.testing.allocator);
+
+    const store_offset = testOpcodeOffset(&positive_vertex, 62, 0).?;
+    try words.appendSlice(std.testing.allocator, positive_vertex[0..store_offset]);
+
+    var value_id: u32 = 8;
+    var next_id = positive_vertex[3];
+    for (0..ir.max_instructions) |_| {
+        const result_id = next_id;
+        next_id += 1;
+        try words.appendSlice(std.testing.allocator, &.{
+            (4 << 16) | 83, // OpCopyObject
+            3,
+            result_id,
+            value_id,
+        });
+        value_id = result_id;
+    }
+
+    const rewritten_store_offset = words.items.len;
+    try words.appendSlice(std.testing.allocator, positive_vertex[store_offset..]);
+    words.items[rewritten_store_offset + 2] = value_id;
+    words.items[3] = next_id;
+
+    try std.testing.expectError(error.LimitExceeded, compile(std.testing.allocator, words.items, .vertex, "main", &.{}));
 }
 
 test "table driven profile schema is unique and every decoration has exact payload metadata" {

@@ -48,14 +48,30 @@ pub const Value = struct {
     dpdx_bits: [16]u32 = .{0} ** 16,
     dpdy_bits: [16]u32 = .{0} ** 16,
     derivatives_valid: bool = false,
+    derivative_valid_mask: u16 = 0,
 
     pub fn lanes(self: Value) usize {
         return @as(usize, self.ty.columns) * self.ty.rows;
     }
 };
 
+fn fullDerivativeMask(lane_count: usize) u16 {
+    return if (lane_count >= 16) std.math.maxInt(u16) else (@as(u16, 1) << @intCast(lane_count)) - 1;
+}
+
+fn derivativeMask(value: Value) u16 {
+    const full = fullDerivativeMask(value.lanes());
+    return if (value.derivatives_valid) full else value.derivative_valid_mask & full;
+}
+
+fn setDerivativeMask(value: *Value, mask: u16) void {
+    const full = fullDerivativeMask(value.lanes());
+    value.derivative_valid_mask = mask & full;
+    value.derivatives_valid = value.derivative_valid_mask == full;
+}
+
 pub const SampledImage = struct {
-    pub const Format = enum { r8_unorm, rg8_unorm, rg16_sfloat, rgba8_unorm, bgra8_unorm, rgba16_sfloat, ycbcr_420_2plane, ycbcr_420_3plane };
+    pub const Format = enum { r8_unorm, rg8_unorm, r16_sfloat, rg16_sfloat, rgba8_unorm, bgra8_unorm, rgba16_sfloat, r32_sfloat, rg32_sfloat, rgba32_sfloat, r11g11b10_ufloat, ycbcr_420_2plane, ycbcr_420_3plane };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
     pub const YcbcrModel = enum { identity, bt601, bt709, bt2020 };
@@ -65,9 +81,7 @@ pub const SampledImage = struct {
     width: u32,
     height: u32,
     row_stride: u32,
-    // The driver keeps sampled image storage in its existing four-byte
-    // internal layout, while standalone IR fixtures may use the format's
-    // natural packed layout.
+    // Sampled images use the native texel layout of their Vulkan format.
     bytes_per_texel: u32 = 4,
     // Cube-compatible views keep their six faces in Vulkan array-layer
     // order. The executor selects one face before running the existing 2D
@@ -180,6 +194,34 @@ fn valueRef(values: []const Value, current: usize, id: u32) Error!Value {
 fn canonicalFloat(bits: u32) u32 {
     const x: f32 = @bitCast(bits);
     return if (std.math.isNan(x)) 0x7fc00000 else bits;
+}
+
+fn floatUnaryDerivative(op: ir.Op, x: f32, value: f32) f32 {
+    const ln2: f32 = 0.6931471805599453;
+    return switch (op) {
+        .f_fract => 1,
+        .f_radians => std.math.pi / 180.0,
+        .f_degrees => 180.0 / std.math.pi,
+        .f_sin => @cos(x),
+        .f_cos => -@sin(x),
+        .f_tan => 1.0 + value * value,
+        .f_asin => 1.0 / std.math.sqrt(1.0 - x * x),
+        .f_acos => -1.0 / std.math.sqrt(1.0 - x * x),
+        .f_atan => 1.0 / (1.0 + x * x),
+        .f_sinh => std.math.cosh(x),
+        .f_cosh => std.math.sinh(x),
+        .f_tanh => 1.0 - value * value,
+        .f_asinh => 1.0 / std.math.sqrt(1.0 + x * x),
+        .f_acosh => 1.0 / std.math.sqrt(x * x - 1.0),
+        .f_atanh => 1.0 / (1.0 - x * x),
+        .f_exp => value,
+        .f_log => 1.0 / x,
+        .f_exp2 => value * ln2,
+        .f_log2 => 1.0 / (x * ln2),
+        .f_sqrt => 0.5 / value,
+        .f_inverse_sqrt => -0.5 * value / x,
+        else => 0,
+    };
 }
 
 fn determinant3(m: *const [3][3]f32) f32 {
@@ -483,6 +525,18 @@ fn ycbcrTexel(image: SampledImage, x: u32, y: u32) Error![4]f32 {
     return ycbcrToRgb(image, y_sample, cb_sample, cr_sample);
 }
 
+fn readUnsignedFloat(bits: u32, mantissa_bits: u32) f32 {
+    const mantissa_mask = (@as(u32, 1) << @intCast(mantissa_bits)) - 1;
+    const mantissa = bits & mantissa_mask;
+    const exponent = (bits >> @intCast(mantissa_bits)) & 0x1f;
+    if (exponent == 0) return @floatCast(@as(f64, @floatFromInt(mantissa)) *
+        std.math.pow(f64, 2.0, -14.0 - @as(f64, @floatFromInt(mantissa_bits))));
+    if (exponent == 0x1f) return if (mantissa == 0) std.math.inf(f32) else std.math.nan(f32);
+    const scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 15.0);
+    return @floatCast((1.0 + @as(f64, @floatFromInt(mantissa)) /
+        std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)))) * scale);
+}
+
 fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return applySwizzle(image, image.border);
     const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return applySwizzle(image, image.border);
@@ -498,6 +552,11 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
         if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
         return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, @as(f32, @floatFromInt(image.pixels[offset + 1])) / 255, 0, 1 });
     }
+    if (image.format == .r16_sfloat) {
+        if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
+        const bits = std.mem.readInt(u16, image.pixels[offset..][0..2], .little);
+        return applySwizzle(image, .{ @as(f32, @floatCast(@as(f16, @bitCast(bits)))), 0, 0, 1 });
+    }
     if (image.format == .rg16_sfloat) {
         if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
         const r_bits = std.mem.readInt(u16, image.pixels[offset..][0..2], .little);
@@ -508,6 +567,28 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
             0,
             1,
         });
+    }
+    if (image.format == .r32_sfloat) {
+        if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
+        const bits = std.mem.readInt(u32, image.pixels[offset..][0..4], .little);
+        return applySwizzle(image, .{ @bitCast(bits), 0, 0, 1 });
+    }
+    if (image.format == .rg32_sfloat) {
+        if (image.bytes_per_texel < 8 or image.pixels.len - offset < 8) return error.Bounds;
+        const r = std.mem.readInt(u32, image.pixels[offset..][0..4], .little);
+        const g = std.mem.readInt(u32, image.pixels[offset + 4 ..][0..4], .little);
+        return applySwizzle(image, .{ @bitCast(r), @bitCast(g), 0, 1 });
+    }
+    if (image.format == .rgba32_sfloat) {
+        if (image.bytes_per_texel < 16 or image.pixels.len - offset < 16) return error.Bounds;
+        var rgba: [4]f32 = undefined;
+        for (0..4) |lane| rgba[lane] = @bitCast(std.mem.readInt(u32, image.pixels[offset + lane * 4 ..][0..4], .little));
+        return applySwizzle(image, rgba);
+    }
+    if (image.format == .r11g11b10_ufloat) {
+        if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
+        const bits = std.mem.readInt(u32, image.pixels[offset..][0..4], .little);
+        return applySwizzle(image, .{ readUnsignedFloat(bits & 0x7ff, 6), readUnsignedFloat((bits >> 11) & 0x7ff, 6), readUnsignedFloat((bits >> 22) & 0x3ff, 5), 1 });
     }
     if (image.format == .rgba16_sfloat) {
         if (image.bytes_per_texel < 8 or image.pixels.len - offset < 8) return error.Bounds;
@@ -557,21 +638,22 @@ fn imageFetch(image: SampledImage, coordinates: Value, lod: Value) Error!Value {
     for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
     return result;
 }
-fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
-    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
-    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or bias.ty.scalar != .f32 or bias.ty.columns != 1 or bias.ty.rows != 1) return error.InvalidType;
-    const u: f32 = @bitCast(coordinates.bits[0]);
-    const v: f32 = @bitCast(coordinates.bits[1]);
-    const lod_bias: f32 = @bitCast(bias.bits[0]);
-    if (!std.math.isFinite(u) or !std.math.isFinite(v) or !std.math.isFinite(lod_bias)) return error.NumericDomain;
+const SampledColor = struct {
+    value: [4]f32,
+    du: [4]f32 = .{ 0, 0, 0, 0 },
+    dv: [4]f32 = .{ 0, 0, 0, 0 },
+};
+
+fn sampleRgbaAt(image: SampledImage, u: f32, v: f32) Error!SampledColor {
+    if (!std.math.isFinite(u) or !std.math.isFinite(v)) return error.NumericDomain;
     const normalized_u = normalizedCoordinate(u, image.address_u);
     const normalized_v = normalizedCoordinate(v, image.address_v);
-    var rgba = image.border;
+    var sampled = SampledColor{ .value = image.border };
     if (normalized_u) |sample_u| if (normalized_v) |sample_v| {
         const fx = sample_u * @as(f32, @floatFromInt(image.width)) - 0.5;
         const fy = sample_v * @as(f32, @floatFromInt(image.height)) - 0.5;
         if (image.filter == .nearest) {
-            rgba = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+            sampled.value = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
         } else {
             const x0: i32 = @intFromFloat(@floor(fx));
             const y0: i32 = @intFromFloat(@floor(fy));
@@ -581,18 +663,54 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
             const p10 = try texel(image, x0 + 1, y0);
             const p01 = try texel(image, x0, y0 + 1);
             const p11 = try texel(image, x0 + 1, y0 + 1);
-            for (0..4) |lane| rgba[lane] =
-                (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
-                (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+            for (0..4) |lane| {
+                sampled.value[lane] =
+                    (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+                    (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+                sampled.du[lane] = ((p10[lane] - p00[lane]) * (1 - ty) + (p11[lane] - p01[lane]) * ty) * @as(f32, @floatFromInt(image.width));
+                sampled.dv[lane] = ((p01[lane] - p00[lane]) * (1 - tx) + (p11[lane] - p10[lane]) * tx) * @as(f32, @floatFromInt(image.height));
+            }
         }
     };
+    return sampled;
+}
+
+fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
+    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or bias.ty.scalar != .f32 or bias.ty.columns != 1 or bias.ty.rows != 1) return error.InvalidType;
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const lod_bias: f32 = @bitCast(bias.bits[0]);
+    if (!std.math.isFinite(lod_bias)) return error.NumericDomain;
+    const sampled = try sampleRgbaAt(image, u, v);
     var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
-    for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    for (sampled.value, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    if (coordinates.derivatives_valid) {
+        const du_dx: f32 = @bitCast(coordinates.dpdx_bits[0]);
+        const dv_dx: f32 = @bitCast(coordinates.dpdx_bits[1]);
+        const du_dy: f32 = @bitCast(coordinates.dpdy_bits[0]);
+        const dv_dy: f32 = @bitCast(coordinates.dpdy_bits[1]);
+        const neighbor_dx = if (image.filter == .nearest) (try sampleRgbaAt(image, u + du_dx, v + dv_dx)).value else sampled.value;
+        const neighbor_dy = if (image.filter == .nearest) (try sampleRgbaAt(image, u + du_dy, v + dv_dy)).value else sampled.value;
+        result.derivatives_valid = true;
+        for (0..4) |lane| {
+            const dx = if (image.filter == .linear)
+                sampled.du[lane] * du_dx + sampled.dv[lane] * dv_dx
+            else
+                neighbor_dx[lane] - sampled.value[lane];
+            const dy = if (image.filter == .linear)
+                sampled.du[lane] * du_dy + sampled.dv[lane] * dv_dy
+            else
+                neighbor_dy[lane] - sampled.value[lane];
+            result.dpdx_bits[lane] = canonicalFloat(@bitCast(dx));
+            result.dpdy_bits[lane] = canonicalFloat(@bitCast(dy));
+        }
+    }
     if (renderDiagnosticsEnabled() and image.width == 1024 and image.height == 512) {
         const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
         if (sequence < 64) std.debug.print(
             "ZPU IR sample seq={d} uv={d:.4},{d:.4} normalized={any},{any} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
-            .{ sequence, u, v, normalized_u, normalized_v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
+            .{ sequence, u, v, normalizedCoordinate(u, image.address_u), normalizedCoordinate(v, image.address_v), image.width, image.height, sampled.value[0], sampled.value[1], sampled.value[2], sampled.value[3] },
         );
     }
     return result;
@@ -666,7 +784,49 @@ fn cubeUvValue(cube: CubeCoordinate) Value {
 
 fn sampleCube(image: SampledImage, direction: Value, bias: Value) Error!Value {
     const mapped = try cubeDirectionCoordinates(direction);
-    return sample(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), bias);
+    var coordinates = cubeUvValue(mapped);
+    const has_direction_derivatives = derivativeMask(direction) == fullDerivativeMask(3);
+    var crosses_face = [_]bool{ false, false };
+    if (has_direction_derivatives) {
+        coordinates.derivatives_valid = true;
+        for (0..2) |axis| {
+            var shifted_direction = direction;
+            for (0..3) |lane| {
+                const value: f32 = @bitCast(direction.bits[lane]);
+                const delta: f32 = @bitCast(if (axis == 0) direction.dpdx_bits[lane] else direction.dpdy_bits[lane]);
+                shifted_direction.bits[lane] = @bitCast(value + delta);
+            }
+            const shifted = try cubeDirectionCoordinates(shifted_direction);
+            if (shifted.face != mapped.face) {
+                crosses_face[axis] = true;
+                continue;
+            }
+            const dx = if (axis == 0) &coordinates.dpdx_bits else &coordinates.dpdy_bits;
+            dx[0] = canonicalFloat(@bitCast(shifted.uv[0] - mapped.uv[0]));
+            dx[1] = canonicalFloat(@bitCast(shifted.uv[1] - mapped.uv[1]));
+        }
+    }
+    var result = try sample(try cubeFaceImage(image, mapped.face), coordinates, bias);
+    if (has_direction_derivatives) {
+        for (0..2) |axis| if (crosses_face[axis]) {
+            var shifted_direction = direction;
+            for (0..3) |lane| {
+                const value: f32 = @bitCast(direction.bits[lane]);
+                const delta: f32 = @bitCast(if (axis == 0) direction.dpdx_bits[lane] else direction.dpdy_bits[lane]);
+                shifted_direction.bits[lane] = @bitCast(value + delta);
+            }
+            const shifted = try cubeDirectionCoordinates(shifted_direction);
+            const shifted_color = try sample(try cubeFaceImage(image, shifted.face), cubeUvValue(shifted), bias);
+            result.derivatives_valid = true;
+            const derivative = if (axis == 0) &result.dpdx_bits else &result.dpdy_bits;
+            for (0..result.lanes()) |lane| {
+                const neighbor: f32 = @bitCast(shifted_color.bits[lane]);
+                const center: f32 = @bitCast(result.bits[lane]);
+                derivative[lane] = canonicalFloat(@bitCast(neighbor - center));
+            }
+        };
+    }
+    return result;
 }
 
 fn sampleCubeExplicitLod(image: SampledImage, direction: Value, lod: Value, sampler: Sampler) Error!Value {
@@ -827,6 +987,34 @@ test "cube sampling maps Vulkan face directions to six array layers" {
     try std.testing.expectError(error.NumericDomain, cubeDirectionCoordinates(zero));
 }
 
+test "cube sampling carries direction derivatives into face coordinates" {
+    var pixels = [_]u8{0} ** 96;
+    for ([_]u8{ 10, 110, 30, 130 }, 0..) |red, texel_index| {
+        const offset = texel_index * 4;
+        pixels[offset] = red;
+        pixels[offset + 3] = 255;
+    }
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .format = .rgba8_unorm,
+        .filter = .linear,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .cube = true,
+        .cube_face_stride = 16,
+    };
+    var direction = Value{ .ty = .{ .scalar = .f32, .columns = 3 }, .derivatives_valid = true };
+    direction.bits[0] = @bitCast(@as(f32, 1));
+    direction.dpdx_bits[2] = @bitCast(@as(f32, -0.5));
+    const sampled = try sampleCube(image, direction, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expect(sampled.derivatives_valid);
+    try std.testing.expectApproxEqAbs(@as(f32, 50.0 / 255.0), @as(f32, @bitCast(sampled.dpdx_bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(sampled.dpdy_bits[0])), 0.00001);
+}
+
 test "sample decodes packed R8 coverage as red with opaque alpha" {
     const pixels = [_]u8{ 0, 64, 128, 255 };
     const image = SampledImage{
@@ -852,6 +1040,38 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
 }
 
+test "sample computes screen-space derivatives for filtered texture results" {
+    const pixels = [_]u8{
+        10, 20, 30, 40, 110, 120, 130, 140,
+        30, 40, 50, 60, 130, 140, 150, 160,
+    };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .format = .rgba8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 }, .derivatives_valid = true };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.25));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.25));
+    coordinates.dpdx_bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.dpdy_bits[1] = @bitCast(@as(f32, 0.5));
+    const sampled = try sample(image, coordinates, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expect(sampled.derivatives_valid);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0 / 255.0), @as(f32, @bitCast(sampled.bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0 / 255.0), @as(f32, @bitCast(sampled.dpdx_bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0 / 255.0), @as(f32, @bitCast(sampled.dpdy_bits[0])), 0.00001);
+    var linear_image = image;
+    linear_image.filter = .linear;
+    const linear_sample = try sample(linear_image, coordinates, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0 / 255.0), @as(f32, @bitCast(linear_sample.dpdx_bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0 / 255.0), @as(f32, @bitCast(linear_sample.dpdy_bits[0])), 0.00001);
+}
+
 test "sample decodes RG16F channels with zero blue and opaque alpha" {
     var pixels = [_]u8{0} ** 4;
     std.mem.writeInt(u16, pixels[0..2], @bitCast(@as(f16, 0.5)), .little);
@@ -875,6 +1095,38 @@ test "sample decodes RG16F channels with zero blue and opaque alpha" {
     try std.testing.expectEqual(@as(f32, 2), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample decodes native scalar float color formats" {
+    var r16_bytes = [_]u8{0} ** 2;
+    std.mem.writeInt(u16, &r16_bytes, @bitCast(@as(f16, 0.5)), .little);
+    const r16 = try texel(.{ .pixels = &r16_bytes, .width = 1, .height = 1, .row_stride = 2, .bytes_per_texel = 2, .format = .r16_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ 0.5, 0, 0, 1 }, r16);
+
+    var r32_bytes = [_]u8{0} ** 4;
+    std.mem.writeInt(u32, &r32_bytes, @bitCast(@as(f32, -0.25)), .little);
+    const r32 = try texel(.{ .pixels = &r32_bytes, .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = .r32_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ -0.25, 0, 0, 1 }, r32);
+
+    var rg32_bytes = [_]u8{0} ** 8;
+    std.mem.writeInt(u32, rg32_bytes[0..4], @bitCast(@as(f32, 0.25)), .little);
+    std.mem.writeInt(u32, rg32_bytes[4..8], @bitCast(@as(f32, 1.5)), .little);
+    const rg32 = try texel(.{ .pixels = &rg32_bytes, .width = 1, .height = 1, .row_stride = 8, .bytes_per_texel = 8, .format = .rg32_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ 0.25, 1.5, 0, 1 }, rg32);
+
+    var rgba32_bytes = [_]u8{0} ** 16;
+    for ([_]f32{ 0.125, -2, 3, 0.75 }, 0..) |component, lane| std.mem.writeInt(u32, rgba32_bytes[lane * 4 ..][0..4], @bitCast(component), .little);
+    const rgba32 = try texel(.{ .pixels = &rgba32_bytes, .width = 1, .height = 1, .row_stride = 16, .bytes_per_texel = 16, .format = .rgba32_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ 0.125, -2, 3, 0.75 }, rgba32);
+
+    var packed_bytes = [_]u8{0} ** 4;
+    const packed_bits = (@as(u32, 13) << 6) | (@as(u32, 14) << 17) | (@as(u32, 14) << 27) | (@as(u32, 16) << 22);
+    std.mem.writeInt(u32, &packed_bytes, packed_bits, .little);
+    const packed_rgb = try texel(.{ .pixels = &packed_bytes, .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = .r11g11b10_ufloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), packed_rgb[0], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), packed_rgb[1], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), packed_rgb[2], 0.0001);
+    try std.testing.expectEqual(@as(f32, 1), packed_rgb[3]);
 }
 
 test "sample decodes Chromium packed RG8 chroma inputs" {
@@ -3549,7 +3801,7 @@ pub const Executor = struct {
                             result.dpdx_bits[component] = source.dpdx_bits[lane + component];
                             result.dpdy_bits[component] = source.dpdy_bits[lane + component];
                         }
-                        result.derivatives_valid = source.derivatives_valid;
+                        setDerivativeMask(&result, derivativeMask(source) >> @intCast(lane));
                     }
                 },
                 .local_store => {
@@ -3568,7 +3820,9 @@ pub const Executor = struct {
                             target.dpdx_bits[lane + component] = source.dpdx_bits[component];
                             target.dpdy_bits[lane + component] = source.dpdy_bits[component];
                         }
-                        target.derivatives_valid = target.derivatives_valid and source.derivatives_valid;
+                        const target_range = fullDerivativeMask(source.lanes()) << @intCast(lane);
+                        const updated_mask = (derivativeMask(target.*) & ~target_range) | ((derivativeMask(source) << @intCast(lane)) & target_range);
+                        setDerivativeMask(target, updated_mask);
                     }
                 },
                 .label => current_label = std.mem.readInt(u32, instruction.literal[0..4], .little),
@@ -3598,10 +3852,10 @@ pub const Executor = struct {
                 },
                 .constant_composite, .composite => {
                     var at: usize = 0;
-                    result.derivatives_valid = true;
+                    var result_mask: u16 = 0;
                     for (instruction.operands) |operand| {
                         const part = try valueRef(self.values, pc, operand);
-                        result.derivatives_valid = result.derivatives_valid and part.derivatives_valid;
+                        result_mask |= derivativeMask(part) << @intCast(at);
                         for (0..part.lanes()) |lane| {
                             result.bits[at] = part.bits[lane];
                             result.dpdx_bits[at] = part.dpdx_bits[lane];
@@ -3609,6 +3863,7 @@ pub const Executor = struct {
                             at += 1;
                         }
                     }
+                    setDerivativeMask(&result, result_mask);
                 },
                 .input => result = try readInputValue(instruction.ty, try findBindingRecord(bindings, instruction.operands[0])),
                 .uniform => {
@@ -3748,13 +4003,14 @@ pub const Executor = struct {
                             result.bits[0] = source.bits[selector];
                             result.dpdx_bits[0] = source.dpdx_bits[selector];
                             result.dpdy_bits[0] = source.dpdy_bits[selector];
-                            result.derivatives_valid = source.derivatives_valid;
+                            setDerivativeMask(&result, (derivativeMask(source) >> @intCast(selector)) & 1);
                         } else {
                             if (selector >= source.ty.columns or instruction.ty.rows != 1 or instruction.ty.columns != source.ty.rows or instruction.ty.scalar != source.ty.scalar) return error.Bounds;
                             @memcpy(result.bits[0..source.ty.rows], source.bits[selector * source.ty.rows ..][0..source.ty.rows]);
                             @memcpy(result.dpdx_bits[0..source.ty.rows], source.dpdx_bits[selector * source.ty.rows ..][0..source.ty.rows]);
                             @memcpy(result.dpdy_bits[0..source.ty.rows], source.dpdy_bits[selector * source.ty.rows ..][0..source.ty.rows]);
-                            result.derivatives_valid = source.derivatives_valid;
+                            const lane = selector * source.ty.rows;
+                            setDerivativeMask(&result, (derivativeMask(source) >> @intCast(lane)) & fullDerivativeMask(source.ty.rows));
                         }
                     }
                 },
@@ -3769,7 +4025,7 @@ pub const Executor = struct {
                     result.bits[0] = source.bits[index];
                     result.dpdx_bits[0] = source.dpdx_bits[index];
                     result.dpdy_bits[0] = source.dpdy_bits[index];
-                    result.derivatives_valid = source.derivatives_valid;
+                    setDerivativeMask(&result, (derivativeMask(source) >> @intCast(index)) & 1);
                 },
                 .vector_insert_dynamic => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
@@ -3781,7 +4037,9 @@ pub const Executor = struct {
                     result.bits[index] = component.bits[0];
                     result.dpdx_bits[index] = component.dpdx_bits[0];
                     result.dpdy_bits[index] = component.dpdy_bits[0];
-                    result.derivatives_valid = source.derivatives_valid and component.derivatives_valid;
+                    const lane_mask = @as(u16, 1) << @intCast(index);
+                    const updated_mask = (derivativeMask(source) & ~lane_mask) | ((derivativeMask(component) & 1) << @intCast(index));
+                    setDerivativeMask(&result, updated_mask);
                 },
                 .composite_insert => {
                     const object = try valueRef(self.values, pc, instruction.operands[0]);
@@ -3792,22 +4050,30 @@ pub const Executor = struct {
                     result.bits[index] = object.bits[0];
                     result.dpdx_bits[index] = object.dpdx_bits[0];
                     result.dpdy_bits[index] = object.dpdy_bits[0];
-                    result.derivatives_valid = composite.derivatives_valid and object.derivatives_valid;
+                    const lane_mask = @as(u16, 1) << @intCast(index);
+                    const updated_mask = (derivativeMask(composite) & ~lane_mask) | ((derivativeMask(object) & 1) << @intCast(index));
+                    setDerivativeMask(&result, updated_mask);
                 },
                 .shuffle => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
-                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
+                    var result_mask: u16 = 0;
                     for (instruction.operands[2..], 0..) |selector, i| {
                         if (selector >= a.lanes() + b.lanes()) return error.Bounds;
                         result.bits[i] = if (selector < a.lanes()) a.bits[selector] else b.bits[selector - a.lanes()];
                         result.dpdx_bits[i] = if (selector < a.lanes()) a.dpdx_bits[selector] else b.dpdx_bits[selector - a.lanes()];
                         result.dpdy_bits[i] = if (selector < a.lanes()) a.dpdy_bits[selector] else b.dpdy_bits[selector - a.lanes()];
+                        const valid = if (selector < a.lanes())
+                            ((derivativeMask(a) >> @intCast(selector)) & 1) != 0
+                        else
+                            ((derivativeMask(b) >> @intCast(selector - a.lanes())) & 1) != 0;
+                        if (valid) result_mask |= @as(u16, 1) << @intCast(i);
                     }
+                    setDerivativeMask(&result, result_mask);
                 },
                 .fneg, .ineg, .bit_not, .logical_not => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    result.derivatives_valid = instruction.op == .fneg and a.derivatives_valid;
+                    if (instruction.op == .fneg) setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         result.bits[i] = switch (instruction.op) {
                             .fneg => canonicalFloat(a.bits[i] ^ 0x80000000),
@@ -3824,6 +4090,7 @@ pub const Executor = struct {
                 },
                 .f_abs, .i_abs, .f_sign, .i_sign => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    if (instruction.op == .f_abs or instruction.op == .f_sign) setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         if (instruction.op == .f_abs or instruction.op == .f_sign) {
                             const x: f32 = @bitCast(a.bits[i]);
@@ -3840,6 +4107,14 @@ pub const Executor = struct {
                             } else {
                                 // Preserve the sign of zero exactly.
                                 result.bits[i] = a.bits[i] & 0x80000000;
+                            }
+                            if (instruction.op == .f_abs or instruction.op == .f_sign) {
+                                const factor: f32 = if (instruction.op == .f_abs)
+                                    (if (x < 0) -1 else if (x > 0) 1 else 0)
+                                else
+                                    0;
+                                result.dpdx_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdx_bits[i]))));
+                                result.dpdy_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdy_bits[i]))));
                             }
                         } else {
                             const x: i32 = @bitCast(a.bits[i]);
@@ -3887,6 +4162,30 @@ pub const Executor = struct {
                             result.bits[i] = canonicalFloat(@bitCast(x / length));
                         }
                     }
+                    if (vector.derivatives_valid and length != 0) {
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..vector.lanes()) |i| {
+                            const x: f32 = @bitCast(vector.bits[i]);
+                            sum_dx += x * @as(f32, @bitCast(vector.dpdx_bits[i]));
+                            sum_dy += x * @as(f32, @bitCast(vector.dpdy_bits[i]));
+                        }
+                        const length_dx = sum_dx / length;
+                        const length_dy = sum_dy / length;
+                        result.derivatives_valid = true;
+                        if (instruction.op == .f_length) {
+                            result.dpdx_bits[0] = canonicalFloat(@bitCast(length_dx));
+                            result.dpdy_bits[0] = canonicalFloat(@bitCast(length_dy));
+                        } else {
+                            for (0..vector.lanes()) |i| {
+                                const x: f32 = @bitCast(vector.bits[i]);
+                                const dx: f32 = @bitCast(vector.dpdx_bits[i]);
+                                const dy: f32 = @bitCast(vector.dpdy_bits[i]);
+                                result.dpdx_bits[i] = canonicalFloat(@bitCast((dx * length - x * length_dx) / (length * length)));
+                                result.dpdy_bits[i] = canonicalFloat(@bitCast((dy * length - x * length_dy) / (length * length)));
+                            }
+                        }
+                    }
                 },
                 .f_distance => {
                     const left = try valueRef(self.values, pc, instruction.operands[0]);
@@ -3910,6 +4209,22 @@ pub const Executor = struct {
                     result.bits[0] = canonicalFloat(@bitCast(ay * bz - az * by));
                     result.bits[1] = canonicalFloat(@bitCast(az * bx - ax * bz));
                     result.bits[2] = canonicalFloat(@bitCast(ax * by - ay * bx));
+                    result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
+                    if (result.derivatives_valid) for (0..2) |axis| {
+                        const adx: f32 = @bitCast(if (axis == 0) left.dpdx_bits[0] else left.dpdy_bits[0]);
+                        const ady: f32 = @bitCast(if (axis == 0) left.dpdx_bits[1] else left.dpdy_bits[1]);
+                        const adz: f32 = @bitCast(if (axis == 0) left.dpdx_bits[2] else left.dpdy_bits[2]);
+                        const bdx: f32 = @bitCast(if (axis == 0) right.dpdx_bits[0] else right.dpdy_bits[0]);
+                        const bdy: f32 = @bitCast(if (axis == 0) right.dpdx_bits[1] else right.dpdy_bits[1]);
+                        const bdz: f32 = @bitCast(if (axis == 0) right.dpdx_bits[2] else right.dpdy_bits[2]);
+                        const dx = ady * bz + ay * bdz - adz * by - az * bdy;
+                        const dy = adz * bx + az * bdx - adx * bz - ax * bdz;
+                        const dz = adx * by + ax * bdy - ady * bx - ay * bdx;
+                        const dx_index = if (axis == 0) &result.dpdx_bits else &result.dpdy_bits;
+                        dx_index[0] = canonicalFloat(@bitCast(dx));
+                        dx_index[1] = canonicalFloat(@bitCast(dy));
+                        dx_index[2] = canonicalFloat(@bitCast(dz));
+                    };
                 },
                 .f_face_forward => {
                     const normal = try valueRef(self.values, pc, instruction.operands[0]);
@@ -3953,6 +4268,7 @@ pub const Executor = struct {
                 },
                 .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const value = if (instruction.op == .f_trunc)
@@ -4013,6 +4329,11 @@ pub const Executor = struct {
                             break :blk if (fraction < 0.5) lower else if (fraction > 0.5) lower + 1.0 else if (@mod(lower, 2.0) == 0.0) lower else lower + 1.0;
                         };
                         result.bits[i] = canonicalFloat(@bitCast(value));
+                        if (((derivativeMask(a) >> @intCast(i)) & 1) != 0) {
+                            const factor = floatUnaryDerivative(instruction.op, x, value);
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdx_bits[i]))));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdy_bits[i]))));
+                        }
                     }
                 },
                 .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set => {
@@ -4479,7 +4800,7 @@ pub const Executor = struct {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
                     const c = try valueRef(self.values, pc, instruction.operands[2]);
-                    result.derivatives_valid = instruction.op == .fma and a.derivatives_valid and b.derivatives_valid and c.derivatives_valid;
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid and c.derivatives_valid;
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const y: f32 = @bitCast(b.bits[i]);
@@ -4490,12 +4811,18 @@ pub const Executor = struct {
                             x * (1.0 - z) + y * z;
                         result.bits[i] = canonicalFloat(@bitCast(value));
                         if (result.derivatives_valid) {
-                            const dx = @as(f32, @bitCast(a.dpdx_bits[i])) * y +
-                                x * @as(f32, @bitCast(b.dpdx_bits[i])) +
-                                @as(f32, @bitCast(c.dpdx_bits[i]));
-                            const dy = @as(f32, @bitCast(a.dpdy_bits[i])) * y +
-                                x * @as(f32, @bitCast(b.dpdy_bits[i])) +
-                                @as(f32, @bitCast(c.dpdy_bits[i]));
+                            const dx = if (instruction.op == .fma)
+                                @as(f32, @bitCast(a.dpdx_bits[i])) * y + x * @as(f32, @bitCast(b.dpdx_bits[i])) + @as(f32, @bitCast(c.dpdx_bits[i]))
+                            else
+                                @as(f32, @bitCast(a.dpdx_bits[i])) * (1.0 - z) +
+                                    @as(f32, @bitCast(b.dpdx_bits[i])) * z +
+                                    (y - x) * @as(f32, @bitCast(c.dpdx_bits[i]));
+                            const dy = if (instruction.op == .fma)
+                                @as(f32, @bitCast(a.dpdy_bits[i])) * y + x * @as(f32, @bitCast(b.dpdy_bits[i])) + @as(f32, @bitCast(c.dpdy_bits[i]))
+                            else
+                                @as(f32, @bitCast(a.dpdy_bits[i])) * (1.0 - z) +
+                                    @as(f32, @bitCast(b.dpdy_bits[i])) * z +
+                                    (y - x) * @as(f32, @bitCast(c.dpdy_bits[i]));
                             result.dpdx_bits[i] = canonicalFloat(@bitCast(dx));
                             result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
                         }
@@ -4542,40 +4869,109 @@ pub const Executor = struct {
                 },
                 .vector_times_scalar => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[1])).bits[0]);
-                    for (0..result.lanes()) |i| result.bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(a.bits[i])) * b));
+                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const scalar: f32 = @bitCast(b.bits[0]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
+                    for (0..result.lanes()) |i| {
+                        const value: f32 = @bitCast(a.bits[i]);
+                        result.bits[i] = canonicalFloat(@bitCast(value * scalar));
+                        if (result.derivatives_valid) {
+                            const dx = @as(f32, @bitCast(a.dpdx_bits[i])) * scalar + value * @as(f32, @bitCast(b.dpdx_bits[0]));
+                            const dy = @as(f32, @bitCast(a.dpdy_bits[i])) * scalar + value * @as(f32, @bitCast(b.dpdy_bits[0]));
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(dx));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
+                        }
+                    }
                 },
                 .matrix_times_vector => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
                     const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
                     for (0..a.ty.rows) |row| {
                         var sum: f32 = 0;
-                        for (0..a.ty.columns) |col| sum += @as(f32, @bitCast(a.bits[col * a.ty.rows + row])) * @as(f32, @bitCast(b.bits[col]));
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..a.ty.columns) |col| {
+                            const a_index = col * a.ty.rows + row;
+                            const av: f32 = @bitCast(a.bits[a_index]);
+                            const bv: f32 = @bitCast(b.bits[col]);
+                            sum += av * bv;
+                            if (result.derivatives_valid) {
+                                sum_dx += @as(f32, @bitCast(a.dpdx_bits[a_index])) * bv + av * @as(f32, @bitCast(b.dpdx_bits[col]));
+                                sum_dy += @as(f32, @bitCast(a.dpdy_bits[a_index])) * bv + av * @as(f32, @bitCast(b.dpdy_bits[col]));
+                            }
+                        }
                         result.bits[row] = canonicalFloat(@bitCast(sum));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[row] = canonicalFloat(@bitCast(sum_dx));
+                            result.dpdy_bits[row] = canonicalFloat(@bitCast(sum_dy));
+                        }
                     }
                 },
                 .matrix_times_scalar => {
                     const matrix = try valueRef(self.values, pc, instruction.operands[0]);
-                    const scalar: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[1])).bits[0]);
-                    for (0..16) |i| result.bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.bits[i])) * scalar));
+                    const scalar = try valueRef(self.values, pc, instruction.operands[1]);
+                    const factor: f32 = @bitCast(scalar.bits[0]);
+                    result.derivatives_valid = matrix.derivatives_valid and scalar.derivatives_valid;
+                    for (0..result.lanes()) |i| {
+                        const value: f32 = @bitCast(matrix.bits[i]);
+                        result.bits[i] = canonicalFloat(@bitCast(value * factor));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.dpdx_bits[i])) * factor + value * @as(f32, @bitCast(scalar.dpdx_bits[0]))));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.dpdy_bits[i])) * factor + value * @as(f32, @bitCast(scalar.dpdy_bits[0]))));
+                        }
+                    }
                 },
                 .vector_times_matrix => {
                     const vector = try valueRef(self.values, pc, instruction.operands[0]);
                     const matrix = try valueRef(self.values, pc, instruction.operands[1]);
                     const width: usize = matrix.ty.columns;
+                    result.derivatives_valid = vector.derivatives_valid and matrix.derivatives_valid;
                     for (0..width) |col| {
                         var sum: f32 = 0;
-                        for (0..width) |row| sum += @as(f32, @bitCast(vector.bits[row])) * @as(f32, @bitCast(matrix.bits[col * width + row]));
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..width) |row| {
+                            const vector_value: f32 = @bitCast(vector.bits[row]);
+                            const matrix_index = col * width + row;
+                            const matrix_value: f32 = @bitCast(matrix.bits[matrix_index]);
+                            sum += vector_value * matrix_value;
+                            if (result.derivatives_valid) {
+                                sum_dx += @as(f32, @bitCast(vector.dpdx_bits[row])) * matrix_value + vector_value * @as(f32, @bitCast(matrix.dpdx_bits[matrix_index]));
+                                sum_dy += @as(f32, @bitCast(vector.dpdy_bits[row])) * matrix_value + vector_value * @as(f32, @bitCast(matrix.dpdy_bits[matrix_index]));
+                            }
+                        }
                         result.bits[col] = canonicalFloat(@bitCast(sum));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[col] = canonicalFloat(@bitCast(sum_dx));
+                            result.dpdy_bits[col] = canonicalFloat(@bitCast(sum_dy));
+                        }
                     }
                 },
                 .matrix_times_matrix => {
                     const left = try valueRef(self.values, pc, instruction.operands[0]);
                     const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
                     for (0..instruction.ty.columns) |col| for (0..instruction.ty.rows) |row| {
                         var sum: f32 = 0;
-                        for (0..left.ty.columns) |k| sum += @as(f32, @bitCast(left.bits[k * left.ty.rows + row])) * @as(f32, @bitCast(right.bits[col * right.ty.rows + k]));
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..left.ty.columns) |k| {
+                            const left_index = k * left.ty.rows + row;
+                            const right_index = col * right.ty.rows + k;
+                            const a: f32 = @bitCast(left.bits[left_index]);
+                            const b: f32 = @bitCast(right.bits[right_index]);
+                            sum += a * b;
+                            if (result.derivatives_valid) {
+                                sum_dx += @as(f32, @bitCast(left.dpdx_bits[left_index])) * b + a * @as(f32, @bitCast(right.dpdx_bits[right_index]));
+                                sum_dy += @as(f32, @bitCast(left.dpdy_bits[left_index])) * b + a * @as(f32, @bitCast(right.dpdy_bits[right_index]));
+                            }
+                        }
                         result.bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum_dx));
+                            result.dpdy_bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum_dy));
+                        }
                     };
                 },
                 .transpose => {
@@ -4596,8 +4992,23 @@ pub const Executor = struct {
                     const left = try valueRef(self.values, pc, instruction.operands[0]);
                     const right = try valueRef(self.values, pc, instruction.operands[1]);
                     var sum: f32 = 0;
-                    for (0..left.lanes()) |i| sum += @as(f32, @bitCast(left.bits[i])) * @as(f32, @bitCast(right.bits[i]));
+                    var sum_dx: f32 = 0;
+                    var sum_dy: f32 = 0;
+                    result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
+                    for (0..left.lanes()) |i| {
+                        const a: f32 = @bitCast(left.bits[i]);
+                        const b: f32 = @bitCast(right.bits[i]);
+                        sum += a * b;
+                        if (result.derivatives_valid) {
+                            sum_dx += @as(f32, @bitCast(left.dpdx_bits[i])) * b + a * @as(f32, @bitCast(right.dpdx_bits[i]));
+                            sum_dy += @as(f32, @bitCast(left.dpdy_bits[i])) * b + a * @as(f32, @bitCast(right.dpdy_bits[i]));
+                        }
+                    }
                     result.bits[0] = canonicalFloat(@bitCast(sum));
+                    if (result.derivatives_valid) {
+                        result.dpdx_bits[0] = canonicalFloat(@bitCast(sum_dx));
+                        result.dpdy_bits[0] = canonicalFloat(@bitCast(sum_dy));
+                    }
                 },
                 .convert => {
                     const a = try valueRef(self.values, pc, instruction.operands[0]);
@@ -6077,6 +6488,76 @@ test "fragment derivatives propagate through floating arithmetic" {
     try std.testing.expectEqual(@as(f32, 10), @as(f32, @bitCast(executor.values[4].bits[0])));
     try std.testing.expectEqual(@as(f32, 30), @as(f32, @bitCast(executor.values[4].bits[1])));
     try std.testing.expectError(error.MissingInput, executor.execute(&.{.{ .interface = 0, .bytes = std.mem.sliceAsBytes(&input) }}, &.{}));
+}
+
+test "fragment derivatives propagate through implicit texture sampling" {
+    const vec2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const vec4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const scalar = ir.Type{ .scalar = .f32 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = vec2, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
+    };
+    const zero = f32bytes(0);
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = vec2, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .constant, .ty = scalar, .operands = &.{}, .literal = &zero },
+        .{ .op = .image_sample_implicit_lod, .ty = vec4, .operands = &.{ 2, 0, 1 }, .literal = &.{} },
+        .{ .op = .dpdx, .ty = vec4, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .output, .ty = vec4, .operands = &.{ 1, 3 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+
+    const input = [_]f32{ 0.25, 0.25 };
+    const input_dx = [_]f32{ 0.5, 0 };
+    const input_dy = [_]f32{ 0, 0.5 };
+    const pixels = [_]u8{
+        10, 20, 30, 40, 110, 120, 130, 140,
+        30, 40, 50, 60, 130, 140, 150, 160,
+    };
+    const image = SampledImage{ .pixels = &pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var output: [16]u8 = undefined;
+    try executor.execute(&.{
+        .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&input), .dpdx_bytes = std.mem.sliceAsBytes(&input_dx), .dpdy_bytes = std.mem.sliceAsBytes(&input_dy) },
+        .{ .interface = 2, .sampled_image = image },
+    }, &.{.{ .interface = 1, .bytes = &output }});
+    for (0..4) |lane| try std.testing.expectApproxEqAbs(
+        @as(f32, 100.0 / 255.0),
+        @as(f32, @bitCast(std.mem.readInt(u32, output[lane * 4 ..][0..4], .little))),
+        0.00001,
+    );
+}
+
+test "fragment derivatives propagate through vector normalization" {
+    const vec3 = ir.Type{ .scalar = .f32, .columns = 3 };
+    var interfaces = [_]ir.Interface{.{ .storage = .input, .ty = vec3, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = vec3, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .f_normalize, .ty = vec3, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .dpdx, .ty = vec3, .operands = &.{1}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    const input = [_]f32{ 3, 0, 4 };
+    const input_dx = [_]f32{ 1, 0, 2 };
+    const input_dy = [_]f32{ 0, 1, 0 };
+    try executor.execute(&.{.{
+        .interface = 0,
+        .bytes = std.mem.sliceAsBytes(&input),
+        .dpdx_bytes = std.mem.sliceAsBytes(&input_dx),
+        .dpdy_bytes = std.mem.sliceAsBytes(&input_dy),
+    }}, &.{});
+    try std.testing.expectApproxEqAbs(@as(f32, -0.064), @as(f32, @bitCast(executor.values[2].bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(executor.values[2].bits[1])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.048), @as(f32, @bitCast(executor.values[2].bits[2])), 0.00001);
 }
 
 test "GLSL round round-even and trunc preserve bounded f32 lanes" {
