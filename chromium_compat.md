@@ -295,10 +295,11 @@ a 60 Hz rAF loop without those checks is not evidence of ZPU WebGL support.
 
 The prior live probe reached ANGLE on ZPU but failed before WebGL context
 creation because D24/S8 and multisample attachment semantics were missing.
-This change adds D24/S8 image queries, packed depth storage, independent aspect
-clears, and raster depth conversion. The probe has not been rerun against a live
-SmolVM/Chromium guest in this workspace. Multisample attachment semantics and
-general stencil test/operation execution remain missing. ZPU's drawable
+The current format profile adds D24/S8 plus standalone X8_D24 and S8 image
+queries, format-correct aspect clears, and raster depth conversion for D24 and
+X8_D24. The expanded profile has not yet been rerun against a live
+SmolVM/Chromium guest. Multisample attachment semantics and general stencil
+test/operation execution remain missing. ZPU's drawable
 graphics profile also accepts only the fixed `cpu_cube_v1` shaders, so
 arbitrary ANGLE-generated SPIR-V still fails closed. A passing Tier B gate
 requires the real demo suite to create and render WebGL contexts, plus an
