@@ -1254,6 +1254,7 @@ const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_im
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const max_profile_sampled_bindings = 8;
+const DescriptorUniformBinding = struct { buffer: ?*BufferObj = null, offset: u64 = 0, range: u64 = 0, dynamic: bool = false };
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
 const DescriptorSetObj = struct {
@@ -1262,6 +1263,7 @@ const DescriptorSetObj = struct {
     counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count,
     layout: Canonical = .{},
     binding_types: [max_profile_sampled_bindings]i32 = [_]i32{-1} ** max_profile_sampled_bindings,
+    uniform_bindings: [max_profile_sampled_bindings]DescriptorUniformBinding = [_]DescriptorUniformBinding{.{}} ** max_profile_sampled_bindings,
     uniform: ?*BufferObj = null,
     uniform_offset: u64 = 0,
     uniform_range: u64 = 0,
@@ -1288,6 +1290,25 @@ const DescriptorSetObj = struct {
     active_users: std.atomic.Value(u32) = .init(0),
     retire_pending: bool = false,
 };
+
+fn descriptorUniformBinding(set: *const DescriptorSetObj, binding: u32) ?DescriptorUniformBinding {
+    if (binding >= set.uniform_bindings.len) return null;
+    const stored = set.uniform_bindings[binding];
+    if (stored.buffer != null) return stored;
+    if (binding == 0 and set.uniform != null)
+        return .{ .buffer = set.uniform, .offset = set.uniform_offset, .range = set.uniform_range, .dynamic = set.uniform_dynamic };
+    return null;
+}
+
+fn descriptorUniformBytes(set: *const DescriptorSetObj, binding: u32) ?[]const u8 {
+    const descriptor = descriptorUniformBinding(set, binding) orelse return null;
+    const buffer = descriptor.buffer orelse return null;
+    const bytes = bufferBytes(buffer);
+    const offset = std.math.cast(usize, descriptor.offset) orelse return null;
+    const range = std.math.cast(usize, descriptor.range) orelse return null;
+    if (range == 0 or offset > bytes.len or range > bytes.len - offset) return null;
+    return bytes[offset..][0..range];
+}
 const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 }, ycbcr: ?YcbcrConversion = null };
 const DescriptorInputAttachment = struct { image: ?*ImageObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
@@ -5410,6 +5431,7 @@ fn releasePinnedPipelineLayoutsLocked(pinned: *PinnedPipelineLayouts) void {
 fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     if (!set.retire_pending or set.active_users.load(.acquire) != 0) return;
     set.layout.deinit();
+    set.uniform_bindings = [_]DescriptorUniformBinding{.{}} ** max_profile_sampled_bindings;
     set.uniform = null;
     set.storage = null;
     set.texture = null;
@@ -5601,7 +5623,12 @@ fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, 
     if (set.source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
     if (set.sampled_source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
     if (set.layout_source) |layout| if (!pinPipelineLayoutLocked(layout, owner, pinned_layouts)) return false;
-    if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+    var pinned_uniform_zero = false;
+    for (set.uniform_bindings, 0..) |binding, index| if (binding.buffer) |buffer| {
+        if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+        if (index == 0) pinned_uniform_zero = true;
+    };
+    if (!pinned_uniform_zero) if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.texture) |image| if (!pinImageLocked(image, owner, pinned)) return false;
     for (set.sampled_images) |sampled| if (sampled.image) |image| {
@@ -9528,16 +9555,26 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
 }
 
 fn prevalidateProfileUniforms(op: anytype, owner: *DeviceObj) bool {
-    const needs_uniform = switch (op.pipeline.execution_abi) {
-        .profile_v1_scalar_graphics => |profile| profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0,
-        else => false,
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return true,
     };
-    if (!needs_uniform) return true;
-    const uniform = op.descriptors.uniform orelse return deadResource();
-    if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
-    if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
-    if (!bufferStorageValid(uniform)) return false;
-    if (op.descriptors.uniform_offset > uniform.size or op.descriptors.uniform_range == 0 or op.descriptors.uniform_range > uniform.size - op.descriptors.uniform_offset) return false;
+    for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
+        const interface = profile.vertex.program.interfaces[uniform.interface];
+        const descriptor = descriptorUniformBinding(op.descriptors, interface.binding orelse return false) orelse return deadResource();
+        const buffer = descriptor.buffer orelse return deadResource();
+        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        if (!bufferStorageValid(buffer) or descriptor.offset > buffer.size or descriptor.range == 0 or descriptor.range > buffer.size - descriptor.offset) return false;
+    }
+    for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+        const interface = profile.fragment.program.interfaces[uniform.interface];
+        const descriptor = descriptorUniformBinding(op.descriptors, interface.binding orelse return false) orelse return deadResource();
+        const buffer = descriptor.buffer orelse return deadResource();
+        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        if (!bufferStorageValid(buffer) or descriptor.offset > buffer.size or descriptor.range == 0 or descriptor.range > buffer.size - descriptor.offset) return false;
+    }
     return true;
 }
 
@@ -11226,21 +11263,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var fragment_uniform_bindings: [5]render_ir_exec.Binding = undefined;
     var vertex_uniform_count: usize = 0;
     var fragment_uniform_count: usize = 0;
-    var uniform_bytes: []const u8 = &.{};
-    if (profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0) {
-        const uniform_buffer = op.descriptors.uniform orelse return;
-        const start = op.descriptors.uniform_offset;
-        const range = op.descriptors.uniform_range;
-        if (start > uniform_buffer.size or range == 0 or range > uniform_buffer.size - start) return;
-        uniform_bytes = bufferBytes(uniform_buffer)[@intCast(start)..][0..@intCast(range)];
-        for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
-            vertex_uniform_bindings[vertex_uniform_count] = .{ .interface = uniform.interface, .bytes = uniform_bytes };
-            vertex_uniform_count += 1;
-        }
-        for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
-            fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = uniform.interface, .bytes = uniform_bytes };
-            fragment_uniform_count += 1;
-        }
+    for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
+        const interface = profile.vertex.program.interfaces[uniform.interface];
+        const bytes = descriptorUniformBytes(op.descriptors, interface.binding orelse return) orelse return;
+        vertex_uniform_bindings[vertex_uniform_count] = .{ .interface = uniform.interface, .bytes = bytes };
+        vertex_uniform_count += 1;
+    }
+    for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+        const interface = profile.fragment.program.interfaces[uniform.interface];
+        const bytes = descriptorUniformBytes(op.descriptors, interface.binding orelse return) orelse return;
+        fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = uniform.interface, .bytes = bytes };
+        fragment_uniform_count += 1;
     }
     if (profile.vertex_push_constant) |push| {
         if (!pushConstantBytesInitialized(op.push_constants, 0, push.byte_size)) return;
@@ -11335,7 +11368,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (varying.fragment_interface == plan.chroma_coordinate_interface) vp9_chroma_coordinate_varying = index;
         }
         for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
-            if (uniform.interface == plan.uniform_interface) vp9_uniform = uniform_bytes;
+            if (uniform.interface == plan.uniform_interface) {
+                const interface = profile.fragment.program.interfaces[uniform.interface];
+                vp9_uniform = descriptorUniformBytes(op.descriptors, interface.binding orelse return);
+            }
         }
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.luma_image_interface) vp9_luma_image = binding.sampled_image;
@@ -11383,7 +11419,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (varying.fragment_interface == plan.coordinates_interface) radial_gradient_coordinate_varying = index;
         }
         for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
-            if (uniform.interface == plan.uniform_interface) radial_gradient_uniform = uniform_bytes;
+            if (uniform.interface == plan.uniform_interface) {
+                const interface = profile.fragment.program.interfaces[uniform.interface];
+                radial_gradient_uniform = descriptorUniformBytes(op.descriptors, interface.binding orelse return);
+            }
         }
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.image_interface) radial_gradient_image = binding.sampled_image;
@@ -14820,11 +14859,26 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
     fragment.interfaces[1].member_count = 1;
     try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces = fragment_interfaces[0..1];
-    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces = &fragment_interfaces;
     var vertex_without_uniform = vertex;
     vertex_without_uniform.interfaces = vertex_interfaces[0..2];
-    try std.testing.expect(!frontendInterfacesCompatible(&vertex_without_uniform, &fragment, &set0));
+    try std.testing.expect(frontendInterfacesCompatible(&vertex_without_uniform, &fragment, &set0));
+
+    const stage_bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 2, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 3, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 0x10, .immutable_samplers = null },
+    };
+    const stage_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &stage_bindings };
+    var stage_layout = try buildDescriptorSetLayout(&stage_layout_info);
+    defer stage_layout.deinit();
+    vertex_interfaces[2].binding = 2;
+    fragment.interfaces[1].binding = 3;
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &stage_layout));
+    fragment.interfaces[1].binding = 2;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &stage_layout));
+    vertex_interfaces[2].binding = 2;
+    fragment.interfaces[1].binding = 2;
     var malformed = set0;
     malformed.bytes = malformed.bytes[0..20];
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &malformed));
@@ -15666,27 +15720,10 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         };
         if (!matched) return false;
     };
-    for (vertex.interfaces) |left| if (left.storage == .uniform) {
-        var matched = false;
-        // Vertex and fragment stages declare independent views of the shared
-        // uniform binding; each program decodes the buffer with its own
-        // member layout, so compatibility is the descriptor coordinate plus
-        // block-ness, not struct equality.
-        for (fragment.interfaces) |right| if (right.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) {
-            if (left.block != right.block) return false;
-            matched = true;
-        };
-        if (!matched) return false;
-    };
-    for (fragment.interfaces) |right| if (right.storage == .uniform) {
-        var matched = false;
-        for (vertex.interfaces) |left| {
-            if (left.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) matched = true;
-        }
-        if (!matched) return false;
-    };
+    // Uniform bindings may be stage-specific. Validate each stage's binding
+    // against the descriptor layout and its stage flags below.
     for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .uniform) {
-        if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
+        if (!interface.block or interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
         const count = std.mem.readInt(u32, set0.bytes[32..36], .little);
         if (set0.bytes.len != 36 + @as(usize, count) * 16) return false;
         var found = false;
@@ -15756,7 +15793,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             } else if (interface.location == null) return null;
         },
         .uniform => {
-            if (result.vertex_uniform_count != 0 or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? != 0 or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
+            if (result.vertex_uniform_count == result.vertex_uniforms.len or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_uniforms[result.vertex_uniform_count] = .{ .interface = @intCast(index) };
             result.vertex_uniform_count += 1;
         },
@@ -15795,7 +15832,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.varying_count += 1;
         },
         .uniform => {
-            if (result.fragment_uniform_count != 0 or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? != 0 or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
+            if (result.fragment_uniform_count == result.fragment_uniforms.len or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.fragment_uniforms[result.fragment_uniform_count] = .{ .interface = @intCast(index) };
             result.fragment_uniform_count += 1;
         },
@@ -17161,14 +17198,14 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
         if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
-        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
+        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and (descriptor_write.descriptor_type != 8 or descriptor_write.dst_binding == 0) and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
             if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) return;
@@ -17178,6 +17215,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.uniform_offset = info.offset;
             update.uniform_range = range;
             update.uniform_dynamic = descriptor_write.descriptor_type == 8;
+            update.uniform_binding = @intCast(descriptor_write.dst_binding);
             update.writes_uniform = true;
         } else if (descriptor_write.descriptor_type == 7 and descriptor_write.dst_binding <= 1 and set.binding_types[descriptor_write.dst_binding] == 7 and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
@@ -17216,10 +17254,13 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     }
     for (updates[0..write_count]) |update| {
         if (update.writes_uniform) {
-            update.set.uniform = update.uniform;
-            update.set.uniform_offset = update.uniform_offset;
-            update.set.uniform_range = update.uniform_range;
-            update.set.uniform_dynamic = update.uniform_dynamic;
+            update.set.uniform_bindings[update.uniform_binding] = .{ .buffer = update.uniform, .offset = update.uniform_offset, .range = update.uniform_range, .dynamic = update.uniform_dynamic };
+            if (update.uniform_binding == 0) {
+                update.set.uniform = update.uniform;
+                update.set.uniform_offset = update.uniform_offset;
+                update.set.uniform_range = update.uniform_range;
+                update.set.uniform_dynamic = update.uniform_dynamic;
+            }
         }
         if (update.writes_storage) {
             update.set.storage = update.storage;
@@ -17251,7 +17292,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -17278,6 +17319,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
     if (!validDeviceLocked(d) or !set.owner.eql(d) or !template.owner.eql(d) or !template.layout.owner.eql(d) or template.template_type != 0 or !set.layout.eql(&template.layout.canonical)) return;
     if (template.entry_count != 0 and data == null) return;
     const Update = struct {
+        uniform_bindings: [max_profile_sampled_bindings]DescriptorUniformBinding,
         uniform: ?*BufferObj,
         uniform_offset: u64,
         uniform_range: u64,
@@ -17290,21 +17332,25 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
         sampler: ?*SamplerObj,
         texture_binding: u8,
     };
-    var update = Update{ .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture, .sampler = set.sampler, .texture_binding = 0 };
+    var update = Update{ .uniform_bindings = set.uniform_bindings, .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture, .sampler = set.sampler, .texture_binding = 0 };
     var sampled_images = set.sampled_images;
     const source: [*]const u8 = @ptrCast(data orelse return);
     for (template.entries[0..template.entry_count]) |entry| {
         const item: [*]const u8 = source + entry.offset;
-        if (entry.descriptor_type == 6 or entry.descriptor_type == 8) {
+        if ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and entry.dst_binding < update.uniform_bindings.len and set.binding_types[entry.dst_binding] == entry.descriptor_type) {
             const descriptor: *const DescriptorBufferInfo = @ptrCast(@alignCast(item));
             const buffer = validBufferLocked(descriptor.buffer) orelse return;
             if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or descriptor.offset > buffer.size or (entry.descriptor_type == 8 and descriptor.offset % 256 != 0)) return;
             const range = if (descriptor.range == std.math.maxInt(u64)) buffer.size - descriptor.offset else descriptor.range;
             if (range == 0 or range > buffer.size - descriptor.offset) return;
-            update.uniform = buffer;
-            update.uniform_offset = descriptor.offset;
-            update.uniform_range = range;
-            update.uniform_dynamic = entry.descriptor_type == 8;
+            const dynamic = entry.descriptor_type == 8;
+            update.uniform_bindings[entry.dst_binding] = .{ .buffer = buffer, .offset = descriptor.offset, .range = range, .dynamic = dynamic };
+            if (entry.dst_binding == 0) {
+                update.uniform = buffer;
+                update.uniform_offset = descriptor.offset;
+                update.uniform_range = range;
+                update.uniform_dynamic = dynamic;
+            }
         } else if (entry.descriptor_type == 7) {
             const descriptor: *const DescriptorBufferInfo = @ptrCast(@alignCast(item));
             const buffer = validBufferLocked(descriptor.buffer) orelse return;
@@ -17326,6 +17372,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr };
         }
     }
+    set.uniform_bindings = update.uniform_bindings;
     set.uniform = update.uniform;
     set.uniform_offset = update.uniform_offset;
     set.uniform_range = update.uniform_range;
@@ -18192,17 +18239,21 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
     candidate.synthetic = true;
     if (writes) |items| for (items[0..count]) |item| {
         if (item.s_type != 35 or item.p_next != null or item.dst_array_element != 0 or item.descriptor_count != 1 or item.texel_buffer_view != null) return false;
-        if ((item.descriptor_type == 6 or item.descriptor_type == 8) and item.dst_binding == 0 and candidate.binding_types[0] == item.descriptor_type and item.buffer_info != null and item.image_info == null) {
+        if ((item.descriptor_type == 6 or item.descriptor_type == 8) and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == item.descriptor_type and (item.descriptor_type != 8 or item.dst_binding == 0) and item.buffer_info != null and item.image_info == null) {
             if (candidate.counts[6] == 0) return false;
             const info = item.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return false;
             if (buffer.owner != command_buffer.impl.owner or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (item.descriptor_type == 8 and info.offset % 256 != 0)) return false;
             const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
             if (range == 0 or range > buffer.size - info.offset) return false;
-            candidate.uniform = buffer;
-            candidate.uniform_offset = info.offset;
-            candidate.uniform_range = range;
-            candidate.uniform_dynamic = item.descriptor_type == 8;
+            const dynamic = item.descriptor_type == 8;
+            candidate.uniform_bindings[item.dst_binding] = .{ .buffer = buffer, .offset = info.offset, .range = range, .dynamic = dynamic };
+            if (item.dst_binding == 0) {
+                candidate.uniform = buffer;
+                candidate.uniform_offset = info.offset;
+                candidate.uniform_range = range;
+                candidate.uniform_dynamic = dynamic;
+            }
         } else if (item.descriptor_type == 7 and item.dst_binding <= 1 and candidate.binding_types[item.dst_binding] == 7 and item.buffer_info != null and item.image_info == null) {
             if (candidate.counts[7] == 0) return false;
             const info = item.buffer_info.?[0];
@@ -19515,6 +19566,7 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
         if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
         snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
         snapshot.uniform_dynamic = false;
+        snapshot.uniform_bindings[0] = .{ .buffer = descriptors.uniform, .offset = snapshot.uniform_offset, .range = descriptors.uniform_range };
     }
     snapshot.synthetic = true;
     return snapshot;
@@ -19531,6 +19583,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
             if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
             snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
             snapshot.uniform_dynamic = false;
+            snapshot.uniform_bindings[0] = .{ .buffer = descriptors.uniform, .offset = snapshot.uniform_offset, .range = descriptors.uniform_range };
         }
     } else {
         snapshot.* = .{
@@ -29085,14 +29138,17 @@ test "descriptor pool empty control operations are allocation free and bounded" 
 test "descriptor updates and binds are atomic and allocation free" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(WriteDescriptorSet));
     const ctx = try createTestDeviceContext();
-    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
-    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    const bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 0x10, .immutable_samplers = null },
+    };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings };
     var set_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &set_layout));
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
-    const pool_size = DescriptorPoolSize{ .descriptor_type = 6, .descriptor_count = 1 };
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 6, .descriptor_count = 2 };
     const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
@@ -29112,6 +29168,11 @@ test "descriptor updates and binds are atomic and allocation free" {
     const set_object = validDescriptorSetLocked(set).?;
     try std.testing.expect(set_object.uniform != null);
     try std.testing.expectEqual(@as(u64, 64), set_object.uniform_range);
+    descriptor_write.dst_binding = 1;
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(validBufferLocked(buffer).?, descriptorUniformBinding(set_object, 1).?.buffer.?);
+    try std.testing.expectEqual(@as(u64, 64), descriptorUniformBinding(set_object, 1).?.range);
+    descriptor_write.dst_binding = 0;
     const uniform_before = set_object.uniform;
     const range_before = set_object.uniform_range;
     descriptor_write.descriptor_count = 2;
@@ -29122,24 +29183,29 @@ test "descriptor updates and binds are atomic and allocation free" {
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
-    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
-    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    const template_entries = [_]DescriptorUpdateTemplateEntry{
+        .{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) },
+        .{ .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = @sizeOf(DescriptorBufferInfo), .stride = @sizeOf(DescriptorBufferInfo) },
+    };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = template_entries.len, .descriptor_update_entries = &template_entries, .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
     var template: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor_buffer);
+    var template_data = [_]DescriptorBufferInfo{ descriptor_buffer, descriptor_buffer };
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &template_data);
     try std.testing.expectEqual(@as(u64, 64), validDescriptorSetLocked(set).?.uniform_range);
+    try std.testing.expectEqual(validBufferLocked(buffer).?, descriptorUniformBinding(set_object, 1).?.buffer.?);
     const template_uniform_before = validDescriptorSetLocked(set).?.uniform;
     const template_offset_before = validDescriptorSetLocked(set).?.uniform_offset;
     const template_range_before = validDescriptorSetLocked(set).?.uniform_range;
-    var invalid_template_descriptor = descriptor_buffer;
-    invalid_template_descriptor.buffer = 0xdead_beef;
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &invalid_template_descriptor);
+    template_data[1].buffer = 0xdead_beef;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &template_data);
     try std.testing.expectEqual(template_uniform_before, validDescriptorSetLocked(set).?.uniform);
     try std.testing.expectEqual(template_offset_before, validDescriptorSetLocked(set).?.uniform_offset);
     try std.testing.expectEqual(template_range_before, validDescriptorSetLocked(set).?.uniform_range);
     updateDescriptorSetWithTemplate(ctx.device, set, template, null);
     try std.testing.expectEqual(template_uniform_before, validDescriptorSetLocked(set).?.uniform);
-    for (0..4096) |_| updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor_buffer);
+    template_data[1] = descriptor_buffer;
+    for (0..4096) |_| updateDescriptorSetWithTemplate(ctx.device, set, template, &template_data);
     destroyDescriptorUpdateTemplate(ctx.device, template, null);
     const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var command_pool: usize = 0;
