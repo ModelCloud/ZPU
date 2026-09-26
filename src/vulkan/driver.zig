@@ -14222,7 +14222,7 @@ test "2D presentation stays one-core and only complex 3D enables the auxiliary w
     try std.testing.expect(!usePresentWorker(false, false));
     try std.testing.expect(!usePresentWorker(false, true));
     try std.testing.expect(!usePresentWorker(true, true));
-    try std.testing.expect(usePresentWorker(true, false));
+    try std.testing.expect(usePresentWorkerForProfile(true, false, 3, null));
 }
 
 test "Vulkan host-memory benchmark helpers implement exact command byte semantics" {
