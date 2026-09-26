@@ -16464,18 +16464,22 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (alloc != null or ci.s_type != 16 or ci.p_next != null or ci.flags != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module create rejected alloc={} s_type={} pnext={} flags=0x{x}\n", .{ alloc != null, ci.s_type, ci.p_next != null, ci.flags });
         hit(.shader_invalid);
         return .error_initialization_failed;
     }
-    const word_count = spirv.validateByteSize(ci.code_size) catch {
+    const word_count = spirv.validateByteSize(ci.code_size) catch |err| {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module byte size rejected size={} error={s}\n", .{ ci.code_size, @errorName(err) });
         hit(.shader_invalid);
         return .error_invalid_shader;
     };
     const raw = ci.p_code orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module rejected null code size={}\n", .{ci.code_size});
         hit(.shader_invalid);
         return .error_invalid_shader;
     };
     if (@intFromPtr(raw) % @alignOf(u32) != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module rejected unaligned code pointer=0x{x} size={}\n", .{ @intFromPtr(raw), ci.code_size });
         hit(.shader_invalid);
         return .error_invalid_shader;
     }
@@ -16494,7 +16498,10 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
     };
     if (failTestAllocation()) return .error_out_of_host_memory;
     var module = spirv.Module.parse(allocator, source[0..word_count]) catch |err| {
-        if (err != error.OutOfMemory) hit(.shader_invalid);
+        if (err != error.OutOfMemory) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU SPIR-V module rejected words={} error={s} version=0x{x} bound={} schema={}\n", .{ word_count, @errorName(err), if (word_count > 1) source[1] else 0, if (word_count > 3) source[3] else 0, if (word_count > 4) source[4] else 0 });
+            hit(.shader_invalid);
+        }
         return if (err == error.OutOfMemory) .error_out_of_host_memory else .error_invalid_shader;
     };
     errdefer module.deinit(allocator);
