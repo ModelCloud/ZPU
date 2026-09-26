@@ -545,8 +545,10 @@ benchmark() {
     local status=0
     if benchmark_chrome; then :; else status=$?; fi
     stop_benchmark_chrome || { [[ $status -ne 0 ]] || status=$?; }
-    run smolvm machine stop --name "$machine"
-    run smolvm machine update --name "$machine" --no-net
+    if [[ ${ZPU_KEEP_WEBGL_VM:-0} != 1 ]]; then
+        run smolvm machine stop --name "$machine"
+        run smolvm machine update --name "$machine" --no-net
+    fi
     return "$status"
 }
 

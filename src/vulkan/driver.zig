@@ -10547,7 +10547,11 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
                 std.mem.writeInt(u32, storage[index * 4 ..][0..4], value, .little);
             }
         },
-        100, 103, 106, 109 => {
+        109 => {
+            if (input.source_byte_size != 16 or input.byte_size == 0 or input.byte_size > 16) return null;
+            @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
+        },
+        100, 103, 106 => {
             if (input.source_byte_size != input.byte_size) return null;
             @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
         },
@@ -14867,7 +14871,7 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
 
     const stage_bindings = [_]DescriptorSetLayoutBinding{
         .{ .binding = 2, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
-        .{ .binding = 3, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 0x10, .immutable_samplers = null },
+        .{ .binding = 3, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 0x10, .immutable_samplers = null },
     };
     const stage_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &stage_bindings };
     var stage_layout = try buildDescriptorSetLayout(&stage_layout_info);
@@ -15366,10 +15370,22 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         return pipelineInvalid(@src().line);
     }
     if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) {
-        if (failureDiagnosticsEnabled()) std.debug.print(
-            "ZPU pipeline interfaces rejected vertex_words={d} fragment_words={d} vertex_digest={x} fragment_digest={x}\n",
-            .{ vertex_words, fragment_words, vertex_digest, fragment_digest },
-        );
+        if (failureDiagnosticsEnabled()) {
+            std.debug.print("ZPU pipeline interfaces rejected set0_len={d} vertex_words={d} fragment_words={d}\n", .{ layout.set0.bytes.len, vertex_words, fragment_words });
+            for ([_]*const render_ir.Program{ &vertex_program.?, &fragment_program.? }) |program| for (program.interfaces, 0..) |interface, index| {
+                std.debug.print("ZPU interface stage={s} index={d} storage={s} set={any} binding={any} block={} members={any} location={any} type={any}\n", .{ @tagName(program.stage), index, @tagName(interface.storage), interface.descriptor_set, interface.binding, interface.block, interface.member_count, interface.location, interface.ty });
+            };
+            if (layout.set0.bytes.len >= 36) {
+                const descriptor_count = std.mem.readInt(u32, layout.set0.bytes[32..36], .little);
+                if (descriptor_count <= (layout.set0.bytes.len - 36) / 16) {
+                    std.debug.print("ZPU set0 descriptor_count={d}\n", .{descriptor_count});
+                    for (0..descriptor_count) |index| {
+                        const item = layout.set0.bytes[36 + index * 16 ..][0..16];
+                        std.debug.print("ZPU set0 descriptor binding={d} type={d} count={d} stages=0x{x}\n", .{ std.mem.readInt(u32, item[0..4], .little), std.mem.readInt(i32, item[4..8], .little), std.mem.readInt(u32, item[8..12], .little), std.mem.readInt(u32, item[12..16], .little) });
+                    }
+                }
+            }
+        }
         return pipelineInvalid(@src().line);
     }
     if (profile_pair and !frontendSampledImagesCompatible(&vertex_program.?, &fragment_program.?, layout)) {
@@ -15585,7 +15601,13 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     for (pipeline_depth_bias) |factor| try w.f32le(factor);
     if (!dynamic_line_width) try w.f32le(rs.line_width);
     const ms = ci.multisample orelse return pipelineInvalid(@src().line);
-    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return pipelineInvalid(@src().line);
+    const sample_shading_enable = try bool32(ms.sample_shading_enable);
+    const alpha_to_coverage_enable = try bool32(ms.alpha_to_coverage_enable);
+    const alpha_to_one_enable = try bool32(ms.alpha_to_one_enable);
+    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or sample_shading_enable != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or alpha_to_coverage_enable != 0 or alpha_to_one_enable != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU multisample state rejected sType={d} pNext={} flags=0x{x} samples={d} sampleShading={d} minShading={d} sampleMask={} alphaCoverage={d} alphaOne={d}\n", .{ ms.s_type, ms.p_next != null, ms.flags, ms.rasterization_samples, sample_shading_enable, ms.min_sample_shading, ms.sample_mask != null, alpha_to_coverage_enable, alpha_to_one_enable });
+        return pipelineInvalid(@src().line);
+    }
     try w.u32le(1);
     const ds = ci.depth_stencil orelse return pipelineInvalid(@src().line);
     const zero_stencil = std.mem.zeroes(StencilOpState);
@@ -15729,7 +15751,8 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         var found = false;
         for (0..count) |index| {
             const item = set0.bytes[36 + index * 16 ..][0..16];
-            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 6 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
+            const descriptor_type = std.mem.readInt(i32, item[4..8], .little);
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and (descriptor_type == 6 or descriptor_type == 8) and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
         }
         if (!found) return false;
     };
@@ -15874,7 +15897,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
                 100 => if (result.inputs[input_index].byte_size == 4) 4 else return null,
                 103 => if (result.inputs[input_index].byte_size == 8) 8 else return null,
                 106 => if (result.inputs[input_index].byte_size == 12) 12 else return null,
-                109 => if (result.inputs[input_index].byte_size == 16) 16 else return null,
+                109 => if (result.inputs[input_index].byte_size <= 16) 16 else return null,
                 else => return null,
             };
             if (found or attribute.binding >= 16 or attribute.offset > 2047) return null;
@@ -19248,6 +19271,16 @@ test "scalar graphics profile admits Chromium vec3 vertex inputs and varyings" {
     try std.testing.expectEqual(@as(u8, 3), contract.varyings[0].lanes);
     var decoded: [16]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &decoded).?);
+    var vec4_binding = binding;
+    vec4_binding.stride = 16;
+    var vec4_attribute = attribute;
+    vec4_attribute.format = 109;
+    var vec4_vi = vi;
+    vec4_vi.bindings = @ptrCast(&vec4_binding);
+    vec4_vi.attributes = @ptrCast(&vec4_attribute);
+    const vec4_source_contract = profileGraphicsContract(&vertex, &fragment, &vec4_vi).?;
+    try std.testing.expectEqual(@as(u8, 16), vec4_source_contract.inputs[0].source_byte_size);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(vec4_source_contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, &decoded).?);
 }
 
 test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
