@@ -10605,7 +10605,7 @@ const ProfileVertexEvaluation = struct {
     varyings: [8][16]u8,
 };
 
-const profile_vertex_cache_slot_count = 128;
+const profile_vertex_cache_slot_count = 512;
 const ProfileVertexCacheEntry = struct {
     vertex_index: u32 = 0,
     valid: bool = false,
@@ -11003,6 +11003,31 @@ fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
         7 => true,
         else => false,
     };
+}
+
+fn profileEarlyDepthTest(op: anytype, depth: ?*ImageObj, depth_bytes: ?[]const u8, offset: usize, depth_value: f32) bool {
+    if (depth_bytes != null and op.depth_bounds_test_enable != 0 and
+        (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) return false;
+    if (depth_bytes) |storage| {
+        const image = depth orelse return false;
+        const stored_depth = depthValueFromStorage(image.format, storage, offset);
+        if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) return false;
+    }
+    return true;
+}
+
+test "profile early depth tests reject occluded and out-of-bounds fragments" {
+    var bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    for (0..4) |pixel| std.mem.writeInt(u32, bytes[pixel * 4 ..][0..4], @bitCast(@as(f32, 0.5)), .little);
+    var memory = MemoryObj{ .owner = undefined, .bytes = bytes[0..], .mapped = true };
+    var image = ImageObj{ .owner = undefined, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 126, .usage = 0x2, .layout = 1, .memory = &memory };
+    const State = struct { depth_test_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32 };
+    const less_equal = State{ .depth_test_enable = 1, .depth_compare_op = 3, .depth_bounds_test_enable = 0, .depth_bounds = .{ 0, 1 } };
+    try std.testing.expect(profileEarlyDepthTest(less_equal, &image, bytes[0..], 0, 0.25));
+    try std.testing.expect(!profileEarlyDepthTest(less_equal, &image, bytes[0..], 0, 0.75));
+    const bounded = State{ .depth_test_enable = 0, .depth_compare_op = 3, .depth_bounds_test_enable = 1, .depth_bounds = .{ 0.2, 0.4 } };
+    try std.testing.expect(profileEarlyDepthTest(bounded, &image, bytes[0..], 0, 0.3));
+    try std.testing.expect(!profileEarlyDepthTest(bounded, &image, bytes[0..], 0, 0.5));
 }
 
 fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
@@ -12118,6 +12143,12 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 if (b0 < 0 or b1 < 0 or b2 < 0) continue;
                 const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
                 if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
+                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
+                // The scalar profile accepts only pure fragment programs:
+                // its IR has no kill, depth output, or external write. Test
+                // depth before running the expensive fragment interpreter so
+                // hidden terrain faces do not shade pixels they cannot write.
+                if (!profileEarlyDepthTest(op, depth, depth_bytes, offset, depth_value)) continue;
                 var direct_fragment_color: ?[4]f32 = null;
                 if (direct_constant_black) {
                     direct_fragment_color = .{ 0, 0, 0, 0 };
@@ -12453,7 +12484,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         );
                     }
                 }
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
                 if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
                     target.width == 1280 and target.height == 256 and x == 100 and y == 50 and
                     render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
@@ -12488,11 +12518,6 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         "ZPU targeted fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
                         .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
                     );
-                }
-                if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
-                if (depth_bytes) |depth_storage| {
-                    const stored_depth = depthValueFromStorage(depth.?.format, depth_storage, offset);
-                    if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
                 }
                 if (color_bytes) |color_storage| {
                     const wrote = if (direct_vp9_opaque_write)
