@@ -18595,9 +18595,12 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     if (pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) missing |= 1 << 0;
     if (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) missing |= 1 << 1;
     if (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) missing |= 1 << 2;
-    if (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) missing |= 1 << 3;
+    // The admitted graphics profile uses triangle topologies, where line
+    // width has no raster effect. Chromium can include it in a shared
+    // dynamic-state set without issuing vkCmdSetLineWidth for triangle draws.
     if (pipeline.dynamic_line_stipple and !command_buffer.impl.line_stipple_set) missing |= 1 << 4;
-    if (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) missing |= 1 << 5;
+    const effective_depth_bias_enable = if (pipeline.dynamic_depth_bias_enable) command_buffer.impl.dynamic.depth_bias_enable else pipeline.depth_bias_enable;
+    if (pipeline.dynamic_depth_bias and effective_depth_bias_enable != 0 and !command_buffer.impl.depth_bias_set) missing |= 1 << 5;
     if (pipeline.dynamic_blend_constants and pipelineUsesBlendConstants(pipeline) and !command_buffer.impl.blend_constants_set) missing |= 1 << 6;
     if (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) missing |= 1 << 7;
     if (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) missing |= 1 << 8;
@@ -18610,7 +18613,8 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     if (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) missing |= 1 << 15;
     if (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) missing |= 1 << 16;
     if (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) missing |= 1 << 17;
-    if (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) missing |= 1 << 18;
+    const effective_depth_bounds_test_enable = if (pipeline.dynamic_depth_bounds_test_enable) command_buffer.impl.dynamic.depth_bounds_test_enable else pipeline.depth_bounds_test_enable;
+    if (pipeline.dynamic_depth_bounds and effective_depth_bounds_test_enable != 0 and !command_buffer.impl.depth_bounds_set) missing |= 1 << 18;
     if (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) missing |= 1 << 19;
     if (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) missing |= 1 << 20;
     if (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) missing |= 1 << 21;
@@ -18878,7 +18882,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expectEqual(@as(u16, 1), impl.vertex_bindings.stride_set);
     pipeline.dynamic_vertex_input_binding_stride = false;
     pipeline.dynamic_line_width = true;
-    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) != null);
     impl.line_width_set = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     pipeline.dynamic_line_width = false;
@@ -18892,9 +18896,11 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expectEqual(@as(u16, 0x55aa), resolved.line_stipple_pattern);
     pipeline.dynamic_line_stipple = false;
     pipeline.dynamic_depth_bias = true;
+    pipeline.depth_bias_enable = 1;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.depth_bias_set = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.depth_bias_enable = 0;
     pipeline.dynamic_depth_bias = false;
     pipeline.dynamic_blend_constants = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) != null);
