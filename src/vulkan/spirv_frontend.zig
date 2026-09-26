@@ -4925,7 +4925,7 @@ test "every explicitly excluded instruction family capability type storage and c
         try std.testing.expectError(error.Unsupported, compile(std.testing.allocator, &changed, .vertex, "main", &.{}));
     }
     var changed = positive_vertex;
-    changed[1] = 0x0001_0100;
+    changed[1] = 0x0001_0700;
     try std.testing.expectError(error.Malformed, compile(std.testing.allocator, &changed, .vertex, "main", &.{}));
     changed = positive_vertex;
     changed[3] = max_profile_bound + 1;

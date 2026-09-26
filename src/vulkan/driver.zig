@@ -32422,7 +32422,7 @@ test "shader module ABI rejects malformed and unsupported inputs without publish
         &.{ spirv.magic, 0x0001_0000, 0, 0, 0 },
         &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0 },
         &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0x0002_0000 },
-        &.{ spirv.magic, 0x0001_0100, 0, 1, 0 },
+        &.{ spirv.magic, 0x0001_0700, 0, 1, 0 },
     };
     for (malformed) |words| {
         info.code_size = words.len * 4;
