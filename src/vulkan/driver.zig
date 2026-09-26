@@ -10087,7 +10087,15 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
         .transition => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner) return wrongSubmittingDevice();
-            if (op.old_layout != 0 and layouts[slot] != op.old_layout) {
+            // Combined D24/S8 images can reach ZPU through ANGLE's
+            // attachment path with an externally established layout that
+            // the scalar per-image tracker has not observed. A same-layout
+            // dependency does not perform a layout transition, so accept it
+            // from UNDEFINED and synchronize the tracker to that declared
+            // layout. Keep layout-changing barriers strict.
+            const d24_stencil_layout_resync = op.image.format == format_d24_unorm_s8_uint and
+                layouts[slot] == 0 and op.old_layout == op.new_layout;
+            if (op.old_layout != 0 and layouts[slot] != op.old_layout and !d24_stencil_layout_resync) {
                 if (failureDiagnosticsEnabled()) std.debug.print(
                     "ZPU transition rejected image=0x{x} slot={} current={} old={} new={} format={} size={}x{} mips={}\n",
                     .{ @intFromPtr(op.image), slot, layouts[slot], op.old_layout, op.new_layout, op.image.format, op.image.width, op.image.height, op.image.mip_levels },
@@ -29967,6 +29975,48 @@ test "D24 S8 storage quantizes depth and preserves the untouched aspect" {
     const first_after_write = std.mem.readInt(u32, storage[0..4], .little);
     try std.testing.expectEqual(@as(u32, 0x56), first_after_write & 0xff);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), depthValueFromStorage(image.format, storage[0..], 0), 0.000001);
+}
+
+test "D24 S8 same-layout barriers reconcile an untracked attachment layout" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = depth_stencil_image_usage, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const aspects = ImageSubresourceRange{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    var barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0x1000, .dst_access_mask = 0x1000, .old_layout = 7, .new_layout = 7, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = aspects };
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 7), validImageLocked(image).?.layout);
+
+    // The compatibility is limited to a same-layout dependency. A stale
+    // layout-changing transition still fails atomically.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    barrier.old_layout = 6;
+    barrier.new_layout = 7;
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 7), validImageLocked(image).?.layout);
 }
 
 test "standalone X8 D24 and S8 attachment formats preserve their single aspect" {
