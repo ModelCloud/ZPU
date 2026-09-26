@@ -712,6 +712,11 @@ const UniformStructArrayAccess = struct {
     structure_type_id: u32,
 };
 
+const UniformStructArrayFieldAccess = struct {
+    aggregate: UniformStructArrayAccess,
+    field_index: u32,
+};
+
 /// Recognize the captured bounded uniform access `block.member[0]` where the
 /// member is a one-element array of a plain structure. Its fields are lowered
 /// individually to uniform byte offsets, so this does not admit dynamic or
@@ -737,6 +742,38 @@ fn uniformStructArrayPointer(nodes: []const Node, pointer_id: u32) Error!?Unifor
     const access_pointer = nodes[try id(nodes, access.type_id)];
     if (access_pointer.kind != .pointer or access_pointer.a != variable.a or access_pointer.b != member_type.a) return error.Malformed;
     return .{ .variable_id = variable_id, .block_type_id = variable_pointer.b, .member_index = member_index, .structure_type_id = member_type.a };
+}
+
+/// Recognize a direct access to one field of a one-element array of structs
+/// inside a uniform block: `block.member[0].field`. ANGLE emits this complete
+/// pointer chain as one OpAccessChain, so lower it to the flattened field
+/// offset instead of retaining three nested selectors in Render IR.
+fn uniformStructArrayFieldPointer(nodes: []const Node, pointer_id: u32) Error!?UniformStructArrayFieldAccess {
+    const access = nodes[try id(nodes, pointer_id)];
+    if (access.kind != .function_value or access.opcode != 65 or access.words.len != 4) return null;
+    const variable_id = access.words[0];
+    const variable = nodes[try id(nodes, variable_id)];
+    if (variable.kind != .variable or (variable.a != 2 and variable.a != 9)) return null;
+    const variable_pointer = nodes[try id(nodes, variable.type_id)];
+    if (variable_pointer.kind != .pointer) return error.Malformed;
+    const block = nodes[try id(nodes, variable_pointer.b)];
+    if (block.kind != .structure) return null;
+    const member_index = try nonnegativeScalarIntegerConstant(nodes, access.words[1]);
+    if (member_index >= block.words.len) return null;
+    const member_type = nodes[try id(nodes, block.words[member_index])];
+    if (member_type.kind != .array or member_type.b != 1) return null;
+    const structure = nodes[try id(nodes, member_type.a)];
+    if (structure.kind != .structure) return null;
+    if (try nonnegativeScalarIntegerConstant(nodes, access.words[2]) != 0) return null;
+    const field_index = try nonnegativeScalarIntegerConstant(nodes, access.words[3]);
+    if (field_index >= structure.words.len) return null;
+    const field_type_id = structure.words[field_index];
+    const access_pointer = nodes[try id(nodes, access.type_id)];
+    if (access_pointer.kind != .pointer or access_pointer.a != variable.a or access_pointer.b != field_type_id) return error.Malformed;
+    return .{
+        .aggregate = .{ .variable_id = variable_id, .block_type_id = variable_pointer.b, .member_index = member_index, .structure_type_id = member_type.a },
+        .field_index = field_index,
+    };
 }
 
 fn uniformStructArrayMemberCount(nodes: []const Node, access: UniformStructArrayAccess) Error!u32 {
@@ -792,6 +829,28 @@ fn oneElementInputArrayVariable(nodes: []const Node, pointer_id: u32) Error!?u32
     if (access_pointer.kind != .pointer or access_pointer.a != 1 or access_pointer.b != array.a) return error.Malformed;
     const element = nodes[try id(nodes, array.a)];
     if (element.kind != .vector) return null;
+    return variable_id;
+}
+
+/// Resolve a constant element-zero access through a one-element vertex output
+/// array. ANGLE uses this wrapper for some game varyings; output stores are
+/// already reflected at the decorated location, so the pointer is only an
+/// alias and must not become a struct-member access in Render IR.
+fn oneElementOutputArrayVariable(nodes: []const Node, pointer_id: u32) Error!?u32 {
+    const access = nodes[try id(nodes, pointer_id)];
+    if (access.kind != .function_value or access.opcode != 65 or access.words.len != 2) return null;
+    const variable_id = access.words[0];
+    const variable = nodes[try id(nodes, variable_id)];
+    if (variable.kind != .variable or variable.a != 3) return null;
+    if (try nonnegativeScalarIntegerConstant(nodes, access.words[1]) != 0) return null;
+    const variable_pointer = nodes[try id(nodes, variable.type_id)];
+    if (variable_pointer.kind != .pointer or variable_pointer.a != 3) return error.Malformed;
+    const array = nodes[try id(nodes, variable_pointer.b)];
+    if (array.kind != .array or array.b != 1) return null;
+    const element = nodes[try id(nodes, array.a)];
+    if (element.kind != .vector) return null;
+    const access_pointer = nodes[try id(nodes, access.type_id)];
+    if (access_pointer.kind != .pointer or access_pointer.a != 3 or access_pointer.b != array.a) return error.Malformed;
     return variable_id;
 }
 
@@ -3165,6 +3224,35 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
         const rid = result_id orelse continue;
         if (!needed[try id(nodes, rid)]) continue;
         const node = nodes[try id(nodes, rid)];
+        if (instruction.opcode == 65) {
+            if (try uniformStructArrayFieldPointer(nodes, rid)) |field| {
+                const variable = nodes[try id(nodes, field.aggregate.variable_id)];
+                const decoration = decorations[try id(nodes, field.aggregate.variable_id)];
+                const storage: ir.Storage = if (variable.a == 2) .uniform else .push_constant;
+                var interface_index: ?u32 = null;
+                for (interfaces.items, 0..) |item, index| if (item.storage == storage and item.binding == decoration.binding and item.descriptor_set == decoration.descriptor_set) {
+                    interface_index = @intCast(index);
+                };
+                const selected_interface = interface_index orelse return error.Unsupported;
+                const member_index = try uniformStructArrayMemberCount(nodes, field.aggregate) + field.field_index;
+                if (member_index >= interfaces.items[selected_interface].member_count) return error.Unsupported;
+                const field_type = nodes[try id(nodes, field.aggregate.structure_type_id)].words[field.field_index];
+                const field_shape = try resultShape(nodes, field_type);
+                if (!sameShape(field_shape, interfaces.items[selected_interface].members[member_index].ty)) return error.Unsupported;
+                var member_literal: [4]u8 = undefined;
+                std.mem.writeInt(u32, &member_literal, member_index, .little);
+                const member_constant = try appendLoweredInstruction(allocator, &lowered, .constant, .{ .scalar = .u32 }, &.{}, &member_literal);
+                canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(
+                    allocator,
+                    &lowered,
+                    .access,
+                    field_shape,
+                    &.{ selected_interface, member_constant },
+                    &.{},
+                );
+                continue;
+            }
+        }
         if ((instruction.opcode == 65 and (try uniformStructArrayPointer(nodes, rid)) != null) or
             (instruction.opcode == 61 and nodes[try id(nodes, node.type_id)].kind == .structure and (try uniformStructArrayPointer(nodes, node.words[0])) != null))
         {
@@ -3182,6 +3270,18 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 const input_shape = try resultShape(nodes, node.type_id);
                 if (!sameShape(input_shape, interfaces.items[selected_interface].ty)) return error.Unsupported;
                 canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(allocator, &lowered, .input, input_shape, &.{selected_interface}, &.{});
+                continue;
+            }
+            if (try oneElementOutputArrayVariable(nodes, node.words[0])) |variable_id| {
+                const decoration = decorations[try id(nodes, variable_id)];
+                var interface_index: ?u32 = null;
+                for (interfaces.items, 0..) |item, index| if (item.storage == .output and item.location == decoration.location and item.flat == decoration.flat) {
+                    interface_index = @intCast(index);
+                };
+                const selected_interface = interface_index orelse return error.Unsupported;
+                const output_shape = try resultShape(nodes, node.type_id);
+                if (!sameShape(output_shape, interfaces.items[selected_interface].ty)) return error.Unsupported;
+                canonical_ids[try id(nodes, rid)] = try appendLoweredInstruction(allocator, &lowered, .storage, output_shape, &.{selected_interface}, &.{});
                 continue;
             }
         }
@@ -3320,6 +3420,13 @@ fn compileInternal(allocator: std.mem.Allocator, words: []const u32, requested_s
                 continue;
             }
             if (try oneElementInputArrayVariable(nodes, rid) != null) {
+                canonical_ids[try id(nodes, rid)] = std.math.maxInt(u32);
+                continue;
+            }
+            if (try oneElementOutputArrayVariable(nodes, rid) != null) {
+                // OpStore resolves this pointer directly to the flattened
+                // output location below. Do not materialize its array index
+                // as an IR struct-member access.
                 canonical_ids[try id(nodes, rid)] = std.math.maxInt(u32);
                 continue;
             }
@@ -6542,6 +6649,24 @@ test "Three.js terrain vertex shader inlines helpers and compiles bounded contro
         unpack = unpack or instruction.op == .f_unpack_snorm4x8;
     }
     try std.testing.expect(push_constants and position and branch and phi and unpack);
+}
+
+test "Three.js FPS vertex shader flattens one-element output arrays" {
+    const bytes align(4) = @embedFile("fixtures/threejs_games_fps_vertex.spv").*;
+    const words = std.mem.bytesAsSlice(u32, &bytes);
+    var program = try compile(std.testing.allocator, words, .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+
+    var position = false;
+    var wrapped_varying = false;
+    for (program.interfaces) |interface| {
+        position = position or (interface.storage == .output and interface.builtin_position);
+        wrapped_varying = wrapped_varying or (interface.storage == .output and interface.location == 0 and !interface.builtin_position and interface.ty.scalar == .f32 and interface.ty.columns == 4);
+    }
+    try std.testing.expect(position and wrapped_varying);
+
+    var executor = try render_ir_exec.Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
 }
 
 test "Three.js vertex index builtin selects the indexed vertex position" {

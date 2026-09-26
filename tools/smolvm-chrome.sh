@@ -415,10 +415,11 @@ benchmark_chrome() {
     local guest_pid=/run/zpu-runtime/chromium.pid
     local guest_log=/run/zpu-runtime/chromium.log
     local guest_profile=/run/zpu-runtime/chromium-profile
-    local site safe_url result
+    local site safe_url result screenshot
     local -a pointer_options=()
     local -a webgl_options=()
     local -a game_options=()
+    local -a screenshot_options=()
     if [[ $benchmark_pointer_sweep == 1 ]]; then
         pointer_options=(--pointer-sweep --pointer-sweep-hz "$benchmark_pointer_hz")
     fi
@@ -452,9 +453,19 @@ benchmark_chrome() {
         safe_url=${site#https://}
         safe_url=${safe_url//[^A-Za-z0-9._-]/_}
         result="$guest_results/chromium-${safe_url}.json"
+        screenshot=
+        if [[ -n $benchmark_results_dir && $benchmark_require_webgl == 1 ]]; then
+            screenshot="$guest_results/chromium-${safe_url}.png"
+            screenshot_options=(--screenshot "$screenshot")
+        else
+            screenshot_options=()
+        fi
         # Each site gets a fresh GPU process. Reusing one leaves page-specific
         # swapchain pacing state behind and made Bing depend on whether Google
         # ran first, which is not a valid per-site performance measurement.
+        if [[ -n $screenshot ]]; then
+            run smolvm machine exec --name "$machine" -- rm -f "$screenshot" || return $?
+        fi
         run smolvm machine exec --name "$machine" -- env -i \
             HOME=/root PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/zpu-runtime DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
             VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
@@ -484,7 +495,7 @@ benchmark_chrome() {
             sh -c 'result=$1; shift; python3 "$@" > "$result"' \
             sh "$result" "$guest_tool" --compositor --compositor-selector body --page-url "$site" \
             --warmup "$benchmark_warmup" --duration "$benchmark_duration" \
-            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}" "${webgl_options[@]}" "${game_options[@]}"; then
+            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}" "${webgl_options[@]}" "${game_options[@]}" "${screenshot_options[@]}"; then
             :
         else
             probe_status=$?
@@ -492,6 +503,9 @@ benchmark_chrome() {
             # Preserve that evidence while the guest tmpfs still exists.
             if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$result"; then
                 run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
+            fi
+            if [[ -n $screenshot ]] && run smolvm machine exec --name "$machine" -- test -r "$screenshot"; then
+                run smolvm machine cp "$machine:$screenshot" "$benchmark_results_dir/${safe_url}.png" || return $?
             fi
             if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$guest_log"; then
                 run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
@@ -509,6 +523,9 @@ benchmark_chrome() {
         if [[ -n $benchmark_results_dir ]]; then
             run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
             run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+            if [[ -n $screenshot ]]; then
+                run smolvm machine cp "$machine:$screenshot" "$benchmark_results_dir/${safe_url}.png" || return $?
+            fi
         fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
         stop_benchmark_chrome
