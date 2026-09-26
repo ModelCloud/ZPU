@@ -365,6 +365,21 @@ def main() -> None:
         )
         session_id = attached["sessionId"]
         devtools.call("Page.enable", session_id=session_id)
+        if webgl_size is not None:
+            # In headless mode --window-size includes browser-chrome overhead
+            # on some Chromium builds, so a nominal 2560x1440 window can expose
+            # a shorter page viewport. Pin the page viewport to the requested
+            # WebGL drawing-buffer dimensions before the demo initializes.
+            devtools.call(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": webgl_size["width"],
+                    "height": webgl_size["height"],
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+                session_id=session_id,
+            )
         devtools.call(
             "Page.addScriptToEvaluateOnNewDocument",
             {
