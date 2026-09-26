@@ -17823,9 +17823,11 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
     command_buffer.impl.dynamic_uniform_offset = dynamic_offset;
-    command_buffer.impl.push_descriptor_active = false;
-    command_buffer.impl.push_descriptor_bind_point = 0;
-    command_buffer.impl.push_descriptor_stage_flags = 0;
+    if (first_set == 0) {
+        command_buffer.impl.push_descriptor_active = false;
+        command_buffer.impl.push_descriptor_bind_point = 0;
+        command_buffer.impl.push_descriptor_stage_flags = 0;
+    }
 }
 fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsInfo) callconv(.c) void {
     const ci = info orelse {
@@ -29381,16 +29383,28 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &push_layout_info, null, &push_set_layout));
     try std.testing.expectEqual(@as(u32, 1), validDescriptorSetLayoutLocked(push_set_layout).?.flags);
 
+    const empty_set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null };
+    var empty_set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &empty_set_layout_info, null, &empty_set_layout));
+
     var unsupported_layout = push_layout_info;
     unsupported_layout.flags = 2;
     var unpublished_layout: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorSetLayout(ctx.device, &unsupported_layout, null, &unpublished_layout));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished_layout);
 
-    const pipeline_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&push_set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    const set_layouts = [_]usize{ push_set_layout, empty_set_layout };
+    const pipeline_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = set_layouts.len, .set_layouts = &set_layouts, .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_info, null, &pipeline_layout));
     try std.testing.expect(validPipelineLayoutLocked(pipeline_layout).?.push_descriptor);
+
+    const descriptor_pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 0, .max_sets = 1, .pool_size_count = 0, .pool_sizes = null };
+    var descriptor_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &descriptor_pool_info, null, &descriptor_pool));
+    const set_allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = descriptor_pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&empty_set_layout) };
+    var sampled_set: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &set_allocate_info, @ptrCast(&sampled_set)));
 
     const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var buffer: usize = 0;
@@ -29428,6 +29442,10 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(@as(u64, 4), command[0].impl.push_descriptor.uniform_offset);
     try std.testing.expectEqual(@as(u64, 32), command[0].impl.push_descriptor.uniform_range);
     try std.testing.expectEqual(validBufferLocked(buffer).?, command[0].impl.push_descriptor.uniform.?);
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 1, 1, @ptrCast(&sampled_set), 0, null);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.push_descriptor_active);
+    try std.testing.expectEqual(validDescriptorSetLocked(sampled_set).?, command[0].impl.bound_sampled_descriptors.?);
 
     const uniform_before = command[0].impl.push_descriptor.uniform;
     const range_before = command[0].impl.push_descriptor.uniform_range;
@@ -29539,7 +29557,9 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     destroyCommandPool(ctx.device, pool, null);
     destroyBuffer(ctx.device, buffer, null);
     freeMemory(ctx.device, memory, null);
+    destroyDescriptorPool(ctx.device, descriptor_pool, null);
     destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, empty_set_layout, null);
     destroyDescriptorSetLayout(ctx.device, push_set_layout, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
