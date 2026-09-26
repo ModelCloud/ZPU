@@ -4198,6 +4198,9 @@ const format_x8_d24_unorm_pack32: i32 = 125;
 const format_s8_uint: i32 = 127;
 const image_aspect_depth_bit: u32 = 0x2;
 const image_aspect_stencil_bit: u32 = 0x4;
+const depth_stencil_sampled_image_features: u32 = 0x1 | 0x200 | 0x4000 | 0x8000;
+const depth_sampled_image_features: u32 = depth_stencil_sampled_image_features | 0x1000;
+const depth_stencil_image_usage: u32 = 0x1 | 0x2 | 0x4 | 0x20;
 
 fn isStencilFormat(format: i32) bool {
     return format == format_s8_uint or format == format_d24_unorm_s8_uint;
@@ -4377,6 +4380,11 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // The WebGL bootstrap formats deliberately have no linear image support:
     // they are backed only by ZPU's private optimal-tiled RGBA surface.
     if (webglBootstrapColorFormat(format)) return if (tiling == 0) 0x4 | 0x10 else 0;
+    // ANGLE exposes depth and stencil renderbuffer formats only when their
+    // sampled-image and attachment features agree with the image-usage
+    // combinations it probes. ZPU keeps these images in its four-byte CPU
+    // backing store and supports sampled, transfer, and attachment use there.
+    if (isDepthStencilFormat(format)) return if (tiling == 0) depth_stencil_image_usage else 0;
     return switch (format) {
         // R8_UNORM is retained in the internal image store as one red byte
         // per texel followed by an opaque padding word. It supports the
@@ -4393,9 +4401,6 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // render target or input attachment, and every plane shares one
         // allocation rather than exposing disjoint-memory semantics.
         format_g8_b8r8_2plane_420_unorm => 0x2 | 0x4,
-        format_x8_d24_unorm_pack32, format_d24_unorm_s8_uint, format_s8_uint => 0x2 | 0x20,
-        124 => 0x2 | 0x20,
-        126 => 0x2 | 0x20,
         else => 0,
     };
 }
@@ -4428,15 +4433,20 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
         out.* = .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x80 | 0x100, .buffer_features = 0 };
         return true;
     }
+    if (isDepthStencilFormat(format)) {
+        out.* = .{
+            .linear_tiling_features = 0,
+            .optimal_tiling_features = if (format == format_s8_uint) depth_stencil_sampled_image_features else depth_sampled_image_features,
+            .buffer_features = 0,
+        };
+        return true;
+    }
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37, 43 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
-        format_x8_d24_unorm_pack32, format_d24_unorm_s8_uint, format_s8_uint => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
-        124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
-        126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
     return true;
@@ -24727,7 +24737,11 @@ test "all physical queries cover success boundaries and invalid handles" {
         .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 43, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
-        .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
+        .{ .format = 124, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 125, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 126, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 127, .linear = 0, .optimal = depth_stencil_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 129, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
     };
     for (format_cases) |case| {
         getFormatProperties(p, case.format, &format);
@@ -29913,7 +29927,7 @@ test "D24 S8 storage quantizes depth and preserves the untouched aspect" {
     const image = ImageObj{ .owner = undefined, .width = 2, .height = 1, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x22, .layout = 1, .owned_bytes = storage[0..] };
     try std.testing.expect(isDepthFormat(format_d24_unorm_s8_uint));
     try std.testing.expect(isStencilFormat(format_d24_unorm_s8_uint));
-    try std.testing.expectEqual(@as(u32, 0x2 | 0x20), imageFormatUsage(format_d24_unorm_s8_uint, 0));
+    try std.testing.expectEqual(depth_stencil_image_usage, imageFormatUsage(format_d24_unorm_s8_uint, 0));
     try std.testing.expect(validImageAspectMask(&image, image_aspect_depth_bit));
     try std.testing.expect(validImageAspectMask(&image, image_aspect_stencil_bit));
     try std.testing.expect(validImageAspectMask(&image, image_aspect_depth_bit | image_aspect_stencil_bit));
@@ -29924,9 +29938,9 @@ test "D24 S8 storage quantizes depth and preserves the untouched aspect" {
     var properties = std.mem.zeroes(FormatProperties);
     try std.testing.expect(getFormatPropertiesLocked(context.physical, format_d24_unorm_s8_uint, &properties));
     try std.testing.expectEqual(@as(u32, 0), properties.linear_tiling_features);
-    try std.testing.expectEqual(@as(u32, 0x200 | 0x8000), properties.optimal_tiling_features);
+    try std.testing.expectEqual(depth_sampled_image_features, properties.optimal_tiling_features);
     var image_properties: ImageFormatProperties = undefined;
-    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, 0x22, 0, &image_properties));
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, depth_stencil_image_usage, 0, &image_properties));
 
     clearDepthStencilBytes(&image, storage[0..], 0.25, 0, image_aspect_depth_bit);
     const first_after_depth = std.mem.readInt(u32, storage[0..4], .little);
@@ -29982,14 +29996,14 @@ test "standalone X8 D24 and S8 attachment formats preserve their single aspect" 
     defer destroyDevice(context.device, null);
     var properties = std.mem.zeroes(FormatProperties);
     try std.testing.expect(getFormatPropertiesLocked(context.physical, format_x8_d24_unorm_pack32, &properties));
-    try std.testing.expectEqual(@as(u32, 0x200 | 0x8000), properties.optimal_tiling_features);
+    try std.testing.expectEqual(depth_sampled_image_features, properties.optimal_tiling_features);
     try std.testing.expect(getFormatPropertiesLocked(context.physical, format_s8_uint, &properties));
-    try std.testing.expectEqual(@as(u32, 0x200 | 0x8000), properties.optimal_tiling_features);
+    try std.testing.expectEqual(depth_stencil_sampled_image_features, properties.optimal_tiling_features);
     var image_properties: ImageFormatProperties = undefined;
-    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_x8_d24_unorm_pack32, 1, 0, 0x22, 0, &image_properties));
-    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_s8_uint, 1, 0, 0x22, 0, &image_properties));
-    try std.testing.expectEqual(@as(u32, 0x2 | 0x20), imageFormatUsage(format_x8_d24_unorm_pack32, 0));
-    try std.testing.expectEqual(@as(u32, 0x2 | 0x20), imageFormatUsage(format_s8_uint, 0));
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_x8_d24_unorm_pack32, 1, 0, depth_stencil_image_usage, 0, &image_properties));
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_s8_uint, 1, 0, depth_stencil_image_usage, 0, &image_properties));
+    try std.testing.expectEqual(depth_stencil_image_usage, imageFormatUsage(format_x8_d24_unorm_pack32, 0));
+    try std.testing.expectEqual(depth_stencil_image_usage, imageFormatUsage(format_s8_uint, 0));
 
     clearDepthStencilBytes(&depth_image, depth_storage[0..], 0.25, 0, image_aspect_depth_bit);
     try std.testing.expectEqual(@as(u32, 0xdd00_0000), std.mem.readInt(u32, depth_storage[0..4], .little) & 0xff00_0000);
@@ -30029,9 +30043,9 @@ test "D24 S8 Vulkan images create and clear depth and stencil aspects independen
     defer destroyDevice(context.device, null);
     var properties = std.mem.zeroes(FormatProperties);
     try std.testing.expect(getFormatPropertiesLocked(context.physical, format_d24_unorm_s8_uint, &properties));
-    try std.testing.expectEqual(@as(u32, 0x200 | 0x8000), properties.optimal_tiling_features);
+    try std.testing.expectEqual(depth_sampled_image_features, properties.optimal_tiling_features);
     var format_properties: ImageFormatProperties = undefined;
-    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, 0x22, 0, &format_properties));
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, depth_stencil_image_usage, 0, &format_properties));
 
     const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8, .memory_type_index = 0 };
     var memory: usize = 0;
