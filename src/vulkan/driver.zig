@@ -4436,6 +4436,10 @@ fn imageStorageBytesPerTexel(format: i32) u64 {
     return if (format == 97) 8 else 4;
 }
 
+fn halfFloatColorFormat(format: i32) bool {
+    return format == 83 or format == 97;
+}
+
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
     // and vkCreateImage both receive the tiling explicitly.
@@ -4457,9 +4461,10 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // R8G8 for interleaved chroma. Both are sampled/transfer resources;
         // neither is exposed as a color attachment in this bounded profile.
         16 => 0x1 | 0x2 | 0x4 | 0x10,
-        // R16G16_SFLOAT backs sampled WebGL intermediate images. Its
-        // byte-addressable half-float pair supports sampling and transfers.
-        83 => if (tiling == 0) 0x1 | 0x2 | 0x4 else 0,
+        // R16G16_SFLOAT backs sampled WebGL intermediate images, color
+        // attachments, and input attachments. Two half-float channels use the
+        // byte-addressable CPU path for transfers and rendering.
+        83 => if (tiling == 0) 0x1 | 0x2 | 0x4 | 0x10 | 0x80 else 0,
         37, 43 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         // RGBA16_SFLOAT uses the byte-addressable half-float CPU store below
@@ -4512,7 +4517,7 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
     out.* = switch (format) {
         9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        83 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        83 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         37, 43 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         97 => .{ .linear_tiling_features = 0x1 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
@@ -7576,7 +7581,7 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
         c.impl.invalid = true;
         return;
     };
-    const half_color: ?[4]u16 = if (image.format == 97) blk: {
+    const half_color: ?[4]u16 = if (halfFloatColorFormat(image.format)) blk: {
         var converted: [4]u16 = undefined;
         for (value.float32, 0..) |component, index| {
             if (!std.math.isFinite(component)) {
@@ -7771,7 +7776,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
         const bytes = if (attachment.aspect_mask == image_aspect_color_bit) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
         const target_color_format = if (color_image) |target| target.format else inherited_color_format;
-        const half_color: ?[4]u16 = if (attachment.aspect_mask == image_aspect_color_bit and target_color_format == 97)
+        const half_color: ?[4]u16 = if (attachment.aspect_mask == image_aspect_color_bit and halfFloatColorFormat(target_color_format))
             halfColorFromComponents(attachment.clear_value.color.float32) orelse {
                 c.impl.invalid = true;
                 return;
@@ -7898,7 +7903,7 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !transferableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !blittableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
@@ -8118,24 +8123,28 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
     return false;
 }
 
-// The advertised transfer profile exposes the three four-byte color formats
-// with a byte-addressable CPU layout.  The B8G8R8A8 UNORM and sRGB variants
-// share BGRA storage, so the CPU transfer and scalar-raster paths can copy and
-// filter them without format conversion. Depth formats retain their narrower
-// sampled/destination-only contracts.
+// The advertised transfer profile exposes byte-addressable color formats.
+// The B8G8R8A8 UNORM and sRGB variants share BGRA storage, while RG16F keeps
+// its two half-float channels; CPU transfer and raster paths preserve both.
+// Depth formats retain their narrower sampled/destination-only contracts.
 fn transferableColorFormat(format: i32) bool {
-    return format == 37 or format == 43 or format == 44 or format == 97;
+    return format == 37 or format == 43 or format == 44 or format == 83 or format == 97;
+}
+
+fn blittableColorFormat(format: i32) bool {
+    // RG16F has no linear-blit implementation or advertised blit feature.
+    return transferableColorFormat(format) and format != 83;
 }
 
 fn colorAttachmentFormat(format: i32) bool {
-    return format == 9 or format == 16 or webglBootstrapColorFormat(format) or transferableColorFormat(format);
+    return format == 9 or format == 16 or format == 83 or webglBootstrapColorFormat(format) or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
     return switch (format) {
         9 => 1,
         16 => 2,
-        37, 43, 44 => 4,
+        37, 43, 44, 83 => 4,
         97 => 8,
         else => null,
     };
@@ -10290,30 +10299,34 @@ fn halfColorForImageClear(color: [4]u8, half_color: ?[4]u16) [4]u16 {
 }
 
 fn imageClearPattern(format: i32, color: [4]u8) ?u32 {
-    return if (format == 97) null else @bitCast(color);
+    return if (halfFloatColorFormat(format)) null else @bitCast(color);
 }
 
 fn fillImageClearColor(bytes: []u8, format: i32, color: [4]u8, half_color: ?[4]u16) void {
-    if (format != 97) {
+    if (!halfFloatColorFormat(format)) {
         fillImagePattern(bytes, @bitCast(color));
         return;
     }
     const components = halfColorForImageClear(color, half_color);
-    for (0..bytes.len / 8) |pixel| for (components, 0..) |component, index| {
-        std.mem.writeInt(u16, bytes[pixel * 8 + index * 2 ..][0..2], component, .little);
+    const channels: usize = if (format == 83) 2 else 4;
+    const bytes_per_texel: usize = channels * 2;
+    for (0..bytes.len / bytes_per_texel) |pixel| for (components[0..channels], 0..) |component, index| {
+        std.mem.writeInt(u16, bytes[pixel * bytes_per_texel + index * 2 ..][0..2], component, .little);
     };
 }
 
 fn fillImageClearColorRect(bytes: []u8, width: u32, format: i32, color: [4]u8, half_color: ?[4]u16, rect: cpu_cube.Rect) void {
-    if (format != 97) {
+    if (!halfFloatColorFormat(format)) {
         fillImagePatternRect(bytes, width, rect, @bitCast(color));
         return;
     }
     if (rect.width == 0 or rect.height == 0) return;
     const components = halfColorForImageClear(color, half_color);
+    const channels: usize = if (format == 83) 2 else 4;
+    const bytes_per_texel: usize = channels * 2;
     for (@intCast(rect.y)..@intCast(rect.y + @as(i32, @intCast(rect.height)))) |y| for (@intCast(rect.x)..@intCast(rect.x + @as(i32, @intCast(rect.width)))) |x| {
-        const pixel_offset = (y * width + x) * 8;
-        for (components, 0..) |component, index| std.mem.writeInt(u16, bytes[pixel_offset + index * 2 ..][0..2], component, .little);
+        const pixel_offset = (y * width + x) * bytes_per_texel;
+        for (components[0..channels], 0..) |component, index| std.mem.writeInt(u16, bytes[pixel_offset + index * 2 ..][0..2], component, .little);
     };
 }
 
@@ -10898,23 +10911,24 @@ fn colorStorageIndices(format: i32) ?[4]usize {
 }
 
 fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
-    if (format == 97) {
-        if (bytes.len < 8 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+    if (halfFloatColorFormat(format)) {
+        const channels: usize = if (format == 83) 2 else 4;
+        if (bytes.len < channels * 2 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
         const source = source_values;
         for (source) |value| if (!std.math.isFinite(value)) return null;
-        var destination: [4]f32 = undefined;
-        for (&destination, 0..) |*value, channel| value.* = readHalfFloat(bytes, channel * 2);
+        var destination: [4]f32 = .{ 0, 0, 0, 1 };
+        for (0..channels) |channel| destination[channel] = readHalfFloat(bytes, channel * 2);
         var result = source;
         if (blend.enable != 0) {
-            for (0..4) |channel| {
-                const alpha = channel == 3;
+            for (0..channels) |channel| {
+                const alpha = format == 97 and channel == 3;
                 const src_factor = profileBlendFactor(if (alpha) blend.src_alpha_factor else blend.src_color_factor, source, destination, blend.constants, channel, alpha) orelse return null;
                 const dst_factor = profileBlendFactor(if (alpha) blend.dst_alpha_factor else blend.dst_color_factor, source, destination, blend.constants, channel, alpha) orelse return null;
                 result[channel] = profileBlendEquation(if (alpha) blend.alpha_op else blend.color_op, source[channel] * src_factor, destination[channel] * dst_factor) orelse return null;
                 if (!std.math.isFinite(result[channel])) return null;
             }
         }
-        for (0..4) |channel| if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) writeHalfFloat(bytes, channel * 2, result[channel]);
+        for (0..channels) |channel| if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) writeHalfFloat(bytes, channel * 2, result[channel]);
         return 1;
     }
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
@@ -10950,7 +10964,7 @@ fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, 
 /// operation order and u8 conversion; it only removes repeated factor and
 /// equation dispatch after the caller has selected this exact fixed state.
 fn profileWriteSourceOverColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32) ?u32 {
-    if (format == 97) return profileWriteColorComponents(bytes, format, source_values, color_write_mask, .{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 });
+    if (halfFloatColorFormat(format)) return profileWriteColorComponents(bytes, format, source_values, color_write_mask, .{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 });
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     var source = source_values;
@@ -11040,9 +11054,10 @@ fn profileTextureCopyPreparedIsOpaque(prepared: render_ir_exec.TextureCopyPrepar
 /// state has no destination contribution.  Other pipelines remain on the
 /// general bounded blend implementation above.
 fn profileWriteOpaqueColorComponents(bytes: []u8, format: i32, components: [4]f32) ?u32 {
-    if (format == 97) {
-        if (bytes.len < 8) return null;
-        for (components, 0..) |component, channel| {
+    if (halfFloatColorFormat(format)) {
+        const channels: usize = if (format == 83) 2 else 4;
+        if (bytes.len < channels * 2) return null;
+        for (components[0..channels], 0..) |component, channel| {
             if (!std.math.isFinite(component)) return null;
             writeHalfFloat(bytes, channel * 2, component);
         }
@@ -11133,6 +11148,35 @@ test "RGBA16F source-over blending does not clamp float attachment values" {
     try std.testing.expectEqualSlices(u8, &generic, &specialized);
     try std.testing.expectEqual(@as(f32, 2.125), readHalfFloat(&generic, 0));
     try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&generic, 2));
+}
+
+test "RG16F profile attachments preserve half-float range and masked channels" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 1.5, -0.5, 4, 0.25 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var pixel: [4]u8 = undefined;
+    writeHalfFloat(&pixel, 0, 0.25);
+    writeHalfFloat(&pixel, 2, 0.5);
+    try std.testing.expect(colorAttachmentFormat(83));
+    try std.testing.expectEqual(@as(u64, 4), imageStorageBytesPerTexel(83));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&pixel, 83, false, &output, 0x1, .{}));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&pixel, 0));
+    try std.testing.expectEqual(@as(f32, 0.5), readHalfFloat(&pixel, 2));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueColor(&pixel, 83, &output));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&pixel, 0));
+    try std.testing.expectEqual(@as(f32, -0.5), readHalfFloat(&pixel, 2));
+}
+
+test "RG16F attachment clears preserve half-float channels and rectangular bounds" {
+    var bytes: [16]u8 = [_]u8{0xa5} ** 16;
+    const clear = [_]u16{ @bitCast(@as(f16, 1.5)), @bitCast(@as(f16, -0.25)), 0, 0 };
+    fillImageClearColor(&bytes, 83, .{ 0, 0, 0, 0 }, clear);
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
+    try std.testing.expectEqual(@as(f32, -0.25), readHalfFloat(&bytes, 2));
+    const replacement = [_]u16{ @bitCast(@as(f16, 0.25)), @bitCast(@as(f16, 0.5)), 0, 0 };
+    fillImageClearColorRect(&bytes, 2, 83, .{ 0, 0, 0, 0 }, replacement, .{ .x = 1, .y = 0, .width = 1, .height = 1 });
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&bytes, 4));
+    try std.testing.expectEqual(@as(f32, 0.5), readHalfFloat(&bytes, 6));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
 }
 
 test "scalar profile color writes preserve R8 red storage" {
@@ -13848,7 +13892,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                                 fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
                             }
                         }
-                    } else if (op.image.format == 97) {
+                    } else if (halfFloatColorFormat(op.image.format)) {
                         fillImageClearColor(bytes, op.image.format, op.color, op.half_color);
                         fillImagePattern(depth_bytes, depth_pattern);
                     } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
@@ -18155,7 +18199,7 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
             var clear_bytes = [4]u8{ 0, 0, 0, 0 };
             var half_color: ?[4]u16 = null;
             if (clear_color) {
-                if (color_target.format == 97) {
+                if (halfFloatColorFormat(color_target.format)) {
                     half_color = halfColorFromComponents(color) orelse {
                         command_buffer.impl.invalid = true;
                         return;
@@ -18261,7 +18305,7 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
                 return;
             }
             clear_color = true;
-            if (color.?.format == 97) {
+            if (halfFloatColorFormat(color.?.format)) {
                 clear_color_half = halfColorFromComponents(clear_components) orelse {
                     command_buffer.impl.invalid = true;
                     return;
@@ -25689,7 +25733,7 @@ test "all physical queries cover success boundaries and invalid handles" {
         .{ .format = 5, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 6, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 7, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
-        .{ .format = 83, .linear = 0, .optimal = 0xD001, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x7 },
+        .{ .format = 83, .linear = 0, .optimal = 0xD181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
         .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 43, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },

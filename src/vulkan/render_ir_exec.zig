@@ -3663,60 +3663,71 @@ pub const Executor = struct {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len) return error.InvalidOperand;
                     const interface = self.program.interfaces[interface_index];
-                    if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) return error.InvalidStorage;
-                    const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
-                    if (member_index >= interface.member_count) {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access member out of bounds interface={} member={} count={}\n",
-                            .{ interface_index, member_index, interface.member_count },
-                        );
-                        return error.Bounds;
-                    }
-                    const bytes = if (interface.storage == .output and
-                        interface.descriptor_set == null and
-                        interface.binding == null)
-                    blk: {
-                        var offset: usize = 0;
-                        for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
-                            offset += try byteSize(item.ty);
-                        };
-                        break :blk self.output_scratch[offset..];
-                    } else try findBinding(bindings, interface_index);
-                    const member = interface.members[member_index];
-                    var offset = member.offset;
-                    const member_ty = member.ty;
-                    if (member.array_stride != 0) {
-                        if (instruction.operands.len != 3) return error.InvalidShape;
-                        const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
-                        if (index >= member.array_count) return error.Bounds;
-                        offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
-                    }
-                    if (offset > bytes.len) {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access offset out of bounds interface={} member={} offset={} bytes={}\n",
-                            .{ interface_index, member_index, offset, bytes.len },
-                        );
-                        return error.Bounds;
-                    }
-                    const size = uniformValueByteSize(member_ty, bytes.len - offset) catch {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access bytes out of bounds interface={} member={} offset={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
-                            .{ interface_index, member_index, offset, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
-                        );
-                        return error.Bounds;
-                    };
-                    if (size > bytes.len - offset) return error.Bounds;
-                    const loaded = try readUniformValue(member_ty, bytes[offset..]);
-                    if (instruction.operands.len == 2 or member.array_stride != 0) {
-                        if (!same(member_ty, instruction.ty)) return error.InvalidType;
-                        result = loaded;
+                    if (interface.storage == .input) {
+                        if (instruction.operands.len != 2 or interface.ty.rows != 1 or interface.ty.columns < 2 or interface.ty.columns > 4 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != interface.ty.scalar) return error.InvalidShape;
+                        const input = try readInputValue(interface.ty, try findBindingRecord(bindings, interface_index));
+                        const component = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
+                        if (component >= input.lanes()) return error.Bounds;
+                        result.bits[0] = input.bits[component];
+                        result.dpdx_bits[0] = input.dpdx_bits[component];
+                        result.dpdy_bits[0] = input.dpdy_bits[component];
+                        result.derivatives_valid = input.derivatives_valid;
                     } else {
-                        if (instruction.operands.len != 3 or try lanes(instruction.ty) != 1) return error.InvalidShape;
-                        const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
-                        if (index >= loaded.lanes()) return error.Bounds;
-                        result.bits[0] = loaded.bits[index];
+                        if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) return error.InvalidStorage;
+                        const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
+                        if (member_index >= interface.member_count) {
+                            if (renderDiagnosticsEnabled()) std.debug.print(
+                                "ZPU render access member out of bounds interface={} member={} count={}\n",
+                                .{ interface_index, member_index, interface.member_count },
+                            );
+                            return error.Bounds;
+                        }
+                        const bytes = if (interface.storage == .output and
+                            interface.descriptor_set == null and
+                            interface.binding == null)
+                        blk: {
+                            var offset: usize = 0;
+                            for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
+                                offset += try byteSize(item.ty);
+                            };
+                            break :blk self.output_scratch[offset..];
+                        } else try findBinding(bindings, interface_index);
+                        const member = interface.members[member_index];
+                        var offset = member.offset;
+                        const member_ty = member.ty;
+                        if (member.array_stride != 0) {
+                            if (instruction.operands.len != 3) return error.InvalidShape;
+                            const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
+                            if (index >= member.array_count) return error.Bounds;
+                            offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
+                        }
+                        if (offset > bytes.len) {
+                            if (renderDiagnosticsEnabled()) std.debug.print(
+                                "ZPU render access offset out of bounds interface={} member={} offset={} bytes={}\n",
+                                .{ interface_index, member_index, offset, bytes.len },
+                            );
+                            return error.Bounds;
+                        }
+                        const size = uniformValueByteSize(member_ty, bytes.len - offset) catch {
+                            if (renderDiagnosticsEnabled()) std.debug.print(
+                                "ZPU render access bytes out of bounds interface={} member={} offset={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
+                                .{ interface_index, member_index, offset, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
+                            );
+                            return error.Bounds;
+                        };
+                        if (size > bytes.len - offset) return error.Bounds;
+                        const loaded = try readUniformValue(member_ty, bytes[offset..]);
+                        if (instruction.operands.len == 2 or member.array_stride != 0) {
+                            if (!same(member_ty, instruction.ty)) return error.InvalidType;
+                            result = loaded;
+                        } else {
+                            if (instruction.operands.len != 3 or try lanes(instruction.ty) != 1) return error.InvalidShape;
+                            const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
+                            if (index >= loaded.lanes()) return error.Bounds;
+                            result.bits[0] = loaded.bits[index];
+                        }
+                        markConstant(&result);
                     }
-                    markConstant(&result);
                 },
                 .extract => {
                     const source = try valueRef(self.values, pc, instruction.operands[0]);
@@ -4922,40 +4933,54 @@ fn validate(program: *const ir.Program) Error!void {
         switch (instruction.op) {
             .access => {
                 const interface_index = instruction.operands[0];
-                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .push_constant and program.interfaces[interface_index].storage != .output)) {
+                if (interface_index >= program.interfaces.len) {
                     if (failureDiagnosticsEnabled()) {
-                        const actual = if (interface_index < program.interfaces.len) @tagName(program.interfaces[interface_index].storage) else "out_of_bounds";
-                        std.debug.print("ZPU render executor invalid access storage pc={} interface={} actual={s}\n", .{ pc, interface_index, actual });
+                        std.debug.print("ZPU render executor invalid access interface pc={} interface={} actual=out_of_bounds\n", .{ pc, interface_index });
                     }
                     return error.InvalidStorage;
                 }
                 const interface = program.interfaces[interface_index];
-                for (instruction.operands[1..], 0..) |index_id, index_position| {
-                    const index_ty = program.instructions[index_id].ty;
-                    if ((index_ty.scalar != .u32 and index_ty.scalar != .i32) or try lanes(index_ty) != 1) return error.InvalidType;
-                    // The member selector remains static so the backing
-                    // interface offset is deterministic.
-                    if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
-                }
-                const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
-                if (member_id >= interface.member_count) return error.Bounds;
-                const member = interface.members[member_id];
-                const member_ty = member.ty;
-                if (member.array_stride != 0) {
-                    if (instruction.operands.len != 3 or !same(instruction.ty, member_ty)) return error.InvalidType;
-                    if (program.instructions[instruction.operands[2]].op == .constant) {
-                        const index = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
-                        if (index >= member.array_count) return error.Bounds;
+                if (interface.storage == .input) {
+                    if (interface.ty.rows != 1 or interface.ty.columns < 2 or interface.ty.columns > 4 or instruction.operands.len != 2 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != interface.ty.scalar) return error.InvalidType;
+                    const selector = program.instructions[instruction.operands[1]];
+                    if (selector.op == .constant) {
+                        const component = std.mem.readInt(u32, selector.literal[0..4], .little);
+                        if (component >= interface.ty.columns) return error.Bounds;
+                    } else if (selector.ty.scalar != .u32 and selector.ty.scalar != .i32) return error.InvalidType;
+                } else if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) {
+                    if (failureDiagnosticsEnabled()) {
+                        const actual = @tagName(interface.storage);
+                        std.debug.print("ZPU render executor invalid access storage pc={} interface={} actual={s}\n", .{ pc, interface_index, actual });
                     }
-                } else if (instruction.operands.len == 2) {
-                    if (!same(instruction.ty, member_ty)) return error.InvalidType;
+                    return error.InvalidStorage;
                 } else {
-                    if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType;
-                    const index_instruction = program.instructions[instruction.operands[2]];
-                    if (index_instruction.op == .constant) {
-                        const component = std.mem.readInt(u32, index_instruction.literal[0..4], .little);
-                        if (component >= member_ty.columns) return error.Bounds;
-                    } else if (index_instruction.ty.scalar != .u32) return error.InvalidType;
+                    for (instruction.operands[1..], 0..) |index_id, index_position| {
+                        const index_ty = program.instructions[index_id].ty;
+                        if ((index_ty.scalar != .u32 and index_ty.scalar != .i32) or try lanes(index_ty) != 1) return error.InvalidType;
+                        // The member selector remains static so the backing
+                        // interface offset is deterministic.
+                        if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
+                    }
+                    const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
+                    if (member_id >= interface.member_count) return error.Bounds;
+                    const member = interface.members[member_id];
+                    const member_ty = member.ty;
+                    if (member.array_stride != 0) {
+                        if (instruction.operands.len != 3 or !same(instruction.ty, member_ty)) return error.InvalidType;
+                        if (program.instructions[instruction.operands[2]].op == .constant) {
+                            const index = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
+                            if (index >= member.array_count) return error.Bounds;
+                        }
+                    } else if (instruction.operands.len == 2) {
+                        if (!same(instruction.ty, member_ty)) return error.InvalidType;
+                    } else {
+                        if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType;
+                        const index_instruction = program.instructions[instruction.operands[2]];
+                        if (index_instruction.op == .constant) {
+                            const component = std.mem.readInt(u32, index_instruction.literal[0..4], .little);
+                            if (component >= member_ty.columns) return error.Bounds;
+                        } else if (index_instruction.ty.scalar != .u32) return error.InvalidType;
+                    }
                 }
             },
             .extract => {
