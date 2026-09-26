@@ -1690,7 +1690,7 @@ const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeli
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
 const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, dynamic_uniform_offsets: [max_profile_sampled_bindings]u64 = [_]u64{0} ** max_profile_sampled_bindings, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -6865,6 +6865,7 @@ fn resetCommandBufferState(c: *CommandBufferObj) void {
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.dynamic_uniform_offset = 0;
+    c.impl.dynamic_uniform_offsets = [_]u64{0} ** max_profile_sampled_bindings;
     c.impl.push_descriptor = .{};
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
@@ -7025,6 +7026,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.dynamic_uniform_offset = 0;
+    c.impl.dynamic_uniform_offsets = [_]u64{0} ** max_profile_sampled_bindings;
     c.impl.push_descriptor = .{};
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
@@ -15247,6 +15249,31 @@ fn validDepthBiasFactors(factors: [3]f32) bool {
     return std.math.isFinite(factors[0]) and std.math.isFinite(factors[1]) and std.math.isFinite(factors[2]);
 }
 
+fn profileMultisampleStateValid(ms: *const PipelineMultisampleStateCreateInfo) bool {
+    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or
+        (ms.sample_shading_enable != 0 and ms.sample_shading_enable != 1) or ms.sample_shading_enable != 0 or
+        !std.math.isFinite(ms.min_sample_shading) or ms.min_sample_shading < 0 or ms.min_sample_shading > 1 or
+        (ms.alpha_to_coverage_enable != 0 and ms.alpha_to_coverage_enable != 1) or ms.alpha_to_coverage_enable != 0 or
+        (ms.alpha_to_one_enable != 0 and ms.alpha_to_one_enable != 1) or ms.alpha_to_one_enable != 0) return false;
+    if (ms.sample_mask) |mask| if (mask[0] & 1 == 0) return false;
+    return true;
+}
+
+test "profile multisample state accepts only equivalent one-sample coverage" {
+    var sample_mask: u32 = 1;
+    var state = PipelineMultisampleStateCreateInfo{ .s_type = 24, .p_next = null, .flags = 0, .rasterization_samples = 1, .sample_shading_enable = 0, .min_sample_shading = 1, .sample_mask = @ptrCast(&sample_mask), .alpha_to_coverage_enable = 0, .alpha_to_one_enable = 0 };
+    try std.testing.expect(profileMultisampleStateValid(&state));
+    sample_mask = 0;
+    try std.testing.expect(!profileMultisampleStateValid(&state));
+    sample_mask = 1;
+    state.sample_mask = null;
+    state.rasterization_samples = 4;
+    try std.testing.expect(!profileMultisampleStateValid(&state));
+    state.rasterization_samples = 1;
+    state.sample_shading_enable = 1;
+    try std.testing.expect(!profileMultisampleStateValid(&state));
+}
+
 fn validBlendConstants(constants: [4]f32) bool {
     for (constants) |value| if (!std.math.isFinite(value)) return false;
     return true;
@@ -15604,8 +15631,8 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     const sample_shading_enable = try bool32(ms.sample_shading_enable);
     const alpha_to_coverage_enable = try bool32(ms.alpha_to_coverage_enable);
     const alpha_to_one_enable = try bool32(ms.alpha_to_one_enable);
-    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or sample_shading_enable != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or alpha_to_coverage_enable != 0 or alpha_to_one_enable != 0) {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU multisample state rejected sType={d} pNext={} flags=0x{x} samples={d} sampleShading={d} minShading={d} sampleMask={} alphaCoverage={d} alphaOne={d}\n", .{ ms.s_type, ms.p_next != null, ms.flags, ms.rasterization_samples, sample_shading_enable, ms.min_sample_shading, ms.sample_mask != null, alpha_to_coverage_enable, alpha_to_one_enable });
+    if (!profileMultisampleStateValid(ms)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU multisample state rejected sType={d} pNext={} flags=0x{x} samples={d} sampleShading={d} minShading={d} sampleMask={any} alphaCoverage={d} alphaOne={d}\n", .{ ms.s_type, ms.p_next != null, ms.flags, ms.rasterization_samples, sample_shading_enable, ms.min_sample_shading, if (ms.sample_mask) |mask| mask[0] else null, alpha_to_coverage_enable, alpha_to_one_enable });
         return pipelineInvalid(@src().line);
     }
     try w.u32le(1);
@@ -15649,7 +15676,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         if (pass.framebuffer_supported and (pass.framebuffer_attachment_count == 0 or pass.framebuffer_attachments[0].role == .depth)) 0 else 1
     else
         1;
-    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !validBlendConstants(cb.blend_constants)) return pipelineInvalid(@src().line);
+    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op < 0 or cb.logic_op > 15 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !validBlendConstants(cb.blend_constants)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU color blend rejected sType={d} pNext={} flags=0x{x} logicEnable={d} logicOp={d} attachments={d} supportedAttachments={d} attachmentPtr={} constantsValid={} renderPass=0x{x} framebufferSupported={} framebufferAttachments={d} framebufferFirstRole={s}\n", .{ cb.s_type, cb.p_next != null, cb.flags, cb.logic_op_enable, cb.logic_op, cb.attachment_count, color_attachment_count, cb.attachments != null, validBlendConstants(cb.blend_constants), ci.render_pass, if (render_pass) |pass| pass.framebuffer_supported else false, if (render_pass) |pass| pass.framebuffer_attachment_count else 0, if (render_pass) |pass| if (pass.framebuffer_attachment_count != 0) @tagName(pass.framebuffer_attachments[0].role) else "none" else "none" });
+        return pipelineInvalid(@src().line);
+    }
     try w.u32le(color_attachment_count);
     if (color_attachment_count != 0) {
         const attachment = cb.attachments.?[0];
@@ -17089,13 +17119,18 @@ fn createDescriptorPool(device: ?Device, info: ?*const DescriptorPoolCreateInfo,
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 33 or ci.p_next != null or ci.flags & ~@as(u32, 1) != 0 or ci.max_sets == 0 or ci.pool_size_count > descriptor_type_count or (ci.pool_size_count != 0 and ci.pool_sizes == null)) return .error_initialization_failed;
+    if (ci.s_type != 33 or ci.p_next != null or ci.flags & ~@as(u32, 1) != 0 or ci.max_sets == 0 or ci.pool_size_count > max_api_items or (ci.pool_size_count != 0 and ci.pool_sizes == null)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor pool rejected sType={d} pNext={} flags=0x{x} maxSets={d} poolSizes={d} sizesPtr={} alloc={}\n", .{ ci.s_type, ci.p_next != null, ci.flags, ci.max_sets, ci.pool_size_count, ci.pool_sizes != null, alloc != null });
+        return .error_initialization_failed;
+    }
     var capacity = [_]u32{0} ** descriptor_type_count;
     if (ci.pool_sizes) |sizes| for (sizes[0..ci.pool_size_count]) |size| {
-        if (size.descriptor_type < 0 or size.descriptor_type >= descriptor_type_count or size.descriptor_count == 0) return .error_initialization_failed;
+        if (size.descriptor_type < 0 or size.descriptor_type >= descriptor_type_count or size.descriptor_count == 0) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor pool size rejected type={d} count={d}\n", .{ size.descriptor_type, size.descriptor_count });
+            return .error_initialization_failed;
+        }
         const index: usize = @intCast(size.descriptor_type);
-        if (capacity[index] != 0) return .error_initialization_failed;
-        capacity[index] = size.descriptor_count;
+        capacity[index] = std.math.add(u32, capacity[index], size.descriptor_count) catch return .error_initialization_failed;
     };
     lock();
     defer mutex.unlock();
@@ -17228,7 +17263,7 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
         const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
         if (!set.owner.eql(d)) return;
         var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
-        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and (descriptor_write.descriptor_type != 8 or descriptor_write.dst_binding == 0) and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
+        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return;
             if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) return;
@@ -17315,7 +17350,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -17809,33 +17844,55 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
             return;
         };
         const expected_layout = if (set_index == 0) &layout_object.set0 else &layout_object.set1;
-        if (!descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(expected_layout) or (set_index != 0 and descriptor.uniform_dynamic)) {
+        if (!descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(expected_layout)) {
             command_buffer.impl.invalid = true;
             return;
         }
         descriptors[index] = descriptor;
-        if (descriptor.uniform_dynamic) expected_dynamic_count += 1;
+        for (descriptor.binding_types) |descriptor_type| {
+            if (descriptor_type == 8) {
+                if (set_index != 0 or expected_dynamic_count == max_profile_sampled_bindings) {
+                    command_buffer.impl.invalid = true;
+                    return;
+                }
+                expected_dynamic_count += 1;
+            }
+        }
     }
     if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null) or (dynamic_count == 0 and offsets != null)) {
         command_buffer.impl.invalid = true;
         return;
     }
-    var dynamic_offset: u64 = 0;
-    if (expected_dynamic_count != 0) {
-        const descriptor = descriptors[0];
-        dynamic_offset = offsets.?[0];
-        const buffer = descriptor.uniform orelse {
-            command_buffer.impl.invalid = true;
-            return;
-        };
-        if (dynamic_offset % 256 != 0 or descriptor.uniform_offset > std.math.maxInt(u64) - dynamic_offset) {
-            command_buffer.impl.invalid = true;
-            return;
-        }
-        const effective_offset = descriptor.uniform_offset + dynamic_offset;
-        if (effective_offset > buffer.size or descriptor.uniform_range == 0 or descriptor.uniform_range > buffer.size - effective_offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) {
-            command_buffer.impl.invalid = true;
-            return;
+    var dynamic_offsets = command_buffer.impl.dynamic_uniform_offsets;
+    if (first_set == 0) dynamic_offsets = [_]u64{0} ** max_profile_sampled_bindings;
+    var dynamic_index: usize = 0;
+    for (descriptors[0..count], first_set..) |descriptor, set_index| {
+        for (descriptor.binding_types, 0..) |descriptor_type, binding| {
+            if (descriptor_type != 8) continue;
+            if (set_index != 0 or dynamic_index >= expected_dynamic_count) {
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            const uniform = descriptorUniformBinding(descriptor, @intCast(binding)) orelse {
+                command_buffer.impl.invalid = true;
+                return;
+            };
+            const buffer = uniform.buffer orelse {
+                command_buffer.impl.invalid = true;
+                return;
+            };
+            const dynamic_offset: u64 = offsets.?[dynamic_index];
+            if (!uniform.dynamic or !liveBufferObject(buffer) or buffer.owner != command_buffer.impl.owner or dynamic_offset % 256 != 0 or uniform.offset > std.math.maxInt(u64) - dynamic_offset) {
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            const effective_offset = uniform.offset + dynamic_offset;
+            if (effective_offset > buffer.size or uniform.range == 0 or uniform.range > buffer.size - effective_offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) {
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            dynamic_offsets[binding] = dynamic_offset;
+            dynamic_index += 1;
         }
     }
     for (descriptors[0..count], first_set..) |descriptor, set_index| {
@@ -17845,7 +17902,8 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     command_buffer.impl.bound_descriptor_stage_flags = if (bind_point == 1) 0x20 else 0x1f;
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
-    command_buffer.impl.dynamic_uniform_offset = dynamic_offset;
+    command_buffer.impl.dynamic_uniform_offsets = dynamic_offsets;
+    command_buffer.impl.dynamic_uniform_offset = dynamic_offsets[0];
     if (first_set == 0) {
         command_buffer.impl.push_descriptor_active = false;
         command_buffer.impl.push_descriptor_bind_point = 0;
@@ -19581,6 +19639,28 @@ fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipelin
     }
     return true;
 }
+fn materializeDynamicUniformBindings(command_buffer: *const CommandBufferObj, snapshot: *DescriptorSetObj, descriptors: *const DescriptorSetObj) bool {
+    for (descriptors.binding_types, 0..) |descriptor_type, binding| {
+        if (descriptor_type != 8) continue;
+        var uniform = descriptorUniformBinding(descriptors, @intCast(binding)) orelse return false;
+        if (!uniform.dynamic) return false;
+        const buffer = uniform.buffer orelse return false;
+        const dynamic_offset = command_buffer.impl.dynamic_uniform_offsets[binding];
+        if (uniform.offset > std.math.maxInt(u64) - dynamic_offset) return false;
+        uniform.offset += dynamic_offset;
+        if (!liveBufferObject(buffer) or buffer.owner != command_buffer.impl.owner or uniform.offset > buffer.size or uniform.range == 0 or uniform.range > buffer.size - uniform.offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return false;
+        uniform.dynamic = false;
+        snapshot.uniform_bindings[binding] = uniform;
+        if (binding == 0) {
+            snapshot.uniform = buffer;
+            snapshot.uniform_offset = uniform.offset;
+            snapshot.uniform_range = uniform.range;
+            snapshot.uniform_dynamic = false;
+        }
+    }
+    return true;
+}
+
 fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const DescriptorSetObj) ?*DescriptorSetObj {
     if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
     const snapshot = &command_buffer.impl.descriptor_snapshots[command_buffer.impl.count];
@@ -19597,12 +19677,7 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
         snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
-    if (descriptors.uniform_dynamic) {
-        if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
-        snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
-        snapshot.uniform_dynamic = false;
-        snapshot.uniform_bindings[0] = .{ .buffer = descriptors.uniform, .offset = snapshot.uniform_offset, .range = descriptors.uniform_range };
-    }
+    if (!materializeDynamicUniformBindings(command_buffer, snapshot, descriptors)) return null;
     snapshot.synthetic = true;
     return snapshot;
 }
@@ -19614,12 +19689,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         const descriptors = activeDescriptorSet(command_buffer) orelse return null;
         snapshot.* = descriptors.*;
         if (!descriptors.synthetic) snapshot.source_set = @constCast(descriptors);
-        if (descriptors.uniform_dynamic) {
-            if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
-            snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
-            snapshot.uniform_dynamic = false;
-            snapshot.uniform_bindings[0] = .{ .buffer = descriptors.uniform, .offset = snapshot.uniform_offset, .range = descriptors.uniform_range };
-        }
+        if (!materializeDynamicUniformBindings(command_buffer, snapshot, descriptors)) return null;
     } else {
         snapshot.* = .{
             .owner = pipeline.owner,
@@ -22703,7 +22773,7 @@ test "vkcube presentation path records submits and presents two swapchain images
         try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     }
     var bad_multisample = multisample;
-    bad_multisample.min_sample_shading = 0.5;
+    bad_multisample.min_sample_shading = 1.5;
     invalid_pipeline = pipeline_info;
     invalid_pipeline.multisample = &bad_multisample;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
@@ -22759,7 +22829,15 @@ test "vkcube presentation path records submits and presents two swapchain images
         destroyPipeline(device, mutated_blend_pipeline[0], null);
     }
     bad_blend = color_blend;
+    bad_blend.logic_op = 3;
+    invalid_pipeline.color_blend = &bad_blend;
+    var ignored_logic_op_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &ignored_logic_op_pipeline));
+    try std.testing.expect(baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(ignored_logic_op_pipeline[0]).?.canonical));
+    destroyPipeline(device, ignored_logic_op_pipeline[0], null);
+    bad_blend = color_blend;
     bad_blend.logic_op = 1;
+    bad_blend.logic_op_enable = 1;
     invalid_pipeline.color_blend = &bad_blend;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     inline for (0..4) |index| {
@@ -29130,6 +29208,16 @@ test "descriptor pool budgets free reset and rollback are exact" {
     var bad_sizes = sizes;
     bad_sizes[1].descriptor_type = 6;
     pool_info.pool_sizes = &bad_sizes;
+    var duplicate_type_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &duplicate_type_pool));
+    try std.testing.expectEqual(@as(u32, 6), validDescriptorPoolLocked(duplicate_type_pool).?.capacity[6]);
+    destroyDescriptorPool(ctx.device, duplicate_type_pool, null);
+
+    const overflowing_sizes = [_]DescriptorPoolSize{
+        .{ .descriptor_type = 6, .descriptor_count = std.math.maxInt(u32) },
+        .{ .descriptor_type = 6, .descriptor_count = 1 },
+    };
+    pool_info.pool_sizes = &overflowing_sizes;
     var unchanged: usize = 0x1234;
     try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorPool(ctx.device, &pool_info, null, &unchanged));
     try std.testing.expectEqual(@as(usize, 0x1234), unchanged);
@@ -29279,14 +29367,17 @@ test "descriptor updates and binds are atomic and allocation free" {
 
 test "dynamic uniform descriptors apply aligned per-bind offsets transactionally" {
     const ctx = try createTestDeviceContext();
-    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
-    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    const bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
+    };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings };
     var set_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &set_layout));
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
-    const pool_size = DescriptorPoolSize{ .descriptor_type = 8, .descriptor_count = 1 };
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 8, .descriptor_count = 2 };
     const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
@@ -29300,25 +29391,38 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     var memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
     try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
-    var descriptor = DescriptorBufferInfo{ .buffer = buffer, .offset = 0, .range = 256 };
-    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptor), .texel_buffer_view = null };
-    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    var descriptors = [_]DescriptorBufferInfo{
+        .{ .buffer = buffer, .offset = 0, .range = 256 },
+        .{ .buffer = buffer, .offset = 0, .range = 256 },
+    };
+    var descriptor_writes = [_]WriteDescriptorSet{
+        .{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptors[0]), .texel_buffer_view = null },
+        .{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptors[1]), .texel_buffer_view = null },
+    };
+    updateDescriptorSets(ctx.device, descriptor_writes.len, &descriptor_writes, 0, null);
     const set_object = validDescriptorSetLocked(set).?;
     try std.testing.expect(set_object.uniform_dynamic);
     try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
-    descriptor.offset = 4;
-    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expect(set_object.uniform_bindings[1].dynamic);
+    descriptors[0].offset = 4;
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_writes[0]), 0, null);
     try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
-    descriptor.offset = 0;
-    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
-    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    descriptors[0].offset = 0;
+    const template_entries = [_]DescriptorUpdateTemplateEntry{
+        .{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) },
+        .{ .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = @sizeOf(DescriptorBufferInfo), .stride = @sizeOf(DescriptorBufferInfo) },
+    };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = template_entries.len, .descriptor_update_entries = &template_entries, .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
     var template: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
-    descriptor.offset = 256;
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    descriptors[0].offset = 256;
+    descriptors[1].offset = 512;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptors);
     try std.testing.expectEqual(@as(u64, 256), set_object.uniform_offset);
-    descriptor.offset = 0;
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    try std.testing.expectEqual(@as(u64, 512), set_object.uniform_bindings[1].offset);
+    descriptors[0].offset = 0;
+    descriptors[1].offset = 0;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptors);
     try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
 
     const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
@@ -29329,44 +29433,55 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_info, &command));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    var dynamic_offset: u32 = 256;
+    var dynamic_offsets = [_]u32{ 256, 512 };
     cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
     try std.testing.expect(command[0].impl.invalid);
     try std.testing.expect(command[0].impl.bound_descriptors == null);
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offsets));
     try std.testing.expect(command[0].impl.invalid);
     try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, null);
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, null);
     try std.testing.expect(command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    dynamic_offset = 4;
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    dynamic_offsets[1] = 4;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
     try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    dynamic_offset = 256;
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    dynamic_offsets[1] = 1024;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    dynamic_offsets[1] = 512;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
     try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offsets[0]);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
     try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
     const snapshot = snapshotDescriptorSet(command[0], set_object).?;
     try std.testing.expectEqual(@as(u64, 256), snapshot.uniform_offset);
+    try std.testing.expectEqual(@as(u64, 512), snapshot.uniform_bindings[1].offset);
     try std.testing.expect(!snapshot.uniform_dynamic);
+    try std.testing.expect(!snapshot.uniform_bindings[1].dynamic);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    const bind2 = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&set), .dynamic_offset_count = 1, .dynamic_offsets = @ptrCast(&dynamic_offset) };
+    const bind2 = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&set), .dynamic_offset_count = 2, .dynamic_offsets = @ptrCast(&dynamic_offsets) };
     cmdBindDescriptorSets2(command[0], &bind2);
     try std.testing.expect(!command[0].impl.invalid);
-    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
     var compute_bind2 = bind2;
     compute_bind2.stage_flags = 32;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     cmdBindDescriptorSets2(command[0], &compute_bind2);
     try std.testing.expect(!command[0].impl.invalid);
-    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
     try std.testing.expectEqual(@as(i32, 1), command[0].impl.bound_descriptor_bind_point);
     try std.testing.expectEqual(@as(u32, 0x20), command[0].impl.bound_descriptor_stage_flags);
     try std.testing.expect(!graphicsDescriptorBindingValid(command[0].impl));
@@ -29390,7 +29505,7 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
-        cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+        cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
         try std.testing.expect(!command[0].impl.invalid);
         cmdBindDescriptorSets2(command[0], &bind2);
         try std.testing.expect(!command[0].impl.invalid);

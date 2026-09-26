@@ -369,6 +369,7 @@ launch_chrome() {
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
         ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+        ZPU_DUMP_REJECTED_SPIRV=/run/zpu-runtime/rejected.spv \
         ZPU_PRESENT_DUMP="$present_dump" \
         ZPU_LIMITED=physical-core-v1 \
         ZPU_MAX_THREADS=2 \
@@ -459,6 +460,7 @@ benchmark_chrome() {
             ZPU_DIAGNOSE_FAILURES="$diagnose_failures" ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
             ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
             ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+            ZPU_DUMP_REJECTED_SPIRV=/run/zpu-runtime/rejected.spv \
             ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
             sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
         run smolvm machine exec --name "$machine" -- sh -c '
