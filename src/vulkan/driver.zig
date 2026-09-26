@@ -17900,14 +17900,17 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         .{ command_buffer.impl.invalid, command_buffer.impl.count, bind_point, first_set, count, dynamic_count },
     );
     if ((bind_point != 0 and bind_point != 1) or count == 0 or count > 2 or first_set > 1 or count > 2 - first_set or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=arguments bindPoint={d} firstSet={d} count={d} state={d} invalid={} sets={}\n", .{ bind_point, first_set, count, command_buffer.impl.state, command_buffer.impl.invalid, sets != null });
         command_buffer.impl.invalid = true;
         return;
     }
     const layout_object = validPipelineLayoutLocked(layout) orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=invalid_layout handle=0x{x}\n", .{layout});
         command_buffer.impl.invalid = true;
         return;
     };
     if (!layout_object.owner.eql(command_buffer.impl.owner) or first_set + count > layout_object.set_count) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=layout_scope owner={} firstSet={d} count={d} layoutSets={d}\n", .{ layout_object.owner.eql(command_buffer.impl.owner), first_set, count, layout_object.set_count });
         command_buffer.impl.invalid = true;
         return;
     }
@@ -17916,11 +17919,13 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     for (0..count) |index| {
         const set_index = first_set + @as(u32, @intCast(index));
         const descriptor = validDescriptorSetLocked(sets.?[index]) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=invalid_descriptor setIndex={d} handle=0x{x}\n", .{ index, sets.?[index] });
             command_buffer.impl.invalid = true;
             return;
         };
         const expected_layout = if (set_index == 0) &layout_object.set0 else &layout_object.set1;
         if (!descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(expected_layout)) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=descriptor_layout setIndex={d} owner={} descriptorDigest=0x{x} expectedDigest=0x{x} descriptorBytes={d} expectedBytes={d}\n", .{ set_index, descriptor.owner.eql(command_buffer.impl.owner), descriptor.layout.digest, expected_layout.digest, descriptor.layout.bytes.len, expected_layout.bytes.len });
             command_buffer.impl.invalid = true;
             return;
         }
@@ -17936,6 +17941,7 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         }
     }
     if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null) or (dynamic_count == 0 and offsets != null)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_count actual={d} expected={d} offsets={}\n", .{ dynamic_count, expected_dynamic_count, offsets != null });
         command_buffer.impl.invalid = true;
         return;
     }
