@@ -482,10 +482,13 @@ ignoring them.
 The promoted depth-bounds-test-enable state is likewise initialized, resolved,
 and snapshotted for direct and indirect draws, so a dynamic pipeline cannot
 silently fall back to its static enable value.
-The promoted stencil-test-enable state follows the same initialized snapshot
-contract; because the advertised attachment policy is D32-only, an enabled
-resolved stencil test rejects the draw rather than silently dropping stencil
-semantics.
+The promoted stencil-test-enable and stencil-operation states are resolved per
+front and back face and snapshotted for direct, indexed, and indirect draws.
+The scalar graphics profile executes stencil compare, fail, depth-fail, and
+pass operations with compare/write masks and reference values on D24S8 and S8
+attachments. Depth bounds run before stencil, and depth writes preserve the
+packed stencil byte. Enabled stencil remains unsupported by the legacy
+CPU-cube executor, which rejects that draw path instead of dropping the test.
 The promoted depth-bias-enable state is initialized and resolved in the same
 draw snapshot. The bounded scalar CPU raster profile now applies finite
 constant-factor and slope-factor bias in post-projection depth space, clamps
@@ -497,8 +500,8 @@ Core dynamic line width, depth-bias values, blend constants, and stencil
 compare/write/reference masks are now decoded into pipeline-owned requirements.
 The command buffer must initialize each declared value before a direct, indexed,
 or indirect draw can be recorded; the bounded backend keeps its truthful policy
-(line width 1, zero depth-bias clamp, and no stencil attachment) while rejecting
-missing or unsupported state rather than silently substituting baked values.
+(line width 1 and zero depth-bias clamp) while rejecting missing or unsupported
+state rather than silently substituting baked values.
 Query commands now enforce Vulkan render-scope rules: occlusion begin/end
 must be inside a traditional or dynamic render-pass instance, while timestamp
 writes must be outside one. The existing reset-history, availability,

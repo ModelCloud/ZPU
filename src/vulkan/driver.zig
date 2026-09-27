@@ -1446,6 +1446,13 @@ const RenderPassObj = struct {
     subpass_color_layouts: [8]i32 = [_]i32{0} ** 8,
     subpass_depth_layouts: [8]i32 = [_]i32{0} ** 8,
 };
+fn renderPassStencilFormat(pass: *const RenderPassObj) i32 {
+    if (!pass.framebuffer_supported) return 0;
+    for (pass.framebuffer_attachments[0..pass.framebuffer_attachment_count]) |attachment| {
+        if (attachment.role == .depth and isStencilFormat(attachment.format)) return attachment.format;
+    }
+    return 0;
+}
 const SyntheticProfile = struct {
     stage: render_ir.Stage,
     executor: render_ir_exec.Executor,
@@ -1460,6 +1467,10 @@ const ProfileVertexInput = struct {
     source_byte_size: u8,
     format: i32,
     input_rate: i32,
+    matrix_columns: bool = false,
+    matrix_bindings: [4]u32 = .{ 0, 0, 0, 0 },
+    matrix_offsets: [4]u32 = .{ 0, 0, 0, 0 },
+    matrix_strides: [4]u32 = .{ 0, 0, 0, 0 },
 };
 const ProfileVarying = struct {
     vertex_interface: u32,
@@ -1561,6 +1572,37 @@ const ExecutionAbi = union(enum) {
         self.* = .profile_v1_metadata;
     }
 };
+const StencilFaceState = struct {
+    fail_op: i32 = 0,
+    pass_op: i32 = 0,
+    depth_fail_op: i32 = 0,
+    compare_op: i32 = 7,
+    compare_mask: u32 = std.math.maxInt(u32),
+    write_mask: u32 = std.math.maxInt(u32),
+    reference: u32 = 0,
+};
+const StencilRasterState = struct {
+    test_enable: u32 = 0,
+    front: StencilFaceState = .{},
+    back: StencilFaceState = .{},
+};
+fn stencilFaceState(state: StencilOpState) StencilFaceState {
+    return .{
+        .fail_op = state.fail_op,
+        .pass_op = state.pass_op,
+        .depth_fail_op = state.depth_fail_op,
+        .compare_op = state.compare_op,
+        .compare_mask = state.compare_mask,
+        .write_mask = state.write_mask,
+        .reference = state.reference,
+    };
+}
+fn stencilFaceStateValid(state: StencilOpState) bool {
+    return state.fail_op >= 0 and state.fail_op <= 7 and
+        state.pass_op >= 0 and state.pass_op <= 7 and
+        state.depth_fail_op >= 0 and state.depth_fail_op <= 7 and
+        state.compare_op >= 0 and state.compare_op <= 7;
+}
 const GraphicsPipelineObj = struct {
     owner: DeviceIdentity,
     canonical: Canonical,
@@ -1583,6 +1625,8 @@ const GraphicsPipelineObj = struct {
     depth_compare_op: i32 = 3,
     depth_bounds_test_enable: u32 = 0,
     depth_bounds: [2]f32 = .{ 0, 1 },
+    stencil_front: StencilFaceState = .{},
+    stencil_back: StencilFaceState = .{},
     depth_bias_enable: u32 = 0,
     depth_bias: [3]f32 = .{ 0, 0, 0 },
     color_write_mask: u32 = 0xf,
@@ -1715,14 +1759,40 @@ const QueryCommand = struct { pool: *QueryPoolObj, index: u32 };
 const QueryCopyCommand = struct { pool: *QueryPoolObj, first: u32, count: u32, destination: *BufferObj, offset: u64, stride: u64, flags: u32 };
 const IndexedDrawState = struct { buffer: *BufferObj, offset: u64, byte_count: u64, index_type: i32, vertex_offset: i32 };
 const IndirectCountState = struct { buffer: *BufferObj, offset: u64, max_draw_count: u32 };
-const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{}, count_source: ?IndirectCountState = null };
+const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, stencil: StencilRasterState = .{}, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{}, count_source: ?IndirectCountState = null };
 const BlitImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageBlit, filter: i32 };
 const ResolveImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageResolve };
 const ClearDepthCommand = struct { image: *ImageObj, layout: i32, depth: f32, stencil: u32 = 0, aspect_mask: u32 = 2, base_layer: u32 = 0, layer_count: u32 = 1 };
 const RenderClearCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, depth_value: f32, stencil_value: u32 = 0, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true, clear_stencil: bool = false };
 const ClearAttachmentsCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
 const DeferredClearAttachmentsCommand = struct { color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
-const DynamicState = struct { cull_mode: u32 = std.math.maxInt(u32), front_face: i32 = -1, primitive_topology: i32 = 3, primitive_topology_set: bool = false, primitive_restart_enable: u32 = 0, primitive_restart_enable_set: bool = false, rasterizer_discard_enable: u32 = 0, rasterizer_discard_enable_set: bool = false, depth_bias_enable: u32 = 0, depth_bias_enable_set: bool = false, depth_test_enable: u32 = 1, depth_test_enable_set: bool = false, depth_write_enable: u32 = 1, depth_write_enable_set: bool = false, depth_compare_op: i32 = 3, depth_compare_op_set: bool = false, depth_bounds_test_enable: u32 = 0, depth_bounds_test_enable_set: bool = false, stencil_test_enable: u32 = 0, stencil_test_enable_set: bool = false, stencil_fail_op: i32 = 0, stencil_pass_op: i32 = 0, stencil_depth_fail_op: i32 = 0, stencil_compare_op: i32 = 7, stencil_op_set: bool = false };
+const DynamicState = struct {
+    cull_mode: u32 = std.math.maxInt(u32),
+    front_face: i32 = -1,
+    primitive_topology: i32 = 3,
+    primitive_topology_set: bool = false,
+    primitive_restart_enable: u32 = 0,
+    primitive_restart_enable_set: bool = false,
+    rasterizer_discard_enable: u32 = 0,
+    rasterizer_discard_enable_set: bool = false,
+    depth_bias_enable: u32 = 0,
+    depth_bias_enable_set: bool = false,
+    depth_test_enable: u32 = 1,
+    depth_test_enable_set: bool = false,
+    depth_write_enable: u32 = 1,
+    depth_write_enable_set: bool = false,
+    depth_compare_op: i32 = 3,
+    depth_compare_op_set: bool = false,
+    depth_bounds_test_enable: u32 = 0,
+    depth_bounds_test_enable_set: bool = false,
+    stencil_test_enable: u32 = 0,
+    stencil_test_enable_set: bool = false,
+    stencil_fail_op: [2]i32 = .{ 0, 0 },
+    stencil_pass_op: [2]i32 = .{ 0, 0 },
+    stencil_depth_fail_op: [2]i32 = .{ 0, 0 },
+    stencil_compare_op: [2]i32 = .{ 7, 7 },
+    stencil_op_set: u2 = 0,
+};
 const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
@@ -1733,7 +1803,7 @@ const ImageTransitionCommand = struct {
     new_layout: i32,
     subresource_range: ?ImageSubresourceRange = null,
 };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: ImageTransitionCommand, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, stencil: StencilRasterState = .{}, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: ImageTransitionCommand, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
 const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, dynamic_uniform_offsets: [max_profile_sampled_bindings]u64 = [_]u64{0} ** max_profile_sampled_bindings, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
@@ -2502,12 +2572,18 @@ fn pipelineVertexInputDivisorStateValid(raw: ?*const anyopaque) bool {
     while (next) |item| {
         if (depth == 16) return false;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (header.s_type != 1_000_191_001 or seen) return false;
+        if (header.s_type != 1_000_190_001 or seen) return false;
         const info: *const PipelineVertexInputDivisorStateCreateInfo = @ptrCast(@alignCast(item));
-        // Vertex-attribute divisor is not advertised.  A zero-entry node is
-        // still a valid ABI extension and has no execution effect; nonzero
-        // divisors would require the disabled feature and are rejected.
-        if (info.vertex_binding_divisor_count > max_api_items or info.vertex_binding_divisor_count != 0) return false;
+        // The scalar backend supports the core divisor of one. Divisor zero
+        // and values greater than one require additional execution semantics.
+        if (info.vertex_binding_divisor_count > max_api_items or
+            (info.vertex_binding_divisor_count != 0 and info.vertex_binding_divisors == null)) return false;
+        if (info.vertex_binding_divisors) |divisors| {
+            for (divisors[0..info.vertex_binding_divisor_count], 0..) |divisor, index| {
+                if (divisor.divisor != 1) return false;
+                for (divisors[0..index]) |prior| if (prior.binding == divisor.binding) return false;
+            }
+        }
         seen = true;
         next = header.p_next;
         depth += 1;
@@ -3055,6 +3131,10 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
                 propertyWriteU32(payload, 0, 1);
                 propertyWriteU32(payload, 4, 0);
             },
+            1000191002 => { // VkPhysicalDeviceVertexAttributeDivisorFeatures
+                propertyWriteU32(payload, 0, 1);
+                propertyWriteU32(payload, 4, 0);
+            },
             else => {},
         }
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
@@ -3086,6 +3166,12 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
                 const preserve = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
                 if (last != 0 and last != 1) return true;
                 if (preserve != 0) return true;
+            },
+            1000191002 => { // VkPhysicalDeviceVertexAttributeDivisorFeatures
+                const divisor = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
+                const zero_divisor = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
+                if (divisor != 0 and divisor != 1) return true;
+                if (zero_divisor != 0) return true;
             },
             else => {
                 for (bytes[16 .. 16 + words * @sizeOf(u32)]) |value| if (value != 0) return true;
@@ -8550,6 +8636,23 @@ fn renderingAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
         (aspect_mask == image_aspect_depth_bit and (layout == 1_000_241_000 or layout == 1_000_241_001)) or
         (aspect_mask == image_aspect_stencil_bit and (layout == 1_000_241_002 or layout == 1_000_241_003));
 }
+fn clearAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
+    if (layout == 1) return true; // GENERAL
+    if (aspect_mask == image_aspect_color_bit) return layout == 2;
+    if (layout == 3 or layout == 4) return aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0;
+    if (aspect_mask == image_aspect_depth_bit) return layout == 1_000_117_001 or layout == 1_000_117_002 or layout == 1_000_241_000 or layout == 1_000_241_001;
+    if (aspect_mask == image_aspect_stencil_bit) return layout == 1_000_117_000 or layout == 1_000_241_002 or layout == 1_000_241_003;
+    return false;
+}
+
+test "clear attachment layouts permit writes only to active depth or stencil aspects" {
+    try std.testing.expect(clearAttachmentLayoutValid(1_000_117_001, image_aspect_depth_bit));
+    try std.testing.expect(!clearAttachmentLayoutValid(1_000_117_001, image_aspect_stencil_bit));
+    try std.testing.expect(clearAttachmentLayoutValid(1_000_117_000, image_aspect_stencil_bit));
+    try std.testing.expect(!clearAttachmentLayoutValid(1_000_117_000, image_aspect_depth_bit));
+    try std.testing.expect(clearAttachmentLayoutValid(2, image_aspect_color_bit));
+    try std.testing.expect(!clearAttachmentLayoutValid(2, image_aspect_depth_bit));
+}
 fn dependencyKeyMix(hash: *u64, value: u64) void {
     hash.* ^= value;
     hash.* *%= 1099511628211;
@@ -9770,18 +9873,25 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
     }
     const last_instance = std.math.add(u64, op.instance_index, @as(u64, op.instance_count) - 1) catch return false;
     for (profile.inputs[0..profile.input_count]) |input| {
-        if (input.binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
-        if (op.pipeline.dynamic_vertex_input_binding_stride and op.vertex_bindings.stride_set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
-        const buffer = op.vertex_bindings.buffers[input.binding] orelse return deadResource();
-        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
-        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
-        if (!bufferStorageValid(buffer)) return false;
-        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-        const element = if (input.input_rate == 0) last_vertex else last_instance;
-        const relative = std.math.add(u64, input.offset, std.math.mul(u64, element, stride) catch return false) catch return false;
-        const end = std.math.add(u64, relative, input.source_byte_size) catch return false;
-        const offset = op.vertex_bindings.offsets[input.binding];
-        if (offset > buffer.size or end > buffer.size - offset or end > op.vertex_bindings.sizes[input.binding]) return false;
+        const columns: usize = if (input.matrix_columns) 4 else 1;
+        for (0..columns) |column| {
+            const binding: usize = if (input.matrix_columns) input.matrix_bindings[column] else input.binding;
+            const attribute_offset = if (input.matrix_columns) input.matrix_offsets[column] else input.offset;
+            const static_stride = if (input.matrix_columns) input.matrix_strides[column] else input.stride;
+            const source_size: u64 = if (input.matrix_columns) 16 else input.source_byte_size;
+            if (binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(binding)) == 0) return false;
+            if (op.pipeline.dynamic_vertex_input_binding_stride and op.vertex_bindings.stride_set & (@as(u16, 1) << @intCast(binding)) == 0) return false;
+            const buffer = op.vertex_bindings.buffers[binding] orelse return deadResource();
+            if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+            if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(buffer)) return false;
+            const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[binding] else if (op.vertex_bindings.strides[binding] == 0) static_stride else op.vertex_bindings.strides[binding];
+            const element = if (input.input_rate == 0) last_vertex else last_instance;
+            const relative = std.math.add(u64, attribute_offset, std.math.mul(u64, element, stride) catch return false) catch return false;
+            const end = std.math.add(u64, relative, source_size) catch return false;
+            const offset = op.vertex_bindings.offsets[binding];
+            if (offset > buffer.size or end > buffer.size - offset or end > op.vertex_bindings.sizes[binding]) return false;
+        }
     }
     return true;
 }
@@ -9888,9 +9998,9 @@ fn prevalidateIndirectProfileDraw(op: IndirectDrawState, owner: *DeviceObj) bool
             const index_start = std.math.add(u64, op.index_offset, std.math.mul(u64, first_index, index_size) catch return false) catch return false;
             const index_bytes = std.math.mul(u64, vertex_count, index_size) catch return false;
             if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) return false;
-            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
         } else {
-            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = std.mem.readInt(u32, words[12..16], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = std.mem.readInt(u32, words[12..16], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
         }
         cube.cube_draw.push_constants = op.push_constants;
         if (!prevalidateProfileVertexBindings(cube.cube_draw, owner)) return false;
@@ -10016,22 +10126,48 @@ fn prevalidateCommandWithMipLayouts(command: Command, owner: *DeviceObj, layouts
             if (op.layer_count == 0 or op.base_layer >= op.image.array_layers or op.layer_count > op.image.array_layers - op.base_layer) return false;
         },
         .clear_attachments => |op| {
-            const image_slot = imageSlot(op.image) orelse return deadResource();
-            if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) return wrongSubmittingDevice();
+            const image_slot = imageSlot(op.image) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment preflight rejected stale image={x}\n", .{@intFromPtr(op.image)});
+                return deadResource();
+            };
+            if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment preflight owner/storage mismatch aspect=0x{x} owner={} memory={} owned_bytes={}\n", .{ op.aspect_mask, op.image.owner == owner, op.image.memory != null, op.image.owned_bytes != null });
+                return wrongSubmittingDevice();
+            }
             if (op.aspect_mask == image_aspect_color_bit) {
-                if (!colorAttachmentFormat(op.image.format)) return false;
-            } else if (!isDepthStencilFormat(op.image.format) or !validImageAspectMask(op.image, op.aspect_mask)) return false;
+                if (!colorAttachmentFormat(op.image.format)) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment unsupported color format={d}\n", .{op.image.format});
+                    return false;
+                }
+            } else if (!isDepthStencilFormat(op.image.format) or !validImageAspectMask(op.image, op.aspect_mask)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment unsupported depth/stencil format={d} aspect=0x{x}\n", .{ op.image.format, op.aspect_mask });
+                return false;
+            }
             const expected_layout = if (op.aspect_mask == image_aspect_color_bit) op.expected_color_layout else op.expected_depth_layout;
             if (expected_layout >= 0 and layouts[image_slot] != expected_layout) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment color/depth layout mismatch expected={d} actual={d}\n", .{ expected_layout, layouts[image_slot] });
                 hit(.layout_mismatch);
                 return false;
             }
-            if (layouts[image_slot] != 0 and layouts[image_slot] != 1 and layouts[image_slot] != 2 and layouts[image_slot] != 3 and layouts[image_slot] != 5 and layouts[image_slot] != 6 and layouts[image_slot] != 7) return false;
+            if (!clearAttachmentLayoutValid(layouts[image_slot], op.aspect_mask)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment layout unsupported={} aspect=0x{x}\n", .{ layouts[image_slot], op.aspect_mask });
+                return false;
+            }
             if (op.depth) |depth| {
-                const depth_slot = imageSlot(depth) orelse return deadResource();
-                if (depth.owner != owner or depth.memory == null or !liveMemoryObject(depth.memory.?)) return wrongSubmittingDevice();
-                if (!imageStorageValid(depth)) return false;
+                const depth_slot = imageSlot(depth) orelse {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment stale depth image={x}\n", .{@intFromPtr(depth)});
+                    return deadResource();
+                };
+                if (depth.owner != owner or (depth.memory == null and depth.owned_bytes == null) or (depth.memory != null and !liveMemoryObject(depth.memory.?))) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment depth owner/storage mismatch owner={} memory={} owned_bytes={}\n", .{ depth.owner == owner, depth.memory != null, depth.owned_bytes != null });
+                    return wrongSubmittingDevice();
+                }
+                if (!imageStorageValid(depth)) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment depth storage invalid\n", .{});
+                    return false;
+                }
                 if (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment depth layout mismatch expected={d} actual={d}\n", .{ op.expected_depth_layout, layouts[depth_slot] });
                     hit(.layout_mismatch);
                     return false;
                 }
@@ -10993,7 +11129,7 @@ fn profileReadClip(bytes: []const u8) ?[4]f32 {
     return result;
 }
 
-fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storage: *[16]u8) ?[]const u8 {
+fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storage: *[64]u8) ?[]const u8 {
     if (source.len < input.source_byte_size or input.byte_size > storage.len) return null;
     switch (input.format) {
         37 => {
@@ -11016,7 +11152,7 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
             }
         },
         109 => {
-            if (input.source_byte_size != 16 or input.byte_size == 0 or input.byte_size > 16) return null;
+            if ((input.source_byte_size != input.byte_size and !(input.source_byte_size == 16 and input.byte_size <= 16)) or input.byte_size == 0 or input.byte_size > storage.len) return null;
             @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
         },
         100, 103, 106 => {
@@ -11026,6 +11162,31 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
         else => return null,
     }
     return storage[0..input.byte_size];
+}
+
+fn profileReadVertexInput(op: anytype, input: ProfileVertexInput, vertex_index: u64, storage: *[64]u8) ?[]const u8 {
+    const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
+    if (input.matrix_columns) {
+        for (0..4) |column| {
+            const binding: usize = input.matrix_bindings[column];
+            const buffer = op.vertex_bindings.buffers[binding] orelse return null;
+            const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[binding] else if (op.vertex_bindings.strides[binding] == 0) input.matrix_strides[column] else op.vertex_bindings.strides[binding];
+            const relative = std.math.add(u64, input.matrix_offsets[column], std.math.mul(u64, element_index, stride) catch return null) catch return null;
+            const start = std.math.add(u64, op.vertex_bindings.offsets[binding], relative) catch return null;
+            const source = bufferBytes(buffer);
+            if (start > source.len or source.len - start < 16) return null;
+            @memcpy(storage[column * 16 ..][0..16], source[@intCast(start)..][0..16]);
+        }
+        return storage[0..64];
+    }
+    const binding: usize = input.binding;
+    const buffer = op.vertex_bindings.buffers[binding] orelse return null;
+    const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[binding] else if (op.vertex_bindings.strides[binding] == 0) input.stride else op.vertex_bindings.strides[binding];
+    const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return null) catch return null;
+    const start = std.math.add(u64, op.vertex_bindings.offsets[binding], relative) catch return null;
+    const source = bufferBytes(buffer);
+    if (start > source.len or source.len - start < input.source_byte_size) return null;
+    return profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], storage);
 }
 
 const ProfileVertexEvaluation = struct {
@@ -11061,21 +11222,15 @@ test "profile vertex cache slots are bounded and mix adjacent indices" {
 /// draws continue through the original per-triangle setup below.
 fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, uniform_bindings: []const render_ir_exec.Binding) ?ProfileVertexEvaluation {
     var bindings: [22]render_ir_exec.Binding = undefined;
-    var binding_storage: [16][16]u8 = undefined;
+    var binding_storage: [16][64]u8 = undefined;
     var output_storage: [16][16]u8 = undefined;
     var outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| outputs[slot] = .{ .interface = interface, .bytes = &output_storage[slot] };
     var binding_count: usize = 0;
     for (profile.inputs[0..profile.input_count]) |input| {
-        const buffer = op.vertex_bindings.buffers[input.binding] orelse return null;
-        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
         const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return null) else std.math.add(u64, op.base_vertex, emitted) catch return null;
-        const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
-        const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return null) catch return null;
-        const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return null;
-        const source = bufferBytes(buffer);
-        if (start > source.len or source.len - start < input.source_byte_size or binding_count == bindings.len) return null;
-        const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &binding_storage[binding_count]) orelse return null;
+        if (binding_count == bindings.len) return null;
+        const bytes = profileReadVertexInput(op, input, vertex_index, &binding_storage[binding_count]) orelse return null;
         bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
         binding_count += 1;
     }
@@ -11570,29 +11725,137 @@ fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
     };
 }
 
-fn profileEarlyDepthTest(op: anytype, depth: ?*ImageObj, depth_bytes: ?[]const u8, offset: usize, depth_value: f32) bool {
-    if (depth_bytes != null and op.depth_bounds_test_enable != 0 and
-        (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) return false;
-    if (depth_bytes) |storage| {
-        const image = depth orelse return false;
-        const stored_depth = depthValueFromStorage(image.format, storage, offset);
-        if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) return false;
-    }
-    return true;
+fn stencilValueFromStorage(format: i32, bytes: []const u8, offset: usize) ?u32 {
+    if (!isStencilFormat(format) or offset >= bytes.len) return null;
+    return bytes[offset];
 }
 
-test "profile early depth tests reject occluded and out-of-bounds fragments" {
+fn writeStencilValueToStorage(format: i32, bytes: []u8, offset: usize, value: u32) void {
+    if (!isStencilFormat(format) or offset >= bytes.len) return;
+    bytes[offset] = @intCast(value & 0xff);
+}
+
+fn profileStencilCompare(op: i32, reference: u32, stored: u32) bool {
+    return switch (op) {
+        0 => false,
+        1 => reference < stored,
+        2 => reference == stored,
+        3 => reference <= stored,
+        4 => reference > stored,
+        5 => reference != stored,
+        6 => reference >= stored,
+        7 => true,
+        else => false,
+    };
+}
+
+fn profileStencilOperation(op: i32, current: u32, reference: u32) u32 {
+    const value = current & 0xff;
+    return switch (op) {
+        0 => value,
+        1 => 0,
+        2 => reference & 0xff,
+        3 => @min(value + 1, 0xff),
+        4 => if (value == 0) 0 else value - 1,
+        5 => (~value) & 0xff,
+        6 => (value + 1) & 0xff,
+        7 => (value -% 1) & 0xff,
+        else => value,
+    };
+}
+
+fn applyProfileStencilOperation(bytes: []u8, image: *const ImageObj, offset: usize, face: StencilFaceState, operation: i32) void {
+    const stored = stencilValueFromStorage(image.format, bytes, offset) orelse return;
+    const generated = profileStencilOperation(operation, stored, face.reference);
+    const mask = face.write_mask & 0xff;
+    writeStencilValueToStorage(image.format, bytes, offset, (stored & ~mask) | (generated & mask));
+}
+
+fn profileDepthStencilTest(op: anytype, depth: ?*ImageObj, storage: ?[]u8, offset: usize, depth_value: f32, front_facing: bool) bool {
+    const image = depth;
+    const has_depth = if (image) |value| isDepthFormat(value.format) else false;
+    const has_stencil = if (image) |value| isStencilFormat(value.format) else false;
+
+    // Vulkan applies depth bounds before stencil. A fragment rejected by this
+    // test does not update the stencil value.
+    if (has_depth and op.depth_bounds_test_enable != 0 and
+        (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) return false;
+
+    const face = if (front_facing) op.stencil.front else op.stencil.back;
+    if (op.stencil.test_enable != 0) {
+        const stencil_image = image orelse return false;
+        const bytes = storage orelse return false;
+        if (!has_stencil) return false;
+        const stored = stencilValueFromStorage(stencil_image.format, bytes, offset) orelse return false;
+        const reference = face.reference & face.compare_mask;
+        const masked_stored = stored & face.compare_mask;
+        if (!profileStencilCompare(face.compare_op, reference, masked_stored)) {
+            applyProfileStencilOperation(bytes, stencil_image, offset, face, face.fail_op);
+            return false;
+        }
+    }
+
+    var depth_pass = true;
+    if (has_depth and op.depth_test_enable != 0) {
+        const depth_image = image.?;
+        const bytes = storage orelse return false;
+        const stored_depth = depthValueFromStorage(depth_image.format, bytes, offset);
+        depth_pass = std.math.isFinite(stored_depth) and profileDepthCompare(op.depth_compare_op, depth_value, stored_depth);
+    }
+    if (op.stencil.test_enable != 0) {
+        const stencil_image = image.?;
+        const bytes = storage orelse return false;
+        applyProfileStencilOperation(bytes, stencil_image, offset, face, if (depth_pass) face.pass_op else face.depth_fail_op);
+    }
+    return depth_pass;
+}
+
+test "profile depth and bounds tests reject occluded fragments" {
     var bytes: [16]u8 align(64) = [_]u8{0} ** 16;
     for (0..4) |pixel| std.mem.writeInt(u32, bytes[pixel * 4 ..][0..4], @bitCast(@as(f32, 0.5)), .little);
     var memory = MemoryObj{ .owner = undefined, .bytes = bytes[0..], .mapped = true };
     var image = ImageObj{ .owner = undefined, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 126, .usage = 0x2, .layout = 1, .memory = &memory };
-    const State = struct { depth_test_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32 };
-    const less_equal = State{ .depth_test_enable = 1, .depth_compare_op = 3, .depth_bounds_test_enable = 0, .depth_bounds = .{ 0, 1 } };
-    try std.testing.expect(profileEarlyDepthTest(less_equal, &image, bytes[0..], 0, 0.25));
-    try std.testing.expect(!profileEarlyDepthTest(less_equal, &image, bytes[0..], 0, 0.75));
-    const bounded = State{ .depth_test_enable = 0, .depth_compare_op = 3, .depth_bounds_test_enable = 1, .depth_bounds = .{ 0.2, 0.4 } };
-    try std.testing.expect(profileEarlyDepthTest(bounded, &image, bytes[0..], 0, 0.3));
-    try std.testing.expect(!profileEarlyDepthTest(bounded, &image, bytes[0..], 0, 0.5));
+    const State = struct { depth_test_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32, stencil: StencilRasterState };
+    const less_equal = State{ .depth_test_enable = 1, .depth_compare_op = 3, .depth_bounds_test_enable = 0, .depth_bounds = .{ 0, 1 }, .stencil = .{} };
+    try std.testing.expect(profileDepthStencilTest(less_equal, &image, bytes[0..], 0, 0.25, true));
+    try std.testing.expect(!profileDepthStencilTest(less_equal, &image, bytes[0..], 0, 0.75, true));
+    const bounded = State{ .depth_test_enable = 0, .depth_compare_op = 3, .depth_bounds_test_enable = 1, .depth_bounds = .{ 0.2, 0.4 }, .stencil = .{} };
+    try std.testing.expect(profileDepthStencilTest(bounded, &image, bytes[0..], 0, 0.3, true));
+    try std.testing.expect(!profileDepthStencilTest(bounded, &image, bytes[0..], 0, 0.5, true));
+}
+
+test "profile stencil applies masked front and back operations around depth" {
+    var bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    // D24S8 packs the stencil byte in the least-significant byte.
+    std.mem.writeInt(u32, bytes[0..4], 0x4000_00a3, .little);
+    std.mem.writeInt(u32, bytes[4..8], 0x8000_00ff, .little);
+    var memory = MemoryObj{ .owner = undefined, .bytes = bytes[0..], .mapped = true };
+    var image = ImageObj{ .owner = undefined, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x20, .layout = 1, .memory = &memory };
+    const State = struct { depth_test_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32, stencil: StencilRasterState };
+    var state = State{
+        .depth_test_enable = 0,
+        .depth_compare_op = 3,
+        .depth_bounds_test_enable = 0,
+        .depth_bounds = .{ 0, 1 },
+        .stencil = .{ .test_enable = 1, .front = .{ .pass_op = 2, .compare_op = 5, .compare_mask = 0xf, .write_mask = 0xf, .reference = 0x15 }, .back = .{ .fail_op = 1, .compare_op = 0, .compare_mask = 0xff, .write_mask = 0xff } },
+    };
+    try std.testing.expect(profileDepthStencilTest(state, &image, bytes[0..], 0, 0.5, true));
+    try std.testing.expectEqual(@as(u8, 0xa5), bytes[0]);
+    try std.testing.expectEqual(@as(u32, 0x4000_00a5), std.mem.readInt(u32, bytes[0..4], .little));
+    try std.testing.expect(!profileDepthStencilTest(state, &image, bytes[0..], 4, 0.5, false));
+    try std.testing.expectEqual(@as(u8, 0), bytes[4]);
+
+    // A failed depth comparison selects depthFailOp; bounds rejection occurs
+    // first and leaves stencil untouched.
+    state.stencil.front = .{ .depth_fail_op = 6, .compare_op = 7, .compare_mask = 0xff, .write_mask = 0xff };
+    state.depth_test_enable = 1;
+    state.depth_compare_op = 1;
+    try std.testing.expect(!profileDepthStencilTest(state, &image, bytes[4..], 0, 0.75, true));
+    try std.testing.expectEqual(@as(u8, 1), bytes[4]);
+    state.depth_bounds_test_enable = 1;
+    state.depth_bounds = .{ 0.1, 0.2 };
+    try std.testing.expect(!profileDepthStencilTest(state, &image, bytes[4..], 0, 0.5, true));
+    try std.testing.expectEqual(@as(u8, 1), bytes[4]);
 }
 
 fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
@@ -11761,7 +12024,7 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descr
         76 => .r16_sfloat,
         83 => .rg16_sfloat,
         97 => .rgba16_sfloat,
-        100 => .r32_sfloat,
+        100, 126 => .r32_sfloat,
         103 => .rg32_sfloat,
         109 => .rgba32_sfloat,
         122 => .r11g11b10_ufloat,
@@ -12015,7 +12278,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var bounds = emptyRect();
     var pixels_written: usize = 0;
     var vertex_bindings: [22]render_ir_exec.Binding = undefined;
-    var vertex_binding_storage: [16][16]u8 = undefined;
+    var vertex_binding_storage: [16][64]u8 = undefined;
     var vertex_output_bytes: [16][16]u8 = undefined;
     var vertex_outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| vertex_outputs[slot] = .{ .interface = interface, .bytes = &vertex_output_bytes[slot] };
@@ -12053,7 +12316,38 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var fragment_sampled_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count], 0..) |sampled_profile, index| {
         const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required, sampled_profile.cube) orelse {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampled-image setup failed set={} binding={d} interface={d} sampler_required={}\n", .{ sampled_profile.descriptor_set, sampled_profile.binding, sampled_profile.interface, sampled_profile.sampler_required });
+            if (renderDiagnosticsEnabled()) {
+                const table = if (sampled_profile.descriptor_set == 1) &op.descriptors.sampled_images_set1 else &op.descriptors.sampled_images;
+                const descriptor = if (sampled_profile.binding < table.len) table[sampled_profile.binding] else DescriptorSampledImage{};
+                const image = descriptor.image;
+                const sampler = descriptor.sampler;
+                std.debug.print(
+                    "ZPU render sampled-image setup failed set={} binding={d} interface={d} sampler_required={} image={any} format={d} size={d}x{d} layers={d} mips={d} view={d} base={d},{d} range={d},{d} sampler={any} filters={d},{d} address={d},{d} unnormalized={}\n",
+                    .{
+                        sampled_profile.descriptor_set,
+                        sampled_profile.binding,
+                        sampled_profile.interface,
+                        sampled_profile.sampler_required,
+                        if (image) |value| @intFromPtr(value) else 0,
+                        if (image) |value| value.format else 0,
+                        if (image) |value| value.width else 0,
+                        if (image) |value| value.height else 0,
+                        if (image) |value| value.array_layers else 0,
+                        if (image) |value| value.mip_levels else 0,
+                        descriptor.view_type,
+                        descriptor.base_array_layer,
+                        descriptor.base_mip_level,
+                        descriptor.layer_count,
+                        descriptor.level_count,
+                        if (sampler) |value| @intFromPtr(value) else 0,
+                        if (sampler) |value| value.mag_filter else -1,
+                        if (sampler) |value| value.min_filter else -1,
+                        if (sampler) |value| value.address_mode_u else -1,
+                        if (sampler) |value| value.address_mode_v else -1,
+                        if (sampler) |value| value.unnormalized_coordinates else false,
+                    },
+                );
+            }
             return;
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
@@ -12342,7 +12636,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_vp9_affine_quad = blk: {
         if (vp9_color_transform_prepared == null or vp9_luma_coordinate_varying == null or vp9_chroma_coordinate_varying == null or
             op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
-            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            op.cull_mode != 0 or op.stencil.test_enable != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
             depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
             !vp9_varying_abi or profile.varyings[vp9_luma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_luma_coordinate_varying.?].flat or
             profile.varyings[vp9_chroma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_chroma_coordinate_varying.?].flat or
@@ -12431,7 +12725,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_texture_copy_affine_quad = blk: {
         if (texture_copy_prepared == null or texture_copy_coordinate_varying == null or
             op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
-            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            op.cull_mode != 0 or op.stencil.test_enable != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
             depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
             profile.varying_count != 1 or profile.varyings[texture_copy_coordinate_varying.?].lanes != 2 or profile.varyings[texture_copy_coordinate_varying.?].flat or
             profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or colorStorageIndices(color.?.format) == null or
@@ -12519,8 +12813,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_source_over_write = draw_blend.enable == 1 and draw_blend.src_color_factor == 1 and draw_blend.dst_color_factor == 7 and draw_blend.color_op == 0 and
         draw_blend.src_alpha_factor == 1 and draw_blend.dst_alpha_factor == 7 and draw_blend.alpha_op == 0;
     var vertices: [3]ProfileScreenVertex = undefined;
-    const cache_large_indexed_vertices = op.indexed != null and op.vertex_count > 4_096;
-    var vertex_cache = [_]ProfileVertexCacheEntry{.{}} ** profile_vertex_cache_slot_count;
+    const cache_indexed_vertices = op.indexed != null;
+    var vertex_cache: [profile_vertex_cache_slot_count]ProfileVertexCacheEntry = undefined;
+    var vertex_cache_valid: [profile_vertex_cache_slot_count / 64]u64 = [_]u64{0} ** (profile_vertex_cache_slot_count / 64);
     var vertex_cache_hits: u64 = 0;
     var vertex_cache_misses: u64 = 0;
     for (0..triangle_count) |triangle_index| {
@@ -12533,9 +12828,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             ) orelse return;
             const vertex_index = profileVertexIndexValue(op, emitted) orelse return;
             const cache_slot = profileVertexCacheSlot(vertex_index);
-            if (cache_large_indexed_vertices) {
-                const cached = vertex_cache[cache_slot];
-                if (cached.valid and cached.vertex_index == vertex_index) {
+            if (cache_indexed_vertices) {
+                const cache_word = cache_slot / 64;
+                const cache_bit = @as(u64, 1) << @intCast(cache_slot % 64);
+                if (vertex_cache_valid[cache_word] & cache_bit != 0 and vertex_cache[cache_slot].vertex_index == vertex_index) {
+                    const cached = vertex_cache[cache_slot];
                     vertex_cache_hits += 1;
                     vertices[corner] = cached.evaluation.screen;
                     for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
@@ -12558,17 +12855,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return) catch return;
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
                 const source = bufferBytes(buffer);
-                if (start > source.len or source.len - start < input.source_byte_size or binding_count == vertex_bindings.len) {
+                if (binding_count == vertex_bindings.len) {
                     if (renderDiagnosticsEnabled()) std.debug.print(
-                        "ZPU render vertex input bounds binding={d} format={d} source_len={} start={} bytes={} stride={} offset={} vertex_index={} vertex={d} triangle={d}\n",
-                        .{ input.binding, input.format, source.len, start, input.source_byte_size, stride, input.offset, vertex_index, corner, triangle_index },
+                        "ZPU render vertex input binding limit binding={d} vertex={d} triangle={d}\n",
+                        .{ input.binding, corner, triangle_index },
                     );
                     return;
                 }
-                const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &vertex_binding_storage[binding_count]) orelse {
+                const bytes = profileReadVertexInput(op, input, vertex_index, &vertex_binding_storage[binding_count]) orelse {
                     if (renderDiagnosticsEnabled()) std.debug.print(
-                        "ZPU render vertex input format rejected binding={d} format={d} bytes={} vertex={d} triangle={d}\n",
-                        .{ input.binding, input.format, input.source_byte_size, corner, triangle_index },
+                        "ZPU render vertex input bounds binding={d} format={d} source_len={} start={} bytes={} stride={} offset={} vertex_index={} vertex={d} triangle={d}\n",
+                        .{ input.binding, input.format, source.len, start, input.source_byte_size, stride, input.offset, vertex_index, corner, triangle_index },
                     );
                     return;
                 };
@@ -12644,12 +12941,13 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
             for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], vertex_output_bytes[varying.vertex_slot][0 .. varying.lanes * 4]);
-            if (cache_large_indexed_vertices) {
+            if (cache_indexed_vertices) {
                 var evaluation = ProfileVertexEvaluation{ .screen = vertices[corner], .varyings = undefined };
                 for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
                     @memcpy(evaluation.varyings[varying_index][0 .. varying.lanes * 4], varying_bytes[corner][varying_index][0 .. varying.lanes * 4]);
                 }
                 vertex_cache[cache_slot] = .{ .vertex_index = vertex_index, .valid = true, .evaluation = evaluation };
+                vertex_cache_valid[cache_slot / 64] |= @as(u64, 1) << @intCast(cache_slot % 64);
             }
             if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_geometry.fetchAdd(1, .monotonic) < 6) {
                 std.debug.print(
@@ -12723,7 +13021,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 fragment_bindings[fragment_binding_count] = uniform;
                 fragment_binding_count += 1;
             }
-            var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
+            var front_facing_bytes = [_]u8{ @intFromBool(front_facing), 0, 0, 0 };
             if (profile.fragment_front_facing) |interface| {
                 fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
                 fragment_binding_count += 1;
@@ -12837,7 +13135,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 // its IR has no kill, depth output, or external write. Test
                 // depth before running the expensive fragment interpreter so
                 // hidden terrain faces do not shade pixels they cannot write.
-                if (!profileEarlyDepthTest(op, depth, depth_bytes, depth_offset, depth_value)) continue;
+                if (!profileDepthStencilTest(op, depth, depth_bytes, depth_offset, depth_value, front_facing)) continue;
                 var direct_fragment_color: ?[4]f32 = null;
                 if (direct_constant_black) {
                     direct_fragment_color = .{ 0, 0, 0, 0 };
@@ -13033,7 +13331,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         };
                         fragment_binding_count += 1;
                     }
-                    var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
+                    var front_facing_bytes = [_]u8{ @intFromBool(front_facing), 0, 0, 0 };
                     if (profile.fragment_front_facing) |interface| {
                         fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
                         fragment_binding_count += 1;
@@ -13227,7 +13525,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         profileWriteColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
                     if (wrote == null) return;
                 }
-                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) writeDepthValueToStorage(depth.?.format, depth_storage, depth_offset, depth_value);
+                if (depth_bytes) |depth_storage| if (op.depth_test_enable != 0 and op.depth_write_enable != 0 and isDepthFormat(depth.?.format)) {
+                    writeDepthValueToStorage(depth.?.format, depth_storage, depth_offset, depth_value);
+                };
                 bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
                 pixels_written += 1;
             }
@@ -13236,7 +13536,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     // A parallel Mosaic lane owns disjoint pixels but must not race on image
     // content metadata. Its caller publishes a conservative whole-target
     // envelope after every lane has completed.
-    if (profileTimingDiagnosticsEnabled() and cache_large_indexed_vertices) std.debug.print(
+    if (profileTimingDiagnosticsEnabled() and cache_indexed_vertices) std.debug.print(
         "ZPU indexed profile summary vertices={d} cache_hits={} cache_misses={} pixels={} bounds={d},{d} {d}x{d}\n",
         .{ op.vertex_count, vertex_cache_hits, vertex_cache_misses, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height },
     );
@@ -13275,7 +13575,7 @@ fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
         .cpu_cube_v1 => {},
         else => return null,
     }
-    if (op.rasterizer_discard_enable != 0 or op.primitive_topology != 3 or op.primitive_restart_enable != 0 or
+    if (op.rasterizer_discard_enable != 0 or op.stencil.test_enable != 0 or op.primitive_topology != 3 or op.primitive_restart_enable != 0 or
         op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or
         op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or op.pipeline.color_write_mask != 0xf or
         op.pipeline.color_blend_enable != 0 or op.cull_mode != 0 or op.front_face != 0 or
@@ -13577,7 +13877,7 @@ fn executeMosaicSingleRadialGradientDraw(command: *const Command, query_context:
         .cube_draw => |value| value,
         else => return false,
     };
-    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null or op.depth_image != null or
+    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null or op.depth_image != null or op.stencil.test_enable != 0 or
         op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.rasterizer_discard_enable != 0) return false;
     const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
@@ -13620,7 +13920,7 @@ fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageOb
 
 fn profileMosaicEligible(op: anytype) bool {
     return op.pipeline.execution_abi == .profile_v1_scalar_graphics and
-        op.rasterizer_discard_enable == 0 and op.layer_count == 1;
+        op.rasterizer_discard_enable == 0 and op.stencil.test_enable == 0 and op.layer_count == 1;
 }
 
 /// Resolve one image-order Mosaic tile.  Tile ownership is static and a lane
@@ -13704,7 +14004,7 @@ fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: u
         // discarding this otherwise stateless path merely for using the
         // framebuffer form of the Vulkan API.
         const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
-        if (op.instance_count != 1 or depth != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
+        if (op.instance_count != 1 or op.stencil.test_enable != 0 or depth != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
         const profile = switch (op.pipeline.execution_abi) {
             .profile_v1_scalar_graphics => |*value| value,
             else => return false,
@@ -14406,11 +14706,11 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     const index_start = op.index_offset + @as(u64, first_index) * index_size;
                     const index_bytes = @as(u64, first) * index_size;
                     if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) continue;
-                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
                 } else {
                     const first_vertex = std.mem.readInt(u32, words[8..12], .little);
                     const first_instance = std.mem.readInt(u32, words[12..16], .little);
-                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .instance_index = first_instance, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .instance_index = first_instance, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
                 }
                 cube.cube_draw.push_constants = op.push_constants;
                 cube.cube_draw.color_base_layer = op.color_base_layer;
@@ -15851,15 +16151,27 @@ test "pipeline flags2 validation is bounded and allocation-free" {
     try std.testing.expectEqual(@as(?u32, 0), pipelineCreateFlags2(@ptrCast(&node), pipeline_create_dispatch_base_bit, true));
 }
 
-test "vertex input divisor pNext accepts only the feature-disabled default" {
-    var divisor = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_191_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
+test "vertex input divisor pNext accepts divisor one only" {
+    var divisor = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_190_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| try std.testing.expect(pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
     var divisor_description = VertexInputBindingDivisorDescription{ .binding = 0, .divisor = 1 };
     divisor.vertex_binding_divisor_count = 1;
     divisor.vertex_binding_divisors = @ptrCast(&divisor_description);
+    try std.testing.expect(pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor_description.divisor = 0;
     try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor_description.divisor = 2;
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor_description.divisor = 1;
+    const duplicate_binding = VertexInputBindingDivisorDescription{ .binding = 0, .divisor = 1 };
+    var two_divisors = [_]VertexInputBindingDivisorDescription{ divisor_description, duplicate_binding };
+    divisor.vertex_binding_divisor_count = 2;
+    divisor.vertex_binding_divisors = &two_divisors;
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor.vertex_binding_divisor_count = 1;
+    divisor.vertex_binding_divisors = @ptrCast(&divisor_description);
     divisor.vertex_binding_divisor_count = 0;
     divisor.vertex_binding_divisors = null;
     var duplicate = divisor;
@@ -16546,30 +16858,45 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     }
     try w.u32le(1);
     const ds = ci.depth_stencil orelse return pipelineInvalid(@src().line);
-    const zero_stencil = std.mem.zeroes(StencilOpState);
-    var always_stencil = zero_stencil;
-    always_stencil.compare_op = 7;
     const pipeline_depth_test_enable = try bool32(ds.depth_test_enable);
     const pipeline_depth_write_enable = try bool32(ds.depth_write_enable);
     const pipeline_depth_bounds_test_enable = try bool32(ds.depth_bounds_test_enable);
     const pipeline_stencil_test_enable = try bool32(ds.stencil_test_enable);
+    const stencil_attachment_format = if (dynamic_rendering_state) |state|
+        state.stencil_format
+    else if (render_pass) |pass|
+        renderPassStencilFormat(pass)
+    else
+        0;
     const finite_depth_bounds = std.math.isFinite(ds.min_depth_bounds) and std.math.isFinite(ds.max_depth_bounds);
     const valid_depth_bounds = finite_depth_bounds and (pipeline_depth_bounds_test_enable == 0 or (ds.min_depth_bounds >= 0 and ds.max_depth_bounds <= 1 and ds.min_depth_bounds <= ds.max_depth_bounds));
-    const stencil_test = try bool32(ds.stencil_test_enable);
     const invalid_depth_stencil =
         ds.s_type != 25 or
         ds.p_next != null or
         ds.flags != 0 or
         ds.depth_compare_op < 0 or ds.depth_compare_op > 7 or
         !valid_depth_bounds or
-        stencil_test != 0 or
-        (!std.meta.eql(ds.front, zero_stencil) and !std.meta.eql(ds.front, always_stencil)) or
-        (!std.meta.eql(ds.back, zero_stencil) and !std.meta.eql(ds.back, always_stencil)) or
+        !stencilFaceStateValid(ds.front) or
+        !stencilFaceStateValid(ds.back) or
+        (pipeline_stencil_test_enable != 0 and stencil_attachment_format == 0) or
         (!dynamic_depth_bounds and pipeline_depth_bounds_test_enable == 1 and (ds.min_depth_bounds != 0.0 or ds.max_depth_bounds != 1.0));
     if (invalid_depth_stencil) return pipelineInvalid(@src().line);
-    try w.u32le(1);
-    try w.u32le(1);
-    try w.i32le(3);
+    try w.u32le(pipeline_depth_test_enable);
+    try w.u32le(pipeline_depth_write_enable);
+    try w.i32le(ds.depth_compare_op);
+    try w.u32le(pipeline_depth_bounds_test_enable);
+    try w.f32le(ds.min_depth_bounds);
+    try w.f32le(ds.max_depth_bounds);
+    try w.u32le(pipeline_stencil_test_enable);
+    inline for (.{ ds.front, ds.back }) |stencil_state| {
+        try w.i32le(stencil_state.fail_op);
+        try w.i32le(stencil_state.pass_op);
+        try w.i32le(stencil_state.depth_fail_op);
+        try w.i32le(stencil_state.compare_op);
+        try w.u32le(stencil_state.compare_mask);
+        try w.u32le(stencil_state.write_mask);
+        try w.u32le(stencil_state.reference);
+    }
     const cb = ci.color_blend orelse return pipelineInvalid(@src().line);
     var pipeline_color_blend_enable: u32 = 0;
     var pipeline_src_color_blend_factor: i32 = 1;
@@ -16662,7 +16989,7 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         };
         profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_samplers = contract.fragment_samplers, .fragment_sampler_count = contract.fragment_sampler_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .stencil_front = stencilFaceState(ds.front), .stencil_back = stencilFaceState(ds.back), .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = stencil_attachment_format, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -16750,12 +17077,13 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
                 result.vertex_index_interface = @intCast(index);
                 continue;
             }
-            if (vertex_inputs == 16 or interface.location == null or
-                (interface.ty.scalar != .f32 and !(interface.ty.scalar == .u32 and interface.ty.columns == 2)) or
-                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
+            const supported_scalar = interface.ty.scalar == .f32 or (interface.ty.scalar == .u32 and interface.ty.columns == 2 and interface.ty.rows == 1);
+            const supported_shape = interface.ty.rows == 1 or (interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 4);
+            if (vertex_inputs == 16 or interface.location == null or !supported_scalar or !supported_shape or
+                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4)) return null;
             result.inputs[vertex_inputs].interface = @intCast(index);
             result.inputs[vertex_inputs].location = interface.location.?;
-            result.inputs[vertex_inputs].byte_size = @as(u8, interface.ty.columns) * 4;
+            result.inputs[vertex_inputs].byte_size = @as(u8, interface.ty.columns) * @as(u8, interface.ty.rows) * 4;
             vertex_inputs += 1;
         },
         .output => {
@@ -16864,35 +17192,74 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
     if (fragment_outputs == 0 or !fragment_output_locations[0]) return null;
     const bindings = if (vi.bindings) |items| items[0..vi.binding_count] else &.{};
     const attributes = if (vi.attributes) |items| items[0..vi.attribute_count] else &.{};
-    if (attributes.len != vertex_inputs) return null;
+    var expected_attribute_count: usize = 0;
+    for (0..vertex_inputs) |input_index| expected_attribute_count += if (vertex.interfaces[result.inputs[input_index].interface].ty.rows > 1) 4 else 1;
+    if (attributes.len != expected_attribute_count) return null;
     for (0..vertex_inputs) |input_index| {
-        var found = false;
-        for (attributes) |attribute| if (attribute.location == result.inputs[input_index].location) {
-            const source_byte_size: u8 = switch (attribute.format) {
-                37 => if (result.inputs[input_index].byte_size == 16) 4 else return null,
-                81 => if (vertex.interfaces[result.inputs[input_index].interface].ty.scalar == .u32 and result.inputs[input_index].byte_size == 8) 4 else return null,
-                100 => if (result.inputs[input_index].byte_size == 4) 4 else return null,
-                103 => if (result.inputs[input_index].byte_size == 8) 8 else return null,
-                106 => if (result.inputs[input_index].byte_size == 12) 12 else return null,
-                109 => if (result.inputs[input_index].byte_size <= 16) 16 else return null,
-                else => return null,
+        const input = result.inputs[input_index];
+        const interface = vertex.interfaces[input.interface];
+        const column_count: u32 = if (interface.ty.rows > 1) 4 else 1;
+        var first_attribute: ?VertexInputAttributeDescription = null;
+        var matrix_rate: ?i32 = null;
+        for (0..column_count) |column| {
+            const location = input.location + @as(u32, @intCast(column));
+            var attribute_match: ?VertexInputAttributeDescription = null;
+            for (attributes) |attribute| if (attribute.location == location) {
+                if (attribute_match != null) return null;
+                attribute_match = attribute;
             };
-            if (found or attribute.binding >= 16 or attribute.offset > 2047) return null;
-            var binding_found = false;
-            for (bindings) |binding| if (binding.binding == attribute.binding) {
-                if (binding_found or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
-                result.inputs[input_index].binding = attribute.binding;
-                result.inputs[input_index].offset = attribute.offset;
-                result.inputs[input_index].stride = binding.stride;
-                result.inputs[input_index].source_byte_size = source_byte_size;
-                result.inputs[input_index].format = attribute.format;
-                result.inputs[input_index].input_rate = binding.input_rate;
-                binding_found = true;
-            };
-            if (!binding_found) return null;
-            found = true;
+            const attribute = attribute_match orelse return null;
+            if (attribute.binding >= 16 or attribute.offset > 2047) return null;
+            if (interface.ty.rows > 1) {
+                if (attribute.format != 109) return null;
+                var matched_binding = false;
+                for (bindings) |binding| if (binding.binding == attribute.binding) {
+                    if (matched_binding or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
+                    if (matrix_rate) |rate| {
+                        if (rate != binding.input_rate) return null;
+                    } else matrix_rate = binding.input_rate;
+                    result.inputs[input_index].matrix_bindings[column] = attribute.binding;
+                    result.inputs[input_index].matrix_offsets[column] = attribute.offset;
+                    result.inputs[input_index].matrix_strides[column] = binding.stride;
+                    matched_binding = true;
+                };
+                if (!matched_binding) return null;
+            } else if (first_attribute) |first| {
+                if (attribute.binding != first.binding or attribute.format != first.format or attribute.offset != first.offset) return null;
+            } else first_attribute = attribute;
+        }
+        if (interface.ty.rows > 1) {
+            result.inputs[input_index].matrix_columns = true;
+            result.inputs[input_index].source_byte_size = 64;
+            result.inputs[input_index].format = 109;
+            result.inputs[input_index].input_rate = matrix_rate orelse return null;
+            result.inputs[input_index].binding = result.inputs[input_index].matrix_bindings[0];
+            result.inputs[input_index].offset = result.inputs[input_index].matrix_offsets[0];
+            result.inputs[input_index].stride = result.inputs[input_index].matrix_strides[0];
+            continue;
+        }
+        const attribute = first_attribute orelse return null;
+        const source_byte_size: u8 = switch (attribute.format) {
+            37 => if (input.byte_size == 16) 4 else return null,
+            81 => if (interface.ty.scalar == .u32 and input.byte_size == 8) 4 else return null,
+            100 => if (input.byte_size == 4) 4 else return null,
+            103 => if (input.byte_size == 8) 8 else return null,
+            106 => if (input.byte_size == 12) 12 else return null,
+            109 => if (input.byte_size <= 16) 16 else return null,
+            else => return null,
         };
-        if (!found) return null;
+        var binding_found = false;
+        for (bindings) |binding| if (binding.binding == attribute.binding) {
+            if (binding_found or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
+            result.inputs[input_index].binding = attribute.binding;
+            result.inputs[input_index].offset = attribute.offset;
+            result.inputs[input_index].stride = binding.stride;
+            result.inputs[input_index].source_byte_size = source_byte_size;
+            result.inputs[input_index].format = attribute.format;
+            result.inputs[input_index].input_rate = binding.input_rate;
+            binding_found = true;
+        };
+        if (!binding_found) return null;
     }
     result.input_count = @intCast(vertex_inputs);
     return result;
@@ -19281,11 +19648,19 @@ fn cmdSetStencilOp(cb: ?CommandBuffer, face_mask: u32, fail_op: i32, pass_op: i3
         c.impl.invalid = true;
         return;
     }
-    c.impl.dynamic.stencil_fail_op = fail_op;
-    c.impl.dynamic.stencil_pass_op = pass_op;
-    c.impl.dynamic.stencil_depth_fail_op = depth_fail_op;
-    c.impl.dynamic.stencil_compare_op = compare_op;
-    c.impl.dynamic.stencil_op_set = true;
+    if (face_mask & 1 != 0) {
+        c.impl.dynamic.stencil_fail_op[0] = fail_op;
+        c.impl.dynamic.stencil_pass_op[0] = pass_op;
+        c.impl.dynamic.stencil_depth_fail_op[0] = depth_fail_op;
+        c.impl.dynamic.stencil_compare_op[0] = compare_op;
+    }
+    if (face_mask & 2 != 0) {
+        c.impl.dynamic.stencil_fail_op[1] = fail_op;
+        c.impl.dynamic.stencil_pass_op[1] = pass_op;
+        c.impl.dynamic.stencil_depth_fail_op[1] = depth_fail_op;
+        c.impl.dynamic.stencil_compare_op[1] = compare_op;
+    }
+    c.impl.dynamic.stencil_op_set |= @intCast(face_mask);
 }
 fn cmdSetLineWidth(cb: ?CommandBuffer, line_width: f32) callconv(.c) void {
     lock();
@@ -19584,7 +19959,26 @@ fn cmdPushDescriptorSetWithTemplate2(cb: ?CommandBuffer, info: ?*const PushDescr
     };
     cmdPushDescriptorSetWithTemplateLocked(command_buffer, ci.descriptor_update_template, template.pipeline_bind_point, ci.layout, ci.set, ci.data);
 }
-const DrawRasterState = struct { viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32, primitive_restart_enable: u32, rasterizer_discard_enable: u32, depth_test_enable: u32, depth_write_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32, depth_bias_enable: u32, depth_bias: [3]f32, blend_constants: [4]f32, line_stipple_factor: u32, line_stipple_pattern: u16 };
+const DrawRasterState = struct {
+    viewport: Viewport,
+    scissor: cpu_cube.Rect,
+    cull_mode: u32,
+    front_face: i32,
+    primitive_topology: i32,
+    primitive_restart_enable: u32,
+    rasterizer_discard_enable: u32,
+    depth_test_enable: u32,
+    depth_write_enable: u32,
+    depth_compare_op: i32,
+    depth_bounds_test_enable: u32,
+    depth_bounds: [2]f32,
+    stencil: StencilRasterState,
+    depth_bias_enable: u32,
+    depth_bias: [3]f32,
+    blend_constants: [4]f32,
+    line_stipple_factor: u32,
+    line_stipple_pattern: u16,
+};
 fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     return switch (abi) {
         .cpu_cube_v1, .profile_v1_scalar_graphics => true,
@@ -19644,7 +20038,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     if (pipeline.dynamic_depth_bounds and effective_depth_bounds_test_enable != 0 and !command_buffer.impl.depth_bounds_set) missing |= 1 << 18;
     if (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) missing |= 1 << 19;
     if (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) missing |= 1 << 20;
-    if (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) missing |= 1 << 21;
+    if (pipeline.dynamic_stencil_op and command_buffer.impl.dynamic.stencil_op_set != 3) missing |= 1 << 21;
     if (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set) missing |= 1 << 22;
     if (missing != 0) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster state rejected missing=0x{x}\n", .{missing});
@@ -19665,9 +20059,25 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
         pipeline.execution_abi == .profile_v1_scalar_graphics,
         primitive_topology,
     );
-    if (!topology_supported or (primitive_restart_enable != 0 and primitive_topology != 3) or stencil_test_enable != 0) {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster mode rejected topology={d} supported={} restart={d} stencil={d}\n", .{ primitive_topology, topology_supported, primitive_restart_enable, stencil_test_enable });
+    if (!topology_supported or (primitive_restart_enable != 0 and primitive_topology != 3) or
+        (stencil_test_enable != 0 and (pipeline.execution_abi != .profile_v1_scalar_graphics or pipeline.rendering_stencil_format == 0)))
+    {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster mode rejected topology={d} supported={} restart={d} stencil={d} stencilFormat={d} abi={s}\n", .{ primitive_topology, topology_supported, primitive_restart_enable, stencil_test_enable, pipeline.rendering_stencil_format, @tagName(pipeline.execution_abi) });
         return null;
+    }
+    var stencil = StencilRasterState{ .test_enable = stencil_test_enable, .front = pipeline.stencil_front, .back = pipeline.stencil_back };
+    for (0..2) |face_index| {
+        var face = if (face_index == 0) pipeline.stencil_front else pipeline.stencil_back;
+        if (pipeline.dynamic_stencil_op) {
+            face.fail_op = command_buffer.impl.dynamic.stencil_fail_op[face_index];
+            face.pass_op = command_buffer.impl.dynamic.stencil_pass_op[face_index];
+            face.depth_fail_op = command_buffer.impl.dynamic.stencil_depth_fail_op[face_index];
+            face.compare_op = command_buffer.impl.dynamic.stencil_compare_op[face_index];
+        }
+        if (pipeline.dynamic_stencil_compare_mask) face.compare_mask = command_buffer.impl.stencil_compare_mask[face_index];
+        if (pipeline.dynamic_stencil_write_mask) face.write_mask = command_buffer.impl.stencil_write_mask[face_index];
+        if (pipeline.dynamic_stencil_reference) face.reference = command_buffer.impl.stencil_reference[face_index];
+        if (face_index == 0) stencil.front = face else stencil.back = face;
     }
     return .{
         .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
@@ -19682,6 +20092,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
         .depth_compare_op = depth_compare_op,
         .depth_bounds_test_enable = depth_bounds_test_enable,
         .depth_bounds = depth_bounds,
+        .stencil = stencil,
         .depth_bias_enable = depth_bias_enable,
         .depth_bias = depth_bias,
         .blend_constants = if (pipeline.dynamic_blend_constants) command_buffer.impl.blend_constants else pipeline.blend_constants,
@@ -19707,6 +20118,9 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.depth_compare_op = 3;
     pipeline.depth_bounds_test_enable = 1;
     pipeline.depth_bounds = .{ 0, 1 };
+    pipeline.stencil_front = .{ .compare_mask = 0x3c, .write_mask = 0x30, .reference = 0x0c };
+    pipeline.stencil_back = .{ .compare_mask = 0x5a, .write_mask = 0xa5, .reference = 0x03 };
+    pipeline.rendering_stencil_format = 0;
     pipeline.color_blend_enable = 0;
     pipeline.src_color_blend_factor = 1;
     pipeline.dst_color_blend_factor = 0;
@@ -19754,6 +20168,13 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     impl.dynamic.depth_test_enable_set = false;
     impl.dynamic.depth_write_enable_set = false;
     impl.dynamic.depth_compare_op_set = false;
+    impl.dynamic.stencil_fail_op = .{ 1, 2 };
+    impl.dynamic.stencil_pass_op = .{ 3, 4 };
+    impl.dynamic.stencil_depth_fail_op = .{ 5, 6 };
+    impl.dynamic.stencil_compare_op = .{ 2, 5 };
+    impl.stencil_compare_mask = .{ 0x12, 0x34 };
+    impl.stencil_write_mask = .{ 0x56, 0x78 };
+    impl.stencil_reference = .{ 0x9a, 0xbc };
     var command_buffer = CommandBufferObj{ .loader_data = 0, .impl = &impl };
 
     try std.testing.expect(validViewportDomain(baked_viewport));
@@ -19887,8 +20308,15 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dynamic_stencil_test_enable = false;
     pipeline.dynamic_stencil_op = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
-    impl.dynamic.stencil_op_set = true;
+    impl.dynamic.stencil_op_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(i32, 1), resolved.stencil.front.fail_op);
+    try std.testing.expectEqual(@as(i32, 4), resolved.stencil.back.pass_op);
+    try std.testing.expectEqual(@as(i32, 6), resolved.stencil.back.depth_fail_op);
+    try std.testing.expectEqual(@as(i32, 5), resolved.stencil.back.compare_op);
+    try std.testing.expectEqual(@as(u32, 0x3c), resolved.stencil.front.compare_mask);
+    try std.testing.expectEqual(@as(u32, 0xa5), resolved.stencil.back.write_mask);
+    try std.testing.expectEqual(@as(u32, 0x03), resolved.stencil.back.reference);
     pipeline.dynamic_stencil_op = false;
     pipeline.dynamic_depth_bias_enable = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
@@ -19943,16 +20371,22 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_compare_mask_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 0x12), resolved.stencil.front.compare_mask);
+    try std.testing.expectEqual(@as(u32, 0x34), resolved.stencil.back.compare_mask);
     pipeline.dynamic_stencil_compare_mask = false;
     pipeline.dynamic_stencil_write_mask = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_write_mask_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 0x56), resolved.stencil.front.write_mask);
+    try std.testing.expectEqual(@as(u32, 0x78), resolved.stencil.back.write_mask);
     pipeline.dynamic_stencil_write_mask = false;
     pipeline.dynamic_stencil_reference = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_reference_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 0x9a), resolved.stencil.front.reference);
+    try std.testing.expectEqual(@as(u32, 0xbc), resolved.stencil.back.reference);
     pipeline.dynamic_stencil_reference = false;
     pipeline.dynamic_line_stipple = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
@@ -20224,6 +20658,33 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     bounded_command.cube_draw.depth_bounds = .{ 0.49, 0.51 };
     executeValidatedCommand(bounded_command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+
+    // Exercise stencil on the actual scalar triangle raster path. A NEVER
+    // comparison leaves both attachments untouched; ALWAYS then replaces the
+    // low nibble while preserving the high stencil bits and depth test/write.
+    var stencil_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
+    for (0..16) |pixel| std.mem.writeInt(u32, stencil_bytes[pixel * 4 ..][0..4], 0xffff_ffaa, .little);
+    var stencil_memory = MemoryObj{ .owner = undefined, .bytes = stencil_bytes[0..], .mapped = true };
+    var stencil_image = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x2, .layout = 1, .memory = &stencil_memory };
+    var stencil_command = command;
+    stencil_command.cube_draw.depth_image = &stencil_image;
+    stencil_command.cube_draw.stencil = .{ .test_enable = 1, .front = .{ .compare_op = 0, .write_mask = 0xff, .reference = 0x05 }, .back = .{ .compare_op = 0, .write_mask = 0xff, .reference = 0x05 } };
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(stencil_command, &context);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, color_bytes[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0xffff_ffaa), std.mem.readInt(u32, stencil_bytes[0..4], .little));
+    stencil_command.cube_draw.stencil.front = .{ .pass_op = 2, .compare_op = 7, .compare_mask = 0xff, .write_mask = 0x0f, .reference = 0x05 };
+    stencil_command.cube_draw.stencil.back = stencil_command.cube_draw.stencil.front;
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(stencil_command, &context);
+    var saw_stencil_pixel = false;
+    for (0..16) |pixel| {
+        const color_pixel = std.mem.readInt(u32, color_bytes[pixel * 4 ..][0..4], .little);
+        const depth_stencil_pixel = std.mem.readInt(u32, stencil_bytes[pixel * 4 ..][0..4], .little);
+        if (color_pixel != 0 and depth_stencil_pixel & 0xff == 0xa5) saw_stencil_pixel = true;
+    }
+    try std.testing.expect(saw_stencil_pixel);
+
     var index_bytes: [6]u8 align(64) = .{ 0, 0, 1, 0, 2, 0 };
     var index_memory = MemoryObj{ .owner = undefined, .bytes = index_bytes[0..], .mapped = true };
     var index_buffer = BufferObj{ .owner = undefined, .size = index_bytes.len, .usage = 0x40, .memory = &index_memory };
@@ -20463,7 +20924,7 @@ test "scalar graphics profile decodes normalized vertex inputs" {
         .format = 37,
         .input_rate = 1,
     };
-    var storage: [16]u8 = undefined;
+    var storage: [64]u8 = undefined;
     const decoded = profileVertexInputBytes(input, &.{ 0, 127, 255, 64 }, &storage).?;
     const expected = [_]f32{ 0, 127.0 / 255.0, 1, 64.0 / 255.0 };
     for (expected, 0..) |value, index| {
@@ -20532,7 +20993,7 @@ test "scalar graphics profile admits Chromium vec3 vertex inputs and varyings" {
     try std.testing.expectEqual(@as(u8, 12), contract.inputs[0].source_byte_size);
     try std.testing.expectEqual(@as(i32, 106), contract.inputs[0].format);
     try std.testing.expectEqual(@as(u8, 3), contract.varyings[0].lanes);
-    var decoded: [16]u8 = undefined;
+    var decoded: [64]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &decoded).?);
     var vec4_binding = binding;
     vec4_binding.stride = 16;
@@ -20544,6 +21005,44 @@ test "scalar graphics profile admits Chromium vec3 vertex inputs and varyings" {
     const vec4_source_contract = profileGraphicsContract(&vertex, &fragment, &vec4_vi).?;
     try std.testing.expectEqual(@as(u8, 16), vec4_source_contract.inputs[0].source_byte_size);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(vec4_source_contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, &decoded).?);
+}
+
+test "scalar graphics profile assembles an instance-rate mat4 vertex input" {
+    const mat4 = render_ir.Type{ .scalar = .f32, .columns = 4, .rows = 4 };
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = mat4, .location = 2 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+    };
+    const fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = @constCast(&vertex_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const bindings = [_]VertexInputBindingDescription{
+        .{ .binding = 1, .stride = 0, .input_rate = 1 },
+        .{ .binding = 2, .stride = 0, .input_rate = 1 },
+        .{ .binding = 3, .stride = 0, .input_rate = 1 },
+        .{ .binding = 4, .stride = 0, .input_rate = 1 },
+    };
+    const attributes = [_]VertexInputAttributeDescription{
+        .{ .location = 2, .binding = 1, .format = 109, .offset = 0 },
+        .{ .location = 3, .binding = 2, .format = 109, .offset = 0 },
+        .{ .location = 4, .binding = 3, .format = 109, .offset = 0 },
+        .{ .location = 5, .binding = 4, .format = 109, .offset = 0 },
+    };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings, .attribute_count = attributes.len, .attributes = &attributes };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 64), contract.inputs[0].byte_size);
+    try std.testing.expectEqual(@as(u8, 64), contract.inputs[0].source_byte_size);
+    try std.testing.expectEqual([4]u32{ 1, 2, 3, 4 }, contract.inputs[0].matrix_bindings);
+    try std.testing.expectEqual(@as(i32, 1), contract.inputs[0].input_rate);
+    var source: [64]u8 = undefined;
+    for (&source, 0..) |*byte, index| byte.* = @intCast(index);
+    var decoded: [64]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &source, profileVertexInputBytes(contract.inputs[0], &source, &decoded).?);
 }
 
 test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
@@ -20570,7 +21069,7 @@ test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
     try std.testing.expectEqual(@as(u8, 8), contract.inputs[0].byte_size);
     try std.testing.expectEqual(@as(u8, 4), contract.inputs[0].source_byte_size);
     try std.testing.expectEqual(@as(i32, 81), contract.inputs[0].format);
-    var storage: [16]u8 = undefined;
+    var storage: [64]u8 = undefined;
     const decoded = profileVertexInputBytes(contract.inputs[0], &[_]u8{ 97, 0, 95, 0 }, &storage).?;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 97, 0, 0, 0, 95, 0, 0, 0 }, decoded);
 
@@ -20972,7 +21471,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .instance_index = first_instance, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .instance_index = first_instance, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .stencil = raster.stencil, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_recorded_draws.fetchAdd(1, .monotonic);
 }
 fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
@@ -21069,7 +21568,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .stencil = raster.stencil, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_recorded_draws.fetchAdd(1, .monotonic);
 }
 fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
@@ -21144,7 +21643,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants, .count_source = count_source } });
+    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .stencil = raster.stencil, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants, .count_source = count_source } });
 }
 fn cmdDrawIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
     cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, false, null);
@@ -23544,7 +24043,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const biased_pipeline_object = validGraphicsPipelineLocked(biased_pipeline[0]).?;
     try std.testing.expectEqual([3]f32{ 8, 0.25, 1.5 }, biased_pipeline_object.depth_bias);
     destroyPipeline(device, biased_pipeline[0], null);
-    var divisor_state = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_191_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
+    var divisor_state = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_190_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
     var divisor_vertex_input = vertex_input;
     divisor_vertex_input.p_next = @ptrCast(&divisor_state);
     var divisor_pipeline_info = pipeline_info;
@@ -24046,11 +24545,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_depth = depth_stencil;
     bad_depth.front.fail_op = 1;
     invalid_pipeline.depth_stencil = &bad_depth;
-    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    var static_stencil_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &static_stencil_pipeline));
+    try std.testing.expectEqual(@as(i32, 1), validGraphicsPipelineLocked(static_stencil_pipeline[0]).?.stencil_front.fail_op);
+    destroyPipeline(device, static_stencil_pipeline[0], null);
     bad_depth = depth_stencil;
     bad_depth.back.reference = 1;
     invalid_pipeline.depth_stencil = &bad_depth;
-    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &static_stencil_pipeline));
+    try std.testing.expectEqual(@as(u32, 1), validGraphicsPipelineLocked(static_stencil_pipeline[0]).?.stencil_back.reference);
+    destroyPipeline(device, static_stencil_pipeline[0], null);
     var bad_blend_attachment = blend_attachment;
     bad_blend_attachment.blend_enable = 1;
     var bad_blend = color_blend;
@@ -26994,7 +27498,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var divisor_features = PhysicalDeviceVertexAttributeDivisorFeatures{ .s_type = 1000191002, .p_next = @ptrCast(&storage_features), .vertex_attribute_instance_rate_divisor = 0xffff_ffff, .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff };
     features.p_next = @ptrCast(&divisor_features);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
-    try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_divisor);
+    try std.testing.expectEqual(@as(u32, 1), divisor_features.vertex_attribute_instance_rate_divisor);
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_zero_divisor);
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&storage_features)[16..], 0));
     try std.testing.expectEqual(@as(u32, 0), storage_features.storage_buffer16_bit_access);
@@ -31663,7 +32167,7 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expect(commands[0].impl.dynamic.depth_bounds_test_enable_set);
         try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.stencil_test_enable);
         try std.testing.expect(commands[0].impl.dynamic.stencil_test_enable_set);
-        try std.testing.expect(commands[0].impl.dynamic.stencil_op_set);
+        try std.testing.expectEqual(@as(u2, 3), commands[0].impl.dynamic.stencil_op_set);
         try std.testing.expect(commands[0].impl.dynamic.depth_bias_enable_set);
         try std.testing.expect(commands[0].impl.dynamic.depth_test_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_write_enable);
@@ -31671,7 +32175,7 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expectEqual(@as(i32, 3), commands[0].impl.dynamic.depth_compare_op);
         try std.testing.expect(commands[0].impl.dynamic.depth_compare_op_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_test_enable);
-        try std.testing.expectEqual(@as(i32, 7), commands[0].impl.dynamic.stencil_compare_op);
+        try std.testing.expectEqual([2]i32{ 7, 7 }, commands[0].impl.dynamic.stencil_compare_op);
         try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
         try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
         try std.testing.expect(!commands[0].impl.line_width_set);
@@ -31695,7 +32199,7 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expect(!commands[0].impl.dynamic.depth_bounds_test_enable_set);
         try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.stencil_test_enable);
         try std.testing.expect(!commands[0].impl.dynamic.stencil_test_enable_set);
-        try std.testing.expect(!commands[0].impl.dynamic.stencil_op_set);
+        try std.testing.expectEqual(@as(u2, 0), commands[0].impl.dynamic.stencil_op_set);
         try std.testing.expect(!commands[0].impl.dynamic.depth_bias_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_write_enable);
         try std.testing.expect(!commands[0].impl.dynamic.depth_write_enable_set);
