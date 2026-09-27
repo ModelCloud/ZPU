@@ -2657,6 +2657,13 @@ pub const Executor = struct {
         };
     }
 
+    pub fn isFpsNormalFilter8tap(self: *const Executor) bool {
+        return switch (self.fast_path orelse return false) {
+            .fps_normal_filter_8tap => true,
+            else => false,
+        };
+    }
+
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
         const end = std.math.add(usize, offset, 4) catch return error.Bounds;
         if (end > bytes.len) return error.Bounds;
@@ -5476,7 +5483,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask, .three_pmrem_ggx => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask, .three_pmrem_ggx, .fps_normal_filter_8tap => true,
         else => false,
     };
 }
@@ -5558,6 +5565,8 @@ test "captured Three.js FPS normal filters retain their exact interpreter identi
         var executor = try Executor.init(std.testing.allocator, &program);
         defer executor.deinit();
         try std.testing.expectEqualStrings("fps_normal_filter_8tap", executor.prevalidatedPathName());
+        try std.testing.expect(executor.isFpsNormalFilter8tap());
+        try std.testing.expect(executor.tileParallelSafe());
         var pixels: [16 * 16 * 4]u8 = undefined;
         for (0..16) |y| for (0..16) |x| {
             const offset = (y * 16 + x) * 4;

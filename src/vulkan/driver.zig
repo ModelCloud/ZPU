@@ -14205,8 +14205,36 @@ fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: u
         if (!profile.fragment.tileParallelSafe() or profile.fragment_input_attachment_count != 0) return false;
         if (op.descriptors.texture == color) return false;
         for (op.descriptors.sampled_images) |sampled| if (sampled.image == color) return false;
+        for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color) return false;
         cursor.advance();
     }
+    return true;
+}
+
+/// The exact FPS normal filter also arrives with a writable depth attachment.
+/// Its shader reads a separate sampled image, and each band owns disjoint
+/// color and depth pixels. Keep this exception limited to one validated draw.
+fn profileMosaicSingleFpsNormalBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (query_context.pool != null) return false;
+    var cursor = start;
+    const raw = cursor.current() orelse return false;
+    const op = switch (raw.*) {
+        .cube_draw => |value| value,
+        else => return false,
+    };
+    if (!profileMosaicEligible(op) or op.instance_count != 1 or op.stencil.test_enable != 0 or
+        op.depth_test_enable == 0 or op.depth_write_enable == 0) return false;
+    const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+    const depth_image = depth orelse return false;
+    if (depth_image.width != color.width or depth_image.height != color.height or !isDepthFormat(depth_image.format)) return false;
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    if (!profile.fragment.isFpsNormalFilter8tap() or !profile.fragment.tileParallelSafe() or profile.fragment_input_attachment_count != 0) return false;
+    if (op.descriptors.texture == color or op.descriptors.texture == depth_image) return false;
+    for (op.descriptors.sampled_images) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+    for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
     return true;
 }
 
@@ -14289,13 +14317,22 @@ const ProfileMosaicBandContext = struct {
 /// The tile safety gate rules out target reads, depth, queries, and fragment
 /// state shared across pixels, so bands preserve exact per-pixel draw order.
 fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
-    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
+    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context) and
+        !(batch_count == 1 and profileMosaicSingleFpsNormalBandSafe(start, color, query_context))) return false;
     var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
     if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
     color.content_bounds = unionRect(color.content_bounds, full_target);
     color.complex_3d_content = true;
     color.force_full_present = true;
+    var cursor = start;
+    if (cursor.current()) |raw| switch (raw.*) {
+        .cube_draw => |op| {
+            const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+            if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, full_target);
+        },
+        else => {},
+    };
     return true;
 }
 
@@ -14385,6 +14422,27 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
                 const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
                 if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic PMREM GGX profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
             }
+            cursor.* = candidate;
+            return 1;
+        }
+        // The captured FPS normal-reconstruction filter samples a distinct
+        // image at eight fixed offsets for each output pixel. Disjoint bands
+        // retain the exact scalar sample order within each pixel.
+        const single_fps_normal_filter = switch (first.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile.fragment.isFpsNormalFilter8tap(),
+            else => false,
+        };
+        if (single_fps_normal_filter and @as(u64, color_image.width) * color_image.height >= 256 * 256 and
+            executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context))
+        {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic FPS normal-filter profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
+                std.debug.print("ZPU Mosaic FPS normal-filter profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
             cursor.* = candidate;
             return 1;
         }
