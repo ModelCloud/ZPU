@@ -4646,10 +4646,9 @@ fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatPr
         return true;
     }
     out.* = switch (format) {
-        9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        37, 43 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        37, 43, 44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
@@ -8320,7 +8319,7 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
 // its two half-float channels; CPU transfer and raster paths preserve both.
 // Depth formats retain their narrower sampled/destination-only contracts.
 fn transferableColorFormat(format: i32) bool {
-    return format == 37 or format == 43 or format == 44 or floatColorFormat(format);
+    return format == 9 or format == 16 or format == 37 or format == 43 or format == 44 or floatColorFormat(format);
 }
 
 fn blittableColorFormat(format: i32) bool {
@@ -15218,6 +15217,52 @@ test "RGBA16F linear blits average half-float channels when generating mips" {
     executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
     const expected = [_]f16{ 0.5, 0.5, 0.25, 1 };
     for (expected, 0..) |value, index| try std.testing.expectEqual(value, @as(f16, @bitCast(std.mem.readInt(u16, destination_bytes[index * 2 ..][0..2], .little))));
+}
+
+test "R8 linear blits generate mip texels from expanded sampled storage" {
+    var source_bytes: [16]u8 align(64) = .{
+        10, 0, 0, 255,
+        20, 0, 0, 255,
+        30, 0, 0, 255,
+        40, 0, 0, 255,
+    };
+    var destination_bytes: [4]u8 align(64) = .{0} ** 4;
+    var source = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .owned_bytes = source_bytes[0..] };
+    var destination = ImageObj{ .owner = @ptrFromInt(8), .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .owned_bytes = destination_bytes[0..] };
+    const subresource = ImageSubresourceLayers{ .aspect_mask = image_aspect_color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const region = ImageBlit{
+        .src_subresource = subresource,
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+        .dst_subresource = subresource,
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 } },
+    };
+
+    try std.testing.expect(blittableColorFormat(9));
+    executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 25, 0, 0, 255 }, &destination_bytes);
+}
+
+test "RG8 linear blits generate mip texels from expanded sampled storage" {
+    var source_bytes: [16]u8 align(64) = .{
+        10, 20, 0, 255,
+        20, 40, 0, 255,
+        30, 60, 0, 255,
+        40, 80, 0, 255,
+    };
+    var destination_bytes: [4]u8 align(64) = .{0} ** 4;
+    var source = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 16, .usage = 3, .layout = 1, .owned_bytes = source_bytes[0..] };
+    var destination = ImageObj{ .owner = @ptrFromInt(8), .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 16, .usage = 3, .layout = 1, .owned_bytes = destination_bytes[0..] };
+    const subresource = ImageSubresourceLayers{ .aspect_mask = image_aspect_color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const region = ImageBlit{
+        .src_subresource = subresource,
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+        .dst_subresource = subresource,
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 } },
+    };
+
+    try std.testing.expect(blittableColorFormat(16));
+    executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 25, 50, 0, 255 }, &destination_bytes);
 }
 
 test "RGBA16F attachment clears preserve half-float values and rectangular bounds" {
@@ -23482,7 +23527,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u64, heap_size), memory_properties.memory_heaps[0].size);
         var format_properties: FormatProperties = undefined;
         getFormatProperties(physical[0], 44, &format_properties);
-        try std.testing.expectEqual(@as(u32, 0xd181), format_properties.optimal_tiling_features);
+        try std.testing.expectEqual(@as(u32, 0xdd81), format_properties.optimal_tiling_features);
         var image_format_properties: ImageFormatProperties = undefined;
         try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 44, 1, 0, 0x13, 0, &image_format_properties));
         try std.testing.expectEqual(@as(u32, 1), image_format_properties.sample_counts);
@@ -26687,6 +26732,8 @@ test "all physical queries cover success boundaries and invalid handles" {
         .{ .format = 5, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 6, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
         .{ .format = 7, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 9, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 16, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x17, .optimal_usage = 0x17 },
         .{ .format = 76, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
         .{ .format = 83, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
         .{ .format = 97, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
@@ -26694,9 +26741,9 @@ test "all physical queries cover success boundaries and invalid handles" {
         .{ .format = 103, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
         .{ .format = 109, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
         .{ .format = 122, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
-        .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
-        .{ .format = 43, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
-        .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 37, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 43, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 44, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
         .{ .format = 124, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
         .{ .format = 125, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
         .{ .format = 126, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
@@ -27774,13 +27821,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     properties.p_next = null;
     var format = PhysicalDeviceFormatProperties2{ .s_type = 1000059002, .p_next = null, .format_properties = std.mem.zeroes(FormatProperties) };
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u32, 0xd181), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u32, 0xdd81), format.format_properties.optimal_tiling_features);
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(FormatProperties3));
     var format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xffff_ffff_ffff_ffff, .optimal_tiling_features = 0xffff_ffff_ffff_ffff, .buffer_features = 0xffff_ffff_ffff_ffff };
     format.p_next = @ptrCast(&format3);
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u64, 0xd181), format3.optimal_tiling_features);
-    try std.testing.expectEqual(@as(u64, 0xd181), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xdd81), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xdd81), format3.linear_tiling_features);
     var duplicate_format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xaaaa, .optimal_tiling_features = 0xbbbb, .buffer_features = 0xcccc };
     format3.p_next = @ptrCast(&duplicate_format3);
     format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
