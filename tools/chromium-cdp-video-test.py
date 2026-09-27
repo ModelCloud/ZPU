@@ -404,6 +404,34 @@ def main() -> None:
                 if (context && ['webgl', 'webgl2', 'experimental-webgl'].includes(String(type).toLowerCase()) &&
                     !window.__zpuWebGLContexts.some(item => item.gl === context)) {
                   window.__zpuWebGLContexts.push({ canvas: this, gl: context, api: String(type) });
+                  window.__zpuWebGLTextureUploads ||= [];
+                  if (!window.__zpuWebGLTextureUploadsInstalled) {
+                    window.__zpuWebGLTextureUploadsInstalled = true;
+                    const prototype = Object.getPrototypeOf(context);
+                    for (const name of ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D']) {
+                      const original = prototype[name];
+                      if (typeof original !== 'function') continue;
+                      prototype[name] = function(...uploadArgs) {
+                        const imageSource = uploadArgs.find(value => value && typeof value === 'object' &&
+                          (value instanceof HTMLImageElement || value instanceof HTMLCanvasElement ||
+                           (typeof ImageBitmap !== 'undefined' && value instanceof ImageBitmap))) || null;
+                        let width = imageSource?.naturalWidth || imageSource?.videoWidth || imageSource?.width || 0;
+                        let height = imageSource?.naturalHeight || imageSource?.videoHeight || imageSource?.height || 0;
+                        if (!width) {
+                          const offset = name.includes('SubImage') ? 4 : 3;
+                          width = Number(uploadArgs[offset]) || 0;
+                          height = Number(uploadArgs[offset + 1]) || 0;
+                        }
+                        if (width > 1 && height > 1 && window.__zpuWebGLTextureUploads.length < 64) {
+                          window.__zpuWebGLTextureUploads.push({
+                            method: name, width, height, sourceType: imageSource?.constructor?.name || null,
+                            sourceUrl: imageSource?.currentSrc || imageSource?.src || null,
+                          });
+                        }
+                        return original.apply(this, uploadArgs);
+                      };
+                    }
+                  }
                 }
                 return context;
               };
@@ -612,6 +640,13 @@ def main() -> None:
               intervals.sort((a, b) => a - b);
               observer?.disconnect();
               const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
+              const pageImageResources = performance.getEntriesByType('resource')
+                .filter(entry => /\\.(?:avif|gif|jpe?g|png|webp)(?:[?#]|$)/i.test(new URL(entry.name).pathname))
+                .map(entry => ({{
+                  url: entry.name, durationMilliseconds: entry.duration,
+                  transferBytes: entry.transferSize, encodedBytes: entry.encodedBodySize,
+                  decodedBytes: entry.decodedBodySize, responseEndMilliseconds: entry.responseEnd,
+                }}));
               let webgl = null;
               if ({str(args.require_webgl).lower()}) {{
                 // The center-patch readback must run after the page's draw
@@ -671,7 +706,9 @@ def main() -> None:
                 maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
                 documentTitle: document.title,
                 documentTextPrefix: (document.body?.innerText || '').split('\\n').join(' ').slice(0, 300),
+                pageImageResources,
                 pageErrors: Array.isArray(window.__zpuPageErrors) ? window.__zpuPageErrors : [],
+                webglTextureUploads: Array.isArray(window.__zpuWebGLTextureUploads) ? window.__zpuWebGLTextureUploads : [],
                 gpu: {json.dumps(gpu_telemetry, separators=(',', ':'))},
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
                 webgl,
