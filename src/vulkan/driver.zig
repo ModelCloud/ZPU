@@ -14305,18 +14305,19 @@ fn profileMosaicFpsSceneBandSafe(start: MosaicCommandCursor, color: *ImageObj, q
     return true;
 }
 
-/// The official Three.js clearcoat page submits these five material draws
+/// The official Three.js clearcoat page submits these six ordered draws
 /// against one color/depth pair. The scalar programs have no external writes;
 /// retain draw order inside each disjoint band for depth and blending.
 fn profileMosaicThreeClearcoatBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
     if (query_context.pool != null or @as(u64, color.width) * color.height < 256 * 144) return false;
     const fragment_ids = comptime blk: {
-        var ids: [5][32]u8 = undefined;
+        var ids: [6][32]u8 = undefined;
         _ = std.fmt.hexToBytes(&ids[0], "ad5ccf4b32774807cc146130eb648073eae2f9600872efc1e4024535206fdcba") catch unreachable;
-        _ = std.fmt.hexToBytes(&ids[1], "f9b6c68f1e80f856a27f086dd39dc4e3458724028cc3475d598046a7cea222f1") catch unreachable;
-        _ = std.fmt.hexToBytes(&ids[2], "a933234db963e33726f4271e0a35175832e5b233efd8ed50fa3308058f478858") catch unreachable;
-        _ = std.fmt.hexToBytes(&ids[3], "bb22e53a42506ffe793c2ee5b4959920deef3f29e7dd7fe703939dec45176dd9") catch unreachable;
-        ids[4] = ids[3];
+        _ = std.fmt.hexToBytes(&ids[1], "d7e9075a72461ada750e845ae64b1ab0c463c20a99d62ec05ec4dd442c635881") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[2], "f9b6c68f1e80f856a27f086dd39dc4e3458724028cc3475d598046a7cea222f1") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[3], "a933234db963e33726f4271e0a35175832e5b233efd8ed50fa3308058f478858") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[4], "bb22e53a42506ffe793c2ee5b4959920deef3f29e7dd7fe703939dec45176dd9") catch unreachable;
+        ids[5] = ids[4];
         break :blk ids;
     };
     var cursor = start;
@@ -14425,7 +14426,7 @@ fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count
     if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context) and
         !(batch_count == 1 and profileMosaicSingleFpsNormalBandSafe(start, color, query_context)) and
         !(batch_count == 2 and profileMosaicFpsSceneBandSafe(start, color, query_context)) and
-        !(batch_count == 5 and profileMosaicThreeClearcoatBandSafe(start, color, query_context))) return false;
+        !(batch_count == 6 and profileMosaicThreeClearcoatBandSafe(start, color, query_context))) return false;
     var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
     if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
@@ -14593,7 +14594,7 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         // useful; very short targets are likewise better as bands.
         const area = @as(u64, color_image.width) * color_image.height;
         const use_bands = area <= 192 * 192 or area >= 640 * 256 or
-            (parallel_count == 5 and profileMosaicThreeClearcoatBandSafe(parallel_start, color_image, query_context));
+            (parallel_count == 6 and profileMosaicThreeClearcoatBandSafe(parallel_start, color_image, query_context));
         const parallel_executed = if (use_bands)
             executeMosaicBandParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)
         else
