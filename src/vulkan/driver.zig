@@ -14563,7 +14563,8 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         // medium, potentially sparse targets where its work stealing is more
         // useful; very short targets are likewise better as bands.
         const area = @as(u64, color_image.width) * color_image.height;
-        const use_bands = area <= 192 * 192 or area >= 640 * 256;
+        const use_bands = area <= 192 * 192 or area >= 640 * 256 or
+            (parallel_count == 5 and profileMosaicThreeClearcoatBandSafe(parallel_start, color_image, query_context));
         const parallel_executed = if (use_bands)
             executeMosaicBandParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)
         else
