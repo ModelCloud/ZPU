@@ -1743,9 +1743,12 @@ fn executeThreePmremBlur(bindings: []const Binding, outputs: []const Output) Err
     std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
 }
 
+const FpsNormalFilterVariant = enum { red_only, red_green };
+
 const FastPath = union(enum) {
     three_pmrem_blur: void,
     three_pmrem_ggx: void,
+    fps_normal_filter_8tap: FpsNormalFilterVariant,
     sample_modulate: SampleModulatePlan,
     texture_copy: TextureCopyPlan,
     sample_coverage: SampleCoverageFastPath,
@@ -1786,6 +1789,18 @@ fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operand
 }
 
 fn detectFastPath(program: *const ir.Program) ?FastPath {
+    const fps_normal_a_identity = [_]u8{ 0x35, 0xc2, 0xde, 0xd2, 0x2f, 0x1c, 0x62, 0x26, 0x3d, 0xe7, 0x96, 0xfb, 0xe2, 0x93, 0x45, 0x4e, 0x39, 0x64, 0xd2, 0x41, 0x0b, 0xea, 0xf6, 0xc2, 0xd2, 0x75, 0x90, 0x6c, 0xe5, 0x1f, 0xf2, 0x26 };
+    const fps_normal_b_identity = [_]u8{ 0xf9, 0xe7, 0x5c, 0x9e, 0xd3, 0xe1, 0x0f, 0xbb, 0x55, 0x17, 0xac, 0xb3, 0xa0, 0x43, 0xf5, 0x16, 0x59, 0x7d, 0x31, 0x4e, 0x73, 0xbb, 0xdd, 0xe7, 0xdc, 0x78, 0xaf, 0x15, 0x25, 0x32, 0x7b, 0xed };
+    if (program.stage == .fragment and program.interfaces.len == 5 and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .uniform and program.interfaces[3].storage == .push_constant and
+        program.interfaces[4].storage == .sampled_image)
+    {
+        if (program.instructions.len == 132 and std.mem.eql(u8, &program.identity.digest, &fps_normal_a_identity))
+            return .{ .fps_normal_filter_8tap = .red_only };
+        if (program.instructions.len == 141 and std.mem.eql(u8, &program.identity.digest, &fps_normal_b_identity))
+            return .{ .fps_normal_filter_8tap = .red_green };
+    }
     const pmrem_ggx_identity = [_]u8{ 0x0f, 0x47, 0xeb, 0x52, 0xa0, 0x28, 0x65, 0x95, 0x46, 0x2b, 0x14, 0x41, 0xa5, 0x21, 0xc2, 0xf4, 0xfd, 0x03, 0x58, 0x3c, 0xe5, 0x50, 0x43, 0xb0, 0xc9, 0x91, 0x48, 0x26, 0x8e, 0xe4, 0xd7, 0xc6 };
     if (program.stage == .fragment and program.instructions.len == 883 and program.interfaces.len == 5 and
         std.mem.eql(u8, &program.identity.digest, &pmrem_ggx_identity) and
@@ -2491,6 +2506,7 @@ pub const Executor = struct {
         return switch (self.fast_path orelse return "interpreter") {
             .three_pmrem_blur => "three_pmrem_blur",
             .three_pmrem_ggx => "three_pmrem_ggx",
+            .fps_normal_filter_8tap => "fps_normal_filter_8tap",
             .sample_modulate => "sample_modulate",
             .texture_copy => "chromium_texture_copy",
             .sample_coverage => "chromium_vp9_sample_coverage",
@@ -3608,10 +3624,68 @@ pub const Executor = struct {
         try executeCircleMaskCoordinatesResolved(circle, color, output orelse return error.InvalidOutput);
     }
 
+    fn executeFpsNormalFilter8tap(variant: FpsNormalFilterVariant, bindings: []const Binding, outputs: []const Output) Error!void {
+        const frag = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, 0));
+        const uniform = try findBinding(bindings, 2);
+        const push = try findBinding(bindings, 3);
+        const image = try findSampledImage(bindings, 4);
+        if (uniform.len < 12 or push.len < 20) return error.Bounds;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == 1) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+
+        const packed_size = std.mem.readInt(u32, push[8..12], .little);
+        const packed_scale = std.mem.readInt(u32, push[12..16], .little);
+        const swap = std.mem.readInt(u32, push[16..20], .little) & 1 != 0;
+        const half_x = canonicalF32(@as(f32, @floatFromInt(packed_size & 0xffff)) * 0.5);
+        const half_y = canonicalF32(@as(f32, @floatFromInt(packed_size >> 16)) * 0.5);
+        const scale_x = canonicalF32(unpackNormalized(packed_scale & 0xff, true, 8));
+        const scale_y = canonicalF32(unpackNormalized((packed_scale >> 8) & 0xff, true, 8));
+        const frag_x: f32 = @bitCast(frag.bits[0]);
+        const frag_y: f32 = @bitCast(frag.bits[1]);
+        const source_x = if (swap) frag_y else frag_x;
+        const source_y = if (swap) frag_x else frag_y;
+        const coord_x = canonicalF32(canonicalF32(canonicalF32(source_x - half_x) * scale_x) + half_x);
+        const coord_y = canonicalF32(canonicalF32(canonicalF32(source_y - half_y) * scale_y) + half_y);
+        const image_width = try uniformF32(uniform, 0);
+        const image_height = try uniformF32(uniform, 4);
+        const step = try uniformF32(uniform, 8);
+        var red_sum: f32 = 0;
+        var square_sum: f32 = 0;
+        for (0..8) |tap| {
+            const offset = canonicalF32(-1.0 + canonicalF32(@as(f32, @floatFromInt(tap)) * @as(f32, 0.285714298)));
+            const delta_x = canonicalF32((if (variant == .red_green) offset else @as(f32, 0)) * step);
+            const delta_y = canonicalF32((if (variant == .red_only) offset else @as(f32, 0)) * step);
+            const u = canonicalF32(canonicalF32(coord_x + delta_x) / image_width);
+            const v = canonicalF32(canonicalF32(coord_y + delta_y) / image_height);
+            const sampled = try sampleRgbaAt(image, u, v);
+            const red = canonicalF32(sampled.value[0]);
+            red_sum = canonicalF32(red_sum + red);
+            const red_square = canonicalF32(red * red);
+            const square = if (variant == .red_green) blk: {
+                const green = canonicalF32(sampled.value[1]);
+                break :blk canonicalF32(canonicalF32(green * green) + red_square);
+            } else red_square;
+            square_sum = canonicalF32(square_sum + square);
+        }
+        const average = canonicalF32(red_sum / 8.0);
+        const mean_square = canonicalF32(square_sum / 8.0);
+        const variance = canonicalF32(mean_square - canonicalF32(average * average));
+        const normalized = canonicalF32(@sqrt(if (0.0 < variance) variance else @as(f32, 0)));
+        const result = [4]f32{ average, normalized, 0, 1 };
+        for (result, 0..) |channel, lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(channel)), .little);
+    }
+
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
             .three_pmrem_blur => try executeThreePmremBlur(bindings, outputs),
             .three_pmrem_ggx => try executeThreePmremGgx(bindings, outputs),
+            .fps_normal_filter_8tap => |path| try executeFpsNormalFilter8tap(path, bindings, outputs),
             .sample_modulate => |path| {
                 const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
                 const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
@@ -5364,7 +5438,42 @@ test "captured Three.js FPS normal filters retain their exact interpreter identi
         try std.testing.expectEqual(@as(usize, case.instructions), program.instructions.len);
         var executor = try Executor.init(std.testing.allocator, &program);
         defer executor.deinit();
-        try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+        try std.testing.expectEqualStrings("fps_normal_filter_8tap", executor.prevalidatedPathName());
+        var pixels: [16 * 16 * 4]u8 = undefined;
+        for (0..16) |y| for (0..16) |x| {
+            const offset = (y * 16 + x) * 4;
+            pixels[offset] = @intCast((x * 17 + y * 9) % 256);
+            pixels[offset + 1] = @intCast((x * 3 + y * 23) % 256);
+            pixels[offset + 2] = @intCast((x * 11 + y * 7) % 256);
+            pixels[offset + 3] = 255;
+        };
+        var input: [16]u8 = undefined;
+        var uniform: [12]u8 = undefined;
+        var push = [_]u8{0} ** 20;
+        std.mem.writeInt(u32, uniform[0..4], @bitCast(@as(f32, 16)), .little);
+        std.mem.writeInt(u32, uniform[4..8], @bitCast(@as(f32, 16)), .little);
+        std.mem.writeInt(u32, uniform[8..12], @bitCast(@as(f32, 1)), .little);
+        std.mem.writeInt(u32, push[8..12], 16 | (16 << 16), .little);
+        for ([_]u32{ 0x7f7f, 0x817f, 0x7f81 }) |packed_scale| for ([_]SampledImage.Filter{ .nearest, .linear }) |filter| for ([_]u32{ 0, 1 }) |swap| for ([_][2]f32{ .{ 3.5, 7.5 }, .{ 11.5, 4.5 } }) |position| {
+            std.mem.writeInt(u32, input[0..4], @bitCast(position[0]), .little);
+            std.mem.writeInt(u32, input[4..8], @bitCast(position[1]), .little);
+            std.mem.writeInt(u32, input[8..12], 0, .little);
+            std.mem.writeInt(u32, input[12..16], @bitCast(@as(f32, 1)), .little);
+            std.mem.writeInt(u32, push[12..16], packed_scale, .little);
+            std.mem.writeInt(u32, push[16..20], swap, .little);
+            const image = SampledImage{ .pixels = &pixels, .width = 16, .height = 16, .row_stride = 64, .format = .rgba8_unorm, .filter = filter, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+            const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 3, .bytes = &push }, .{ .interface = 4, .sampled_image = image } };
+            var fast = [_]u8{0} ** 16;
+            var slow = [_]u8{0} ** 16;
+            try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 1, .bytes = &fast }}));
+            try executor.execute(&bindings, &.{.{ .interface = 1, .bytes = &slow }});
+            for (0..4) |lane| {
+                const actual: f32 = @bitCast(std.mem.readInt(u32, fast[lane * 4 ..][0..4], .little));
+                const expected: f32 = @bitCast(std.mem.readInt(u32, slow[lane * 4 ..][0..4], .little));
+                try std.testing.expectApproxEqAbs(expected, actual, 0.00001);
+            }
+            try std.testing.expectEqualSlices(u8, &slow, &fast);
+        };
     }
 }
 
