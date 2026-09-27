@@ -1522,7 +1522,138 @@ pub const Vp9ColorTransformPrepared = struct {
     fast_srgb_transfers: bool,
 };
 
+// Coordinates follow Three.js r186 cube_uv_reflection_fragment.glsl.js.
+// The matched IR bakes 1/768 and 1/1024 into its CubeUV lookup.
+fn threePmremSample(image: SampledImage, direction: [3]f32, mip: f32) Error![4]f32 {
+    const x = direction[0];
+    const y = direction[1];
+    const z = direction[2];
+    const ax = @abs(x);
+    const ay = @abs(y);
+    const az = @abs(z);
+    var face: f32 = undefined;
+    if (ax > az) {
+        face = if (ax > ay) (if (x > 0) @as(f32, 0) else 3) else (if (y > 0) @as(f32, 1) else 4);
+    } else {
+        face = if (az > ay) (if (z > 0) @as(f32, 2) else 5) else (if (y > 0) @as(f32, 1) else 4);
+    }
+    const divisor = if (face == 0 or face == 3) ax else if (face == 1 or face == 4) ay else az;
+    var u: f32 = undefined;
+    var v: f32 = undefined;
+    if (face == 0) {
+        u = z / divisor;
+        v = y / divisor;
+    } else if (face == 1) {
+        u = -x / divisor;
+        v = -z / divisor;
+    } else if (face == 2) {
+        u = -x / divisor;
+        v = y / divisor;
+    } else if (face == 3) {
+        u = -z / divisor;
+        v = y / divisor;
+    } else if (face == 4) {
+        u = -x / divisor;
+        v = z / divisor;
+    } else {
+        u = x / divisor;
+        v = y / divisor;
+    }
+    const filter = @max(4.0 - mip, 0.0);
+    const face_size = @exp2(@max(mip, 4.0));
+    u = (0.5 * (u + 1.0)) * (face_size - 2.0) + 1.0;
+    v = (0.5 * (v + 1.0)) * (face_size - 2.0) + 1.0;
+    if (face > 2) {
+        v += face_size;
+        face -= 3.0;
+    }
+    u += face * face_size;
+    u += filter * 48.0;
+    v += 4.0 * (256.0 - face_size);
+    var uv = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    uv.bits[0] = @bitCast(u * (1.0 / 768.0));
+    uv.bits[1] = @bitCast(v * (1.0 / 1024.0));
+    return try sampleMipLevel(image, uv, 0, image.filter, combinedImageSampler(image));
+}
+
+fn threePmremNormalize(v: [3]f32) [3]f32 {
+    const inv = 1.0 / @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    return .{ v[0] * inv, v[1] * inv, v[2] * inv };
+}
+
+const ThreePmremKernelStep = struct { cos_theta: f32, sin_theta: f32, cos_phi: f32, sin_phi: f32, weight: f32 };
+const ThreePmremKernel = struct { valid: bool = false, sigma_bits: u32 = 0, steps: [20]ThreePmremKernelStep = undefined };
+threadlocal var three_pmrem_kernel_cache: ThreePmremKernel = .{};
+
+fn threePmremKernel(sigma: f32) *const [20]ThreePmremKernelStep {
+    const bits: u32 = @bitCast(sigma);
+    if (!three_pmrem_kernel_cache.valid or three_pmrem_kernel_cache.sigma_bits != bits) {
+        const theta_max = @min(3.0 * sigma, @as(f32, 3.14159265359));
+        const truncation = 1.0 - @exp(-0.5 * theta_max * theta_max / (sigma * sigma));
+        for (0..20) |i| {
+            const index: f32 = @floatFromInt(i);
+            const theta = sigma * @sqrt(-2.0 * @log(1.0 - ((index + 0.5) / 20.0) * truncation));
+            const phi = index * @as(f32, 2.39996322973);
+            const sin_theta = @sin(theta);
+            three_pmrem_kernel_cache.steps[i] = .{
+                .cos_theta = @cos(theta),
+                .sin_theta = sin_theta,
+                .cos_phi = @cos(phi),
+                .sin_phi = @sin(phi),
+                .weight = sin_theta / theta,
+            };
+        }
+        three_pmrem_kernel_cache.sigma_bits = bits;
+        three_pmrem_kernel_cache.valid = true;
+    }
+    return &three_pmrem_kernel_cache.steps;
+}
+
+fn executeThreePmremBlur(bindings: []const Binding, outputs: []const Output) Error!void {
+    const input = try readInputValue(.{ .scalar = .f32, .columns = 3 }, try findBindingRecord(bindings, 0));
+    const uniform = try findBindingRecord(bindings, 2);
+    if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 8) return error.Bounds;
+    const sigma: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, uniform.bytes[0..4])).bits[0]);
+    const mip: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, uniform.bytes[4..8])).bits[0]);
+    const image = try findSampledImage(bindings, 4);
+    var out: ?[]u8 = null;
+    for (outputs) |candidate| if (candidate.interface == 1) {
+        if (out != null) return error.InvalidOutput;
+        out = candidate.bytes;
+    };
+    const bytes = out orelse return error.InvalidOutput;
+    if (bytes.len < 16) return error.InvalidOutput;
+    const direction = [3]f32{ @bitCast(input.bits[0]), @bitCast(input.bits[1]), @bitCast(input.bits[2]) };
+    var rgb: [3]f32 = undefined;
+    if (sigma == 0.0) {
+        const texel_color = try threePmremSample(image, direction, mip);
+        rgb = texel_color[0..3].*;
+    } else {
+        const n = threePmremNormalize(direction);
+        const up: [3]f32 = if (@abs(n[2]) < 0.999) .{ 0, 0, 1 } else .{ 1, 0, 0 };
+        const tangent = threePmremNormalize(.{ up[1] * n[2] - up[2] * n[1], up[2] * n[0] - up[0] * n[2], up[0] * n[1] - up[1] * n[0] });
+        const bitangent = [3]f32{ n[1] * tangent[2] - n[2] * tangent[1], n[2] * tangent[0] - n[0] * tangent[2], n[0] * tangent[1] - n[1] * tangent[0] };
+        const kernel = threePmremKernel(sigma);
+        rgb = .{ 0, 0, 0 };
+        var weight_sum: f32 = 0;
+        for (kernel) |step| {
+            const sample_direction: [3]f32 = .{
+                step.cos_theta * n[0] + step.sin_theta * (step.cos_phi * tangent[0] + step.sin_phi * bitangent[0]),
+                step.cos_theta * n[1] + step.sin_theta * (step.cos_phi * tangent[1] + step.sin_phi * bitangent[1]),
+                step.cos_theta * n[2] + step.sin_theta * (step.cos_phi * tangent[2] + step.sin_phi * bitangent[2]),
+            };
+            const texel_color = try threePmremSample(image, sample_direction, mip);
+            for (0..3) |lane| rgb[lane] += step.weight * texel_color[lane];
+            weight_sum += step.weight;
+        }
+        for (0..3) |lane| rgb[lane] /= weight_sum;
+    }
+    for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(rgb[lane])), .little);
+    std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+}
+
 const FastPath = union(enum) {
+    three_pmrem_blur: void,
     sample_modulate: SampleModulatePlan,
     texture_copy: TextureCopyPlan,
     sample_coverage: SampleCoverageFastPath,
@@ -1563,6 +1694,16 @@ fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operand
 }
 
 fn detectFastPath(program: *const ir.Program) ?FastPath {
+    // Three.js r186 SphericalGaussianBlur, including its CubeUV lookup. The
+    // canonical identity covers the constants, control flow and atlas size.
+    const pmrem_identity = [_]u8{ 0x6e, 0x7f, 0x51, 0x63, 0xf5, 0x1b, 0x74, 0xc2, 0xbf, 0xe6, 0x63, 0xb1, 0x32, 0x29, 0x71, 0x2d, 0xb5, 0x29, 0xac, 0xdb, 0x5d, 0x40, 0x06, 0xcc, 0x61, 0x6f, 0x98, 0x99, 0x33, 0xfd, 0x19, 0x11 };
+    if (program.stage == .fragment and program.instructions.len == 722 and program.interfaces.len == 5 and
+        std.mem.eql(u8, &program.identity.digest, &pmrem_identity) and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .uniform and program.interfaces[4].storage == .sampled_image and
+        exactInstruction(program.instructions[333], .image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, &.{ 4, 332, 7 }) and
+        exactInstruction(program.instructions[691], .image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, &.{ 4, 690, 8 }))
+        return .{ .three_pmrem_blur = {} };
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
@@ -2226,6 +2367,7 @@ pub const Executor = struct {
     /// interpreter before any performance conclusion is drawn.
     pub fn prevalidatedPathName(self: *const Executor) []const u8 {
         return switch (self.fast_path orelse return "interpreter") {
+            .three_pmrem_blur => "three_pmrem_blur",
             .sample_modulate => "sample_modulate",
             .texture_copy => "chromium_texture_copy",
             .sample_coverage => "chromium_vp9_sample_coverage",
@@ -3338,6 +3480,7 @@ pub const Executor = struct {
 
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
+            .three_pmrem_blur => try executeThreePmremBlur(bindings, outputs),
             .sample_modulate => |path| {
                 const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
                 const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
@@ -5058,6 +5201,44 @@ fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
         .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
         else => false,
+    };
+}
+
+test "captured Three.js PMREM blur matches interpreter for copy and spiral branches" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_pmrem_blur_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("three_pmrem_blur", executor.prevalidatedPathName());
+
+    const pixels = try std.testing.allocator.alloc(u8, 768 * 1024 * 4);
+    defer std.testing.allocator.free(pixels);
+    for (0..1024) |y| for (0..768) |x| {
+        const offset = (y * 768 + x) * 4;
+        pixels[offset] = @intCast((x * 17 + y * 7) % 256);
+        pixels[offset + 1] = @intCast((x * 3 + y * 23) % 256);
+        pixels[offset + 2] = @intCast((x * 11 + y * 13) % 256);
+        pixels[offset + 3] = 255;
+    };
+    const image = SampledImage{ .pixels = pixels, .width = 768, .height = 1024, .row_stride = 768 * 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    const directions = [_][3]f32{ .{ 1, 0.2, -0.4 }, .{ -0.7, 1, 0.3 }, .{ 0.2, -0.1, 1 }, .{ -0.3, 0.1, -1 } };
+    for ([_]f32{ 0, 0.08, 0.4 }) |sigma| for ([_]f32{ 8, 6, 4 }) |mip| for (directions) |direction| {
+        var input: [12]u8 = undefined;
+        var uniform: [8]u8 = undefined;
+        for (0..3) |lane| std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(direction[lane]), .little);
+        std.mem.writeInt(u32, uniform[0..4], @bitCast(sigma), .little);
+        std.mem.writeInt(u32, uniform[4..8], @bitCast(mip), .little);
+        const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 4, .sampled_image = image } };
+        var fast = [_]u8{0} ** 16;
+        var slow = [_]u8{0} ** 16;
+        try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 1, .bytes = &fast }}));
+        try executor.execute(&bindings, &.{.{ .interface = 1, .bytes = &slow }});
+        for (0..4) |lane| {
+            const actual: f32 = @bitCast(std.mem.readInt(u32, fast[lane * 4 ..][0..4], .little));
+            const expected: f32 = @bitCast(std.mem.readInt(u32, slow[lane * 4 ..][0..4], .little));
+            try std.testing.expectApproxEqAbs(expected, actual, 0.005);
+        }
     };
 }
 
