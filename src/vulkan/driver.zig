@@ -12276,7 +12276,8 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
     };
-    const diagnostic_draw = if (renderDiagnosticsEnabled()) render_diagnostic_draws.fetchAdd(1, .monotonic) else 0;
+    const render_diagnostics_enabled = renderDiagnosticsEnabled();
+    const diagnostic_draw = if (render_diagnostics_enabled) render_diagnostic_draws.fetchAdd(1, .monotonic) else 0;
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
@@ -12340,7 +12341,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         );
         std.debug.print("ZPU selected profile canonical IR end\n", .{});
     }
-    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+    if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
@@ -12363,7 +12364,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
     }
-    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
+    if (render_diagnostics_enabled and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw seq={d} target={x} {d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={x} {d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
         .{ diagnostic_draw, @intFromPtr(target), target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image_count, profile.varying_count, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, if (op.descriptors.texture) |texture| @intFromPtr(texture) else 0, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).x else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).y else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).width else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).height else 0 },
     );
@@ -12416,7 +12417,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var fragment_sampled_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count], 0..) |sampled_profile, index| {
         const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required, sampled_profile.cube) orelse {
-            if (renderDiagnosticsEnabled()) {
+            if (render_diagnostics_enabled) {
                 const table = if (sampled_profile.descriptor_set == 1) &op.descriptors.sampled_images_set1 else &op.descriptors.sampled_images;
                 const descriptor = if (sampled_profile.binding < table.len) table[sampled_profile.binding] else DescriptorSampledImage{};
                 const image = descriptor.image;
@@ -12455,7 +12456,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var fragment_sampler_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_samplers[0..profile.fragment_sampler_count], 0..) |sampler_profile, index| {
         const sampler = profileSampler(op.descriptors, sampler_profile.binding) orelse {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampler setup failed set=0 binding={d} interface={d}\n", .{ sampler_profile.binding, sampler_profile.interface });
+            if (render_diagnostics_enabled) std.debug.print("ZPU render sampler setup failed set=0 binding={d} interface={d}\n", .{ sampler_profile.binding, sampler_profile.interface });
             return;
         };
         fragment_sampler_bindings[index] = .{ .interface = sampler_profile.interface, .sampler = sampler };
@@ -12477,7 +12478,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) sample_modulate_image = binding.sampled_image;
         }
     }
-    if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
+    if (render_diagnostics_enabled and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
         _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
     // Resolve Chromium's exact full-screen texture-copy ABI once per draw.
     // The selected Render IR identity is stricter than a generic sampled
@@ -12513,11 +12514,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) sample_coverage_image = binding.sampled_image;
         }
         if (sample_coverage_image) |image| sample_coverage_prepared = profile.fragment.prepareSampleCoverage(image) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sample-coverage preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render sample-coverage preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
-    if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
+    if (render_diagnostics_enabled and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
     // The VP9 decoder supplies separate Y and UV planes. Chromium's exact
     // color-transform fragment combines them through its validated transfer
@@ -12548,7 +12549,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var vp9_color_transform_prepared: ?render_ir_exec.Vp9ColorTransformPrepared = null;
     if (vp9_color_transform_plan != null and vp9_uniform != null and vp9_luma_image != null and vp9_chroma_image != null) {
         vp9_color_transform_prepared = profile.fragment.prepareVp9ColorTransform(vp9_uniform.?, vp9_luma_image.?, vp9_chroma_image.?) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
@@ -12597,12 +12598,12 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         radial_gradient_frag_coord = profile.fragment_frag_coord != null and profile.fragment_frag_coord.? == plan.frag_coord_interface;
         if (radial_gradient_uniform) |uniform| {
             if (radial_gradient_image) |image| radial_gradient_prepared = profile.fragment.prepareRadialGradient(uniform, image) catch |err| {
-                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-gradient preparation failed err={s}\n", .{@errorName(err)});
+                if (render_diagnostics_enabled) std.debug.print("ZPU render radial-gradient preparation failed err={s}\n", .{@errorName(err)});
                 return;
             } orelse return;
         }
     }
-    if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
+    if (render_diagnostics_enabled and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
         _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
     // The exact two-distance-field radial mask is another common Chromium
     // tile profile. Its push constants and sampled image are immutable for a
@@ -12629,7 +12630,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var radial_mask_prepared: ?render_ir_exec.RadialMaskPrepared = null;
     if (radial_mask_plan != null and radial_mask_push_constants != null and radial_mask_image != null) {
         radial_mask_prepared = profile.fragment.prepareRadialMask(radial_mask_push_constants.?, radial_mask_image.?) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-mask preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render radial-mask preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
@@ -12676,7 +12677,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var two_axis_coverage_prepared: ?render_ir_exec.TwoAxisCoveragePrepared = null;
     if (two_axis_coverage_plan != null and two_axis_coverage_push_constants != null and two_axis_coverage_image != null) {
         two_axis_coverage_prepared = profile.fragment.prepareTwoAxisCoverage(two_axis_coverage_push_constants.?, two_axis_coverage_image.?) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render two-axis coverage preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render two-axis coverage preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
@@ -12692,7 +12693,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const input_color = color orelse return;
         const bytes = color_bytes orelse return;
         const input = profileInputAttachment(op.descriptors, input_profile.binding, input_color, bytes) orelse {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render input-attachment setup failed binding={d} interface={d}\n", .{ input_profile.binding, input_profile.interface });
+            if (render_diagnostics_enabled) std.debug.print("ZPU render input-attachment setup failed binding={d} interface={d}\n", .{ input_profile.binding, input_profile.interface });
             return;
         };
         fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
@@ -12890,7 +12891,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         break :blk true;
     };
     if (direct_texture_copy_affine_quad) {
-        if (renderDiagnosticsEnabled()) _ = render_diagnostic_direct_texture_copy_quad_draws.fetchAdd(1, .monotonic);
+        if (render_diagnostics_enabled) _ = render_diagnostic_direct_texture_copy_quad_draws.fetchAdd(1, .monotonic);
         if (!publish_metadata) return;
         if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(texture_copy_quad_pixels, .monotonic);
         if (color) |color_image| {
@@ -12946,7 +12947,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
+                    if (render_diagnostics_enabled) std.debug.print(
                         "ZPU render vertex input missing buffer binding={d} vertex={d} triangle={d}\n",
                         .{ input.binding, corner, triangle_index },
                     );
@@ -12958,20 +12959,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
                 const source = bufferBytes(buffer);
                 if (binding_count == vertex_bindings.len) {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
+                    if (render_diagnostics_enabled) std.debug.print(
                         "ZPU render vertex input binding limit binding={d} vertex={d} triangle={d}\n",
                         .{ input.binding, corner, triangle_index },
                     );
                     return;
                 }
                 const bytes = profileReadVertexInput(op, input, vertex_index, &vertex_binding_storage[binding_count]) orelse {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
+                    if (render_diagnostics_enabled) std.debug.print(
                         "ZPU render vertex input bounds binding={d} format={d} source_len={} start={} bytes={} stride={} offset={} vertex_index={} vertex={d} triangle={d}\n",
                         .{ input.binding, input.format, source.len, start, input.source_byte_size, stride, input.offset, vertex_index, corner, triangle_index },
                     );
                     return;
                 };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
+                if (render_diagnostics_enabled and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
                     const geometry_sequence = render_diagnostic_page_geometry.fetchAdd(1, .monotonic);
                     if (geometry_sequence < 24) std.debug.print(
                         "ZPU page geometry input seq={d} triangle={d} corner={d} location={d} binding={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
@@ -12991,7 +12992,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         },
                     );
                 }
-                if (renderDiagnosticsEnabled() and input.interface == 2 and op.descriptors.texture != null and
+                if (render_diagnostics_enabled and input.interface == 2 and op.descriptors.texture != null and
                     op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512)
                 {
                     const input_sequence = render_diagnostic_vertex_inputs.fetchAdd(1, .monotonic);
@@ -13018,7 +13019,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 binding_count += 1;
             }
             profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
-                if (renderDiagnosticsEnabled()) std.debug.print(
+                if (render_diagnostics_enabled) std.debug.print(
                     "ZPU render vertex execution failed err={s} inputs={} outputs={} vertex={d} triangle={d}\n",
                     .{ @errorName(err), profile.input_count, profile.vertex_output_count, corner, triangle_index },
                 );
@@ -13035,7 +13036,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             const y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height;
             const z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth);
             if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return;
-            if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
+            if (render_diagnostics_enabled and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
                 const geometry_sequence = render_diagnostic_page_geometry.fetchAdd(1, .monotonic);
                 if (geometry_sequence < 48) std.debug.print(
                     "ZPU page geometry output seq={d} triangle={d} corner={d} clip={d:.5},{d:.5},{d:.5},{d:.5} screen={d:.2},{d:.2}\n",
@@ -13091,7 +13092,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     },
                 );
             }
-            if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+            if (render_diagnostics_enabled and op.descriptors.texture != null and
                 op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
                 target.width == 1280 and target.height == 256 and triangle_index < 2)
             {
@@ -13100,7 +13101,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     .{ diagnostic_draw, triangle_index, corner, clip[0], clip[1], clip[2], clip[3], x, y, if (profile.varying_count > 0) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][0..4], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 1) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][4..8], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 2) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][8..12], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 3) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][12..16], .little))) else 0, if (profile.varying_count > 1) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][1][0..4], .little))) else 0, if (profile.varying_count > 1 and profile.varyings[1].lanes > 1) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][1][4..8], .little))) else 0 },
                 );
             }
-            if (renderDiagnosticsEnabled() and target.width == 512 and target.height == 256) {
+            if (render_diagnostics_enabled and target.width == 512 and target.height == 256) {
                 const geometry_sequence = render_diagnostic_geometry.fetchAdd(1, .monotonic);
                 if (geometry_sequence < 12) {
                     std.debug.print(
@@ -13185,11 +13186,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     fragment_binding_count += 1;
                 }
                 const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
-                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                    if (render_diagnostics_enabled) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
                     return;
                 };
                 if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
+                    if (render_diagnostics_enabled) std.debug.print(
                         "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
                         .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index },
                     );
@@ -13303,7 +13304,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             chroma_coordinates[lane] = (weights.q0 * chroma_a + weights.q1 * chroma_b + weights.q2 * chroma_c) / weights.denominator;
                         }
                         profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
                     } else if (direct_texture_copy_coordinates) {
@@ -13318,14 +13319,14 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         }
                         if (texture_copy_prepared) |prepared| {
                             profile.fragment.executeTextureCopyPreparedCoordinates(prepared, coordinates, &fragment_output_bytes) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                if (render_diagnostics_enabled) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
                         } else {
                             var coordinate_bytes: [8]u8 = undefined;
                             for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
                             _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                if (render_diagnostics_enabled) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                 return;
                             };
                         }
@@ -13350,7 +13351,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             radial_coordinates[lane] = (q0 * coordinate_a + q1 * coordinate_b + q2 * coordinate_c) / denominator;
                         }
                         profile.fragment.executeRadialMaskPreparedCoordinates(radial_mask_prepared.?, radial_color, radial_coordinates, &fragment_output_bytes) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
                     } else if (direct_circle_mask_coordinates) {
@@ -13374,7 +13375,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             circle_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
                         }
                         _ = profile.fragment.executeCircleMaskCoordinates(circle, circle_color, &fragment_output_bytes) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct circle-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct circle-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
                     } else if (direct_passthrough_coordinates) {
@@ -13392,7 +13393,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             value[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
                         }
                         _ = profile.fragment.executePassthroughCoordinates(value, &fragment_output_bytes) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct pass-through failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct pass-through failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                             return;
                         };
                     } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
@@ -13503,7 +13504,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     image,
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct texture-copy failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                             }
@@ -13517,7 +13518,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     image,
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                             }
@@ -13531,7 +13532,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     fragment_dpdy_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                             }
@@ -13545,7 +13546,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     fragment_binding_storage[distance_varying][0 .. profile.varyings[distance_varying].lanes * 4],
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct two-axis coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct two-axis coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                             }
@@ -13559,7 +13560,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                                 break :direct true;
@@ -13574,7 +13575,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                                 break :direct true;
@@ -13591,24 +13592,24 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                     &frag_coord_bytes,
                                     &fragment_output_bytes,
                                 ) catch |err| {
-                                    if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
                                     return;
                                 };
                                 break :direct true;
                             }
                             break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                                if (render_diagnostics_enabled) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
                                 return;
                             };
                         };
                         if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print(
+                            if (render_diagnostics_enabled) std.debug.print(
                                 "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
                                 .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
                             );
                             return;
                         };
-                        if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
+                        if (render_diagnostics_enabled and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
                             ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
                         {
                             var diagnostic_output: [4]f32 = undefined;
@@ -13619,7 +13620,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             );
                         }
                     }
-                    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+                    if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
                         target.width == 1280 and target.height == 256 and x == 100 and y == 50 and
                         render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
                     {
@@ -13630,7 +13631,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             .{ x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
                         );
                     }
-                    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+                    if (render_diagnostics_enabled and op.descriptors.texture != null and
                         op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
                         target.width == 1280 and target.height == 256 and x == 30 and y == 10)
                     {
@@ -13641,7 +13642,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
                         );
                     }
-                    if (renderDiagnosticsEnabled() and diagnostic_draw == 71 and x == 166 and y == 1) {
+                    if (render_diagnostics_enabled and diagnostic_draw == 71 and x == 166 and y == 1) {
                         var diagnostic_source: [4]f32 = undefined;
                         var diagnostic_destination: [4]f32 = undefined;
                         for (0..4) |channel| {
@@ -13692,18 +13693,18 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         color_image.force_full_present = true;
     }
     if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
-    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
+    if (render_diagnostics_enabled and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
         .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
-    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+    if (render_diagnostics_enabled and op.descriptors.texture != null and
         op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
         target.width == 1280 and target.height == 256)
     {
         dumpDiagnosticImage(op.descriptors.texture.?, "ZPU_TEXT_TEXTURE_DUMP", &render_diagnostic_text_texture_dump);
         dumpDiagnosticImage(target, "ZPU_TEXT_TARGET_DUMP", &render_diagnostic_text_target_dump);
     }
-    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+    if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256)
         dumpDiagnosticImage(target, "ZPU_GLYPH_TARGET_DUMP", &render_diagnostic_glyph_target_dump);
     if (target.width == 1024 and target.height == 512) {
