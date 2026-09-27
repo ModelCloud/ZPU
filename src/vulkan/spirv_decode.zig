@@ -25,7 +25,7 @@ pub const Module = struct {
 
     pub fn decode(allocator: std.mem.Allocator, source: []const u32) Error!Module {
         if (source.len > max_module_words) return error.LimitExceeded;
-        if (source.len < 5 or source[0] != spirv.magic or source[1] != spirv.supported_spirv_version or
+        if (source.len < 5 or source[0] != spirv.magic or !spirv.versionSupported(source[1]) or
             source[3] == 0 or source[3] > spirv.max_id_bound or source[4] != 0)
             return error.Malformed;
         var count: usize = 0;
@@ -70,11 +70,16 @@ test "decode owns words and classifies malformed structure and limits" {
     try std.testing.expectEqual(@as(u16, 17), decoded.instructions[0].opcode);
     try std.testing.expectEqual(@as(u32, 1), decoded.instructions[0].words[0]);
     try std.testing.expectEqual(@as(u32, 5), decoded.instructions[0].offset);
+    var spirv_13 = source;
+    spirv_13[1] = 0x0001_0300;
+    var decoded_13 = try Module.decode(std.testing.allocator, &spirv_13);
+    decoded_13.deinit(std.testing.allocator);
     for ([_][]const u32{
         &.{},
         &.{ spirv.magic, spirv.supported_spirv_version, 0, 1 },
         &.{ 0, spirv.supported_spirv_version, 0, 1, 0 },
-        &.{ spirv.magic, 0x0001_0100, 0, 1, 0 },
+        &.{ spirv.magic, 0x0001_0700, 0, 1, 0 },
+        &.{ spirv.magic, 0x0001_0001, 0, 1, 0 },
         &.{ spirv.magic, spirv.supported_spirv_version, 0, 0, 0 },
         &.{ spirv.magic, spirv.supported_spirv_version, 0, spirv.max_id_bound + 1, 0 },
         &.{ spirv.magic, spirv.supported_spirv_version, 0, 1, 1 },

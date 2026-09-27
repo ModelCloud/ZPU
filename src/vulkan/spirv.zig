@@ -6,11 +6,17 @@ const std = @import("std");
 pub const magic: u32 = 0x0723_0203;
 pub const ingestion_version: u32 = 1;
 pub const serialization_version: u32 = 1;
-/// Vulkan 1.0 advertises support for SPIR-V 1.0. No later SPIR-V capability is
-/// exposed by this driver, so ingestion deliberately accepts exactly 1.0.
-pub const supported_spirv_version: u32 = 0x0001_0000;
+/// Vulkan 1.4 requires support for SPIR-V 1.0 through 1.6.
+pub const supported_spirv_version: u32 = 0x0001_0600;
 pub const max_code_bytes: usize = 1024 * 1024;
 pub const max_id_bound: u32 = 0x003f_ffff;
+
+pub fn versionSupported(version: u32) bool {
+    const major = (version >> 16) & 0xff;
+    const minor = (version >> 8) & 0xff;
+    const reserved_bits = version & 0xff00_00ff;
+    return major == 1 and minor <= 6 and reserved_bits == 0;
+}
 
 pub const ParseError = error{
     Empty,
@@ -71,7 +77,7 @@ pub fn validateByteSize(code_size: usize) ParseError!usize {
 fn validate(words: []const u32) ParseError!void {
     if (words.len < 5) return error.TruncatedHeader;
     if (words[0] != magic) return error.BadMagic;
-    if (words[1] != supported_spirv_version) return error.BadVersion;
+    if (!versionSupported(words[1])) return error.BadVersion;
     if (words[3] == 0 or words[3] > max_id_bound) return error.BadBound;
     if (words[4] != 0) return error.BadSchema;
 
@@ -134,7 +140,7 @@ test "identity hashes version metadata and semantic words as canonical little en
     const words = [_]u32{ magic, supported_spirv_version, 0, 2, 0, 0x0001_0000 };
     const semantic_bytes = [_]u8{
         0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-        0x03, 0x02, 0x23, 0x07, 0x00, 0x00, 0x01, 0x00,
+        0x03, 0x02, 0x23, 0x07, 0x00, 0x06, 0x01, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
     };
@@ -143,22 +149,17 @@ test "identity hashes version metadata and semantic words as canonical little en
     try std.testing.expectEqualSlices(u8, &expected, &identify(&words).digest);
 }
 
-test "supported SPIR-V version policy accepts only 1.0" {
-    const rejected = [_]u32{
-        0,
-        supported_spirv_version - 1,
-        supported_spirv_version + 1,
-        0x0001_0100,
-        0x0001_0600,
-        0x0002_0000,
-        std.math.maxInt(u32),
-    };
+test "supported SPIR-V versions match Vulkan 1.4 bounds" {
+    const accepted = [_]u32{ 0x0001_0000, 0x0001_0300, supported_spirv_version };
+    for (accepted) |version| {
+        var module = try Module.parse(std.testing.allocator, &.{ magic, version, 0, 1, 0 });
+        module.deinit(std.testing.allocator);
+    }
+    const rejected = [_]u32{ 0, 0x0000_0100, 0x0001_0700, 0x0002_0000, 0x0001_0001, 0x0101_0000, std.math.maxInt(u32) };
     for (rejected) |version| {
         const words = [_]u32{ magic, version, 0, 1, 0 };
         try std.testing.expectError(error.BadVersion, Module.parse(std.testing.allocator, &words));
     }
-    var accepted = try Module.parse(std.testing.allocator, &.{ magic, supported_spirv_version, 0, 1, 0 });
-    accepted.deinit(std.testing.allocator);
 }
 
 test "byte size and every structural boundary are rejected" {

@@ -36,6 +36,7 @@ pub const Error = error{
     InvalidOutput,
     MissingInput,
     Bounds,
+    Unsupported,
     NumericDomain,
     LimitExceeded,
     OutOfMemory,
@@ -47,14 +48,34 @@ pub const Value = struct {
     dpdx_bits: [16]u32 = .{0} ** 16,
     dpdy_bits: [16]u32 = .{0} ** 16,
     derivatives_valid: bool = false,
+    derivative_valid_mask: u16 = 0,
 
     pub fn lanes(self: Value) usize {
         return @as(usize, self.ty.columns) * self.ty.rows;
     }
 };
 
+fn fullDerivativeMask(lane_count: usize) u16 {
+    return if (lane_count >= 16) std.math.maxInt(u16) else (@as(u16, 1) << @intCast(lane_count)) - 1;
+}
+
+fn derivativeMask(value: anytype) u16 {
+    const full = fullDerivativeMask(@as(usize, value.ty.columns) * value.ty.rows);
+    return if (value.derivatives_valid) full else value.derivative_valid_mask & full;
+}
+fn derivativeMaskRef(value: *const Value) u16 {
+    const full = fullDerivativeMask(@as(usize, value.ty.columns) * value.ty.rows);
+    return if (value.derivatives_valid) full else value.derivative_valid_mask & full;
+}
+
+fn setDerivativeMask(value: *Value, mask: u16) void {
+    const full = fullDerivativeMask(value.lanes());
+    value.derivative_valid_mask = mask & full;
+    value.derivatives_valid = value.derivative_valid_mask == full;
+}
+
 pub const SampledImage = struct {
-    pub const Format = enum { r8_unorm, rg8_unorm, rgba8_unorm, bgra8_unorm, ycbcr_420_2plane, ycbcr_420_3plane };
+    pub const Format = enum { r8_unorm, rg8_unorm, r16_sfloat, rg16_sfloat, rgba8_unorm, bgra8_unorm, rgba16_sfloat, r32_sfloat, rg32_sfloat, rgba32_sfloat, r11g11b10_ufloat, ycbcr_420_2plane, ycbcr_420_3plane };
     pub const Filter = enum { nearest, linear };
     pub const AddressMode = enum { repeat, mirrored_repeat, clamp_to_edge, clamp_to_border, mirror_clamp_to_edge };
     pub const YcbcrModel = enum { identity, bt601, bt709, bt2020 };
@@ -64,10 +85,13 @@ pub const SampledImage = struct {
     width: u32,
     height: u32,
     row_stride: u32,
-    // The driver keeps sampled image storage in its existing four-byte
-    // internal layout, while standalone IR fixtures may use the format's
-    // natural packed layout.
+    // Sampled images use the native texel layout of their Vulkan format.
     bytes_per_texel: u32 = 4,
+    // Cube-compatible views keep their six faces in Vulkan array-layer
+    // order. The executor selects one face before running the existing 2D
+    // filtering and mip logic.
+    cube: bool = false,
+    cube_face_stride: usize = 0,
     format: Format,
     filter: Filter,
     address_u: AddressMode,
@@ -85,6 +109,23 @@ pub const SampledImage = struct {
     plane_2_row_stride: u32 = 0,
     ycbcr_model: YcbcrModel = .bt601,
     ycbcr_range: YcbcrRange = .narrow,
+    mip_count: u8 = 1,
+    mip_offsets: [16]usize = [_]usize{0} ** 16,
+    mip_widths: [16]u32 = [_]u32{0} ** 16,
+    mip_heights: [16]u32 = [_]u32{0} ** 16,
+};
+
+pub const Sampler = struct {
+    pub const MipmapMode = enum { nearest, linear };
+    mag_filter: SampledImage.Filter = .nearest,
+    min_filter: SampledImage.Filter = .nearest,
+    mipmap_mode: MipmapMode = .nearest,
+    address_u: SampledImage.AddressMode = .clamp_to_edge,
+    address_v: SampledImage.AddressMode = .clamp_to_edge,
+    border: [4]f32 = .{ 0, 0, 0, 0 },
+    lod_bias: f32 = 0,
+    min_lod: f32 = 0,
+    max_lod: f32 = 0,
 };
 
 pub const Binding = struct {
@@ -94,6 +135,7 @@ pub const Binding = struct {
     dpdy_bytes: []const u8 = &.{},
     sampled_image: ?SampledImage = null,
     input_attachment: ?SampledImage = null,
+    sampler: ?Sampler = null,
 };
 pub const Output = struct { interface: u32, bytes: []u8 };
 
@@ -153,9 +195,41 @@ fn valueRef(values: []const Value, current: usize, id: u32) Error!Value {
     if (id >= current) return error.InvalidOperand;
     return values[id];
 }
+fn valueRefPtr(values: []const Value, current: usize, id: u32) Error!*const Value {
+    if (id >= current) return error.InvalidOperand;
+    return &values[id];
+}
 fn canonicalFloat(bits: u32) u32 {
     const x: f32 = @bitCast(bits);
     return if (std.math.isNan(x)) 0x7fc00000 else bits;
+}
+
+fn floatUnaryDerivative(op: ir.Op, x: f32, value: f32) f32 {
+    const ln2: f32 = 0.6931471805599453;
+    return switch (op) {
+        .f_fract => 1,
+        .f_radians => std.math.pi / 180.0,
+        .f_degrees => 180.0 / std.math.pi,
+        .f_sin => @cos(x),
+        .f_cos => -@sin(x),
+        .f_tan => 1.0 + value * value,
+        .f_asin => 1.0 / std.math.sqrt(1.0 - x * x),
+        .f_acos => -1.0 / std.math.sqrt(1.0 - x * x),
+        .f_atan => 1.0 / (1.0 + x * x),
+        .f_sinh => std.math.cosh(x),
+        .f_cosh => std.math.sinh(x),
+        .f_tanh => 1.0 - value * value,
+        .f_asinh => 1.0 / std.math.sqrt(1.0 + x * x),
+        .f_acosh => 1.0 / std.math.sqrt(x * x - 1.0),
+        .f_atanh => 1.0 / (1.0 - x * x),
+        .f_exp => value,
+        .f_log => 1.0 / x,
+        .f_exp2 => value * ln2,
+        .f_log2 => 1.0 / (x * ln2),
+        .f_sqrt => 0.5 / value,
+        .f_inverse_sqrt => -0.5 * value / x,
+        else => 0,
+    };
 }
 
 fn determinant3(m: *const [3][3]f32) f32 {
@@ -304,6 +378,16 @@ fn uniformValueByteSize(ty: ir.Type, available: usize) Error!usize {
     if (available < compact_size) return error.Bounds;
     return compact_size;
 }
+fn uniformArrayStrideValid(member: ir.UniformMember) bool {
+    if (member.array_count == 0 or (member.array_stride == 0 and member.array_count != 1)) return false;
+    if (member.array_stride == 0) return true;
+    if (member.array_stride % 16 != 0) return false;
+    const element_size: u32 = if (member.ty.rows == 1)
+        @intCast(byteSize(member.ty) catch return false)
+    else
+        @as(u32, member.ty.columns) * 16;
+    return member.array_stride >= element_size;
+}
 fn readInputValue(ty: ir.Type, binding: Binding) Error!Value {
     var result = try readValue(ty, binding.bytes);
     if (binding.dpdx_bytes.len == 0 and binding.dpdy_bytes.len == 0) return result;
@@ -348,6 +432,14 @@ fn findInputAttachment(bindings: []const Binding, index: u32) Error!SampledImage
     for (bindings) |binding| if (binding.interface == index) {
         if (found != null or binding.input_attachment == null) return error.InvalidOperand;
         found = binding.input_attachment;
+    };
+    return found orelse error.MissingInput;
+}
+fn findSampler(bindings: []const Binding, index: u32) Error!Sampler {
+    var found: ?Sampler = null;
+    for (bindings) |binding| if (binding.interface == index) {
+        if (found != null or binding.sampler == null) return error.InvalidOperand;
+        found = binding.sampler;
     };
     return found orelse error.MissingInput;
 }
@@ -451,6 +543,18 @@ fn ycbcrTexel(image: SampledImage, x: u32, y: u32) Error![4]f32 {
     return ycbcrToRgb(image, y_sample, cb_sample, cr_sample);
 }
 
+fn readUnsignedFloat(bits: u32, mantissa_bits: u32) f32 {
+    const mantissa_mask = (@as(u32, 1) << @intCast(mantissa_bits)) - 1;
+    const mantissa = bits & mantissa_mask;
+    const exponent = (bits >> @intCast(mantissa_bits)) & 0x1f;
+    if (exponent == 0) return @floatCast(@as(f64, @floatFromInt(mantissa)) *
+        std.math.pow(f64, 2.0, -14.0 - @as(f64, @floatFromInt(mantissa_bits))));
+    if (exponent == 0x1f) return if (mantissa == 0) std.math.inf(f32) else std.math.nan(f32);
+    const scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 15.0);
+    return @floatCast((1.0 + @as(f64, @floatFromInt(mantissa)) /
+        std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)))) * scale);
+}
+
 fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     const addressed_x = addressCoordinate(x, image.width, image.address_u) orelse return applySwizzle(image, image.border);
     const addressed_y = addressCoordinate(y, image.height, image.address_v) orelse return applySwizzle(image, image.border);
@@ -465,6 +569,53 @@ fn texel(image: SampledImage, x: i32, y: i32) Error![4]f32 {
     if (image.format == .rg8_unorm) {
         if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
         return applySwizzle(image, .{ @as(f32, @floatFromInt(image.pixels[offset])) / 255, @as(f32, @floatFromInt(image.pixels[offset + 1])) / 255, 0, 1 });
+    }
+    if (image.format == .r16_sfloat) {
+        if (image.bytes_per_texel < 2 or image.pixels.len - offset < 2) return error.Bounds;
+        const bits = std.mem.readInt(u16, image.pixels[offset..][0..2], .little);
+        return applySwizzle(image, .{ @as(f32, @floatCast(@as(f16, @bitCast(bits)))), 0, 0, 1 });
+    }
+    if (image.format == .rg16_sfloat) {
+        if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
+        const r_bits = std.mem.readInt(u16, image.pixels[offset..][0..2], .little);
+        const g_bits = std.mem.readInt(u16, image.pixels[offset + 2 ..][0..2], .little);
+        return applySwizzle(image, .{
+            @as(f32, @floatCast(@as(f16, @bitCast(r_bits)))),
+            @as(f32, @floatCast(@as(f16, @bitCast(g_bits)))),
+            0,
+            1,
+        });
+    }
+    if (image.format == .r32_sfloat) {
+        if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
+        const bits = std.mem.readInt(u32, image.pixels[offset..][0..4], .little);
+        return applySwizzle(image, .{ @bitCast(bits), 0, 0, 1 });
+    }
+    if (image.format == .rg32_sfloat) {
+        if (image.bytes_per_texel < 8 or image.pixels.len - offset < 8) return error.Bounds;
+        const r = std.mem.readInt(u32, image.pixels[offset..][0..4], .little);
+        const g = std.mem.readInt(u32, image.pixels[offset + 4 ..][0..4], .little);
+        return applySwizzle(image, .{ @bitCast(r), @bitCast(g), 0, 1 });
+    }
+    if (image.format == .rgba32_sfloat) {
+        if (image.bytes_per_texel < 16 or image.pixels.len - offset < 16) return error.Bounds;
+        var rgba: [4]f32 = undefined;
+        for (0..4) |lane| rgba[lane] = @bitCast(std.mem.readInt(u32, image.pixels[offset + lane * 4 ..][0..4], .little));
+        return applySwizzle(image, rgba);
+    }
+    if (image.format == .r11g11b10_ufloat) {
+        if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
+        const bits = std.mem.readInt(u32, image.pixels[offset..][0..4], .little);
+        return applySwizzle(image, .{ readUnsignedFloat(bits & 0x7ff, 6), readUnsignedFloat((bits >> 11) & 0x7ff, 6), readUnsignedFloat((bits >> 22) & 0x3ff, 5), 1 });
+    }
+    if (image.format == .rgba16_sfloat) {
+        if (image.bytes_per_texel < 8 or image.pixels.len - offset < 8) return error.Bounds;
+        var rgba: [4]f32 = undefined;
+        for (0..4) |lane| {
+            const half_bits = std.mem.readInt(u16, image.pixels[offset + lane * 2 ..][0..2], .little);
+            rgba[lane] = @as(f32, @floatCast(@as(f16, @bitCast(half_bits))));
+        }
+        return applySwizzle(image, rgba);
     }
     if (image.bytes_per_texel < 4 or image.pixels.len - offset < 4) return error.Bounds;
     const pixel = image.pixels[offset..][0..4];
@@ -491,21 +642,36 @@ fn inputAttachmentLoad(image: SampledImage, coordinates: Value) Error!Value {
     for (rgba, 0..) |channel, index| result.bits[index] = @bitCast(channel);
     return result;
 }
-fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
-    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
-    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or bias.ty.scalar != .f32 or bias.ty.columns != 1 or bias.ty.rows != 1) return error.InvalidType;
-    const u: f32 = @bitCast(coordinates.bits[0]);
-    const v: f32 = @bitCast(coordinates.bits[1]);
-    const lod_bias: f32 = @bitCast(bias.bits[0]);
-    if (!std.math.isFinite(u) or !std.math.isFinite(v) or !std.math.isFinite(lod_bias)) return error.NumericDomain;
+fn imageFetch(image: SampledImage, coordinates: Value, lod: Value) Error!Value {
+    if (coordinates.ty.scalar != .i32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or lod.ty.scalar != .i32 or lod.ty.columns != 1 or lod.ty.rows != 1) return error.InvalidType;
+    // This profile exposes only level zero of a samplerless 2D image. Reject
+    // other levels and out-of-view coordinates instead of applying sampler
+    // address modes to an image fetch.
+    if (@as(i32, @bitCast(lod.bits[0])) != 0) return error.Unsupported;
+    const x: i32 = @bitCast(coordinates.bits[0]);
+    const y: i32 = @bitCast(coordinates.bits[1]);
+    if (image.width == 0 or image.height == 0 or x < 0 or y < 0 or x >= image.width or y >= image.height) return error.Bounds;
+    const rgba = try texel(image, x, y);
+    var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
+    for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    return result;
+}
+const SampledColor = struct {
+    value: [4]f32,
+    du: [4]f32 = .{ 0, 0, 0, 0 },
+    dv: [4]f32 = .{ 0, 0, 0, 0 },
+};
+
+fn sampleRgbaAt(image: SampledImage, u: f32, v: f32) Error!SampledColor {
+    if (!std.math.isFinite(u) or !std.math.isFinite(v)) return error.NumericDomain;
     const normalized_u = normalizedCoordinate(u, image.address_u);
     const normalized_v = normalizedCoordinate(v, image.address_v);
-    var rgba = image.border;
+    var sampled = SampledColor{ .value = image.border };
     if (normalized_u) |sample_u| if (normalized_v) |sample_v| {
         const fx = sample_u * @as(f32, @floatFromInt(image.width)) - 0.5;
         const fy = sample_v * @as(f32, @floatFromInt(image.height)) - 0.5;
         if (image.filter == .nearest) {
-            rgba = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+            sampled.value = try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
         } else {
             const x0: i32 = @intFromFloat(@floor(fx));
             const y0: i32 = @intFromFloat(@floor(fy));
@@ -515,20 +681,268 @@ fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
             const p10 = try texel(image, x0 + 1, y0);
             const p01 = try texel(image, x0, y0 + 1);
             const p11 = try texel(image, x0 + 1, y0 + 1);
-            for (0..4) |lane| rgba[lane] =
-                (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
-                (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+            for (0..4) |lane| {
+                sampled.value[lane] =
+                    (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+                    (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+                sampled.du[lane] = ((p10[lane] - p00[lane]) * (1 - ty) + (p11[lane] - p01[lane]) * ty) * @as(f32, @floatFromInt(image.width));
+                sampled.dv[lane] = ((p01[lane] - p00[lane]) * (1 - tx) + (p11[lane] - p10[lane]) * tx) * @as(f32, @floatFromInt(image.height));
+            }
         }
     };
+    return sampled;
+}
+
+fn sample(image: SampledImage, coordinates: Value, bias: Value) Error!Value {
+    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or bias.ty.scalar != .f32 or bias.ty.columns != 1 or bias.ty.rows != 1) return error.InvalidType;
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const lod_bias: f32 = @bitCast(bias.bits[0]);
+    if (!std.math.isFinite(lod_bias)) return error.NumericDomain;
+    const sampled = try sampleRgbaAt(image, u, v);
     var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
-    for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    for (sampled.value, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
+    if (coordinates.derivatives_valid) {
+        const du_dx: f32 = @bitCast(coordinates.dpdx_bits[0]);
+        const dv_dx: f32 = @bitCast(coordinates.dpdx_bits[1]);
+        const du_dy: f32 = @bitCast(coordinates.dpdy_bits[0]);
+        const dv_dy: f32 = @bitCast(coordinates.dpdy_bits[1]);
+        const neighbor_dx = if (image.filter == .nearest) (try sampleRgbaAt(image, u + du_dx, v + dv_dx)).value else sampled.value;
+        const neighbor_dy = if (image.filter == .nearest) (try sampleRgbaAt(image, u + du_dy, v + dv_dy)).value else sampled.value;
+        result.derivatives_valid = true;
+        for (0..4) |lane| {
+            const dx = if (image.filter == .linear)
+                sampled.du[lane] * du_dx + sampled.dv[lane] * dv_dx
+            else
+                neighbor_dx[lane] - sampled.value[lane];
+            const dy = if (image.filter == .linear)
+                sampled.du[lane] * du_dy + sampled.dv[lane] * dv_dy
+            else
+                neighbor_dy[lane] - sampled.value[lane];
+            result.dpdx_bits[lane] = canonicalFloat(@bitCast(dx));
+            result.dpdy_bits[lane] = canonicalFloat(@bitCast(dy));
+        }
+    }
     if (renderDiagnosticsEnabled() and image.width == 1024 and image.height == 512) {
         const sequence = diagnostic_samples.fetchAdd(1, .monotonic);
         if (sequence < 64) std.debug.print(
             "ZPU IR sample seq={d} uv={d:.4},{d:.4} normalized={any},{any} image={d}x{d} rgba={d:.4},{d:.4},{d:.4},{d:.4}\n",
-            .{ sequence, u, v, normalized_u, normalized_v, image.width, image.height, rgba[0], rgba[1], rgba[2], rgba[3] },
+            .{ sequence, u, v, normalizedCoordinate(u, image.address_u), normalizedCoordinate(v, image.address_v), image.width, image.height, sampled.value[0], sampled.value[1], sampled.value[2], sampled.value[3] },
         );
     }
+    return result;
+}
+
+const CubeCoordinate = struct { face: u32, uv: [2]f32 };
+
+fn cubeDirectionCoordinates(direction: Value) Error!CubeCoordinate {
+    if (direction.ty.scalar != .f32 or direction.ty.columns != 3 or direction.ty.rows != 1) return error.InvalidType;
+    const x: f32 = @bitCast(direction.bits[0]);
+    const y: f32 = @bitCast(direction.bits[1]);
+    const z: f32 = @bitCast(direction.bits[2]);
+    if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return error.NumericDomain;
+    const ax = @abs(x);
+    const ay = @abs(y);
+    const az = @abs(z);
+    const major = @max(ax, @max(ay, az));
+    if (major == 0) return error.NumericDomain;
+    var face: u32 = undefined;
+    var sc: f32 = undefined;
+    var tc: f32 = undefined;
+    if (ax >= ay and ax >= az) {
+        if (x >= 0) {
+            face = 0; // +X
+            sc = -z;
+            tc = -y;
+        } else {
+            face = 1; // -X
+            sc = z;
+            tc = -y;
+        }
+    } else if (ay >= az) {
+        if (y >= 0) {
+            face = 2; // +Y
+            sc = x;
+            tc = z;
+        } else {
+            face = 3; // -Y
+            sc = x;
+            tc = -z;
+        }
+    } else if (z >= 0) {
+        face = 4; // +Z
+        sc = x;
+        tc = -y;
+    } else {
+        face = 5; // -Z
+        sc = -x;
+        tc = -y;
+    }
+    return .{ .face = face, .uv = .{ (sc / major + 1) * 0.5, (tc / major + 1) * 0.5 } };
+}
+
+fn cubeFaceImage(source: SampledImage, face: u32) Error!SampledImage {
+    if (!source.cube or source.cube_face_stride == 0 or face >= 6) return error.InvalidType;
+    const face_offset = std.math.mul(usize, source.cube_face_stride, face) catch return error.Bounds;
+    if (face_offset > source.pixels.len) return error.Bounds;
+    var image = source;
+    image.pixels = source.pixels[face_offset..];
+    image.cube = false;
+    image.cube_face_stride = 0;
+    return image;
+}
+
+fn cubeUvValue(cube: CubeCoordinate) Value {
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(cube.uv[0]);
+    coordinates.bits[1] = @bitCast(cube.uv[1]);
+    return coordinates;
+}
+
+fn sampleCube(image: SampledImage, direction: Value, bias: Value) Error!Value {
+    const mapped = try cubeDirectionCoordinates(direction);
+    var coordinates = cubeUvValue(mapped);
+    const has_direction_derivatives = derivativeMask(direction) == fullDerivativeMask(3);
+    var crosses_face = [_]bool{ false, false };
+    if (has_direction_derivatives) {
+        coordinates.derivatives_valid = true;
+        for (0..2) |axis| {
+            var shifted_direction = direction;
+            for (0..3) |lane| {
+                const value: f32 = @bitCast(direction.bits[lane]);
+                const delta: f32 = @bitCast(if (axis == 0) direction.dpdx_bits[lane] else direction.dpdy_bits[lane]);
+                shifted_direction.bits[lane] = @bitCast(value + delta);
+            }
+            const shifted = try cubeDirectionCoordinates(shifted_direction);
+            if (shifted.face != mapped.face) {
+                crosses_face[axis] = true;
+                continue;
+            }
+            const dx = if (axis == 0) &coordinates.dpdx_bits else &coordinates.dpdy_bits;
+            dx[0] = canonicalFloat(@bitCast(shifted.uv[0] - mapped.uv[0]));
+            dx[1] = canonicalFloat(@bitCast(shifted.uv[1] - mapped.uv[1]));
+        }
+    }
+    var result = try sample(try cubeFaceImage(image, mapped.face), coordinates, bias);
+    if (has_direction_derivatives) {
+        for (0..2) |axis| if (crosses_face[axis]) {
+            var shifted_direction = direction;
+            for (0..3) |lane| {
+                const value: f32 = @bitCast(direction.bits[lane]);
+                const delta: f32 = @bitCast(if (axis == 0) direction.dpdx_bits[lane] else direction.dpdy_bits[lane]);
+                shifted_direction.bits[lane] = @bitCast(value + delta);
+            }
+            const shifted = try cubeDirectionCoordinates(shifted_direction);
+            const shifted_color = try sample(try cubeFaceImage(image, shifted.face), cubeUvValue(shifted), bias);
+            result.derivatives_valid = true;
+            const derivative = if (axis == 0) &result.dpdx_bits else &result.dpdy_bits;
+            for (0..result.lanes()) |lane| {
+                const neighbor: f32 = @bitCast(shifted_color.bits[lane]);
+                const center: f32 = @bitCast(result.bits[lane]);
+                derivative[lane] = canonicalFloat(@bitCast(neighbor - center));
+            }
+        };
+    }
+    return result;
+}
+
+// The captured Three.js clearcoat skybox has one cube lookup and never reads
+// derivatives of its result. With a single mip level, derivatives cannot
+// affect the selected texels. Keep the normal cube path for all other shaders
+// and for images with mipmaps.
+fn sampleCubeSingleMipColor(image: SampledImage, direction: Value, bias: Value) Error!Value {
+    const mapped = try cubeDirectionCoordinates(direction);
+    return sample(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), bias);
+}
+
+fn sampleCubeExplicitLod(image: SampledImage, direction: Value, lod: Value, sampler: Sampler) Error!Value {
+    const mapped = try cubeDirectionCoordinates(direction);
+    return sampleExplicitLod(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), lod, sampler);
+}
+
+fn combinedImageSampler(image: SampledImage) Sampler {
+    return .{
+        .mag_filter = image.filter,
+        .min_filter = image.filter,
+        .address_u = image.address_u,
+        .address_v = image.address_v,
+        .border = image.border,
+    };
+}
+
+fn explicitSampleSampler(bindings: []const Binding, operands: []const u32) Error!struct { image: SampledImage, sampler: Sampler } {
+    const image = try findSampledImage(bindings, operands[0]);
+    return .{
+        .image = image,
+        .sampler = if (operands.len == 3) combinedImageSampler(image) else try findSampler(bindings, operands[3]),
+    };
+}
+
+fn sampleMipLevel(source: SampledImage, coordinates: Value, level: u32, filter: SampledImage.Filter, sampler: Sampler) Error![4]f32 {
+    if (level >= source.mip_count or level >= source.mip_offsets.len) return error.Bounds;
+    var image = source;
+    const width = if (source.mip_widths[level] == 0) source.width else source.mip_widths[level];
+    const height = if (source.mip_heights[level] == 0) source.height else source.mip_heights[level];
+    const offset = source.mip_offsets[level];
+    if (offset > source.pixels.len) return error.Bounds;
+    image.pixels = source.pixels[offset..];
+    image.width = width;
+    image.height = height;
+    image.row_stride = std.math.mul(u32, width, source.bytes_per_texel) catch return error.Bounds;
+    image.mip_count = 1;
+    image.filter = filter;
+    image.address_u = sampler.address_u;
+    image.address_v = sampler.address_v;
+    image.border = sampler.border;
+
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const normalized_u = normalizedCoordinate(u, image.address_u);
+    const normalized_v = normalizedCoordinate(v, image.address_v);
+    if (normalized_u == null or normalized_v == null) return sampler.border;
+    const fx = normalized_u.? * @as(f32, @floatFromInt(width)) - 0.5;
+    const fy = normalized_v.? * @as(f32, @floatFromInt(height)) - 0.5;
+    if (filter == .nearest) return try texel(image, @intFromFloat(@floor(fx + 0.5)), @intFromFloat(@floor(fy + 0.5)));
+    const x0: i32 = @intFromFloat(@floor(fx));
+    const y0: i32 = @intFromFloat(@floor(fy));
+    const tx = fx - @floor(fx);
+    const ty = fy - @floor(fy);
+    const p00 = try texel(image, x0, y0);
+    const p10 = try texel(image, x0 + 1, y0);
+    const p01 = try texel(image, x0, y0 + 1);
+    const p11 = try texel(image, x0 + 1, y0 + 1);
+    var rgba: [4]f32 = undefined;
+    for (0..4) |lane| rgba[lane] =
+        (p00[lane] * (1 - tx) + p10[lane] * tx) * (1 - ty) +
+        (p01[lane] * (1 - tx) + p11[lane] * tx) * ty;
+    return rgba;
+}
+
+fn sampleExplicitLod(image: SampledImage, coordinates: Value, lod_value: Value, sampler: Sampler) Error!Value {
+    if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.mip_count == 0 or image.mip_count > image.mip_offsets.len) return error.Bounds;
+    if (coordinates.ty.scalar != .f32 or coordinates.ty.columns != 2 or coordinates.ty.rows != 1 or lod_value.ty.scalar != .f32 or lod_value.ty.columns != 1 or lod_value.ty.rows != 1) return error.InvalidType;
+    const u: f32 = @bitCast(coordinates.bits[0]);
+    const v: f32 = @bitCast(coordinates.bits[1]);
+    const requested_lod: f32 = @bitCast(lod_value.bits[0]);
+    if (!std.math.isFinite(u) or !std.math.isFinite(v) or !std.math.isFinite(requested_lod) or !std.math.isFinite(sampler.lod_bias) or !std.math.isFinite(sampler.min_lod) or !std.math.isFinite(sampler.max_lod) or sampler.max_lod < sampler.min_lod) return error.NumericDomain;
+    const max_level = @as(f32, @floatFromInt(image.mip_count - 1));
+    const clamped_min_lod = std.math.clamp(sampler.min_lod, 0, max_level);
+    const clamped_max_lod = std.math.clamp(sampler.max_lod, clamped_min_lod, max_level);
+    const lod = std.math.clamp(requested_lod + sampler.lod_bias, clamped_min_lod, clamped_max_lod);
+    const filter = if (lod <= 0) sampler.mag_filter else sampler.min_filter;
+    const lower_f = @floor(lod);
+    const lower: u32 = @intFromFloat(lower_f);
+    const upper = @min(lower + 1, image.mip_count - 1);
+    const lower_rgba = try sampleMipLevel(image, coordinates, if (sampler.mipmap_mode == .nearest and lod - lower_f >= 0.5) upper else lower, filter, sampler);
+    var rgba = lower_rgba;
+    if (sampler.mipmap_mode == .linear and upper != lower) {
+        const upper_rgba = try sampleMipLevel(image, coordinates, upper, filter, sampler);
+        const fraction = lod - lower_f;
+        for (0..4) |lane| rgba[lane] = lower_rgba[lane] * (1 - fraction) + upper_rgba[lane] * fraction;
+    }
+    var result = Value{ .ty = .{ .scalar = .f32, .columns = 4 } };
+    for (rgba, 0..) |channel, lane| result.bits[lane] = canonicalFloat(@bitCast(channel));
     return result;
 }
 
@@ -563,6 +977,71 @@ test "sample applies normalized addressing before bounded texel indexing" {
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(border.bits[3])));
 }
 
+test "cube sampling maps Vulkan face directions to six array layers" {
+    const pixels = [_]u8{
+        10, 0, 0, 255, 20, 0, 0, 255, 30, 0, 0, 255,
+        40, 0, 0, 255, 50, 0, 0, 255, 60, 0, 0, 255,
+    };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 4,
+        .format = .rgba8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .cube = true,
+        .cube_face_stride = 4,
+    };
+    const directions = [_][3]f32{
+        .{ 1, 0, 0 },  .{ -1, 0, 0 }, .{ 0, 1, 0 },
+        .{ 0, -1, 0 }, .{ 0, 0, 1 },  .{ 0, 0, -1 },
+    };
+    var bias = Value{ .ty = .{ .scalar = .f32 } };
+    bias.bits[0] = @bitCast(@as(f32, 0));
+    for (directions, 0..) |direction, face| {
+        var value = Value{ .ty = .{ .scalar = .f32, .columns = 3 } };
+        for (direction, 0..) |component, lane| value.bits[lane] = @bitCast(component);
+        const mapped = try cubeDirectionCoordinates(value);
+        try std.testing.expectEqual(@as(u32, @intCast(face)), mapped.face);
+        try std.testing.expectEqual(@as(f32, 0.5), mapped.uv[0]);
+        try std.testing.expectEqual(@as(f32, 0.5), mapped.uv[1]);
+        const sampled = try sampleCube(image, value, bias);
+        try std.testing.expectEqual(@as(f32, @floatFromInt((face + 1) * 10)) / 255, @as(f32, @bitCast(sampled.bits[0])));
+    }
+    const zero = Value{ .ty = .{ .scalar = .f32, .columns = 3 } };
+    try std.testing.expectError(error.NumericDomain, cubeDirectionCoordinates(zero));
+}
+
+test "cube sampling carries direction derivatives into face coordinates" {
+    var pixels = [_]u8{0} ** 96;
+    for ([_]u8{ 10, 110, 30, 130 }, 0..) |red, texel_index| {
+        const offset = texel_index * 4;
+        pixels[offset] = red;
+        pixels[offset + 3] = 255;
+    }
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .format = .rgba8_unorm,
+        .filter = .linear,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .cube = true,
+        .cube_face_stride = 16,
+    };
+    var direction = Value{ .ty = .{ .scalar = .f32, .columns = 3 }, .derivatives_valid = true };
+    direction.bits[0] = @bitCast(@as(f32, 1));
+    direction.dpdx_bits[2] = @bitCast(@as(f32, -0.5));
+    const sampled = try sampleCube(image, direction, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expect(sampled.derivatives_valid);
+    try std.testing.expectApproxEqAbs(@as(f32, 50.0 / 255.0), @as(f32, @bitCast(sampled.dpdx_bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(sampled.dpdy_bits[0])), 0.00001);
+}
+
 test "sample decodes packed R8 coverage as red with opaque alpha" {
     const pixels = [_]u8{ 0, 64, 128, 255 };
     const image = SampledImage{
@@ -586,6 +1065,95 @@ test "sample decodes packed R8 coverage as red with opaque alpha" {
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[1])));
     try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample computes screen-space derivatives for filtered texture results" {
+    const pixels = [_]u8{
+        10, 20, 30, 40, 110, 120, 130, 140,
+        30, 40, 50, 60, 130, 140, 150, 160,
+    };
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 2,
+        .row_stride = 8,
+        .format = .rgba8_unorm,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 }, .derivatives_valid = true };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.25));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.25));
+    coordinates.dpdx_bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.dpdy_bits[1] = @bitCast(@as(f32, 0.5));
+    const sampled = try sample(image, coordinates, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expect(sampled.derivatives_valid);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0 / 255.0), @as(f32, @bitCast(sampled.bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0 / 255.0), @as(f32, @bitCast(sampled.dpdx_bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0 / 255.0), @as(f32, @bitCast(sampled.dpdy_bits[0])), 0.00001);
+    var linear_image = image;
+    linear_image.filter = .linear;
+    const linear_sample = try sample(linear_image, coordinates, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0 / 255.0), @as(f32, @bitCast(linear_sample.dpdx_bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0 / 255.0), @as(f32, @bitCast(linear_sample.dpdy_bits[0])), 0.00001);
+}
+
+test "sample decodes RG16F channels with zero blue and opaque alpha" {
+    var pixels = [_]u8{0} ** 4;
+    std.mem.writeInt(u16, pixels[0..2], @bitCast(@as(f16, 0.5)), .little);
+    std.mem.writeInt(u16, pixels[2..4], @bitCast(@as(f16, 2)), .little);
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 1,
+        .height = 1,
+        .row_stride = 4,
+        .bytes_per_texel = 4,
+        .format = .rg16_sfloat,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.5));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    const result = try sample(image, coordinates, .{ .ty = .{ .scalar = .f32 } });
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(result.bits[0])));
+    try std.testing.expectEqual(@as(f32, 2), @as(f32, @bitCast(result.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(result.bits[2])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[3])));
+}
+
+test "sample decodes native scalar float color formats" {
+    var r16_bytes = [_]u8{0} ** 2;
+    std.mem.writeInt(u16, &r16_bytes, @bitCast(@as(f16, 0.5)), .little);
+    const r16 = try texel(.{ .pixels = &r16_bytes, .width = 1, .height = 1, .row_stride = 2, .bytes_per_texel = 2, .format = .r16_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ 0.5, 0, 0, 1 }, r16);
+
+    var r32_bytes = [_]u8{0} ** 4;
+    std.mem.writeInt(u32, &r32_bytes, @bitCast(@as(f32, -0.25)), .little);
+    const r32 = try texel(.{ .pixels = &r32_bytes, .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = .r32_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ -0.25, 0, 0, 1 }, r32);
+
+    var rg32_bytes = [_]u8{0} ** 8;
+    std.mem.writeInt(u32, rg32_bytes[0..4], @bitCast(@as(f32, 0.25)), .little);
+    std.mem.writeInt(u32, rg32_bytes[4..8], @bitCast(@as(f32, 1.5)), .little);
+    const rg32 = try texel(.{ .pixels = &rg32_bytes, .width = 1, .height = 1, .row_stride = 8, .bytes_per_texel = 8, .format = .rg32_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ 0.25, 1.5, 0, 1 }, rg32);
+
+    var rgba32_bytes = [_]u8{0} ** 16;
+    for ([_]f32{ 0.125, -2, 3, 0.75 }, 0..) |component, lane| std.mem.writeInt(u32, rgba32_bytes[lane * 4 ..][0..4], @bitCast(component), .little);
+    const rgba32 = try texel(.{ .pixels = &rgba32_bytes, .width = 1, .height = 1, .row_stride = 16, .bytes_per_texel = 16, .format = .rgba32_sfloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectEqual([_]f32{ 0.125, -2, 3, 0.75 }, rgba32);
+
+    var packed_bytes = [_]u8{0} ** 4;
+    const packed_bits = (@as(u32, 13) << 6) | (@as(u32, 14) << 17) | (@as(u32, 14) << 27) | (@as(u32, 16) << 22);
+    std.mem.writeInt(u32, &packed_bytes, packed_bits, .little);
+    const packed_rgb = try texel(.{ .pixels = &packed_bytes, .width = 1, .height = 1, .row_stride = 4, .bytes_per_texel = 4, .format = .r11g11b10_ufloat, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge }, 0, 0);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), packed_rgb[0], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), packed_rgb[1], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), packed_rgb[2], 0.0001);
+    try std.testing.expectEqual(@as(f32, 1), packed_rgb[3]);
 }
 
 test "sample decodes Chromium packed RG8 chroma inputs" {
@@ -700,6 +1268,49 @@ test "sample applies Vulkan image-view component swizzle" {
     try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(result.bits[2])));
     try std.testing.expectEqual(@as(f32, 40.0 / 255.0), @as(f32, @bitCast(result.bits[3])));
 }
+
+test "explicit LOD selects and blends RGBA16F mip levels with separate sampler state" {
+    var pixels = [_]u8{0} ** 24;
+    const mip_values = [_]f16{
+        1, 0, 0, 1,
+        0, 1, 0, 1,
+        0, 0, 1, 0.5,
+    };
+    for (mip_values, 0..) |value, index| std.mem.writeInt(u16, pixels[index * 2 ..][0..2], @bitCast(value), .little);
+    const image = SampledImage{
+        .pixels = &pixels,
+        .width = 2,
+        .height = 1,
+        .row_stride = 16,
+        .bytes_per_texel = 8,
+        .format = .rgba16_sfloat,
+        .filter = .nearest,
+        .address_u = .clamp_to_edge,
+        .address_v = .clamp_to_edge,
+        .mip_count = 2,
+        .mip_offsets = .{ 0, 16 } ++ [_]usize{0} ** 14,
+        .mip_widths = .{ 2, 1 } ++ [_]u32{0} ** 14,
+        .mip_heights = .{ 1, 1 } ++ [_]u32{0} ** 14,
+    };
+    var coordinates = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    coordinates.bits[0] = @bitCast(@as(f32, 0.75));
+    coordinates.bits[1] = @bitCast(@as(f32, 0.5));
+    var lod = Value{ .ty = .{ .scalar = .f32 } };
+    lod.bits[0] = @bitCast(@as(f32, 0));
+    const nearest_sampler = Sampler{ .min_filter = .nearest, .mag_filter = .nearest, .mipmap_mode = .nearest, .min_lod = 1, .max_lod = 1 };
+    const selected = try sampleExplicitLod(image, coordinates, lod, nearest_sampler);
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(selected.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(selected.bits[1])));
+    try std.testing.expectEqual(@as(f32, 1), @as(f32, @bitCast(selected.bits[2])));
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(selected.bits[3])));
+
+    lod.bits[0] = @bitCast(@as(f32, 0.5));
+    const blended = try sampleExplicitLod(image, coordinates, lod, .{ .min_filter = .nearest, .mag_filter = .nearest, .mipmap_mode = .linear, .min_lod = 0, .max_lod = 1 });
+    try std.testing.expectEqual(@as(f32, 0), @as(f32, @bitCast(blended.bits[0])));
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(blended.bits[1])));
+    try std.testing.expectEqual(@as(f32, 0.5), @as(f32, @bitCast(blended.bits[2])));
+    try std.testing.expectEqual(@as(f32, 0.75), @as(f32, @bitCast(blended.bits[3])));
+}
 fn validateType(ty: ir.Type) Error!void {
     _ = try lanes(ty);
 }
@@ -711,6 +1322,16 @@ fn branchTarget(program: *const ir.Program, label_id: u32) Error!usize {
         return index;
     }
     return error.InvalidOperand;
+}
+
+const BranchTargets = struct {
+    on_true: u32 = std.math.maxInt(u32),
+    on_false: u32 = std.math.maxInt(u32),
+};
+
+fn cachedBranchTarget(program: *const ir.Program, label_id: u32) u32 {
+    const target = branchTarget(program, label_id) catch return std.math.maxInt(u32);
+    return @intCast(target);
 }
 
 /// An exact, validated lowering for Chromium's common final-composite
@@ -928,7 +1549,216 @@ pub const Vp9ColorTransformPrepared = struct {
     fast_srgb_transfers: bool,
 };
 
+// Coordinates follow Three.js r186 cube_uv_reflection_fragment.glsl.js.
+// The matched IR bakes 1/768 and 1/1024 into its CubeUV lookup.
+fn threePmremSample(image: SampledImage, direction: [3]f32, mip: f32) Error![4]f32 {
+    const x = direction[0];
+    const y = direction[1];
+    const z = direction[2];
+    const ax = @abs(x);
+    const ay = @abs(y);
+    const az = @abs(z);
+    var face: f32 = undefined;
+    if (ax > az) {
+        face = if (ax > ay) (if (x > 0) @as(f32, 0) else 3) else (if (y > 0) @as(f32, 1) else 4);
+    } else {
+        face = if (az > ay) (if (z > 0) @as(f32, 2) else 5) else (if (y > 0) @as(f32, 1) else 4);
+    }
+    const divisor = if (face == 0 or face == 3) ax else if (face == 1 or face == 4) ay else az;
+    var u: f32 = undefined;
+    var v: f32 = undefined;
+    if (face == 0) {
+        u = z / divisor;
+        v = y / divisor;
+    } else if (face == 1) {
+        u = -x / divisor;
+        v = -z / divisor;
+    } else if (face == 2) {
+        u = -x / divisor;
+        v = y / divisor;
+    } else if (face == 3) {
+        u = -z / divisor;
+        v = y / divisor;
+    } else if (face == 4) {
+        u = -x / divisor;
+        v = z / divisor;
+    } else {
+        u = x / divisor;
+        v = y / divisor;
+    }
+    const filter = @max(4.0 - mip, 0.0);
+    const face_size = @exp2(@max(mip, 4.0));
+    u = (0.5 * (u + 1.0)) * (face_size - 2.0) + 1.0;
+    v = (0.5 * (v + 1.0)) * (face_size - 2.0) + 1.0;
+    if (face > 2) {
+        v += face_size;
+        face -= 3.0;
+    }
+    u += face * face_size;
+    u += filter * 48.0;
+    v += 4.0 * (256.0 - face_size);
+    var uv = Value{ .ty = .{ .scalar = .f32, .columns = 2 } };
+    uv.bits[0] = @bitCast(u * (1.0 / 768.0));
+    uv.bits[1] = @bitCast(v * (1.0 / 1024.0));
+    return try sampleMipLevel(image, uv, 0, image.filter, combinedImageSampler(image));
+}
+
+fn threePmremNormalize(v: [3]f32) [3]f32 {
+    const inv = 1.0 / @sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    return .{ v[0] * inv, v[1] * inv, v[2] * inv };
+}
+
+const ThreePmremKernelStep = struct { cos_theta: f32, sin_theta: f32, cos_phi: f32, sin_phi: f32, weight: f32 };
+const ThreePmremKernel = struct { valid: bool = false, sigma_bits: u32 = 0, steps: [20]ThreePmremKernelStep = undefined };
+threadlocal var three_pmrem_kernel_cache: ThreePmremKernel = .{};
+
+fn threePmremKernel(sigma: f32) *const [20]ThreePmremKernelStep {
+    const bits: u32 = @bitCast(sigma);
+    if (!three_pmrem_kernel_cache.valid or three_pmrem_kernel_cache.sigma_bits != bits) {
+        const theta_max = @min(3.0 * sigma, @as(f32, 3.14159265359));
+        const truncation = 1.0 - @exp(-0.5 * theta_max * theta_max / (sigma * sigma));
+        for (0..20) |i| {
+            const index: f32 = @floatFromInt(i);
+            const theta = sigma * @sqrt(-2.0 * @log(1.0 - ((index + 0.5) / 20.0) * truncation));
+            const phi = index * @as(f32, 2.39996322973);
+            const sin_theta = @sin(theta);
+            three_pmrem_kernel_cache.steps[i] = .{
+                .cos_theta = @cos(theta),
+                .sin_theta = sin_theta,
+                .cos_phi = @cos(phi),
+                .sin_phi = @sin(phi),
+                .weight = sin_theta / theta,
+            };
+        }
+        three_pmrem_kernel_cache.sigma_bits = bits;
+        three_pmrem_kernel_cache.valid = true;
+    }
+    return &three_pmrem_kernel_cache.steps;
+}
+
+const ThreePmremGgxKernel = struct { valid: bool = false, roughness_bits: u32 = 0, half_vectors: [256][3]f32 = undefined };
+threadlocal var three_pmrem_ggx_kernel_cache: ThreePmremGgxKernel = .{};
+
+fn threePmremGgxKernel(roughness: f32) *const [256][3]f32 {
+    const bits: u32 = @bitCast(roughness);
+    if (!three_pmrem_ggx_kernel_cache.valid or three_pmrem_ggx_kernel_cache.roughness_bits != bits) {
+        const alpha = roughness * roughness;
+        for (0..256) |i| {
+            const index: f32 = @floatFromInt(i);
+            const reversed: u32 = @bitReverse(@as(u32, @intCast(i)));
+            const xi_y = @as(f32, @floatFromInt(reversed)) * @as(f32, 2.3283064365386963e-10);
+            const r = @sqrt(index / 256.0);
+            const phi = @as(f32, 6.28318530718) * xi_y;
+            const t1 = r * @cos(phi);
+            const t2 = r * @sin(phi);
+            const nz = @sqrt(@max(0.0, 1.0 - t1 * t1 - t2 * t2));
+            three_pmrem_ggx_kernel_cache.half_vectors[i] = threePmremNormalize(.{ alpha * t1, alpha * t2, @max(0.0, nz) });
+        }
+        three_pmrem_ggx_kernel_cache.roughness_bits = bits;
+        three_pmrem_ggx_kernel_cache.valid = true;
+    }
+    return &three_pmrem_ggx_kernel_cache.half_vectors;
+}
+
+fn executeThreePmremGgx(bindings: []const Binding, outputs: []const Output) Error!void {
+    const input = try readInputValue(.{ .scalar = .f32, .columns = 3 }, try findBindingRecord(bindings, 0));
+    const uniform = try findBindingRecord(bindings, 2);
+    if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 8) return error.Bounds;
+    const roughness: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, uniform.bytes[0..4])).bits[0]);
+    const mip: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, uniform.bytes[4..8])).bits[0]);
+    const image = try findSampledImage(bindings, 4);
+    var out: ?[]u8 = null;
+    for (outputs) |candidate| if (candidate.interface == 1) {
+        if (out != null) return error.InvalidOutput;
+        out = candidate.bytes;
+    };
+    const bytes = out orelse return error.InvalidOutput;
+    if (bytes.len < 16) return error.InvalidOutput;
+    const direction = [3]f32{ @bitCast(input.bits[0]), @bitCast(input.bits[1]), @bitCast(input.bits[2]) };
+    const n = threePmremNormalize(direction);
+    var rgb: [3]f32 = undefined;
+    if (roughness < 0.001) {
+        const texel_color = try threePmremSample(image, n, mip);
+        rgb = texel_color[0..3].*;
+    } else {
+        const up: [3]f32 = if (@abs(n[2]) < 0.999) .{ 0, 0, 1 } else .{ 1, 0, 0 };
+        const tangent = threePmremNormalize(.{ up[1] * n[2] - up[2] * n[1], up[2] * n[0] - up[0] * n[2], up[0] * n[1] - up[1] * n[0] });
+        const bitangent = [3]f32{ n[1] * tangent[2] - n[2] * tangent[1], n[2] * tangent[0] - n[0] * tangent[2], n[0] * tangent[1] - n[1] * tangent[0] };
+        rgb = .{ 0, 0, 0 };
+        var weight_sum: f32 = 0;
+        for (threePmremGgxKernel(roughness)) |h_tangent| {
+            const h = threePmremNormalize(.{
+                tangent[0] * h_tangent[0] + bitangent[0] * h_tangent[1] + n[0] * h_tangent[2],
+                tangent[1] * h_tangent[0] + bitangent[1] * h_tangent[1] + n[1] * h_tangent[2],
+                tangent[2] * h_tangent[0] + bitangent[2] * h_tangent[1] + n[2] * h_tangent[2],
+            });
+            const ndoth = n[0] * h[0] + n[1] * h[1] + n[2] * h[2];
+            const l = threePmremNormalize(.{ 2.0 * ndoth * h[0] - n[0], 2.0 * ndoth * h[1] - n[1], 2.0 * ndoth * h[2] - n[2] });
+            const weight = @max(n[0] * l[0] + n[1] * l[1] + n[2] * l[2], 0.0);
+            if (weight > 0.0) {
+                const texel_color = try threePmremSample(image, l, mip);
+                for (0..3) |lane| rgb[lane] += texel_color[lane] * weight;
+                weight_sum += weight;
+            }
+        }
+        if (weight_sum > 0.0) for (0..3) |lane| {
+            rgb[lane] /= weight_sum;
+        };
+    }
+    for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(rgb[lane])), .little);
+    std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+}
+
+fn executeThreePmremBlur(bindings: []const Binding, outputs: []const Output) Error!void {
+    const input = try readInputValue(.{ .scalar = .f32, .columns = 3 }, try findBindingRecord(bindings, 0));
+    const uniform = try findBindingRecord(bindings, 2);
+    if (uniform.sampled_image != null or uniform.input_attachment != null or uniform.bytes.len < 8) return error.Bounds;
+    const sigma: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, uniform.bytes[0..4])).bits[0]);
+    const mip: f32 = @bitCast((try readValue(.{ .scalar = .f32 }, uniform.bytes[4..8])).bits[0]);
+    const image = try findSampledImage(bindings, 4);
+    var out: ?[]u8 = null;
+    for (outputs) |candidate| if (candidate.interface == 1) {
+        if (out != null) return error.InvalidOutput;
+        out = candidate.bytes;
+    };
+    const bytes = out orelse return error.InvalidOutput;
+    if (bytes.len < 16) return error.InvalidOutput;
+    const direction = [3]f32{ @bitCast(input.bits[0]), @bitCast(input.bits[1]), @bitCast(input.bits[2]) };
+    var rgb: [3]f32 = undefined;
+    if (sigma == 0.0) {
+        const texel_color = try threePmremSample(image, direction, mip);
+        rgb = texel_color[0..3].*;
+    } else {
+        const n = threePmremNormalize(direction);
+        const up: [3]f32 = if (@abs(n[2]) < 0.999) .{ 0, 0, 1 } else .{ 1, 0, 0 };
+        const tangent = threePmremNormalize(.{ up[1] * n[2] - up[2] * n[1], up[2] * n[0] - up[0] * n[2], up[0] * n[1] - up[1] * n[0] });
+        const bitangent = [3]f32{ n[1] * tangent[2] - n[2] * tangent[1], n[2] * tangent[0] - n[0] * tangent[2], n[0] * tangent[1] - n[1] * tangent[0] };
+        const kernel = threePmremKernel(sigma);
+        rgb = .{ 0, 0, 0 };
+        var weight_sum: f32 = 0;
+        for (kernel) |step| {
+            const sample_direction: [3]f32 = .{
+                step.cos_theta * n[0] + step.sin_theta * (step.cos_phi * tangent[0] + step.sin_phi * bitangent[0]),
+                step.cos_theta * n[1] + step.sin_theta * (step.cos_phi * tangent[1] + step.sin_phi * bitangent[1]),
+                step.cos_theta * n[2] + step.sin_theta * (step.cos_phi * tangent[2] + step.sin_phi * bitangent[2]),
+            };
+            const texel_color = try threePmremSample(image, sample_direction, mip);
+            for (0..3) |lane| rgb[lane] += step.weight * texel_color[lane];
+            weight_sum += step.weight;
+        }
+        for (0..3) |lane| rgb[lane] /= weight_sum;
+    }
+    for (0..3) |lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(rgb[lane])), .little);
+    std.mem.writeInt(u32, bytes[12..16], @bitCast(@as(f32, 1)), .little);
+}
+
+const FpsNormalFilterVariant = enum { red_only, red_green };
+
 const FastPath = union(enum) {
+    fps_shadow_vertex: void,
+    three_pmrem_blur: void,
+    three_pmrem_ggx: void,
+    fps_normal_filter_8tap: FpsNormalFilterVariant,
     sample_modulate: SampleModulatePlan,
     texture_copy: TextureCopyPlan,
     sample_coverage: SampleCoverageFastPath,
@@ -969,6 +1799,42 @@ fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operand
 }
 
 fn detectFastPath(program: *const ir.Program) ?FastPath {
+    const fps_shadow_vertex_identity = [_]u8{ 0x3f, 0xfa, 0xcd, 0xda, 0x06, 0xba, 0x78, 0x82, 0xa4, 0x2f, 0x1b, 0x8f, 0x57, 0x21, 0xec, 0x61, 0x6b, 0xdc, 0x07, 0xab, 0x3a, 0xaa, 0x2b, 0x0f, 0xb6, 0xfb, 0xfc, 0x14, 0xe4, 0x77, 0x1d, 0x1e };
+    if (program.stage == .vertex and program.instructions.len == 87 and program.interfaces.len == 5 and
+        std.mem.eql(u8, &program.identity.digest, &fps_shadow_vertex_identity) and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .output and program.interfaces[3].storage == .uniform and
+        program.interfaces[4].storage == .push_constant) return .{ .fps_shadow_vertex = {} };
+    const fps_normal_a_identity = [_]u8{ 0x35, 0xc2, 0xde, 0xd2, 0x2f, 0x1c, 0x62, 0x26, 0x3d, 0xe7, 0x96, 0xfb, 0xe2, 0x93, 0x45, 0x4e, 0x39, 0x64, 0xd2, 0x41, 0x0b, 0xea, 0xf6, 0xc2, 0xd2, 0x75, 0x90, 0x6c, 0xe5, 0x1f, 0xf2, 0x26 };
+    const fps_normal_b_identity = [_]u8{ 0xf9, 0xe7, 0x5c, 0x9e, 0xd3, 0xe1, 0x0f, 0xbb, 0x55, 0x17, 0xac, 0xb3, 0xa0, 0x43, 0xf5, 0x16, 0x59, 0x7d, 0x31, 0x4e, 0x73, 0xbb, 0xdd, 0xe7, 0xdc, 0x78, 0xaf, 0x15, 0x25, 0x32, 0x7b, 0xed };
+    if (program.stage == .fragment and program.interfaces.len == 5 and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .uniform and program.interfaces[3].storage == .push_constant and
+        program.interfaces[4].storage == .sampled_image)
+    {
+        if (program.instructions.len == 132 and std.mem.eql(u8, &program.identity.digest, &fps_normal_a_identity))
+            return .{ .fps_normal_filter_8tap = .red_only };
+        if (program.instructions.len == 141 and std.mem.eql(u8, &program.identity.digest, &fps_normal_b_identity))
+            return .{ .fps_normal_filter_8tap = .red_green };
+    }
+    const pmrem_ggx_identity = [_]u8{ 0x0f, 0x47, 0xeb, 0x52, 0xa0, 0x28, 0x65, 0x95, 0x46, 0x2b, 0x14, 0x41, 0xa5, 0x21, 0xc2, 0xf4, 0xfd, 0x03, 0x58, 0x3c, 0xe5, 0x50, 0x43, 0xb0, 0xc9, 0x91, 0x48, 0x26, 0x8e, 0xe4, 0xd7, 0xc6 };
+    if (program.stage == .fragment and program.instructions.len == 883 and program.interfaces.len == 5 and
+        std.mem.eql(u8, &program.identity.digest, &pmrem_ggx_identity) and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .uniform and program.interfaces[4].storage == .sampled_image and
+        exactInstruction(program.instructions[360], .image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, &.{ 4, 359, 17 }) and
+        exactInstruction(program.instructions[840], .image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, &.{ 4, 839, 18 }))
+        return .{ .three_pmrem_ggx = {} };
+    // Three.js r186 SphericalGaussianBlur, including its CubeUV lookup. The
+    // canonical identity covers the constants, control flow and atlas size.
+    const pmrem_identity = [_]u8{ 0x6e, 0x7f, 0x51, 0x63, 0xf5, 0x1b, 0x74, 0xc2, 0xbf, 0xe6, 0x63, 0xb1, 0x32, 0x29, 0x71, 0x2d, 0xb5, 0x29, 0xac, 0xdb, 0x5d, 0x40, 0x06, 0xcc, 0x61, 0x6f, 0x98, 0x99, 0x33, 0xfd, 0x19, 0x11 };
+    if (program.stage == .fragment and program.instructions.len == 722 and program.interfaces.len == 5 and
+        std.mem.eql(u8, &program.identity.digest, &pmrem_identity) and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .uniform and program.interfaces[4].storage == .sampled_image and
+        exactInstruction(program.instructions[333], .image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, &.{ 4, 332, 7 }) and
+        exactInstruction(program.instructions[691], .image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, &.{ 4, 690, 8 }))
+        return .{ .three_pmrem_blur = {} };
     const f32_scalar = ir.Type{ .scalar = .f32 };
     const f32x2 = ir.Type{ .scalar = .f32, .columns = 2 };
     const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
@@ -1591,7 +2457,9 @@ pub const Executor = struct {
     values: []Value,
     locals: []Value,
     output_scratch: []u8,
+    branch_targets: ?[]BranchTargets,
     fast_path: ?FastPath,
+    clearcoat_skybox_single_mip: bool,
     jit_candidate: ?JitCandidate,
 
     pub fn init(allocator: std.mem.Allocator, source: *const ir.Program) Error!Executor {
@@ -1608,17 +2476,41 @@ pub const Executor = struct {
             total = std.math.add(usize, total, try byteSize(interface.ty)) catch return error.LimitExceeded;
         };
         const scratch = allocator.alloc(u8, total) catch return error.OutOfMemory;
+        errdefer allocator.free(scratch);
+        var branch_targets: ?[]BranchTargets = null;
+        for (program.instructions) |instruction| {
+            if (instruction.op == .branch or instruction.op == .branch_conditional) {
+                branch_targets = allocator.alloc(BranchTargets, program.instructions.len) catch return error.OutOfMemory;
+                break;
+            }
+        }
+        if (branch_targets) |targets| for (program.instructions, 0..) |instruction, pc| {
+            targets[pc] = .{};
+            switch (instruction.op) {
+                .branch => targets[pc].on_true = cachedBranchTarget(&program, std.mem.readInt(u32, instruction.literal[0..4], .little)),
+                .branch_conditional => {
+                    targets[pc].on_true = cachedBranchTarget(&program, std.mem.readInt(u32, instruction.literal[0..4], .little));
+                    targets[pc].on_false = cachedBranchTarget(&program, std.mem.readInt(u32, instruction.literal[4..8], .little));
+                },
+                else => {},
+            }
+        };
         return .{
             .allocator = allocator,
             .program = program,
             .values = values,
             .locals = locals,
             .output_scratch = scratch,
+            .branch_targets = branch_targets,
             .fast_path = detectFastPath(&program),
+            .clearcoat_skybox_single_mip = program.stage == .fragment and
+                program.instructions.len == 186 and
+                std.mem.eql(u8, &program.identity.digest, &[_]u8{ 0xad, 0x5c, 0xcf, 0x4b, 0x32, 0x77, 0x48, 0x07, 0xcc, 0x14, 0x61, 0x30, 0xeb, 0x64, 0x80, 0x73, 0xea, 0xe2, 0xf9, 0x60, 0x08, 0x72, 0xef, 0xc1, 0xe4, 0x02, 0x45, 0x35, 0x20, 0x6f, 0xdc, 0xba }),
             .jit_candidate = detectJitCandidate(&program),
         };
     }
     pub fn deinit(self: *Executor) void {
+        if (self.branch_targets) |targets| self.allocator.free(targets);
         self.allocator.free(self.output_scratch);
         self.allocator.free(self.locals);
         self.allocator.free(self.values);
@@ -1632,6 +2524,10 @@ pub const Executor = struct {
     /// interpreter before any performance conclusion is drawn.
     pub fn prevalidatedPathName(self: *const Executor) []const u8 {
         return switch (self.fast_path orelse return "interpreter") {
+            .fps_shadow_vertex => "fps_shadow_vertex",
+            .three_pmrem_blur => "three_pmrem_blur",
+            .three_pmrem_ggx => "three_pmrem_ggx",
+            .fps_normal_filter_8tap => "fps_normal_filter_8tap",
             .sample_modulate => "sample_modulate",
             .texture_copy => "chromium_texture_copy",
             .sample_coverage => "chromium_vp9_sample_coverage",
@@ -1765,6 +2661,20 @@ pub const Executor = struct {
     /// region. Every other profile remains serial by construction.
     pub fn tileParallelSafe(self: *const Executor) bool {
         return fastPathTileParallelSafe(self.fast_path);
+    }
+
+    pub fn isThreePmremGgx(self: *const Executor) bool {
+        return switch (self.fast_path orelse return false) {
+            .three_pmrem_ggx => true,
+            else => false,
+        };
+    }
+
+    pub fn isFpsNormalFilter8tap(self: *const Executor) bool {
+        return switch (self.fast_path orelse return false) {
+            .fps_normal_filter_8tap => true,
+            else => false,
+        };
     }
 
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
@@ -2742,8 +3652,125 @@ pub const Executor = struct {
         try executeCircleMaskCoordinatesResolved(circle, color, output orelse return error.InvalidOutput);
     }
 
+    fn fpsShadowMatrixTimesVector(matrix: [16]f32, vector: [4]f32) [4]f32 {
+        var result: [4]f32 = undefined;
+        for (0..4) |row| {
+            var sum: f32 = 0;
+            for (0..4) |column| sum += matrix[column * 4 + row] * vector[column];
+            result[row] = canonicalF32(sum);
+        }
+        return result;
+    }
+
+    fn executeFpsShadowVertex(bindings: []const Binding, outputs: []const Output) Error!void {
+        const input = try readInputValue(.{ .scalar = .f32, .columns = 3 }, try findBindingRecord(bindings, 0));
+        const uniform = try findBinding(bindings, 3);
+        const push = try findBinding(bindings, 4);
+        if (uniform.len < 128 or push.len < 20) return error.Bounds;
+        var varying_output: ?[]u8 = null;
+        var position_output: ?[]u8 = null;
+        for (outputs) |output| switch (output.interface) {
+            1 => {
+                if (varying_output != null) return error.InvalidOutput;
+                varying_output = output.bytes;
+            },
+            2 => {
+                if (position_output != null) return error.InvalidOutput;
+                position_output = output.bytes;
+            },
+            else => {},
+        };
+        const varying = varying_output orelse return error.InvalidOutput;
+        const position = position_output orelse return error.InvalidOutput;
+        if (varying.len < 8 or position.len < 16) return error.InvalidOutput;
+        var model: [16]f32 = undefined;
+        var projection: [16]f32 = undefined;
+        for (0..16) |lane| {
+            model[lane] = try uniformF32(uniform, lane * 4);
+            projection[lane] = try uniformF32(uniform, 64 + lane * 4);
+        }
+        const source = [4]f32{ @bitCast(input.bits[0]), @bitCast(input.bits[1]), @bitCast(input.bits[2]), 1 };
+        const transformed = fpsShadowMatrixTimesVector(projection, fpsShadowMatrixTimesVector(model, source));
+        const flags = std.mem.readInt(u32, push[16..20], .little);
+        const packed_scale = std.mem.readInt(u32, push[12..16], .little);
+        const scale_x = canonicalF32(unpackNormalized((packed_scale >> 16) & 0xff, true, 8));
+        const scale_y = canonicalF32(unpackNormalized((packed_scale >> 24) & 0xff, true, 8));
+        const swapped = flags & 1 != 0;
+        const output_x = canonicalF32((if (swapped) transformed[1] else transformed[0]) * scale_x);
+        const output_y = canonicalF32((if (swapped) transformed[0] else transformed[1]) * scale_y);
+        const output_z = if (flags & (@as(u32, 1) << 20) != 0)
+            canonicalF32(canonicalF32(transformed[2] + transformed[3]) * 0.5)
+        else
+            transformed[2];
+        for ([_]f32{ transformed[2], transformed[3] }, 0..) |value, lane|
+            std.mem.writeInt(u32, varying[lane * 4 ..][0..4], canonicalFloat(@bitCast(value)), .little);
+        for ([_]f32{ output_x, output_y, output_z, transformed[3] }, 0..) |value, lane|
+            std.mem.writeInt(u32, position[lane * 4 ..][0..4], canonicalFloat(@bitCast(value)), .little);
+    }
+
+    fn executeFpsNormalFilter8tap(variant: FpsNormalFilterVariant, bindings: []const Binding, outputs: []const Output) Error!void {
+        const frag = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, 0));
+        const uniform = try findBinding(bindings, 2);
+        const push = try findBinding(bindings, 3);
+        const image = try findSampledImage(bindings, 4);
+        if (uniform.len < 12 or push.len < 20) return error.Bounds;
+        if (image.width == 0 or image.height == 0 or image.bytes_per_texel == 0 or image.row_stride < image.width * image.bytes_per_texel) return error.Bounds;
+        var output: ?[]u8 = null;
+        for (outputs) |candidate| if (candidate.interface == 1) {
+            if (output != null) return error.InvalidOutput;
+            output = candidate.bytes;
+        };
+        const bytes = output orelse return error.InvalidOutput;
+        if (bytes.len < 16) return error.InvalidOutput;
+
+        const packed_size = std.mem.readInt(u32, push[8..12], .little);
+        const packed_scale = std.mem.readInt(u32, push[12..16], .little);
+        const swap = std.mem.readInt(u32, push[16..20], .little) & 1 != 0;
+        const half_x = canonicalF32(@as(f32, @floatFromInt(packed_size & 0xffff)) * 0.5);
+        const half_y = canonicalF32(@as(f32, @floatFromInt(packed_size >> 16)) * 0.5);
+        const scale_x = canonicalF32(unpackNormalized(packed_scale & 0xff, true, 8));
+        const scale_y = canonicalF32(unpackNormalized((packed_scale >> 8) & 0xff, true, 8));
+        const frag_x: f32 = @bitCast(frag.bits[0]);
+        const frag_y: f32 = @bitCast(frag.bits[1]);
+        const source_x = if (swap) frag_y else frag_x;
+        const source_y = if (swap) frag_x else frag_y;
+        const coord_x = canonicalF32(canonicalF32(canonicalF32(source_x - half_x) * scale_x) + half_x);
+        const coord_y = canonicalF32(canonicalF32(canonicalF32(source_y - half_y) * scale_y) + half_y);
+        const image_width = try uniformF32(uniform, 0);
+        const image_height = try uniformF32(uniform, 4);
+        const step = try uniformF32(uniform, 8);
+        var red_sum: f32 = 0;
+        var square_sum: f32 = 0;
+        for (0..8) |tap| {
+            const offset = canonicalF32(-1.0 + canonicalF32(@as(f32, @floatFromInt(tap)) * @as(f32, 0.285714298)));
+            const delta_x = canonicalF32((if (variant == .red_green) offset else @as(f32, 0)) * step);
+            const delta_y = canonicalF32((if (variant == .red_only) offset else @as(f32, 0)) * step);
+            const u = canonicalF32(canonicalF32(coord_x + delta_x) / image_width);
+            const v = canonicalF32(canonicalF32(coord_y + delta_y) / image_height);
+            const sampled = try sampleRgbaAt(image, u, v);
+            const red = canonicalF32(sampled.value[0]);
+            red_sum = canonicalF32(red_sum + red);
+            const red_square = canonicalF32(red * red);
+            const square = if (variant == .red_green) blk: {
+                const green = canonicalF32(sampled.value[1]);
+                break :blk canonicalF32(canonicalF32(green * green) + red_square);
+            } else red_square;
+            square_sum = canonicalF32(square_sum + square);
+        }
+        const average = canonicalF32(red_sum / 8.0);
+        const mean_square = canonicalF32(square_sum / 8.0);
+        const variance = canonicalF32(mean_square - canonicalF32(average * average));
+        const normalized = canonicalF32(@sqrt(if (0.0 < variance) variance else @as(f32, 0)));
+        const result = [4]f32{ average, normalized, 0, 1 };
+        for (result, 0..) |channel, lane| std.mem.writeInt(u32, bytes[lane * 4 ..][0..4], canonicalFloat(@bitCast(channel)), .little);
+    }
+
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
+            .fps_shadow_vertex => try executeFpsShadowVertex(bindings, outputs),
+            .three_pmrem_blur => try executeThreePmremBlur(bindings, outputs),
+            .three_pmrem_ggx => try executeThreePmremGgx(bindings, outputs),
+            .fps_normal_filter_8tap => |path| try executeFpsNormalFilter8tap(path, bindings, outputs),
             .sample_modulate => |path| {
                 const color = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, path.color_interface));
                 const coordinates = try readInputValue(.{ .scalar = .f32, .columns = 2 }, try findBindingRecord(bindings, path.coordinate_interface));
@@ -3124,9 +4151,11 @@ pub const Executor = struct {
         for (bindings, 0..) |binding, i| {
             if (binding.interface >= self.program.interfaces.len) return error.InvalidOperand;
             const storage = self.program.interfaces[binding.interface].storage;
-            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image and storage != .input_attachment) return error.InvalidStorage;
-            if ((storage == .sampled_image) != (binding.sampled_image != null) or (storage == .sampled_image and binding.bytes.len != 0)) return error.InvalidStorage;
+            if (storage != .input and storage != .uniform and storage != .push_constant and storage != .output and storage != .sampled_image and storage != .input_attachment and storage != .image and storage != .sampler) return error.InvalidStorage;
+            const image_resource = storage == .sampled_image or storage == .image;
+            if (image_resource != (binding.sampled_image != null) or (image_resource and binding.bytes.len != 0)) return error.InvalidStorage;
             if ((storage == .input_attachment) != (binding.input_attachment != null) or (storage == .input_attachment and binding.bytes.len != 0)) return error.InvalidStorage;
+            if ((storage == .sampler) != (binding.sampler != null) or (storage == .sampler and (binding.bytes.len != 0 or binding.sampled_image != null or binding.input_attachment != null))) return error.InvalidStorage;
             for (bindings[0..i]) |prior| if (prior.interface == binding.interface) return error.InvalidOperand;
         }
         var out_offset: usize = 0;
@@ -3179,60 +4208,84 @@ pub const Executor = struct {
             var result = Value{ .ty = instruction.ty };
             switch (instruction.op) {
                 .local => {
-                    self.locals[pc] = result;
+                    if (instruction.operands.len == 1) {
+                        const initial_value = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                        if (!same(initial_value.ty, instruction.ty)) return error.InvalidType;
+                        self.locals[pc] = initial_value.*;
+                    } else {
+                        self.locals[pc] = result;
+                    }
                     result.bits[0] = @intCast(pc);
                 },
                 .local_access => {
-                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
-                    const selector = try valueRef(self.values, pc, instruction.operands[1]);
-                    if (pointer.bits[1] != 0 or selector.bits[0] >= pointer.ty.columns or pointer.ty.rows != 1) return error.Bounds;
+                    const pointer = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const selector = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    if (selector.bits[0] >= pointer.ty.columns) return error.Bounds;
+                    const prior_offset: usize = if (pointer.bits[1] == 0) 0 else pointer.bits[1] - 1;
+                    const element_width: usize = if (pointer.ty.rows == 1) 1 else pointer.ty.rows;
+                    const offset = std.math.add(usize, prior_offset, std.math.mul(usize, selector.bits[0], element_width) catch return error.Bounds) catch return error.Bounds;
+                    if (pointer.bits[0] >= self.locals.len or offset + element_width > self.locals[pointer.bits[0]].lanes()) return error.Bounds;
                     result.bits[0] = pointer.bits[0];
-                    result.bits[1] = selector.bits[0] + 1;
+                    result.bits[1] = @intCast(offset + 1);
                 },
                 .local_load => {
-                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
+                    const pointer = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (pointer.bits[0] >= self.locals.len) return error.Bounds;
-                    const source = self.locals[pointer.bits[0]];
+                    const source = &self.locals[pointer.bits[0]];
                     if (pointer.bits[1] == 0) {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
-                        result = source;
+                        result = source.*;
                     } else {
-                        if (instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != source.ty.scalar or pointer.bits[1] - 1 >= source.lanes()) return error.InvalidType;
-                        const lane = pointer.bits[1] - 1;
-                        result.bits[0] = source.bits[lane];
-                        result.dpdx_bits[0] = source.dpdx_bits[lane];
-                        result.dpdy_bits[0] = source.dpdy_bits[lane];
-                        result.derivatives_valid = source.derivatives_valid;
+                        const lane: usize = pointer.bits[1] - 1;
+                        const width = try lanes(instruction.ty);
+                        const source_lanes = @as(usize, source.ty.columns) * source.ty.rows;
+                        if (instruction.ty.scalar != source.ty.scalar or lane > source_lanes or width > source_lanes - lane) return error.InvalidType;
+                        for (0..width) |component| {
+                            result.bits[component] = source.bits[lane + component];
+                            result.dpdx_bits[component] = source.dpdx_bits[lane + component];
+                            result.dpdy_bits[component] = source.dpdy_bits[lane + component];
+                        }
+                        setDerivativeMask(&result, derivativeMaskRef(source) >> @intCast(lane));
                     }
                 },
                 .local_store => {
-                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
-                    const source = try valueRef(self.values, pc, instruction.operands[1]);
+                    const pointer = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     if (pointer.bits[0] >= self.locals.len) return error.Bounds;
                     if (pointer.bits[1] == 0) {
                         if (!same(self.locals[pointer.bits[0]].ty, source.ty)) return error.InvalidType;
-                        self.locals[pointer.bits[0]] = source;
+                        self.locals[pointer.bits[0]] = source.*;
                     } else {
                         const target = &self.locals[pointer.bits[0]];
-                        if (source.lanes() != 1 or source.ty.scalar != target.ty.scalar or pointer.bits[1] - 1 >= target.lanes()) return error.InvalidType;
-                        const lane = pointer.bits[1] - 1;
-                        target.bits[lane] = source.bits[0];
-                        target.dpdx_bits[lane] = source.dpdx_bits[0];
-                        target.dpdy_bits[lane] = source.dpdy_bits[0];
-                        target.derivatives_valid = target.derivatives_valid and source.derivatives_valid;
+                        const lane: usize = pointer.bits[1] - 1;
+                        const source_lanes = @as(usize, source.ty.columns) * source.ty.rows;
+                        const target_lanes = @as(usize, target.ty.columns) * target.ty.rows;
+                        if (source.ty.scalar != target.ty.scalar or lane > target_lanes or source_lanes > target_lanes - lane) return error.InvalidType;
+                        for (0..source_lanes) |component| {
+                            target.bits[lane + component] = source.bits[component];
+                            target.dpdx_bits[lane + component] = source.dpdx_bits[component];
+                            target.dpdy_bits[lane + component] = source.dpdy_bits[component];
+                        }
+                        const target_range = fullDerivativeMask(source_lanes) << @intCast(lane);
+                        const updated_mask = (derivativeMaskRef(target) & ~target_range) | ((derivativeMaskRef(source) << @intCast(lane)) & target_range);
+                        setDerivativeMask(target, updated_mask);
                     }
                 },
                 .label => current_label = std.mem.readInt(u32, instruction.literal[0..4], .little),
                 .branch => {
                     predecessor_label = current_label;
-                    next_pc = try branchTarget(&self.program, std.mem.readInt(u32, instruction.literal[0..4], .little));
+                    const target = self.branch_targets.?[pc].on_true;
+                    if (target == std.math.maxInt(u32)) return error.InvalidOperand;
+                    next_pc = target;
                 },
                 .branch_conditional => {
-                    const condition = try valueRef(self.values, pc, instruction.operands[0]);
+                    const condition = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (condition.ty.scalar != .bool or condition.lanes() != 1) return error.InvalidType;
-                    const offset: usize = if (condition.bits[0] != 0) 0 else 4;
                     predecessor_label = current_label;
-                    next_pc = try branchTarget(&self.program, std.mem.readInt(u32, instruction.literal[offset..][0..4], .little));
+                    const targets = self.branch_targets.?[pc];
+                    const target = if (condition.bits[0] != 0) targets.on_true else targets.on_false;
+                    if (target == std.math.maxInt(u32)) return error.InvalidOperand;
+                    next_pc = target;
                 },
                 .phi => {
                     var selected: ?u32 = null;
@@ -3249,10 +4302,10 @@ pub const Executor = struct {
                 },
                 .constant_composite, .composite => {
                     var at: usize = 0;
-                    result.derivatives_valid = true;
+                    var result_mask: u16 = 0;
                     for (instruction.operands) |operand| {
-                        const part = try valueRef(self.values, pc, operand);
-                        result.derivatives_valid = result.derivatives_valid and part.derivatives_valid;
+                        const part = try valueRefPtr(self.values, pc, operand);
+                        result_mask |= derivativeMask(part) << @intCast(at);
                         for (0..part.lanes()) |lane| {
                             result.bits[at] = part.bits[lane];
                             result.dpdx_bits[at] = part.dpdx_bits[lane];
@@ -3260,6 +4313,7 @@ pub const Executor = struct {
                             at += 1;
                         }
                     }
+                    setDerivativeMask(&result, result_mask);
                 },
                 .input => result = try readInputValue(instruction.ty, try findBindingRecord(bindings, instruction.operands[0])),
                 .uniform => {
@@ -3284,74 +4338,111 @@ pub const Executor = struct {
                     try valueRef(self.values, pc, instruction.operands[1]),
                     try valueRef(self.values, pc, instruction.operands[2]),
                 ),
+                .image_sample_explicit_lod => result = try sampleExplicitLod(
+                    (try explicitSampleSampler(bindings, instruction.operands)).image,
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
+                    (try explicitSampleSampler(bindings, instruction.operands)).sampler,
+                ),
+                .image_cube_sample_implicit_lod => {
+                    const image = try findSampledImage(bindings, instruction.operands[0]);
+                    const direction = try valueRef(self.values, pc, instruction.operands[1]);
+                    const bias = try valueRef(self.values, pc, instruction.operands[2]);
+                    result = if (self.clearcoat_skybox_single_mip and image.mip_count == 1)
+                        try sampleCubeSingleMipColor(image, direction, bias)
+                    else
+                        try sampleCube(image, direction, bias);
+                },
+                .image_cube_sample_explicit_lod => result = try sampleCubeExplicitLod(
+                    (try explicitSampleSampler(bindings, instruction.operands)).image,
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
+                    (try explicitSampleSampler(bindings, instruction.operands)).sampler,
+                ),
                 .image_read_input_attachment => result = try inputAttachmentLoad(
                     try findInputAttachment(bindings, instruction.operands[0]),
                     try valueRef(self.values, pc, instruction.operands[1]),
+                ),
+                .image_fetch => result = try imageFetch(
+                    try findSampledImage(bindings, instruction.operands[0]),
+                    try valueRef(self.values, pc, instruction.operands[1]),
+                    try valueRef(self.values, pc, instruction.operands[2]),
                 ),
                 .access => {
                     const interface_index = instruction.operands[0];
                     if (interface_index >= self.program.interfaces.len) return error.InvalidOperand;
                     const interface = self.program.interfaces[interface_index];
-                    if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) return error.InvalidStorage;
-                    const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
-                    if (member_index >= interface.member_count) {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access member out of bounds interface={} member={} count={}\n",
-                            .{ interface_index, member_index, interface.member_count },
-                        );
-                        return error.Bounds;
-                    }
-                    const bytes = if (interface.storage == .output and
-                        interface.descriptor_set == null and
-                        interface.binding == null)
-                    blk: {
-                        var offset: usize = 0;
-                        for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
-                            offset += try byteSize(item.ty);
-                        };
-                        break :blk self.output_scratch[offset..];
-                    } else try findBinding(bindings, interface_index);
-                    const member = interface.members[member_index];
-                    var offset = member.offset;
-                    const member_ty = member.ty;
-                    if (member.array_stride != 0) {
-                        if (instruction.operands.len != 3) return error.InvalidShape;
-                        const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
-                        if (index >= member.array_count) return error.Bounds;
-                        offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
-                    }
-                    if (offset > bytes.len) {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access offset out of bounds interface={} member={} offset={} bytes={}\n",
-                            .{ interface_index, member_index, offset, bytes.len },
-                        );
-                        return error.Bounds;
-                    }
-                    const size = uniformValueByteSize(member_ty, bytes.len - offset) catch {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render access bytes out of bounds interface={} member={} offset={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
-                            .{ interface_index, member_index, offset, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
-                        );
-                        return error.Bounds;
-                    };
-                    if (size > bytes.len - offset) return error.Bounds;
-                    const loaded = try readUniformValue(member_ty, bytes[offset..]);
-                    if (instruction.operands.len == 2 or member.array_stride != 0) {
-                        if (!same(member_ty, instruction.ty)) return error.InvalidType;
-                        result = loaded;
+                    if (interface.storage == .input) {
+                        if (instruction.operands.len != 2 or interface.ty.rows != 1 or interface.ty.columns < 2 or interface.ty.columns > 4 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != interface.ty.scalar) return error.InvalidShape;
+                        const input = try readInputValue(interface.ty, try findBindingRecord(bindings, interface_index));
+                        const component = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
+                        if (component >= input.lanes()) return error.Bounds;
+                        result.bits[0] = input.bits[component];
+                        result.dpdx_bits[0] = input.dpdx_bits[component];
+                        result.dpdy_bits[0] = input.dpdy_bits[component];
+                        result.derivatives_valid = input.derivatives_valid;
                     } else {
-                        if (instruction.operands.len != 3 or try lanes(instruction.ty) != 1) return error.InvalidShape;
-                        const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
-                        if (index >= loaded.lanes()) return error.Bounds;
-                        result.bits[0] = loaded.bits[index];
+                        if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) return error.InvalidStorage;
+                        const member_index = (try valueRef(self.values, pc, instruction.operands[1])).bits[0];
+                        if (member_index >= interface.member_count) {
+                            if (renderDiagnosticsEnabled()) std.debug.print(
+                                "ZPU render access member out of bounds interface={} member={} count={}\n",
+                                .{ interface_index, member_index, interface.member_count },
+                            );
+                            return error.Bounds;
+                        }
+                        const bytes = if (interface.storage == .output and
+                            interface.descriptor_set == null and
+                            interface.binding == null)
+                        blk: {
+                            var offset: usize = 0;
+                            for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
+                                offset += try byteSize(item.ty);
+                            };
+                            break :blk self.output_scratch[offset..];
+                        } else try findBinding(bindings, interface_index);
+                        const member = interface.members[member_index];
+                        var offset = member.offset;
+                        const member_ty = member.ty;
+                        if (member.array_stride != 0) {
+                            if (instruction.operands.len != 3) return error.InvalidShape;
+                            const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
+                            if (index >= member.array_count) return error.Bounds;
+                            offset = std.math.add(u32, offset, std.math.mul(u32, index, member.array_stride) catch return error.Bounds) catch return error.Bounds;
+                        }
+                        if (offset > bytes.len) {
+                            if (renderDiagnosticsEnabled()) std.debug.print(
+                                "ZPU render access offset out of bounds interface={} member={} offset={} bytes={}\n",
+                                .{ interface_index, member_index, offset, bytes.len },
+                            );
+                            return error.Bounds;
+                        }
+                        const size = uniformValueByteSize(member_ty, bytes.len - offset) catch {
+                            if (renderDiagnosticsEnabled()) std.debug.print(
+                                "ZPU render access bytes out of bounds interface={} member={} offset={} bytes={} member_offset={} array_stride={} array_count={} type={any}\n",
+                                .{ interface_index, member_index, offset, bytes.len, member.offset, member.array_stride, member.array_count, member_ty },
+                            );
+                            return error.Bounds;
+                        };
+                        if (size > bytes.len - offset) return error.Bounds;
+                        const loaded = try readUniformValue(member_ty, bytes[offset..]);
+                        if (instruction.operands.len == 2 or member.array_stride != 0) {
+                            if (!same(member_ty, instruction.ty)) return error.InvalidType;
+                            result = loaded;
+                        } else {
+                            if (instruction.operands.len != 3 or try lanes(instruction.ty) != 1) return error.InvalidShape;
+                            const index = (try valueRef(self.values, pc, instruction.operands[2])).bits[0];
+                            if (index >= loaded.lanes()) return error.Bounds;
+                            result.bits[0] = loaded.bits[index];
+                        }
+                        markConstant(&result);
                     }
-                    markConstant(&result);
                 },
                 .extract => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (instruction.operands.len == 1) {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
-                        result = source;
+                        result = source.*;
                     } else if (self.program.instructions[instruction.operands[0]].op == .f_frexp_struct or self.program.instructions[instruction.operands[0]].op == .f_modf_struct) {
                         if (instruction.operands[1] >= 2 or source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 2 and source.ty.columns != 4)) return error.InvalidType;
                         const width: usize = source.ty.columns / 2;
@@ -3366,13 +4457,14 @@ pub const Executor = struct {
                             result.bits[0] = source.bits[selector];
                             result.dpdx_bits[0] = source.dpdx_bits[selector];
                             result.dpdy_bits[0] = source.dpdy_bits[selector];
-                            result.derivatives_valid = source.derivatives_valid;
+                            setDerivativeMask(&result, (derivativeMask(source) >> @intCast(selector)) & 1);
                         } else {
                             if (selector >= source.ty.columns or instruction.ty.rows != 1 or instruction.ty.columns != source.ty.rows or instruction.ty.scalar != source.ty.scalar) return error.Bounds;
                             @memcpy(result.bits[0..source.ty.rows], source.bits[selector * source.ty.rows ..][0..source.ty.rows]);
                             @memcpy(result.dpdx_bits[0..source.ty.rows], source.dpdx_bits[selector * source.ty.rows ..][0..source.ty.rows]);
                             @memcpy(result.dpdy_bits[0..source.ty.rows], source.dpdy_bits[selector * source.ty.rows ..][0..source.ty.rows]);
-                            result.derivatives_valid = source.derivatives_valid;
+                            const lane = selector * source.ty.rows;
+                            setDerivativeMask(&result, (derivativeMask(source) >> @intCast(lane)) & fullDerivativeMask(source.ty.rows));
                         }
                     }
                 },
@@ -3380,52 +4472,62 @@ pub const Executor = struct {
                     result = try valueRef(self.values, pc, instruction.operands[0]);
                 },
                 .vector_extract_dynamic => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
-                    const selector = try valueRef(self.values, pc, instruction.operands[1]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const selector = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const index = selector.bits[0];
                     if (index >= source.lanes()) return error.Bounds;
                     result.bits[0] = source.bits[index];
                     result.dpdx_bits[0] = source.dpdx_bits[index];
                     result.dpdy_bits[0] = source.dpdy_bits[index];
-                    result.derivatives_valid = source.derivatives_valid;
+                    setDerivativeMask(&result, (derivativeMask(source) >> @intCast(index)) & 1);
                 },
                 .vector_insert_dynamic => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
-                    const component = try valueRef(self.values, pc, instruction.operands[1]);
-                    const selector = try valueRef(self.values, pc, instruction.operands[2]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const component = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const selector = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     const index = selector.bits[0];
                     if (index >= source.lanes()) return error.Bounds;
-                    result = source;
+                    result = source.*;
                     result.bits[index] = component.bits[0];
                     result.dpdx_bits[index] = component.dpdx_bits[0];
                     result.dpdy_bits[index] = component.dpdy_bits[0];
-                    result.derivatives_valid = source.derivatives_valid and component.derivatives_valid;
+                    const lane_mask = @as(u16, 1) << @intCast(index);
+                    const updated_mask = (derivativeMask(source) & ~lane_mask) | ((derivativeMask(component) & 1) << @intCast(index));
+                    setDerivativeMask(&result, updated_mask);
                 },
                 .composite_insert => {
-                    const object = try valueRef(self.values, pc, instruction.operands[0]);
-                    const composite = try valueRef(self.values, pc, instruction.operands[1]);
+                    const object = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const composite = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const index = instruction.operands[2];
                     if (index >= composite.lanes()) return error.Bounds;
-                    result = composite;
+                    result = composite.*;
                     result.bits[index] = object.bits[0];
                     result.dpdx_bits[index] = object.dpdx_bits[0];
                     result.dpdy_bits[index] = object.dpdy_bits[0];
-                    result.derivatives_valid = composite.derivatives_valid and object.derivatives_valid;
+                    const lane_mask = @as(u16, 1) << @intCast(index);
+                    const updated_mask = (derivativeMask(composite) & ~lane_mask) | ((derivativeMask(object) & 1) << @intCast(index));
+                    setDerivativeMask(&result, updated_mask);
                 },
                 .shuffle => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
-                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    var result_mask: u16 = 0;
                     for (instruction.operands[2..], 0..) |selector, i| {
                         if (selector >= a.lanes() + b.lanes()) return error.Bounds;
                         result.bits[i] = if (selector < a.lanes()) a.bits[selector] else b.bits[selector - a.lanes()];
                         result.dpdx_bits[i] = if (selector < a.lanes()) a.dpdx_bits[selector] else b.dpdx_bits[selector - a.lanes()];
                         result.dpdy_bits[i] = if (selector < a.lanes()) a.dpdy_bits[selector] else b.dpdy_bits[selector - a.lanes()];
+                        const valid = if (selector < a.lanes())
+                            ((derivativeMask(a) >> @intCast(selector)) & 1) != 0
+                        else
+                            ((derivativeMask(b) >> @intCast(selector - a.lanes())) & 1) != 0;
+                        if (valid) result_mask |= @as(u16, 1) << @intCast(i);
                     }
+                    setDerivativeMask(&result, result_mask);
                 },
                 .fneg, .ineg, .bit_not, .logical_not => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    result.derivatives_valid = instruction.op == .fneg and a.derivatives_valid;
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    if (instruction.op == .fneg) setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         result.bits[i] = switch (instruction.op) {
                             .fneg => canonicalFloat(a.bits[i] ^ 0x80000000),
@@ -3441,7 +4543,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_abs, .i_abs, .f_sign, .i_sign => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    if (instruction.op == .f_abs or instruction.op == .f_sign) setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         if (instruction.op == .f_abs or instruction.op == .f_sign) {
                             const x: f32 = @bitCast(a.bits[i]);
@@ -3458,6 +4561,14 @@ pub const Executor = struct {
                             } else {
                                 // Preserve the sign of zero exactly.
                                 result.bits[i] = a.bits[i] & 0x80000000;
+                            }
+                            if (instruction.op == .f_abs or instruction.op == .f_sign) {
+                                const factor: f32 = if (instruction.op == .f_abs)
+                                    (if (x < 0) -1 else if (x > 0) 1 else 0)
+                                else
+                                    0;
+                                result.dpdx_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdx_bits[i]))));
+                                result.dpdy_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdy_bits[i]))));
                             }
                         } else {
                             const x: i32 = @bitCast(a.bits[i]);
@@ -3487,7 +4598,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_length, .f_normalize => {
-                    const vector = try valueRef(self.values, pc, instruction.operands[0]);
+                    const vector = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     var sum: f32 = 0;
                     for (0..vector.lanes()) |i| {
                         const x: f32 = @bitCast(vector.bits[i]);
@@ -3505,10 +4616,34 @@ pub const Executor = struct {
                             result.bits[i] = canonicalFloat(@bitCast(x / length));
                         }
                     }
+                    if (vector.derivatives_valid and length != 0) {
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..vector.lanes()) |i| {
+                            const x: f32 = @bitCast(vector.bits[i]);
+                            sum_dx += x * @as(f32, @bitCast(vector.dpdx_bits[i]));
+                            sum_dy += x * @as(f32, @bitCast(vector.dpdy_bits[i]));
+                        }
+                        const length_dx = sum_dx / length;
+                        const length_dy = sum_dy / length;
+                        result.derivatives_valid = true;
+                        if (instruction.op == .f_length) {
+                            result.dpdx_bits[0] = canonicalFloat(@bitCast(length_dx));
+                            result.dpdy_bits[0] = canonicalFloat(@bitCast(length_dy));
+                        } else {
+                            for (0..vector.lanes()) |i| {
+                                const x: f32 = @bitCast(vector.bits[i]);
+                                const dx: f32 = @bitCast(vector.dpdx_bits[i]);
+                                const dy: f32 = @bitCast(vector.dpdy_bits[i]);
+                                result.dpdx_bits[i] = canonicalFloat(@bitCast((dx * length - x * length_dx) / (length * length)));
+                                result.dpdy_bits[i] = canonicalFloat(@bitCast((dy * length - x * length_dy) / (length * length)));
+                            }
+                        }
+                    }
                 },
                 .f_distance => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var sum: f32 = 0;
                     for (0..left.lanes()) |i| {
                         const delta = @as(f32, @bitCast(left.bits[i])) - @as(f32, @bitCast(right.bits[i]));
@@ -3517,8 +4652,8 @@ pub const Executor = struct {
                     result.bits[0] = canonicalFloat(@bitCast(std.math.sqrt(sum)));
                 },
                 .f_cross => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const ax: f32 = @bitCast(left.bits[0]);
                     const ay: f32 = @bitCast(left.bits[1]);
                     const az: f32 = @bitCast(left.bits[2]);
@@ -3528,11 +4663,27 @@ pub const Executor = struct {
                     result.bits[0] = canonicalFloat(@bitCast(ay * bz - az * by));
                     result.bits[1] = canonicalFloat(@bitCast(az * bx - ax * bz));
                     result.bits[2] = canonicalFloat(@bitCast(ax * by - ay * bx));
+                    result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
+                    if (result.derivatives_valid) for (0..2) |axis| {
+                        const adx: f32 = @bitCast(if (axis == 0) left.dpdx_bits[0] else left.dpdy_bits[0]);
+                        const ady: f32 = @bitCast(if (axis == 0) left.dpdx_bits[1] else left.dpdy_bits[1]);
+                        const adz: f32 = @bitCast(if (axis == 0) left.dpdx_bits[2] else left.dpdy_bits[2]);
+                        const bdx: f32 = @bitCast(if (axis == 0) right.dpdx_bits[0] else right.dpdy_bits[0]);
+                        const bdy: f32 = @bitCast(if (axis == 0) right.dpdx_bits[1] else right.dpdy_bits[1]);
+                        const bdz: f32 = @bitCast(if (axis == 0) right.dpdx_bits[2] else right.dpdy_bits[2]);
+                        const dx = ady * bz + ay * bdz - adz * by - az * bdy;
+                        const dy = adz * bx + az * bdx - adx * bz - ax * bdz;
+                        const dz = adx * by + ax * bdy - ady * bx - ay * bdx;
+                        const dx_index = if (axis == 0) &result.dpdx_bits else &result.dpdy_bits;
+                        dx_index[0] = canonicalFloat(@bitCast(dx));
+                        dx_index[1] = canonicalFloat(@bitCast(dy));
+                        dx_index[2] = canonicalFloat(@bitCast(dz));
+                    };
                 },
                 .f_face_forward => {
-                    const normal = try valueRef(self.values, pc, instruction.operands[0]);
-                    const incident = try valueRef(self.values, pc, instruction.operands[1]);
-                    const reference = try valueRef(self.values, pc, instruction.operands[2]);
+                    const normal = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const incident = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const reference = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     var product: f32 = 0;
                     for (0..normal.lanes()) |i| product += @as(f32, @bitCast(reference.bits[i])) * @as(f32, @bitCast(incident.bits[i]));
                     for (0..result.lanes()) |i| {
@@ -3541,8 +4692,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_reflect => {
-                    const incident = try valueRef(self.values, pc, instruction.operands[0]);
-                    const normal = try valueRef(self.values, pc, instruction.operands[1]);
+                    const incident = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const normal = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var product: f32 = 0;
                     for (0..incident.lanes()) |i| product += @as(f32, @bitCast(normal.bits[i])) * @as(f32, @bitCast(incident.bits[i]));
                     for (0..result.lanes()) |i| {
@@ -3552,8 +4703,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_refract => {
-                    const incident = try valueRef(self.values, pc, instruction.operands[0]);
-                    const normal = try valueRef(self.values, pc, instruction.operands[1]);
+                    const incident = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const normal = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const eta: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[2])).bits[0]);
                     var product: f32 = 0;
                     for (0..incident.lanes()) |i| product += @as(f32, @bitCast(normal.bits[i])) * @as(f32, @bitCast(incident.bits[i]));
@@ -3570,7 +4721,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const value = if (instruction.op == .f_trunc)
@@ -3631,10 +4783,15 @@ pub const Executor = struct {
                             break :blk if (fraction < 0.5) lower else if (fraction > 0.5) lower + 1.0 else if (@mod(lower, 2.0) == 0.0) lower else lower + 1.0;
                         };
                         result.bits[i] = canonicalFloat(@bitCast(value));
+                        if (((derivativeMask(a) >> @intCast(i)) & 1) != 0) {
+                            const factor = floatUnaryDerivative(instruction.op, x, value);
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdx_bits[i]))));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(factor * @as(f32, @bitCast(a.dpdy_bits[i]))));
+                        }
                     }
                 },
                 .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         result.bits[i] = @intFromBool(switch (instruction.op) {
@@ -3648,13 +4805,13 @@ pub const Executor = struct {
                     }
                 },
                 .any, .all => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     var value = instruction.op == .all;
                     for (a.bits[0..a.lanes()]) |bit| value = if (instruction.op == .all) value and bit != 0 else value or bit != 0;
                     result.bits[0] = @intFromBool(value);
                 },
                 .bit_reverse, .bit_count => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         var value = a.bits[i];
                         if (instruction.op == .bit_reverse) {
@@ -3672,7 +4829,7 @@ pub const Executor = struct {
                     }
                 },
                 .i_find_lsb, .i_find_s_msb, .i_find_u_msb => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         const bits = a.bits[i];
                         const candidate = if (instruction.op == .i_find_s_msb and (@as(i32, @bitCast(bits)) < 0)) ~bits else bits;
@@ -3686,12 +4843,12 @@ pub const Executor = struct {
                     }
                 },
                 .bit_field_insert, .bit_field_s_extract, .bit_field_u_extract => {
-                    const base = try valueRef(self.values, pc, instruction.operands[0]);
+                    const base = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const insert = if (instruction.op == .bit_field_insert) try valueRef(self.values, pc, instruction.operands[1]) else null;
                     const offset_index: usize = if (instruction.op == .bit_field_insert) 2 else 1;
                     const count_index: usize = offset_index + 1;
-                    const offset = try valueRef(self.values, pc, instruction.operands[offset_index]);
-                    const count = try valueRef(self.values, pc, instruction.operands[count_index]);
+                    const offset = try valueRefPtr(self.values, pc, instruction.operands[offset_index]);
+                    const count = try valueRefPtr(self.values, pc, instruction.operands[count_index]);
                     for (0..result.lanes()) |i| {
                         const shift = offset.bits[if (offset.lanes() == 1) 0 else i];
                         const width = count.bits[if (count.lanes() == 1) 0 else i];
@@ -3715,8 +4872,8 @@ pub const Executor = struct {
                     }
                 },
                 .iadd_carry, .isub_borrow, .umul_extended, .smul_extended => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     if (result.lanes() != 2 or a.lanes() != 1 or b.lanes() != 1) return error.InvalidShape;
                     switch (instruction.op) {
                         .iadd_carry => {
@@ -3743,8 +4900,8 @@ pub const Executor = struct {
                     }
                 },
                 .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| result.bits[i] = switch (instruction.op) {
                         .iadd => a.bits[i] +% b.bits[i],
                         .isub => a.bits[i] -% b.bits[i],
@@ -3756,8 +4913,8 @@ pub const Executor = struct {
                     };
                 },
                 .udiv, .sdiv, .umod, .srem, .smod => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         if (b.bits[i] == 0) return error.NumericDomain;
                         result.bits[i] = switch (instruction.op) {
@@ -3786,8 +4943,8 @@ pub const Executor = struct {
                     }
                 },
                 .shl_logical, .shr_logical, .shr_arithmetic => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         if (b.bits[i] >= 32) return error.NumericDomain;
                         const amount: u5 = @intCast(b.bits[i]);
@@ -3800,8 +4957,8 @@ pub const Executor = struct {
                     }
                 },
                 .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const lhs = a.bits[i];
                         const rhs = b.bits[i];
@@ -3821,8 +4978,8 @@ pub const Executor = struct {
                     }
                 },
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const lhs: f32 = @bitCast(a.bits[i]);
                         const rhs: f32 = @bitCast(b.bits[i]);
@@ -3845,8 +5002,8 @@ pub const Executor = struct {
                     }
                 },
                 .less_or_greater, .ordered, .unordered => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const lhs: f32 = @bitCast(a.bits[i]);
                         const rhs: f32 = @bitCast(b.bits[i]);
@@ -3860,8 +5017,8 @@ pub const Executor = struct {
                     }
                 },
                 .logical_eq, .logical_ne, .logical_or, .logical_and => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| result.bits[i] = @intFromBool(switch (instruction.op) {
                         .logical_eq => a.bits[i] == b.bits[i],
                         .logical_ne => a.bits[i] != b.bits[i],
@@ -3871,8 +5028,8 @@ pub const Executor = struct {
                     });
                 },
                 .f_ldexp => {
-                    const value = try valueRef(self.values, pc, instruction.operands[0]);
-                    const exponent = try valueRef(self.values, pc, instruction.operands[1]);
+                    const value = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const exponent = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(value.bits[i]);
                         const exp: i32 = @bitCast(exponent.bits[i]);
@@ -3887,7 +5044,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_modf, .f_frexp => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const interface_index = instruction.operands[1];
                     if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
                     var offset: usize = 0;
@@ -3914,7 +5071,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_modf_struct => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 1 and source.ty.columns != 2) or result.ty.scalar != .f32 or result.ty.rows != 1 or result.ty.columns != source.ty.columns * 2) return error.InvalidType;
                     const width: usize = source.ty.columns;
                     for (0..width) |i| {
@@ -3925,7 +5082,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_frexp_struct => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 1 and source.ty.columns != 2) or result.ty.scalar != .f32 or result.ty.rows != 1 or result.ty.columns != source.ty.columns * 2) return error.InvalidType;
                     const width: usize = source.ty.columns;
                     // Validate every lane before publishing any result so a
@@ -3942,7 +5099,7 @@ pub const Executor = struct {
                     }
                 },
                 .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const signed = instruction.op == .i_pack_snorm4x8 or instruction.op == .i_pack_snorm2x16;
                     const width: u5 = if (instruction.op == .i_pack_snorm4x8 or instruction.op == .i_pack_unorm4x8) 8 else 16;
                     const count: usize = if (width == 8) 4 else 2;
@@ -3955,7 +5112,7 @@ pub const Executor = struct {
                     result.bits[0] = packed_bits;
                 },
                 .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const signed = instruction.op == .f_unpack_snorm2x16 or instruction.op == .f_unpack_snorm4x8;
                     const width: u5 = if (instruction.op == .f_unpack_snorm4x8 or instruction.op == .f_unpack_unorm4x8) 8 else 16;
                     const count: usize = if (width == 8) 4 else 2;
@@ -3965,7 +5122,7 @@ pub const Executor = struct {
                     }
                 },
                 .i_pack_half2x16 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const first: f32 = @bitCast(source.bits[0]);
                     const second: f32 = @bitCast(source.bits[1]);
                     const lo = packHalf(first);
@@ -3973,14 +5130,14 @@ pub const Executor = struct {
                     result.bits[0] = @as(u32, lo) | (@as(u32, hi) << 16);
                 },
                 .f_unpack_half2x16 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const word = source.bits[0];
                     result.bits[0] = canonicalFloat(@bitCast(unpackHalf(@truncate(word))));
                     result.bits[1] = canonicalFloat(@bitCast(unpackHalf(@truncate(word >> 16))));
                 },
                 .f_atan2, .f_pow => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         // GLSL.std.450 specifies poison for atan2(0, 0),
                         // negative bases, and non-positive exponents at zero.
@@ -3997,8 +5154,8 @@ pub const Executor = struct {
                     }
                 },
                 .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_n_min, .f_n_max, .f_step => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     result.derivatives_valid = a.derivatives_valid and b.derivatives_valid and
                         (instruction.op == .fadd or instruction.op == .fsub or instruction.op == .fmul or instruction.op == .fdiv);
                     for (0..result.lanes()) |i| {
@@ -4050,8 +5207,8 @@ pub const Executor = struct {
                     }
                 },
                 .u_min, .i_min, .u_max, .i_max => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const x = a.bits[i];
                         const y = b.bits[i];
@@ -4065,9 +5222,9 @@ pub const Executor = struct {
                     }
                 },
                 .f_clamp, .f_n_clamp, .u_clamp, .i_clamp => {
-                    const value = try valueRef(self.values, pc, instruction.operands[0]);
-                    const minimum = try valueRef(self.values, pc, instruction.operands[1]);
-                    const maximum = try valueRef(self.values, pc, instruction.operands[2]);
+                    const value = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const minimum = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const maximum = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     for (0..result.lanes()) |i| {
                         if (instruction.op == .f_clamp or instruction.op == .f_n_clamp) {
                             const x: f32 = @bitCast(value.bits[i]);
@@ -4094,10 +5251,10 @@ pub const Executor = struct {
                     }
                 },
                 .f_mix, .fma => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
-                    const c = try valueRef(self.values, pc, instruction.operands[2]);
-                    result.derivatives_valid = instruction.op == .fma and a.derivatives_valid and b.derivatives_valid and c.derivatives_valid;
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const c = try valueRefPtr(self.values, pc, instruction.operands[2]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid and c.derivatives_valid;
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         const y: f32 = @bitCast(b.bits[i]);
@@ -4108,19 +5265,25 @@ pub const Executor = struct {
                             x * (1.0 - z) + y * z;
                         result.bits[i] = canonicalFloat(@bitCast(value));
                         if (result.derivatives_valid) {
-                            const dx = @as(f32, @bitCast(a.dpdx_bits[i])) * y +
-                                x * @as(f32, @bitCast(b.dpdx_bits[i])) +
-                                @as(f32, @bitCast(c.dpdx_bits[i]));
-                            const dy = @as(f32, @bitCast(a.dpdy_bits[i])) * y +
-                                x * @as(f32, @bitCast(b.dpdy_bits[i])) +
-                                @as(f32, @bitCast(c.dpdy_bits[i]));
+                            const dx = if (instruction.op == .fma)
+                                @as(f32, @bitCast(a.dpdx_bits[i])) * y + x * @as(f32, @bitCast(b.dpdx_bits[i])) + @as(f32, @bitCast(c.dpdx_bits[i]))
+                            else
+                                @as(f32, @bitCast(a.dpdx_bits[i])) * (1.0 - z) +
+                                    @as(f32, @bitCast(b.dpdx_bits[i])) * z +
+                                    (y - x) * @as(f32, @bitCast(c.dpdx_bits[i]));
+                            const dy = if (instruction.op == .fma)
+                                @as(f32, @bitCast(a.dpdy_bits[i])) * y + x * @as(f32, @bitCast(b.dpdy_bits[i])) + @as(f32, @bitCast(c.dpdy_bits[i]))
+                            else
+                                @as(f32, @bitCast(a.dpdy_bits[i])) * (1.0 - z) +
+                                    @as(f32, @bitCast(b.dpdy_bits[i])) * z +
+                                    (y - x) * @as(f32, @bitCast(c.dpdy_bits[i]));
                             result.dpdx_bits[i] = canonicalFloat(@bitCast(dx));
                             result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
                         }
                     }
                 },
                 .dpdx, .dpdy, .fwidth => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (!source.derivatives_valid) return error.MissingInput;
                     markConstant(&result);
                     for (0..result.lanes()) |i| {
@@ -4135,9 +5298,9 @@ pub const Executor = struct {
                     }
                 },
                 .f_smooth_step => {
-                    const edge0 = try valueRef(self.values, pc, instruction.operands[0]);
-                    const edge1 = try valueRef(self.values, pc, instruction.operands[1]);
-                    const value = try valueRef(self.values, pc, instruction.operands[2]);
+                    const edge0 = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const edge1 = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const value = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     for (0..result.lanes()) |i| {
                         const e0: f32 = @bitCast(edge0.bits[i]);
                         const e1: f32 = @bitCast(edge1.bits[i]);
@@ -4148,90 +5311,174 @@ pub const Executor = struct {
                     }
                 },
                 .select => {
-                    const condition = try valueRef(self.values, pc, instruction.operands[0]);
-                    const when_true = try valueRef(self.values, pc, instruction.operands[1]);
-                    const when_false = try valueRef(self.values, pc, instruction.operands[2]);
+                    const condition = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const when_true = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const when_false = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     if (condition.ty.scalar != .bool or condition.ty.rows != 1 or condition.ty.columns < 1 or condition.ty.columns > 4 or !same(when_true.ty, when_false.ty) or !same(when_true.ty, instruction.ty) or (condition.ty.columns != 1 and (condition.ty.columns != instruction.ty.columns or instruction.ty.rows != 1))) return error.InvalidType;
                     if (condition.ty.columns == 1) {
-                        result = if (condition.bits[0] != 0) when_true else when_false;
+                        result = if (condition.bits[0] != 0) when_true.* else when_false.*;
                     } else {
                         for (0..result.lanes()) |i| result.bits[i] = if (condition.bits[i] != 0) when_true.bits[i] else when_false.bits[i];
                     }
                 },
                 .vector_times_scalar => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[1])).bits[0]);
-                    for (0..result.lanes()) |i| result.bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(a.bits[i])) * b));
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const scalar: f32 = @bitCast(b.bits[0]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
+                    for (0..result.lanes()) |i| {
+                        const value: f32 = @bitCast(a.bits[i]);
+                        result.bits[i] = canonicalFloat(@bitCast(value * scalar));
+                        if (result.derivatives_valid) {
+                            const dx = @as(f32, @bitCast(a.dpdx_bits[i])) * scalar + value * @as(f32, @bitCast(b.dpdx_bits[0]));
+                            const dy = @as(f32, @bitCast(a.dpdy_bits[i])) * scalar + value * @as(f32, @bitCast(b.dpdy_bits[0]));
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(dx));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(dy));
+                        }
+                    }
                 },
                 .matrix_times_vector => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
                     for (0..a.ty.rows) |row| {
                         var sum: f32 = 0;
-                        for (0..a.ty.columns) |col| sum += @as(f32, @bitCast(a.bits[col * a.ty.rows + row])) * @as(f32, @bitCast(b.bits[col]));
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..a.ty.columns) |col| {
+                            const a_index = col * a.ty.rows + row;
+                            const av: f32 = @bitCast(a.bits[a_index]);
+                            const bv: f32 = @bitCast(b.bits[col]);
+                            sum += av * bv;
+                            if (result.derivatives_valid) {
+                                sum_dx += @as(f32, @bitCast(a.dpdx_bits[a_index])) * bv + av * @as(f32, @bitCast(b.dpdx_bits[col]));
+                                sum_dy += @as(f32, @bitCast(a.dpdy_bits[a_index])) * bv + av * @as(f32, @bitCast(b.dpdy_bits[col]));
+                            }
+                        }
                         result.bits[row] = canonicalFloat(@bitCast(sum));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[row] = canonicalFloat(@bitCast(sum_dx));
+                            result.dpdy_bits[row] = canonicalFloat(@bitCast(sum_dy));
+                        }
                     }
                 },
                 .matrix_times_scalar => {
-                    const matrix = try valueRef(self.values, pc, instruction.operands[0]);
-                    const scalar: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[1])).bits[0]);
-                    for (0..16) |i| result.bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.bits[i])) * scalar));
+                    const matrix = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const scalar = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const factor: f32 = @bitCast(scalar.bits[0]);
+                    result.derivatives_valid = matrix.derivatives_valid and scalar.derivatives_valid;
+                    for (0..result.lanes()) |i| {
+                        const value: f32 = @bitCast(matrix.bits[i]);
+                        result.bits[i] = canonicalFloat(@bitCast(value * factor));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.dpdx_bits[i])) * factor + value * @as(f32, @bitCast(scalar.dpdx_bits[0]))));
+                            result.dpdy_bits[i] = canonicalFloat(@bitCast(@as(f32, @bitCast(matrix.dpdy_bits[i])) * factor + value * @as(f32, @bitCast(scalar.dpdy_bits[0]))));
+                        }
+                    }
                 },
                 .vector_times_matrix => {
-                    const vector = try valueRef(self.values, pc, instruction.operands[0]);
-                    const matrix = try valueRef(self.values, pc, instruction.operands[1]);
+                    const vector = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const matrix = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const width: usize = matrix.ty.columns;
+                    result.derivatives_valid = vector.derivatives_valid and matrix.derivatives_valid;
                     for (0..width) |col| {
                         var sum: f32 = 0;
-                        for (0..width) |row| sum += @as(f32, @bitCast(vector.bits[row])) * @as(f32, @bitCast(matrix.bits[col * width + row]));
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..width) |row| {
+                            const vector_value: f32 = @bitCast(vector.bits[row]);
+                            const matrix_index = col * width + row;
+                            const matrix_value: f32 = @bitCast(matrix.bits[matrix_index]);
+                            sum += vector_value * matrix_value;
+                            if (result.derivatives_valid) {
+                                sum_dx += @as(f32, @bitCast(vector.dpdx_bits[row])) * matrix_value + vector_value * @as(f32, @bitCast(matrix.dpdx_bits[matrix_index]));
+                                sum_dy += @as(f32, @bitCast(vector.dpdy_bits[row])) * matrix_value + vector_value * @as(f32, @bitCast(matrix.dpdy_bits[matrix_index]));
+                            }
+                        }
                         result.bits[col] = canonicalFloat(@bitCast(sum));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[col] = canonicalFloat(@bitCast(sum_dx));
+                            result.dpdy_bits[col] = canonicalFloat(@bitCast(sum_dy));
+                        }
                     }
                 },
                 .matrix_times_matrix => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
                     for (0..instruction.ty.columns) |col| for (0..instruction.ty.rows) |row| {
                         var sum: f32 = 0;
-                        for (0..left.ty.columns) |k| sum += @as(f32, @bitCast(left.bits[k * left.ty.rows + row])) * @as(f32, @bitCast(right.bits[col * right.ty.rows + k]));
+                        var sum_dx: f32 = 0;
+                        var sum_dy: f32 = 0;
+                        for (0..left.ty.columns) |k| {
+                            const left_index = k * left.ty.rows + row;
+                            const right_index = col * right.ty.rows + k;
+                            const a: f32 = @bitCast(left.bits[left_index]);
+                            const b: f32 = @bitCast(right.bits[right_index]);
+                            sum += a * b;
+                            if (result.derivatives_valid) {
+                                sum_dx += @as(f32, @bitCast(left.dpdx_bits[left_index])) * b + a * @as(f32, @bitCast(right.dpdx_bits[right_index]));
+                                sum_dy += @as(f32, @bitCast(left.dpdy_bits[left_index])) * b + a * @as(f32, @bitCast(right.dpdy_bits[right_index]));
+                            }
+                        }
                         result.bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum));
+                        if (result.derivatives_valid) {
+                            result.dpdx_bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum_dx));
+                            result.dpdy_bits[col * instruction.ty.rows + row] = canonicalFloat(@bitCast(sum_dy));
+                        }
                     };
                 },
                 .transpose => {
-                    const matrix = try valueRef(self.values, pc, instruction.operands[0]);
+                    const matrix = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..4) |col| for (0..4) |row| {
                         result.bits[col * 4 + row] = matrix.bits[row * 4 + col];
                     };
                 },
                 .outer_product => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..4) |col| for (0..4) |row| {
                         const product = @as(f32, @bitCast(left.bits[row])) * @as(f32, @bitCast(right.bits[col]));
                         result.bits[col * 4 + row] = canonicalFloat(@bitCast(product));
                     };
                 },
                 .dot => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var sum: f32 = 0;
-                    for (0..left.lanes()) |i| sum += @as(f32, @bitCast(left.bits[i])) * @as(f32, @bitCast(right.bits[i]));
+                    var sum_dx: f32 = 0;
+                    var sum_dy: f32 = 0;
+                    result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
+                    for (0..left.lanes()) |i| {
+                        const a: f32 = @bitCast(left.bits[i]);
+                        const b: f32 = @bitCast(right.bits[i]);
+                        sum += a * b;
+                        if (result.derivatives_valid) {
+                            sum_dx += @as(f32, @bitCast(left.dpdx_bits[i])) * b + a * @as(f32, @bitCast(right.dpdx_bits[i]));
+                            sum_dy += @as(f32, @bitCast(left.dpdy_bits[i])) * b + a * @as(f32, @bitCast(right.dpdy_bits[i]));
+                        }
+                    }
                     result.bits[0] = canonicalFloat(@bitCast(sum));
+                    if (result.derivatives_valid) {
+                        result.dpdx_bits[0] = canonicalFloat(@bitCast(sum_dx));
+                        result.dpdy_bits[0] = canonicalFloat(@bitCast(sum_dy));
+                    }
                 },
                 .convert => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = try convert(a.ty.scalar, instruction.ty.scalar, a.bits[i]);
                 },
                 .bitcast => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = a.bits[i];
                 },
                 .quantize_f16 => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = quantizeF16(a.bits[i]);
                 },
                 .output => {
                     const interface_index = instruction.operands[0];
-                    const source = try valueRef(self.values, pc, instruction.operands[1]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var offset: usize = 0;
                     for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
                         offset += try byteSize(item.ty);
@@ -4253,9 +5500,292 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask, .three_pmrem_ggx, .fps_normal_filter_8tap => true,
         else => false,
     };
+}
+
+test "captured Three.js clearcoat skybox single-mip cube matches interpreter" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_clearcoat_skybox_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var fast = try Executor.init(std.testing.allocator, &program);
+    defer fast.deinit();
+    var reference = try Executor.init(std.testing.allocator, &program);
+    defer reference.deinit();
+    try std.testing.expect(fast.clearcoat_skybox_single_mip);
+    reference.clearcoat_skybox_single_mip = false;
+    var pixels: [6 * 8 * 8 * 4]u8 = undefined;
+    for (&pixels, 0..) |*channel, index| channel.* = @intCast((index * 61 + index / 7 * 23) % 256);
+    const image = SampledImage{ .pixels = &pixels, .width = 8, .height = 8, .row_stride = 32, .cube = true, .cube_face_stride = 8 * 8 * 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var uniform = [_]u8{0} ** 64;
+    std.mem.writeInt(u32, uniform[0..4], @bitCast(@as(f32, 1)), .little);
+    std.mem.writeInt(u32, uniform[4..8], @bitCast(@as(f32, 1)), .little);
+    for (0..3) |column| std.mem.writeInt(u32, uniform[16 + column * 16 + column * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+    const directions = [_][3]f32{ .{ 1, 0.3, 0.4 }, .{ -1, 0.2, -0.7 }, .{ 0.2, 1, 0.5 }, .{ -0.3, -1, 0.8 }, .{ 0.4, 0.2, 1 }, .{ -0.7, 0.3, -1 } };
+    for (directions) |direction| {
+        var input: [12]u8 = undefined;
+        var dx: [12]u8 = undefined;
+        var dy: [12]u8 = undefined;
+        for (direction, 0..) |component, lane| {
+            std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(component), .little);
+            std.mem.writeInt(u32, dx[lane * 4 ..][0..4], @bitCast(@as(f32, 0.04)), .little);
+            std.mem.writeInt(u32, dy[lane * 4 ..][0..4], @bitCast(@as(f32, -0.03)), .little);
+        }
+        const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input, .dpdx_bytes = &dx, .dpdy_bytes = &dy }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 4, .sampled_image = image } };
+        var actual: [16]u8 = undefined;
+        var expected: [16]u8 = undefined;
+        try fast.execute(&bindings, &.{.{ .interface = 1, .bytes = &actual }});
+        try reference.execute(&bindings, &.{.{ .interface = 1, .bytes = &expected }});
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
+}
+
+test "captured Three.js FPS shadow vertex retains its interpreter identity" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_fps_shadow_vertex.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    const expected_digest = [_]u8{ 0x3f, 0xfa, 0xcd, 0xda, 0x06, 0xba, 0x78, 0x82, 0xa4, 0x2f, 0x1b, 0x8f, 0x57, 0x21, 0xec, 0x61, 0x6b, 0xdc, 0x07, 0xab, 0x3a, 0xaa, 0x2b, 0x0f, 0xb6, 0xfb, 0xfc, 0x14, 0xe4, 0x77, 0x1d, 0x1e };
+    try std.testing.expectEqualSlices(u8, &expected_digest, &program.identity.digest);
+    try std.testing.expectEqual(@as(usize, 87), program.instructions.len);
+    var fast = try Executor.init(std.testing.allocator, &program);
+    defer fast.deinit();
+    try std.testing.expectEqualStrings("fps_shadow_vertex", fast.prevalidatedPathName());
+    var reference = try Executor.init(std.testing.allocator, &program);
+    defer reference.deinit();
+    reference.fast_path = null;
+    var uniform = [_]u8{0} ** 128;
+    var push = [_]u8{0} ** 64;
+    const matrices = [_][16]f32{
+        .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+        .{ 0.75, 0.125, 0, 0, -0.25, 1.25, 0.125, 0, 0, 0.5, 0.875, 0, 0.25, -0.5, 0.125, 1 },
+    };
+    const positions = [_][3]f32{ .{ 0, 0, 0 }, .{ 0.25, -0.75, 1.5 }, .{ -2.25, 0.5, -0.125 } };
+    const flags = [_]u32{ 0, 1, 1 << 20, (1 << 20) | 1 };
+    const packed_scales = [_]u32{ 0x7f7f_0000, 0x8180_0000, 0x4000_0000, 0x0000_0000 };
+    for (matrices, 0..) |model, matrix_case| {
+        const projection = matrices[(matrix_case + 1) % matrices.len];
+        for (model, 0..) |value, lane| std.mem.writeInt(u32, uniform[lane * 4 ..][0..4], @bitCast(value), .little);
+        for (projection, 0..) |value, lane| std.mem.writeInt(u32, uniform[64 + lane * 4 ..][0..4], @bitCast(value), .little);
+        for (flags) |flag| {
+            std.mem.writeInt(u32, push[16..20], flag, .little);
+            for (packed_scales) |packed_scale| {
+                std.mem.writeInt(u32, push[12..16], packed_scale, .little);
+                for (positions) |point| {
+                    var input: [12]u8 = undefined;
+                    for (point, 0..) |value, lane| std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(value), .little);
+                    const bindings = [_]Binding{
+                        .{ .interface = 0, .bytes = &input },
+                        .{ .interface = 3, .bytes = &uniform },
+                        .{ .interface = 4, .bytes = &push },
+                    };
+                    var fast_varying = [_]u8{0} ** 8;
+                    var fast_position = [_]u8{0} ** 16;
+                    var reference_varying = [_]u8{0} ** 8;
+                    var reference_position = [_]u8{0} ** 16;
+                    const fast_outputs = [_]Output{ .{ .interface = 1, .bytes = &fast_varying }, .{ .interface = 2, .bytes = &fast_position } };
+                    const reference_outputs = [_]Output{ .{ .interface = 1, .bytes = &reference_varying }, .{ .interface = 2, .bytes = &reference_position } };
+                    try std.testing.expect(try fast.executePrevalidated(&bindings, &fast_outputs));
+                    try reference.execute(&bindings, &reference_outputs);
+                    try std.testing.expectEqualSlices(u8, &reference_varying, &fast_varying);
+                    try std.testing.expectEqualSlices(u8, &reference_position, &fast_position);
+                }
+            }
+        }
+    }
+}
+
+test "captured Three.js FPS normal filters retain their exact interpreter identities" {
+    const cases = .{
+        .{
+            .shader = @embedFile("fixtures/threejs_fps_normal_filter_a_fragment.spv"),
+            .digest = [_]u8{ 0x35, 0xc2, 0xde, 0xd2, 0x2f, 0x1c, 0x62, 0x26, 0x3d, 0xe7, 0x96, 0xfb, 0xe2, 0x93, 0x45, 0x4e, 0x39, 0x64, 0xd2, 0x41, 0x0b, 0xea, 0xf6, 0xc2, 0xd2, 0x75, 0x90, 0x6c, 0xe5, 0x1f, 0xf2, 0x26 },
+            .instructions = 132,
+        },
+        .{
+            .shader = @embedFile("fixtures/threejs_fps_normal_filter_b_fragment.spv"),
+            .digest = [_]u8{ 0xf9, 0xe7, 0x5c, 0x9e, 0xd3, 0xe1, 0x0f, 0xbb, 0x55, 0x17, 0xac, 0xb3, 0xa0, 0x43, 0xf5, 0x16, 0x59, 0x7d, 0x31, 0x4e, 0x73, 0xbb, 0xdd, 0xe7, 0xdc, 0x78, 0xaf, 0x15, 0x25, 0x32, 0x7b, 0xed },
+            .instructions = 141,
+        },
+    };
+    inline for (cases) |case| {
+        const shader_bytes align(4) = case.shader.*;
+        var expected_digest = case.digest;
+        var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, &expected_digest, &program.identity.digest);
+        try std.testing.expectEqual(@as(usize, case.instructions), program.instructions.len);
+        var executor = try Executor.init(std.testing.allocator, &program);
+        defer executor.deinit();
+        try std.testing.expectEqualStrings("fps_normal_filter_8tap", executor.prevalidatedPathName());
+        try std.testing.expect(executor.isFpsNormalFilter8tap());
+        try std.testing.expect(executor.tileParallelSafe());
+        var pixels: [16 * 16 * 4]u8 = undefined;
+        for (0..16) |y| for (0..16) |x| {
+            const offset = (y * 16 + x) * 4;
+            pixels[offset] = @intCast((x * 17 + y * 9) % 256);
+            pixels[offset + 1] = @intCast((x * 3 + y * 23) % 256);
+            pixels[offset + 2] = @intCast((x * 11 + y * 7) % 256);
+            pixels[offset + 3] = 255;
+        };
+        var input: [16]u8 = undefined;
+        var uniform: [12]u8 = undefined;
+        var push = [_]u8{0} ** 20;
+        std.mem.writeInt(u32, uniform[0..4], @bitCast(@as(f32, 16)), .little);
+        std.mem.writeInt(u32, uniform[4..8], @bitCast(@as(f32, 16)), .little);
+        std.mem.writeInt(u32, uniform[8..12], @bitCast(@as(f32, 1)), .little);
+        std.mem.writeInt(u32, push[8..12], 16 | (16 << 16), .little);
+        for ([_]u32{ 0x7f7f, 0x817f, 0x7f81 }) |packed_scale| for ([_]SampledImage.Filter{ .nearest, .linear }) |filter| for ([_]u32{ 0, 1 }) |swap| for ([_][2]f32{ .{ 3.5, 7.5 }, .{ 11.5, 4.5 } }) |position| {
+            std.mem.writeInt(u32, input[0..4], @bitCast(position[0]), .little);
+            std.mem.writeInt(u32, input[4..8], @bitCast(position[1]), .little);
+            std.mem.writeInt(u32, input[8..12], 0, .little);
+            std.mem.writeInt(u32, input[12..16], @bitCast(@as(f32, 1)), .little);
+            std.mem.writeInt(u32, push[12..16], packed_scale, .little);
+            std.mem.writeInt(u32, push[16..20], swap, .little);
+            const image = SampledImage{ .pixels = &pixels, .width = 16, .height = 16, .row_stride = 64, .format = .rgba8_unorm, .filter = filter, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+            const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 3, .bytes = &push }, .{ .interface = 4, .sampled_image = image } };
+            var fast = [_]u8{0} ** 16;
+            var slow = [_]u8{0} ** 16;
+            try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 1, .bytes = &fast }}));
+            try executor.execute(&bindings, &.{.{ .interface = 1, .bytes = &slow }});
+            for (0..4) |lane| {
+                const actual: f32 = @bitCast(std.mem.readInt(u32, fast[lane * 4 ..][0..4], .little));
+                const expected: f32 = @bitCast(std.mem.readInt(u32, slow[lane * 4 ..][0..4], .little));
+                try std.testing.expectApproxEqAbs(expected, actual, 0.00001);
+            }
+            try std.testing.expectEqualSlices(u8, &slow, &fast);
+        };
+    }
+}
+
+test "captured Three.js PMREM blur matches interpreter for copy and spiral branches" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_pmrem_blur_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("three_pmrem_blur", executor.prevalidatedPathName());
+
+    const pixels = try std.testing.allocator.alloc(u8, 768 * 1024 * 4);
+    defer std.testing.allocator.free(pixels);
+    for (0..1024) |y| for (0..768) |x| {
+        const offset = (y * 768 + x) * 4;
+        pixels[offset] = @intCast((x * 17 + y * 7) % 256);
+        pixels[offset + 1] = @intCast((x * 3 + y * 23) % 256);
+        pixels[offset + 2] = @intCast((x * 11 + y * 13) % 256);
+        pixels[offset + 3] = 255;
+    };
+    const image = SampledImage{ .pixels = pixels, .width = 768, .height = 1024, .row_stride = 768 * 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    const directions = [_][3]f32{ .{ 1, 0.2, -0.4 }, .{ -0.7, 1, 0.3 }, .{ 0.2, -0.1, 1 }, .{ -0.3, 0.1, -1 } };
+    for ([_]f32{ 0, 0.08, 0.4 }) |sigma| for ([_]f32{ 8, 6, 4 }) |mip| for (directions) |direction| {
+        var input: [12]u8 = undefined;
+        var uniform: [8]u8 = undefined;
+        for (0..3) |lane| std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(direction[lane]), .little);
+        std.mem.writeInt(u32, uniform[0..4], @bitCast(sigma), .little);
+        std.mem.writeInt(u32, uniform[4..8], @bitCast(mip), .little);
+        const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 4, .sampled_image = image } };
+        var fast = [_]u8{0} ** 16;
+        var slow = [_]u8{0} ** 16;
+        try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 1, .bytes = &fast }}));
+        try executor.execute(&bindings, &.{.{ .interface = 1, .bytes = &slow }});
+        for (0..4) |lane| {
+            const actual: f32 = @bitCast(std.mem.readInt(u32, fast[lane * 4 ..][0..4], .little));
+            const expected: f32 = @bitCast(std.mem.readInt(u32, slow[lane * 4 ..][0..4], .little));
+            try std.testing.expectApproxEqAbs(expected, actual, 0.005);
+        }
+    };
+}
+
+test "captured Three.js PMREM GGX matches interpreter for copy and convolution branches" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_pmrem_ggx_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("three_pmrem_ggx", executor.prevalidatedPathName());
+    try std.testing.expect(executor.isThreePmremGgx());
+    try std.testing.expect(executor.tileParallelSafe());
+
+    const pixels = try std.testing.allocator.alloc(u8, 768 * 1024 * 4);
+    defer std.testing.allocator.free(pixels);
+    for (0..1024) |y| for (0..768) |x| {
+        const offset = (y * 768 + x) * 4;
+        pixels[offset] = @intCast((x * 17 + y * 7) % 256);
+        pixels[offset + 1] = @intCast((x * 3 + y * 23) % 256);
+        pixels[offset + 2] = @intCast((x * 11 + y * 13) % 256);
+        pixels[offset + 3] = 255;
+    };
+    const image = SampledImage{ .pixels = pixels, .width = 768, .height = 1024, .row_stride = 768 * 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    for ([_]f32{ 0, 0.1, 0.4 }) |roughness| for ([_]f32{ 8, 6 }) |mip| for ([_][3]f32{ .{ 1, 0.2, -0.4 }, .{ -0.7, 1, 0.3 } }) |direction| {
+        var input: [12]u8 = undefined;
+        var uniform: [8]u8 = undefined;
+        for (0..3) |lane| std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(direction[lane]), .little);
+        std.mem.writeInt(u32, uniform[0..4], @bitCast(roughness), .little);
+        std.mem.writeInt(u32, uniform[4..8], @bitCast(mip), .little);
+        const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 4, .sampled_image = image } };
+        var fast = [_]u8{0} ** 16;
+        var slow = [_]u8{0} ** 16;
+        try std.testing.expect(try executor.executePrevalidated(&bindings, &.{.{ .interface = 1, .bytes = &fast }}));
+        try executor.execute(&bindings, &.{.{ .interface = 1, .bytes = &slow }});
+        for (0..4) |lane| {
+            const actual: f32 = @bitCast(std.mem.readInt(u32, fast[lane * 4 ..][0..4], .little));
+            const expected: f32 = @bitCast(std.mem.readInt(u32, slow[lane * 4 ..][0..4], .little));
+            try std.testing.expectApproxEqAbs(expected, actual, 0.005);
+        }
+    };
+}
+
+test "captured Three.js instancing material retains its validated interpreter profile" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_instancing_material_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2246), program.instructions.len);
+    try std.testing.expectEqual(@as(usize, 10), program.interfaces.len);
+    var loads: usize = 0;
+    var stores: usize = 0;
+    for (program.instructions) |instruction| {
+        if (instruction.op == .local_load) loads += 1;
+        if (instruction.op == .local_store) stores += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 482), loads);
+    try std.testing.expectEqual(@as(usize, 259), stores);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+    const targets = executor.branch_targets orelse return error.TestUnexpectedResult;
+    var branches: usize = 0;
+    for (executor.program.instructions, 0..) |instruction, pc| {
+        switch (instruction.op) {
+            .branch => {
+                const label = std.mem.readInt(u32, instruction.literal[0..4], .little);
+                try std.testing.expectEqual(@as(u32, @intCast(try branchTarget(&executor.program, label))), targets[pc].on_true);
+                branches += 1;
+            },
+            .branch_conditional => {
+                for (0..2) |choice| {
+                    const label = std.mem.readInt(u32, instruction.literal[choice * 4 ..][0..4], .little);
+                    const expected: u32 = @intCast(try branchTarget(&executor.program, label));
+                    try std.testing.expectEqual(expected, if (choice == 0) targets[pc].on_true else targets[pc].on_false);
+                }
+                branches += 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 206), branches);
+}
+
+test "missing cached branch label remains a runtime invalid operand" {
+    const missing_label = [_]u8{ 99, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .branch, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &missing_label },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectError(error.InvalidOperand, executor.execute(&.{}, &.{}));
 }
 
 test "only stateless exact profiles are tile parallel safe" {
@@ -4270,6 +5800,7 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(!fastPathTileParallelSafe(.{ .two_axis_coverage = .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .three_pmrem_ggx = {} }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
 }
 
@@ -4319,12 +5850,12 @@ fn validate(program: *const ir.Program) Error!void {
             }
             for (interface.members[0..interface.member_count], 0..) |m, member_index| {
                 try validateType(m.ty);
-                if (m.array_count == 0 or (m.array_stride == 0 and m.array_count != 1) or (m.array_stride != 0 and (m.array_stride % 16 != 0 or m.ty.rows != 1))) {
+                if (!uniformArrayStrideValid(m)) {
                     if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid uniform member interface={} member={} array_count={} array_stride={} type={any}\n", .{ interface_index, member_index, m.array_count, m.array_stride, m.ty });
                     return error.InvalidStorage;
                 }
             }
-        } else if (interface.storage == .sampled_image or interface.storage == .input_attachment) {
+        } else if (interface.storage == .sampled_image or interface.storage == .input_attachment or interface.storage == .image or interface.storage == .sampler) {
             if (interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or interface.descriptor_set == null or interface.binding == null or interface.block or interface.member_count != 0) {
                 if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid sampled image interface={} type={any} set={any} binding={any} block={} members={}\n", .{ interface_index, interface.ty, interface.descriptor_set, interface.binding, interface.block, interface.member_count });
                 return error.InvalidStorage;
@@ -4337,14 +5868,19 @@ fn validate(program: *const ir.Program) Error!void {
         const n = instruction.operands.len;
         const arity_ok = switch (instruction.op) {
             .constant => n == 0,
-            .local, .label, .branch, .return_ => n == 0,
+            .local => n <= 1,
+            .label, .branch, .return_ => n == 0,
             .local_access, .local_store => n == 2,
             .local_load, .branch_conditional => n == 1,
             .phi => n >= 2,
             .constant_composite, .composite => n > 0,
             .input, .uniform, .storage => n == 1,
             .image_sample_implicit_lod => n == 3,
+            .image_sample_explicit_lod => n == 3 or n == 4,
+            .image_cube_sample_implicit_lod => n == 3,
+            .image_cube_sample_explicit_lod => n == 3 or n == 4,
             .image_read_input_attachment => n == 2,
+            .image_fetch => n == 3,
             .access => n >= 2 and n <= 3,
             .extract => n == 1 or n == 2,
             .vector_extract_dynamic => n == 2,
@@ -4363,7 +5899,10 @@ fn validate(program: *const ir.Program) Error!void {
             .iadd, .isub, .imul, .iadd_carry, .isub_borrow, .umul_extended, .smul_extended, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle, .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge, .logical_eq, .logical_ne, .logical_or, .logical_and, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .vector_times_scalar, .matrix_times_vector, .matrix_times_scalar, .vector_times_matrix, .matrix_times_matrix, .outer_product, .dot, .less_or_greater, .ordered, .unordered => n == 2,
             .output => n == 2,
         };
-        if (!arity_ok) return error.InvalidOperand;
+        if (!arity_ok) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU render executor invalid arity pc={} op={s} operands={} type={any}\n", .{ pc, @tagName(instruction.op), n, instruction.ty });
+            return error.InvalidOperand;
+        }
         if (instruction.op == .constant and instruction.literal.len != (if (instruction.ty.scalar == .bool) 1 else try byteSize(instruction.ty))) return error.InvalidOperand;
         if (instruction.op == .constant and instruction.ty.scalar == .bool and instruction.literal[0] > 1) return error.InvalidOperand;
         if (instruction.op == .constant and instruction.ty.scalar == .f32) for (0..try lanes(instruction.ty)) |i| if (!std.math.isFinite(@as(f32, @bitCast(std.mem.readInt(u32, instruction.literal[i * 4 ..][0..4], .little))))) return error.NumericDomain;
@@ -4392,7 +5931,7 @@ fn validate(program: *const ir.Program) Error!void {
             }
             if (!same(instruction.ty, program.interfaces[x].ty)) return error.InvalidType;
         }
-        if (instruction.op == .image_sample_implicit_lod) {
+        if (instruction.op == .image_sample_implicit_lod or instruction.op == .image_cube_sample_implicit_lod) {
             const x = instruction.operands[0];
             if (x >= program.interfaces.len or program.interfaces[x].storage != .sampled_image) {
                 if (failureDiagnosticsEnabled()) {
@@ -4403,9 +5942,25 @@ fn validate(program: *const ir.Program) Error!void {
             }
             if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
         }
+        if (instruction.op == .image_sample_explicit_lod or instruction.op == .image_cube_sample_explicit_lod) {
+            const image_index = instruction.operands[0];
+            if (image_index >= program.interfaces.len) return error.InvalidStorage;
+            if (instruction.operands.len == 3) {
+                if (program.interfaces[image_index].storage != .sampled_image) return error.InvalidStorage;
+            } else {
+                const sampler_index = instruction.operands[3];
+                if (program.interfaces[image_index].storage != .image or sampler_index >= program.interfaces.len or program.interfaces[sampler_index].storage != .sampler) return error.InvalidStorage;
+            }
+            if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
+        }
         if (instruction.op == .image_read_input_attachment) {
             const x = instruction.operands[0];
             if (x >= program.interfaces.len or program.interfaces[x].storage != .input_attachment) return error.InvalidStorage;
+            if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
+        }
+        if (instruction.op == .image_fetch) {
+            const x = instruction.operands[0];
+            if (x >= program.interfaces.len or program.interfaces[x].storage != .image) return error.InvalidStorage;
             if (instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 1) return error.InvalidType;
         }
         if (instruction.op == .output) {
@@ -4419,15 +5974,28 @@ fn validate(program: *const ir.Program) Error!void {
             const source_ty = program.instructions[operand].ty;
             switch (instruction.op) {
                 .constant_composite, .composite => if (source_ty.scalar != instruction.ty.scalar) return error.InvalidType,
-                .image_sample_implicit_lod => if (oi == 1) {
-                    if (source_ty.scalar != .f32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
+                .image_sample_implicit_lod, .image_cube_sample_implicit_lod => if (oi == 1) {
+                    const expected_columns: u3 = if (instruction.op == .image_cube_sample_implicit_lod) 3 else 2;
+                    if (source_ty.scalar != .f32 or source_ty.columns != expected_columns or source_ty.rows != 1) return error.InvalidType;
                 } else if (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
+                .image_sample_explicit_lod, .image_cube_sample_explicit_lod => if (oi == 1) {
+                    const expected_columns: u3 = if (instruction.op == .image_cube_sample_explicit_lod) 3 else 2;
+                    if (source_ty.scalar != .f32 or source_ty.columns != expected_columns or source_ty.rows != 1) return error.InvalidType;
+                } else if (oi == 2 and (source_ty.scalar != .f32 or source_ty.columns != 1 or source_ty.rows != 1)) return error.InvalidType,
                 .image_read_input_attachment => if (oi == 1) {
                     if (source_ty.scalar != .i32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
                 },
+                .image_fetch => if (oi == 1) {
+                    if (source_ty.scalar != .i32 or source_ty.columns != 2 or source_ty.rows != 1) return error.InvalidType;
+                } else if (source_ty.scalar != .i32 or source_ty.columns != 1 or source_ty.rows != 1) return error.InvalidType,
                 .u_min, .i_min, .u_max, .i_max => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_clamp, .u_clamp, .i_clamp, .f_n_clamp, .f_mix, .fma, .f_smooth_step => if (!same(source_ty, instruction.ty)) return error.InvalidType,
-                .fneg, .ineg, .f_abs, .i_abs, .f_sign, .i_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose, .dpdx, .dpdy, .fwidth => if (!same(source_ty, instruction.ty)) return error.InvalidType,
+                .iadd, .isub, .imul => {
+                    if ((instruction.ty.scalar != .i32 and instruction.ty.scalar != .u32) or
+                        (source_ty.scalar != .i32 and source_ty.scalar != .u32) or
+                        source_ty.columns != instruction.ty.columns or source_ty.rows != instruction.ty.rows) return error.InvalidType;
+                },
+                .fneg, .ineg, .f_abs, .i_abs, .i_sign, .f_sign, .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt, .bit_not, .logical_not, .bit_or, .bit_xor, .bit_and, .udiv, .sdiv, .umod, .srem, .smod, .shl_logical, .shr_logical, .shr_arithmetic, .f_atan2, .f_pow, .f_n_min, .f_n_max, .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_step, .transpose, .dpdx, .dpdy, .fwidth => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .f_determinant => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 1 or instruction.ty.rows != 1) return error.InvalidType,
                 .f_matrix_inverse => if (source_ty.scalar != .f32 or source_ty.columns != 4 or source_ty.rows != 4 or instruction.ty.scalar != .f32 or instruction.ty.columns != 4 or instruction.ty.rows != 4) return error.InvalidType,
                 .f_length => if (source_ty.scalar != .f32 or source_ty.rows != 1 or source_ty.columns < 2 or source_ty.columns > 4) return error.InvalidType,
@@ -4503,8 +6071,9 @@ fn validate(program: *const ir.Program) Error!void {
                 .copy_object => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .quantize_f16 => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .local_access => if (oi == 0) {
-                    if (source_ty.rows != 1 or source_ty.columns < 2) return error.InvalidType;
+                    if (source_ty.columns < 2 or source_ty.columns > 4 or (source_ty.rows != 1 and (source_ty.scalar != .f32 or source_ty.rows < 2 or source_ty.rows > 4))) return error.InvalidType;
                 } else if ((source_ty.scalar != .i32 and source_ty.scalar != .u32) or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
+                .local => if (!same(source_ty, instruction.ty)) return error.InvalidType,
                 .local_load => {},
                 .local_store => if (oi == 1 and source_ty.scalar != program.instructions[instruction.operands[0]].ty.scalar) return error.InvalidType,
                 .branch_conditional => if (source_ty.scalar != .bool or source_ty.rows != 1 or source_ty.columns != 1) return error.InvalidType,
@@ -4516,40 +6085,54 @@ fn validate(program: *const ir.Program) Error!void {
         switch (instruction.op) {
             .access => {
                 const interface_index = instruction.operands[0];
-                if (interface_index >= program.interfaces.len or (program.interfaces[interface_index].storage != .uniform and program.interfaces[interface_index].storage != .push_constant and program.interfaces[interface_index].storage != .output)) {
+                if (interface_index >= program.interfaces.len) {
                     if (failureDiagnosticsEnabled()) {
-                        const actual = if (interface_index < program.interfaces.len) @tagName(program.interfaces[interface_index].storage) else "out_of_bounds";
-                        std.debug.print("ZPU render executor invalid access storage pc={} interface={} actual={s}\n", .{ pc, interface_index, actual });
+                        std.debug.print("ZPU render executor invalid access interface pc={} interface={} actual=out_of_bounds\n", .{ pc, interface_index });
                     }
                     return error.InvalidStorage;
                 }
                 const interface = program.interfaces[interface_index];
-                for (instruction.operands[1..], 0..) |index_id, index_position| {
-                    const index_ty = program.instructions[index_id].ty;
-                    if ((index_ty.scalar != .u32 and index_ty.scalar != .i32) or try lanes(index_ty) != 1) return error.InvalidType;
-                    // The member selector remains static so the backing
-                    // interface offset is deterministic.
-                    if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
-                }
-                const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
-                if (member_id >= interface.member_count) return error.Bounds;
-                const member = interface.members[member_id];
-                const member_ty = member.ty;
-                if (member.array_stride != 0) {
-                    if (instruction.operands.len != 3 or !same(instruction.ty, member_ty)) return error.InvalidType;
-                    if (program.instructions[instruction.operands[2]].op == .constant) {
-                        const index = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
-                        if (index >= member.array_count) return error.Bounds;
+                if (interface.storage == .input) {
+                    if (interface.ty.rows != 1 or interface.ty.columns < 2 or interface.ty.columns > 4 or instruction.operands.len != 2 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != interface.ty.scalar) return error.InvalidType;
+                    const selector = program.instructions[instruction.operands[1]];
+                    if (selector.op == .constant) {
+                        const component = std.mem.readInt(u32, selector.literal[0..4], .little);
+                        if (component >= interface.ty.columns) return error.Bounds;
+                    } else if (selector.ty.scalar != .u32 and selector.ty.scalar != .i32) return error.InvalidType;
+                } else if (interface.storage != .uniform and interface.storage != .push_constant and interface.storage != .output) {
+                    if (failureDiagnosticsEnabled()) {
+                        const actual = @tagName(interface.storage);
+                        std.debug.print("ZPU render executor invalid access storage pc={} interface={} actual={s}\n", .{ pc, interface_index, actual });
                     }
-                } else if (instruction.operands.len == 2) {
-                    if (!same(instruction.ty, member_ty)) return error.InvalidType;
+                    return error.InvalidStorage;
                 } else {
-                    if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType;
-                    const index_instruction = program.instructions[instruction.operands[2]];
-                    if (index_instruction.op == .constant) {
-                        const component = std.mem.readInt(u32, index_instruction.literal[0..4], .little);
-                        if (component >= member_ty.columns) return error.Bounds;
-                    } else if (index_instruction.ty.scalar != .u32) return error.InvalidType;
+                    for (instruction.operands[1..], 0..) |index_id, index_position| {
+                        const index_ty = program.instructions[index_id].ty;
+                        if ((index_ty.scalar != .u32 and index_ty.scalar != .i32) or try lanes(index_ty) != 1) return error.InvalidType;
+                        // The member selector remains static so the backing
+                        // interface offset is deterministic.
+                        if (index_position == 0 and program.instructions[index_id].op != .constant) return error.InvalidType;
+                    }
+                    const member_id = std.mem.readInt(u32, program.instructions[instruction.operands[1]].literal[0..4], .little);
+                    if (member_id >= interface.member_count) return error.Bounds;
+                    const member = interface.members[member_id];
+                    const member_ty = member.ty;
+                    if (member.array_stride != 0) {
+                        if (instruction.operands.len != 3 or !same(instruction.ty, member_ty)) return error.InvalidType;
+                        if (program.instructions[instruction.operands[2]].op == .constant) {
+                            const index = std.mem.readInt(u32, program.instructions[instruction.operands[2]].literal[0..4], .little);
+                            if (index >= member.array_count) return error.Bounds;
+                        }
+                    } else if (instruction.operands.len == 2) {
+                        if (!same(instruction.ty, member_ty)) return error.InvalidType;
+                    } else {
+                        if (instruction.operands.len != 3 or member_ty.rows != 1 or instruction.ty.rows != 1 or instruction.ty.columns != 1 or instruction.ty.scalar != member_ty.scalar) return error.InvalidType;
+                        const index_instruction = program.instructions[instruction.operands[2]];
+                        if (index_instruction.op == .constant) {
+                            const component = std.mem.readInt(u32, index_instruction.literal[0..4], .little);
+                            if (component >= member_ty.columns) return error.Bounds;
+                        } else if (index_instruction.ty.scalar != .u32) return error.InvalidType;
+                    }
                 }
             },
             .extract => {
@@ -4830,8 +6413,12 @@ fn freeInstructions(allocator: std.mem.Allocator, items: []ir.Instruction) void 
 }
 fn isValueOperand(op: ir.Op, i: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
-        .image_sample_implicit_lod, .image_read_input_attachment => i != 0,
+        .constant, .input, .uniform, .storage, .label, .branch, .return_ => false,
+        .local => i == 0,
+        .image_sample_implicit_lod, .image_read_input_attachment, .image_fetch => i != 0,
+        .image_sample_explicit_lod => i == 1 or i == 2,
+        .image_cube_sample_implicit_lod => i != 0,
+        .image_cube_sample_explicit_lod => i == 1 or i == 2,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => i == 0,
         .access => i != 0,
@@ -4854,6 +6441,42 @@ fn f32bytes(x: f32) [4]u8 {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, @bitCast(x), .little);
     return b;
+}
+
+test "samplerless image fetch reads level-zero integer coordinates" {
+    const i32x2 = ir.Type{ .scalar = .i32, .columns = 2 };
+    const i32_scalar = ir.Type{ .scalar = .i32 };
+    const f32x4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .image, .ty = f32x4, .descriptor_set = 0, .binding = 0 },
+        .{ .storage = .output, .ty = f32x4, .location = 0 },
+    };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .constant, .ty = i32x2, .operands = &.{}, .literal = &.{ 1, 0, 0, 0, 1, 0, 0, 0 } },
+        .{ .op = .constant, .ty = i32_scalar, .operands = &.{}, .literal = &.{ 0, 0, 0, 0 } },
+        .{ .op = .image_fetch, .ty = f32x4, .operands = &.{ 0, 0, 1 }, .literal = &.{} },
+        .{ .op = .output, .ty = f32x4, .operands = &.{ 1, 2 }, .literal = &.{} },
+    };
+    var program = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(program.bytes);
+    program.stage = .fragment;
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+
+    const pixels = [_]u8{ 10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255 };
+    const image = SampledImage{ .pixels = &pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .linear, .address_u = .repeat, .address_v = .repeat };
+    var output = [_]u8{0} ** 16;
+    try executor.execute(&.{.{ .interface = 0, .sampled_image = image }}, &.{.{ .interface = 1, .bytes = &output }});
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0 / 255.0), @as(f32, @bitCast(std.mem.readInt(u32, output[0..4], .little))), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 110.0 / 255.0), @as(f32, @bitCast(std.mem.readInt(u32, output[4..8], .little))), 0.000001);
+
+    const coordinates = Value{ .ty = i32x2 };
+    var nonzero_lod = Value{ .ty = i32_scalar };
+    nonzero_lod.bits[0] = 1;
+    try std.testing.expectError(error.Unsupported, imageFetch(image, coordinates, nonzero_lod));
+    var out_of_bounds_coordinates = Value{ .ty = i32x2 };
+    out_of_bounds_coordinates.bits[0] = 2;
+    try std.testing.expectError(error.Bounds, imageFetch(image, out_of_bounds_coordinates, .{ .ty = i32_scalar }));
 }
 
 test "captured Chromium constant black path is identity-gated and exact" {
@@ -5606,6 +7229,76 @@ test "fragment derivatives propagate through floating arithmetic" {
     try std.testing.expectEqual(@as(f32, 10), @as(f32, @bitCast(executor.values[4].bits[0])));
     try std.testing.expectEqual(@as(f32, 30), @as(f32, @bitCast(executor.values[4].bits[1])));
     try std.testing.expectError(error.MissingInput, executor.execute(&.{.{ .interface = 0, .bytes = std.mem.sliceAsBytes(&input) }}, &.{}));
+}
+
+test "fragment derivatives propagate through implicit texture sampling" {
+    const vec2 = ir.Type{ .scalar = .f32, .columns = 2 };
+    const vec4 = ir.Type{ .scalar = .f32, .columns = 4 };
+    const scalar = ir.Type{ .scalar = .f32 };
+    var interfaces = [_]ir.Interface{
+        .{ .storage = .input, .ty = vec2, .location = 0 },
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
+    };
+    const zero = f32bytes(0);
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = vec2, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .constant, .ty = scalar, .operands = &.{}, .literal = &zero },
+        .{ .op = .image_sample_implicit_lod, .ty = vec4, .operands = &.{ 2, 0, 1 }, .literal = &.{} },
+        .{ .op = .dpdx, .ty = vec4, .operands = &.{2}, .literal = &.{} },
+        .{ .op = .output, .ty = vec4, .operands = &.{ 1, 3 }, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+
+    const input = [_]f32{ 0.25, 0.25 };
+    const input_dx = [_]f32{ 0.5, 0 };
+    const input_dy = [_]f32{ 0, 0.5 };
+    const pixels = [_]u8{
+        10, 20, 30, 40, 110, 120, 130, 140,
+        30, 40, 50, 60, 130, 140, 150, 160,
+    };
+    const image = SampledImage{ .pixels = &pixels, .width = 2, .height = 2, .row_stride = 8, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var output: [16]u8 = undefined;
+    try executor.execute(&.{
+        .{ .interface = 0, .bytes = std.mem.sliceAsBytes(&input), .dpdx_bytes = std.mem.sliceAsBytes(&input_dx), .dpdy_bytes = std.mem.sliceAsBytes(&input_dy) },
+        .{ .interface = 2, .sampled_image = image },
+    }, &.{.{ .interface = 1, .bytes = &output }});
+    for (0..4) |lane| try std.testing.expectApproxEqAbs(
+        @as(f32, 100.0 / 255.0),
+        @as(f32, @bitCast(std.mem.readInt(u32, output[lane * 4 ..][0..4], .little))),
+        0.00001,
+    );
+}
+
+test "fragment derivatives propagate through vector normalization" {
+    const vec3 = ir.Type{ .scalar = .f32, .columns = 3 };
+    var interfaces = [_]ir.Interface{.{ .storage = .input, .ty = vec3, .location = 0 }};
+    var instructions = [_]ir.Instruction{
+        .{ .op = .input, .ty = vec3, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .f_normalize, .ty = vec3, .operands = &.{0}, .literal = &.{} },
+        .{ .op = .dpdx, .ty = vec3, .operands = &.{1}, .literal = &.{} },
+    };
+    var source = try testProgram(&interfaces, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    source.stage = .fragment;
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    const input = [_]f32{ 3, 0, 4 };
+    const input_dx = [_]f32{ 1, 0, 2 };
+    const input_dy = [_]f32{ 0, 1, 0 };
+    try executor.execute(&.{.{
+        .interface = 0,
+        .bytes = std.mem.sliceAsBytes(&input),
+        .dpdx_bytes = std.mem.sliceAsBytes(&input_dx),
+        .dpdy_bytes = std.mem.sliceAsBytes(&input_dy),
+    }}, &.{});
+    try std.testing.expectApproxEqAbs(@as(f32, -0.064), @as(f32, @bitCast(executor.values[2].bits[0])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), @as(f32, @bitCast(executor.values[2].bits[1])), 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.048), @as(f32, @bitCast(executor.values[2].bits[2])), 0.00001);
 }
 
 test "GLSL round round-even and trunc preserve bounded f32 lanes" {
@@ -7586,15 +9279,43 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
                 output_count = 1;
             }
         },
-        .image_sample_implicit_lod => {
+        .image_sample_implicit_lod, .image_cube_sample_implicit_lod => {
             interfaces[0] = .{ .storage = .sampled_image, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 1, .binding = 0 };
             interface_count = 1;
             @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
-            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } };
+            const is_cube = op == .image_cube_sample_implicit_lod;
+            if (is_cube) @memcpy(input_bytes[0..24], &([_]u8{ 64, 128, 192, 255 } ** 6));
+            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..if (is_cube) 24 else 4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge, .cube = is_cube, .cube_face_stride = if (is_cube) 4 else 0 } };
             binding_count = 1;
-            const coordinate = try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
+            const coordinate = if (is_cube) blk: {
+                var direction: [12]u8 = undefined;
+                std.mem.writeInt(u32, direction[0..4], @bitCast(@as(f32, 1)), .little);
+                std.mem.writeInt(u32, direction[4..8], @bitCast(@as(f32, 0)), .little);
+                std.mem.writeInt(u32, direction[8..12], @bitCast(@as(f32, 0)), .little);
+                break :blk try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .f32, .columns = 3 }, &.{}, &direction);
+            } else try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
             const bias = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, bias }, &.{});
+        },
+        .image_sample_explicit_lod, .image_cube_sample_explicit_lod => {
+            interfaces[0] = .{ .storage = .image, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0 };
+            interfaces[1] = .{ .storage = .sampler, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 1 };
+            interface_count = 2;
+            @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
+            const is_cube = op == .image_cube_sample_explicit_lod;
+            if (is_cube) @memcpy(input_bytes[0..24], &([_]u8{ 64, 128, 192, 255 } ** 6));
+            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..if (is_cube) 24 else 4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge, .cube = is_cube, .cube_face_stride = if (is_cube) 4 else 0 } };
+            bindings[1] = .{ .interface = 1, .sampler = .{} };
+            binding_count = 2;
+            const coordinate = if (is_cube) blk: {
+                var direction: [12]u8 = undefined;
+                std.mem.writeInt(u32, direction[0..4], @bitCast(@as(f32, 1)), .little);
+                std.mem.writeInt(u32, direction[4..8], @bitCast(@as(f32, 0)), .little);
+                std.mem.writeInt(u32, direction[8..12], @bitCast(@as(f32, 0)), .little);
+                break :blk try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .f32, .columns = 3 }, &.{}, &direction);
+            } else try propertyConstant(arena, &instructions, .{ .scalar = .f32, .columns = 2 });
+            const lod = try propertyConstant(arena, &instructions, .{ .scalar = .f32 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, lod, 1 }, &.{});
         },
         .image_read_input_attachment => {
             interfaces[0] = .{ .storage = .input_attachment, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0 };
@@ -7604,6 +9325,16 @@ fn runPropertyCase(op: ir.Op, result_ty: ir.Type, source_ty_override: ?ir.Type, 
             binding_count = 1;
             const coordinate = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .i32, .columns = 2 }, &.{}, &.{ 0, 0, 0, 0, 0, 0, 0, 0 });
             result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate }, &.{});
+        },
+        .image_fetch => {
+            interfaces[0] = .{ .storage = .image, .ty = .{ .scalar = .f32, .columns = 4 }, .descriptor_set = 0, .binding = 0 };
+            interface_count = 1;
+            @memcpy(input_bytes[0..4], &[_]u8{ 64, 128, 192, 255 });
+            bindings[0] = .{ .interface = 0, .sampled_image = .{ .pixels = input_bytes[0..4], .width = 1, .height = 1, .row_stride = 4, .format = .rgba8_unorm, .filter = .nearest, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge } };
+            binding_count = 1;
+            const coordinate = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .i32, .columns = 2 }, &.{}, &.{ 0, 0, 0, 0, 0, 0, 0, 0 });
+            const lod = try propertyInstruction(arena, &instructions, .constant, .{ .scalar = .i32 }, &.{}, &.{ 0, 0, 0, 0 });
+            result_id = try propertyInstruction(arena, &instructions, op, result_ty, &.{ 0, coordinate, lod }, &.{});
         },
         .access => {
             interfaces[0] = .{ .storage = .uniform, .ty = result_ty, .descriptor_set = 0, .binding = 0, .block = true, .member_count = 1 };
@@ -8174,20 +9905,28 @@ test "generated bounded operation by type-family property matrix is complete" {
     }
     try runPropertyCase(.image_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.image_sample_implicit_lod)] += 1;
+    try runPropertyCase(.image_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_sample_explicit_lod)] += 1;
+    try runPropertyCase(.image_cube_sample_implicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_cube_sample_implicit_lod)] += 1;
+    try runPropertyCase(.image_cube_sample_explicit_lod, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_cube_sample_explicit_lod)] += 1;
     try runPropertyCase(.image_read_input_attachment, .{ .scalar = .f32, .columns = 4 }, null, null);
     totals[@intFromEnum(ir.Op.image_read_input_attachment)] += 1;
+    try runPropertyCase(.image_fetch, .{ .scalar = .f32, .columns = 4 }, null, null);
+    totals[@intFromEnum(ir.Op.image_fetch)] += 1;
     inline for ([_]ir.Op{ .local, .local_access, .local_load, .local_store, .label, .branch, .branch_conditional, .phi, .return_ }) |op|
         totals[@intFromEnum(op)] = 1;
     const expected = [_]usize{ 14, 10, 14, 14, 14, 10, 9, 13, 5, 8, 8, 5, 5, 5, 5, 3, 1, 24, 14, 1, 14, 8, 4, 8, 8, 8, 8, 4, 4, 4, 4, 4, 8, 8, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4 };
+    const expected_full = expected ++ [_]usize{1} ** 4 ++ [_]usize{5} ++ [_]usize{1} ** 16 ++ [_]usize{5} ++ [_]usize{8} ** 2 ++ [_]usize{8} ** 3 ++ [_]usize{9} ** 3 ++ [_]usize{24} ++ [_]usize{14} ++ [_]usize{4} ++ [_]usize{1} ** 4 ++ [_]usize{ 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4, 4, 4, 4, 4 } ++ [_]usize{ 4, 4 } ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 8, 4, 4 } ++ [_]usize{4} ++ [_]usize{ 4, 4, 4 } ++ [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1 } ++ [_]usize{ 1, 1 } ++ [_]usize{ 4, 4 } ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ++ [_]usize{1} ** 9 ++ [_]usize{ 4, 4, 4, 1, 1, 1, 1 };
     try std.testing.expectEqualSlices(usize, expected_full[0..totals.len], &totals);
     var total: usize = 0;
     for (totals) |count| {
         try std.testing.expect(count > 0);
         total += count;
     }
-    try std.testing.expectEqual(@as(usize, 711), total);
-    std.debug.print("generated property matrix: operations=184 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
+    try std.testing.expectEqual(@as(usize, 715), total);
+    std.debug.print("generated property matrix: operations=187 type_families=scalar+vec2+vec3+vec4+mat4 valid={d} per_operation={any}\n", .{ total, totals });
 }
 
 fn expectGeneratedSetupError(expected: Error, interfaces: []ir.Interface, instructions: []ir.Instruction) !void {
@@ -8332,13 +10071,13 @@ test "generated bounded negative and runtime property categories are complete" {
         try std.testing.expectEqualSlices(u8, &before, &output);
         rollback += 1;
     }
-    try std.testing.expectEqual(@as(usize, 184), malformed);
+    try std.testing.expectEqual(@as(usize, 188), malformed);
     try std.testing.expectEqual(@as(usize, 41), bounds);
     try std.testing.expectEqual(@as(usize, 14), aliases);
     try std.testing.expectEqual(@as(usize, 4), rollback);
     try std.testing.expectEqual(@as(usize, 5), runtime_nan);
     try std.testing.expectEqual(@as(usize, 5), signed_zero);
-    std.debug.print("generated property categories: malformed=184 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
+    std.debug.print("generated property categories: malformed=187 bounds=41 aliases=14 rollback_after_late_failure=4 runtime_nan=5 signed_zero=5\n", .{});
 }
 
 test "generated valid scalar DAGs are total and stable" {

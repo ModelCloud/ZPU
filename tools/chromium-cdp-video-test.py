@@ -70,7 +70,7 @@ class DevTools:
         # Playback probes intentionally await several seconds of compositor
         # activity, so retain a bounded timeout that exceeds their default
         # sample window after the connection handshake completes.
-        self.connection.settimeout(60)
+        self.connection.settimeout(120)
         self.next_id = 1
         key = base64.b64encode(os.urandom(16)).decode()
         request = (
@@ -281,6 +281,26 @@ def main() -> None:
         default=60.0,
         help="mouse dispatch rate used with --pointer-sweep (default: 60)",
     )
+    parser.add_argument(
+        "--require-webgl",
+        action="store_true",
+        help="require a live non-fallback WebGL canvas and report its renderer",
+    )
+    parser.add_argument(
+        "--require-webgl-draw",
+        action="store_true",
+        help="also require the live WebGL canvas to contain more than one sampled RGBA value",
+    )
+    parser.add_argument(
+        "--require-webgl-size",
+        metavar="WIDTHxHEIGHT",
+        help="require a live WebGL drawing buffer at exactly this size",
+    )
+    parser.add_argument(
+        "--exercise-game-controls",
+        action="store_true",
+        help="click the game canvas and briefly exercise forward/jump input",
+    )
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("--duration must be positive")
@@ -294,9 +314,38 @@ def main() -> None:
         parser.error("--pointer-sweep-hz must be positive")
     if args.pointer_sweep and not args.compositor:
         parser.error("--pointer-sweep requires --compositor")
+    if args.require_webgl and not args.compositor:
+        parser.error("--require-webgl requires --compositor")
+    if args.require_webgl_draw and not args.require_webgl:
+        parser.error("--require-webgl-draw requires --require-webgl")
+    webgl_size = None
+    if args.require_webgl_size is not None:
+        if not args.require_webgl:
+            parser.error("--require-webgl-size requires --require-webgl")
+        try:
+            width_text, height_text = args.require_webgl_size.lower().split("x", 1)
+            webgl_size = {"width": int(width_text), "height": int(height_text)}
+        except (ValueError, TypeError):
+            parser.error("--require-webgl-size must be WIDTHxHEIGHT")
+        if webgl_size["width"] <= 0 or webgl_size["height"] <= 0:
+            parser.error("--require-webgl-size dimensions must be positive")
+    if args.exercise_game_controls and not args.require_webgl:
+        parser.error("--exercise-game-controls requires --require-webgl")
 
     devtools = DevTools(args.port)
     try:
+        # SystemInfo is browser-scoped (not a page Runtime call), which makes
+        # it available even when ANGLE refuses the page's first WebGL context.
+        # Keep only stable diagnostic fields: the full response contains large
+        # machine-specific tables and is not useful as benchmark telemetry.
+        gpu_result = devtools.call("SystemInfo.getInfo").get("gpu", {})
+        gpu_aux = gpu_result.get("auxAttributes", {}) if isinstance(gpu_result, dict) else {}
+        gpu_telemetry = {
+            "featureStatus": gpu_result.get("featureStatus", {}) if isinstance(gpu_result, dict) else {},
+            "glRenderer": gpu_aux.get("glRenderer"),
+            "glVersion": gpu_aux.get("glVersion"),
+            "vulkanVersion": gpu_aux.get("vulkanVersion"),
+        }
         target = devtools.call("Target.createTarget", {"url": "about:blank"})
         # Chromium starts a New Tab page even in headless mode. Keeping it
         # alive turns a focused video measurement into a concurrent browser-UI
@@ -316,9 +365,164 @@ def main() -> None:
         )
         session_id = attached["sessionId"]
         devtools.call("Page.enable", session_id=session_id)
+        if webgl_size is not None:
+            # In headless mode --window-size includes browser-chrome overhead
+            # on some Chromium builds, so a nominal 2560x1440 window can expose
+            # a shorter page viewport. Pin the page viewport to the requested
+            # WebGL drawing-buffer dimensions before the demo initializes.
+            devtools.call(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": webgl_size["width"],
+                    "height": webgl_size["height"],
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+                session_id=session_id,
+            )
+        page_probe_script = """
+          Object.defineProperty(window, '__zpuNativeRaf', {
+            value: window.requestAnimationFrame.bind(window),
+            writable: false, configurable: false
+          });
+          window.__zpuPageErrors = [];
+          addEventListener('error', event => {
+            if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+              String(event.message || event.error || 'script error'));
+          });
+          addEventListener('unhandledrejection', event => {
+            if (window.__zpuPageErrors.length < 16) window.__zpuPageErrors.push(
+              `unhandled rejection: ${String(event.reason)}`);
+          });
+        """
+        if args.require_webgl:
+            page_probe_script += """
+              window.__zpuWebGLContexts = [];
+              const originalGetContext = HTMLCanvasElement.prototype.getContext;
+              HTMLCanvasElement.prototype.getContext = function(type, ...args) {
+                const context = originalGetContext.call(this, type, ...args);
+                if (context && ['webgl', 'webgl2', 'experimental-webgl'].includes(String(type).toLowerCase()) &&
+                    !window.__zpuWebGLContexts.some(item => item.gl === context)) {
+                  window.__zpuWebGLContexts.push({ canvas: this, gl: context, api: String(type) });
+                  window.__zpuWebGLTextureUploads ||= [];
+                  if (!window.__zpuWebGLTextureUploadsInstalled) {
+                    window.__zpuWebGLTextureUploadsInstalled = true;
+                    const prototype = Object.getPrototypeOf(context);
+                    for (const name of ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D']) {
+                      const original = prototype[name];
+                      if (typeof original !== 'function') continue;
+                      prototype[name] = function(...uploadArgs) {
+                        const imageSource = uploadArgs.find(value => value && typeof value === 'object' &&
+                          (value instanceof HTMLImageElement || value instanceof HTMLCanvasElement ||
+                           (typeof ImageBitmap !== 'undefined' && value instanceof ImageBitmap))) || null;
+                        let width = imageSource?.naturalWidth || imageSource?.videoWidth || imageSource?.width || 0;
+                        let height = imageSource?.naturalHeight || imageSource?.videoHeight || imageSource?.height || 0;
+                        if (!width) {
+                          const offset = name.includes('SubImage') ? 4 : 3;
+                          width = Number(uploadArgs[offset]) || 0;
+                          height = Number(uploadArgs[offset + 1]) || 0;
+                        }
+                        if (width > 1 && height > 1 && window.__zpuWebGLTextureUploads.length < 64) {
+                          window.__zpuWebGLTextureUploads.push({
+                            method: name, width, height, sourceType: imageSource?.constructor?.name || null,
+                            sourceUrl: imageSource?.currentSrc || imageSource?.src || null,
+                          });
+                        }
+                        return original.apply(this, uploadArgs);
+                      };
+                    }
+                  }
+                }
+                return context;
+              };
+            """
+        if args.require_webgl_draw:
+            page_probe_script += """
+              window.__zpuWebGLDrawSerial = 0;
+              window.__zpuWebGLPixelCapture = null;
+              const takeWebGLSamples = () => window.__zpuWebGLContexts.map(({gl, api}) => {
+                const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
+                const contextLost = gl.isContextLost();
+                if (contextLost || width <= 0 || height <= 0) return {
+                  context: api, drawingBuffer: {width, height}, contextLost,
+                  drawingBufferSampled: false, uniqueRgbaColors: 0,
+                  sampledRgbaColors: [], readbackError: null
+                };
+                const regionSize = 32;
+                const x = Math.max(0, Math.floor((width - regionSize) / 2));
+                const y = Math.max(0, Math.floor((height - regionSize) / 2));
+                const regionWidth = Math.min(regionSize, width - x);
+                const regionHeight = Math.min(regionSize, height - y);
+                const pixels = new Uint8Array(regionWidth * regionHeight * 4);
+                const sampledPixels = new Uint8Array(8 * 8 * 4);
+                let readbackError = null, readbackGlError = null;
+                const drainGlErrors = () => {
+                  const errors = [];
+                  for (let count = 0; count < 8; count++) {
+                    const error = gl.getError();
+                    if (error === gl.NO_ERROR) break;
+                    errors.push(error);
+                  }
+                  return errors;
+                };
+                try {
+                  const errorsBeforeFinish = drainGlErrors();
+                  gl.finish();
+                  const errorsAfterFinish = drainGlErrors();
+                  gl.readPixels(x, y, regionWidth, regionHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+                  const errorsAfterReadPixels = drainGlErrors();
+                  for (let row = 0; row < 8; row++) for (let column = 0; column < 8; column++) {
+                    const sourceX = Math.min(regionWidth - 1, Math.floor((column + .5) * regionWidth / 8));
+                    const sourceY = Math.min(regionHeight - 1, Math.floor((row + .5) * regionHeight / 8));
+                    const sourceOffset = (sourceY * regionWidth + sourceX) * 4;
+                    sampledPixels.set(pixels.subarray(sourceOffset, sourceOffset + 4), (row * 8 + column) * 4);
+                  }
+                  const colors = new Set();
+                  for (let pixel = 0; pixel < 64; pixel++) {
+                    const offset = pixel * 4;
+                    colors.add(`${sampledPixels[offset]},${sampledPixels[offset + 1]},${sampledPixels[offset + 2]},${sampledPixels[offset + 3]}`);
+                  }
+                  readbackGlError = errorsBeforeFinish.length || errorsAfterFinish.length || errorsAfterReadPixels.length
+                    ? { errorsBeforeFinish, errorsAfterFinish, errorsAfterReadPixels } : gl.NO_ERROR;
+                  return {
+                    context: api, drawingBuffer: {width, height}, contextLost: gl.isContextLost(),
+                    drawingBufferSampled: true, drawSampleRegion: {x, y, width: regionWidth, height: regionHeight},
+                    uniqueRgbaColors: colors.size, sampledRgbaColors: [...colors],
+                    readbackError, readbackGlError, drawSerial: window.__zpuWebGLDrawSerial
+                  };
+                } catch (error) { readbackError = String(error); }
+                return {
+                  context: api, drawingBuffer: {width, height}, contextLost: gl.isContextLost(),
+                  drawingBufferSampled: false, drawSampleRegion: {x, y, width: regionWidth, height: regionHeight},
+                  uniqueRgbaColors: 0, sampledRgbaColors: [], readbackError, readbackGlError
+                };
+              });
+              window.__zpuTakeWebGLSamples = takeWebGLSamples;
+              const originalRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+              window.requestAnimationFrame = callback => originalRequestAnimationFrame(now => {
+                callback(now);
+                if (window.__zpuCaptureWebGL && !window.__zpuWebGLPixelCapture &&
+                    window.__zpuWebGLDrawSerial > window.__zpuWebGLCaptureBaseline) {
+                  window.__zpuWebGLPixelCapture = takeWebGLSamples();
+                }
+              });
+              for (const Constructor of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+                if (!Constructor) continue;
+                for (const name of ['drawArrays', 'drawElements', 'drawRangeElements', 'drawArraysInstanced', 'drawElementsInstanced']) {
+                  if (!Object.prototype.hasOwnProperty.call(Constructor.prototype, name)) continue;
+                  const original = Constructor.prototype[name];
+                  if (typeof original !== 'function') continue;
+                  Constructor.prototype[name] = function(...args) {
+                    const result = original.apply(this, args);
+                    window.__zpuWebGLDrawSerial++;
+                    return result;
+                  };
+                }
+              }
+            """
         devtools.call(
             "Page.addScriptToEvaluateOnNewDocument",
-            {"source": "Object.defineProperty(window, '__zpuNativeRaf', { value: window.requestAnimationFrame.bind(window), writable: false, configurable: false });"},
+            {"source": page_probe_script},
             session_id=session_id,
         )
         # Headless Chromium otherwise treats a CDP-created tab as background
@@ -331,6 +535,59 @@ def main() -> None:
         # focus again after issuing it so the compositor probe measures the
         # visible page, rather than a throttled background tab.
         devtools.call("Page.bringToFront", session_id=session_id)
+        # Page.navigate returns before Chromium has replaced about:blank's
+        # execution context. Starting the long measurement during that swap
+        # makes CDP cancel it with "Inspected target navigated or closed".
+        navigation_deadline = time.monotonic() + 60
+        destination = urllib.parse.urlsplit(args.page_url)
+        while True:
+            try:
+                document = devtools.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "({url: location.href, ready: document.readyState})",
+                        "returnByValue": True,
+                    },
+                    session_id,
+                )["result"].get("value", {})
+                loaded_url = document.get("url", "")
+                loaded = urllib.parse.urlsplit(loaded_url)
+                if (
+                    loaded_url != "about:blank"
+                    and loaded.scheme == destination.scheme
+                    and loaded.hostname == destination.hostname
+                    and document.get("ready") == "complete"
+                ):
+                    break
+            except RuntimeError as error:
+                if "Inspected target navigated or closed" not in str(error) and "Cannot find context" not in str(error):
+                    raise
+            if time.monotonic() >= navigation_deadline:
+                raise RuntimeError("page navigation did not complete before the probe deadline")
+            time.sleep(0.1)
+        if args.exercise_game_controls:
+            viewport_result = devtools.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "new Promise(resolve => { const deadline = performance.now() + 10000; function ready() { if (document.readyState === 'complete' && document.querySelector('canvas')) return resolve({ width: innerWidth, height: innerHeight }); if (performance.now() >= deadline) return resolve(null); setTimeout(ready, 25); } ready(); })",
+                    "awaitPromise": True,
+                    "returnByValue": True,
+                },
+                session_id,
+            )
+            viewport = viewport_result.get("result", {}).get("value")
+            if not isinstance(viewport, dict):
+                raise RuntimeError("game page did not produce a canvas before input exercise")
+            x = viewport["width"] // 2
+            y = viewport["height"] // 2
+            devtools.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, session_id)
+            devtools.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, session_id)
+            devtools.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}, session_id)
+            for key, code in (("w", "KeyW"), (" ", "Space")):
+                devtools.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": key, "code": code}, session_id)
+            time.sleep(1)
+            for key, code in ((" ", "Space"), ("w", "KeyW")):
+                devtools.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": key, "code": code}, session_id)
         if args.compositor:
             pointer_sweep = None
             if args.pointer_sweep:
@@ -366,7 +623,7 @@ def main() -> None:
                 pointer_sweep.start()
             expression = f"""(async () => {{
               const ready = await new Promise(resolve => {{
-                const deadline = performance.now() + 10000;
+                const deadline = performance.now() + 60000;
                 function probe() {{
                   const matches = document.readyState === 'complete' && document.querySelector({json.dumps(args.compositor_selector)});
                   if (matches || performance.now() >= deadline) {{
@@ -413,6 +670,60 @@ def main() -> None:
               intervals.sort((a, b) => a - b);
               observer?.disconnect();
               const p99FrameIntervalMilliseconds = intervals.length ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * .99))] : 0;
+              const pageImageResources = performance.getEntriesByType('resource')
+                .filter(entry => /\\.(?:avif|gif|jpe?g|png|webp)(?:[?#]|$)/i.test(new URL(entry.name).pathname))
+                .map(entry => ({{
+                  url: entry.name, durationMilliseconds: entry.duration,
+                  transferBytes: entry.transferSize, encodedBytes: entry.encodedBodySize,
+                  decodedBytes: entry.decodedBodySize, responseEndMilliseconds: entry.responseEnd,
+                }}));
+              let webgl = null;
+              if ({str(args.require_webgl).lower()}) {{
+                // The center-patch readback must run after the page's draw
+                // callback and before Chromium presents the default buffer.
+                const webglDrawCaptureEnabled = {str(args.require_webgl_draw).lower()};
+                let capturedWebglSamples = null;
+                if (webglDrawCaptureEnabled) {{
+                  window.__zpuCaptureWebGL = true;
+                  window.__zpuWebGLCaptureBaseline = window.__zpuWebGLDrawSerial;
+                  await new Promise(resolve => {{
+                    let frames = 0;
+                    function waitForCapture() {{
+                      if (window.__zpuWebGLPixelCapture || frames >= 4) {{ resolve(); return; }}
+                      frames++;
+                      window.requestAnimationFrame(waitForCapture);
+                    }}
+                    window.requestAnimationFrame(waitForCapture);
+                  }});
+                  capturedWebglSamples = window.__zpuWebGLPixelCapture ||
+                    (window.__zpuTakeWebGLSamples ? window.__zpuTakeWebGLSamples() : []);
+                }}
+                const canvases = [...document.querySelectorAll('canvas')];
+                const trackedContexts = window.__zpuWebGLContexts || [];
+                const contexts = trackedContexts.map((tracked, index) => {{
+                  const {{ canvas, gl, api }} = tracked;
+                  const debug = gl.getExtension('WEBGL_debug_renderer_info');
+                  const renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+                  const version = gl.getParameter(gl.VERSION);
+                  const supportedExtensions = gl.getSupportedExtensions() || [];
+                  const colorBufferFloatExtension = Boolean(gl.getExtension('EXT_color_buffer_float'));
+                  const width = gl.drawingBufferWidth, height = gl.drawingBufferHeight;
+                  const sampled = capturedWebglSamples?.[index] || {{}};
+                  return {{
+                    index, context: api, renderer: String(renderer), version: String(version),
+                    drawingBuffer: {{ width, height }}, contextLost: gl.isContextLost(),
+                    colorBufferFloatExtension, supportedExtensions,
+                    drawingBufferSampled: Boolean(sampled.drawingBufferSampled),
+                    drawSampleRegion: sampled.drawSampleRegion || null,
+                    uniqueRgbaColors: sampled.uniqueRgbaColors || 0,
+                    sampledRgbaColors: sampled.sampledRgbaColors || [],
+                    readbackError: sampled.readbackError || null,
+                    readbackGlError: sampled.readbackGlError ?? null,
+                  }};
+                }});
+                webgl = {{ canvases: canvases.length, contexts,
+                  expectedDrawingBuffer: {json.dumps(webgl_size, separators=(',', ':'))} }};
+              }}
               return {{
                 loadState: 'ready', callbacks,
                 visibilityState: document.visibilityState,
@@ -425,7 +736,12 @@ def main() -> None:
                 maxLongTaskMilliseconds: longTasks.length ? Math.max(...longTasks) : 0,
                 documentTitle: document.title,
                 documentTextPrefix: (document.body?.innerText || '').split('\\n').join(' ').slice(0, 300),
+                pageImageResources,
+                pageErrors: Array.isArray(window.__zpuPageErrors) ? window.__zpuPageErrors : [],
+                webglTextureUploads: Array.isArray(window.__zpuWebGLTextureUploads) ? window.__zpuWebGLTextureUploads : [],
+                gpu: {json.dumps(gpu_telemetry, separators=(',', ':'))},
                 sceneLabel: document.getElementById('frame-label')?.textContent || null,
+                webgl,
               }};
             }})()"""
             try:
@@ -438,7 +754,7 @@ def main() -> None:
                     # measured interval.  Keep the DevTools bound larger than all
                     # three phases so a slow real-site load is reported as
                     # telemetry, not mistaken for a transport failure.
-                    timeout=args.duration + args.warmup + 25,
+                    timeout=args.duration + args.warmup + 180,
                 )
             finally:
                 if pointer_sweep is not None:
@@ -489,6 +805,59 @@ def main() -> None:
                 with open(args.screenshot, "wb") as output:
                     output.write(base64.b64decode(capture["data"]))
             print(json.dumps(telemetry, indent=2, sort_keys=True))
+            # Establish that the page actually rendered WebGL before reporting
+            # a cadence miss. That keeps an absent/failed canvas from being
+            # mistaken for a merely slow 60 Hz workload.
+            if args.require_webgl:
+                webgl = telemetry.get("webgl")
+                contexts = webgl.get("contexts", []) if isinstance(webgl, dict) else []
+                live_contexts = [
+                    context
+                    for context in contexts
+                    if isinstance(context, dict)
+                    and context.get("context")
+                    and not context.get("contextLost")
+                    and context.get("drawingBuffer", {}).get("width", 0) > 0
+                    and context.get("drawingBuffer", {}).get("height", 0) > 0
+                ]
+                if not live_contexts:
+                    raise SystemExit("no live WebGL canvas was available for the compositor sample")
+                page_errors = telemetry.get("pageErrors")
+                if page_errors:
+                    raise SystemExit(f"WebGL demo reported page errors: {page_errors!r}")
+                if webgl_size is not None and not any(
+                    context.get("drawingBuffer") == webgl_size
+                    for context in live_contexts
+                ):
+                    actual_sizes = [context.get("drawingBuffer") for context in live_contexts]
+                    raise SystemExit(
+                        f"no live WebGL drawing buffer matched {webgl_size}; observed {actual_sizes}"
+                    )
+                gpu_renderer = str(gpu_telemetry.get("glRenderer") or "").lower()
+                # A non-software GPU is not enough: Chromium might have
+                # selected a host or virtual hardware adapter. SystemInfo is
+                # browser-scoped and identifies the adapter used by this
+                # isolated SmolVM Chromium process.
+                if "zpu" not in gpu_renderer or "vulkan" not in gpu_renderer:
+                    raise SystemExit(
+                        "WebGL GPU telemetry does not identify the ZPU Vulkan renderer: "
+                        f"{gpu_renderer!r}"
+                    )
+                renderer_text = " ".join(
+                    str(context.get("renderer", "")) for context in live_contexts
+                ).lower()
+                if any(token in renderer_text for token in ("swiftshader", "llvmpipe", "lavapipe", "software")):
+                    raise SystemExit(
+                        f"WebGL renderer is a software fallback, not the ZPU Vulkan path: {renderer_text!r}"
+                    )
+                if args.require_webgl_draw and not any(
+                    isinstance(context.get("uniqueRgbaColors"), int)
+                    and context["uniqueRgbaColors"] > 1
+                    for context in live_contexts
+                ):
+                    raise SystemExit(
+                        "WebGL canvas did not produce non-uniform sampled pixels"
+                    )
             if args.max_p99_frame_ms is not None:
                 p99 = telemetry.get("p99FrameIntervalMilliseconds", 0)
                 if not isinstance(p99, (int, float)) or p99 <= 0 or p99 > args.max_p99_frame_ms:

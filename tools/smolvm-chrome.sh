@@ -6,7 +6,7 @@
 # inside SmolVM. ZPU Mosaic workers are constrained to exactly two guest CPUs.
 # Chromium itself remains schedulable across the guest so its browser,
 # renderer, and networking threads do not starve the two ZPU render lanes.
-# Usage: tools/smolvm-chrome.sh [start-desktop|reproduce|benchmark]
+# Usage: tools/smolvm-chrome.sh [start-desktop|reproduce|benchmark|webgl]
 # Default command is "reproduce".
 #
 # Run a dry-run to inspect commands:
@@ -45,6 +45,8 @@ benchmark_min_fps=${ZPU_CHROME_BENCHMARK_MIN_FPS:-60}
 benchmark_pointer_sweep=${ZPU_CHROME_POINTER_SWEEP:-1}
 benchmark_pointer_hz=${ZPU_CHROME_POINTER_HZ:-60}
 benchmark_urls=${ZPU_CHROME_BENCHMARK_URLS:-https://www.google.com,https://www.google.com/search?q=zpu+60fps,https://www.bing.com,https://www.bing.com/search?q=zpu+60fps}
+benchmark_require_webgl=${ZPU_CHROME_BENCHMARK_REQUIRE_WEBGL:-0}
+webgl_demo_urls=${ZPU_WEBGL_DEMO_URLS:-${ZPU_WEBGL_DEMO_URL:-https://threejs.org/examples/webgl_geometry_terrain.html}}
 # An optional host directory that receives each site's JSON telemetry before
 # the benchmark tears down the guest tmpfs and restores network isolation.
 benchmark_results_dir=${ZPU_CHROME_BENCHMARK_RESULTS_DIR:-}
@@ -82,6 +84,7 @@ die() {
 [[ $benchmark_p99_ms =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_P99_MS must be a positive decimal'
 [[ $benchmark_min_fps =~ ^([0-9]+|[0-9]+\.[0-9]+)$ ]] || die 'ZPU_CHROME_BENCHMARK_MIN_FPS must be a positive decimal'
 [[ $benchmark_pointer_sweep == 0 || $benchmark_pointer_sweep == 1 ]] || die 'ZPU_CHROME_POINTER_SWEEP must be 0 or 1'
+[[ $benchmark_require_webgl == 0 || $benchmark_require_webgl == 1 ]] || die 'ZPU_CHROME_BENCHMARK_REQUIRE_WEBGL must be 0 or 1'
 [[ $benchmark_pointer_hz =~ ^([1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$ ]] || die 'ZPU_CHROME_POINTER_HZ must be a positive decimal'
 IFS=, read -r chrome_cpu_a chrome_cpu_b chrome_cpu_extra <<<"$chrome_cpu_set"
 [[ -n ${chrome_cpu_a:-} && -n ${chrome_cpu_b:-} && -z ${chrome_cpu_extra:-} && $chrome_cpu_a =~ ^[0-9]+$ && $chrome_cpu_b =~ ^[0-9]+$ && $chrome_cpu_a != "$chrome_cpu_b" ]] || \
@@ -131,7 +134,7 @@ require_programs() {
             command -v "$program" >/dev/null || die "$program is required"
         fi
     done
-    if ! python3 -c 'from PIL import Image' 2>/dev/null; then
+    if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]] && ! python3 -c 'from PIL import Image' 2>/dev/null; then
         die 'python3 PIL is required for PNG compression'
     fi
     if [[ ${ZPU_SMOLVM_DRY_RUN:-0} != 1 ]]; then
@@ -366,6 +369,7 @@ launch_chrome() {
         VK_DRIVER_FILES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
         ZPU_DIAGNOSE_FAILURES="$diagnose_failures" \
         ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+        ZPU_DUMP_REJECTED_SPIRV=/run/zpu-runtime/rejected.spv \
         ZPU_PRESENT_DUMP="$present_dump" \
         ZPU_LIMITED=physical-core-v1 \
         ZPU_MAX_THREADS=2 \
@@ -406,13 +410,21 @@ benchmark_chrome() {
     fi
     local guest_tool=/run/zpu-runtime/chromium-cdp-video-test.py
     local transfer_tool=/workspace/.zpu-chrome-transfer/chromium-cdp-video-test.py
+    local guest_results=/workspace/.zpu-chrome-results
+    local guest_rejected_spirv=/workspace/.zpu-rejected-spv
     local guest_pid=/run/zpu-runtime/chromium.pid
     local guest_log=/run/zpu-runtime/chromium.log
     local guest_profile=/run/zpu-runtime/chromium-profile
-    local site safe_url result
+    local site safe_url result screenshot
     local -a pointer_options=()
+    local -a webgl_options=()
+    local -a game_options=()
+    local -a screenshot_options=()
     if [[ $benchmark_pointer_sweep == 1 ]]; then
         pointer_options=(--pointer-sweep --pointer-sweep-hz "$benchmark_pointer_hz")
+    fi
+    if [[ $benchmark_require_webgl == 1 ]]; then
+        webgl_options=(--require-webgl --require-webgl-draw --require-webgl-size "${width}x${height}")
     fi
     if [[ -n $benchmark_results_dir ]]; then
         mkdir -p -- "$benchmark_results_dir"
@@ -424,15 +436,36 @@ benchmark_chrome() {
         install -m 700 '$transfer_tool' '$guest_tool'
         rm -f '$transfer_tool'
     " || return $?
+    run smolvm machine exec --name "$machine" -- install -d -m 700 "$guest_results" || return $?
+    run smolvm machine exec --name "$machine" -- sh -c "rm -rf '$guest_rejected_spirv'; install -d -m 700 '$guest_rejected_spirv'" || return $?
     IFS=, read -r -a benchmark_url_list <<<"$benchmark_urls"
     for site in "${benchmark_url_list[@]}"; do
-        [[ $site =~ ^https://(www\.)?(google\.com|bing\.com)(/search\?q=[A-Za-z0-9._%+-]+)?/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits Google/Bing homepages or deterministic search queries: $site"
+        game_options=()
+        if [[ $benchmark_require_webgl == 1 ]]; then
+            [[ $site =~ ^https://threejs\.org/examples/(webgl_[A-Za-z0-9_-]+|games_[A-Za-z0-9_-]+)\.html$ ]] || \
+                die "WebGL demos must be official Three.js WebGL or games examples: $site"
+            if [[ $site =~ /games_ ]]; then
+                game_options=(--exercise-game-controls)
+            fi
+        else
+            [[ $site =~ ^https://(www\.)?(google\.com|bing\.com)(/search\?q=[A-Za-z0-9._%+-]+)?/?$ ]] || die "ZPU_CHROME_BENCHMARK_URLS only permits Google/Bing homepages or deterministic search queries: $site"
+        fi
         safe_url=${site#https://}
         safe_url=${safe_url//[^A-Za-z0-9._-]/_}
-        result="/run/zpu-runtime/chromium-${safe_url}.json"
+        result="$guest_results/chromium-${safe_url}.json"
+        screenshot=
+        if [[ -n $benchmark_results_dir && $benchmark_require_webgl == 1 ]]; then
+            screenshot="$guest_results/chromium-${safe_url}.png"
+            screenshot_options=(--screenshot "$screenshot")
+        else
+            screenshot_options=()
+        fi
         # Each site gets a fresh GPU process. Reusing one leaves page-specific
         # swapchain pacing state behind and made Bing depend on whether Google
         # ran first, which is not a valid per-site performance measurement.
+        if [[ -n $screenshot ]]; then
+            run smolvm machine exec --name "$machine" -- rm -f "$screenshot" || return $?
+        fi
         run smolvm machine exec --name "$machine" -- env -i \
             HOME=/root PATH=/usr/bin:/bin XDG_RUNTIME_DIR=/run/zpu-runtime DISPLAY=:0 XAUTHORITY=/run/zpu-xauth/Xauthority \
             VK_ICD_FILENAMES=/opt/zpu/share/vulkan/icd.d/zpu_icd.x86_64.json \
@@ -442,8 +475,16 @@ benchmark_chrome() {
             ZPU_DIAGNOSE_FAILURES="$diagnose_failures" ZPU_DIAGNOSE_PRESENT="${ZPU_DIAGNOSE_PRESENT:-0}" \
             ZPU_TRACE_FRAMES="${ZPU_TRACE_FRAMES:-0}" ZPU_TRACE_SKIP_FRAMES="${ZPU_TRACE_SKIP_FRAMES:-0}" \
             ZPU_TRACE_PATH="${ZPU_TRACE_PATH:-}" ZPU_DIAGNOSE_RENDER="$diagnose_render" \
+            ZPU_DUMP_REJECTED_SPIRV=/run/zpu-runtime/rejected.spv \
+            ZPU_DUMP_REJECTED_SPIRV_DIR="$guest_rejected_spirv" \
             ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
-            sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
+            ZPU_DIAGNOSE_PROFILE_TIMING="${ZPU_DIAGNOSE_PROFILE_TIMING:-0}" \
+            ZPU_DIAGNOSE_PROFILE_TIMING_LIMIT="${ZPU_DIAGNOSE_PROFILE_TIMING_LIMIT:-128}" \
+            ZPU_DIAGNOSE_PROFILE_IR="${ZPU_DIAGNOSE_PROFILE_IR:-0}" \
+            ZPU_DIAGNOSE_PROFILE_IR_DIGEST="${ZPU_DIAGNOSE_PROFILE_IR_DIGEST:-}" \
+            ZPU_DIAGNOSE_PROFILE_SHADER_BYTES="${ZPU_DIAGNOSE_PROFILE_SHADER_BYTES:-0}" \
+            ZPU_DIAGNOSE_PROFILE_SHADER_IR_DIGEST="${ZPU_DIAGNOSE_PROFILE_SHADER_IR_DIGEST:-}" \
+            sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log' '$result'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
         run smolvm machine exec --name "$machine" -- sh -c '
             pid=$1 log=$2
             for i in $(seq 1 100); do
@@ -460,7 +501,7 @@ benchmark_chrome() {
             sh -c 'result=$1; shift; python3 "$@" > "$result"' \
             sh "$result" "$guest_tool" --compositor --compositor-selector body --page-url "$site" \
             --warmup "$benchmark_warmup" --duration "$benchmark_duration" \
-            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}"; then
+            --max-p99-frame-ms "$benchmark_p99_ms" --min-fps "$benchmark_min_fps" "${pointer_options[@]}" "${webgl_options[@]}" "${game_options[@]}" "${screenshot_options[@]}"; then
             :
         else
             probe_status=$?
@@ -469,8 +510,17 @@ benchmark_chrome() {
             if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$result"; then
                 run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
             fi
+            if [[ -n $screenshot ]] && run smolvm machine exec --name "$machine" -- test -r "$screenshot"; then
+                run smolvm machine cp "$machine:$screenshot" "$benchmark_results_dir/${safe_url}.png" || return $?
+            fi
             if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -r "$guest_log"; then
                 run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+            fi
+            if [[ -n $benchmark_results_dir ]] && run smolvm machine exec --name "$machine" -- test -d "$guest_rejected_spirv"; then
+                local rejected_archive=/workspace/.zpu-chrome-transfer/rejected-${safe_url}.tar.gz
+                run smolvm machine exec --name "$machine" -- tar -C "$guest_rejected_spirv" -czf "$rejected_archive" . || return $?
+                run smolvm machine cp "$machine:$rejected_archive" "$benchmark_results_dir/rejected-spv-${safe_url}.tar.gz" || return $?
+                run smolvm machine exec --name "$machine" -- rm -f "$rejected_archive" || return $?
             fi
             run smolvm machine exec --name "$machine" -- cat "$result" || true
             run smolvm machine exec --name "$machine" -- tail -n 120 "$guest_log" >&2 || true
@@ -479,6 +529,9 @@ benchmark_chrome() {
         if [[ -n $benchmark_results_dir ]]; then
             run smolvm machine cp "$machine:$result" "$benchmark_results_dir/${safe_url}.json" || return $?
             run smolvm machine cp "$machine:$guest_log" "$benchmark_results_dir/chromium-${safe_url}.log" || return $?
+            if [[ -n $screenshot ]]; then
+                run smolvm machine cp "$machine:$screenshot" "$benchmark_results_dir/${safe_url}.png" || return $?
+            fi
         fi
         run smolvm machine exec --name "$machine" -- cat "$result" || return $?
         stop_benchmark_chrome
@@ -528,13 +581,27 @@ benchmark() {
     local status=0
     if benchmark_chrome; then :; else status=$?; fi
     stop_benchmark_chrome || { [[ $status -ne 0 ]] || status=$?; }
-    run smolvm machine stop --name "$machine"
-    run smolvm machine update --name "$machine" --no-net
+    if [[ ${ZPU_KEEP_WEBGL_VM:-0} != 1 ]]; then
+        run smolvm machine stop --name "$machine"
+        run smolvm machine update --name "$machine" --no-net
+    fi
     return "$status"
 }
 
+webgl() {
+    # This is deliberately a distinct profile from the 4K search benchmark.
+    # It exercises public Three.js graphics and game scenes at 2K, requires
+    # ZPU's Vulkan adapter and actual canvas output, and sends gameplay input
+    # to the FPS case. ZPU remains restricted to the same two Mosaic CPU lanes.
+    width=${ZPU_WEBGL_WIDTH:-2560}
+    height=${ZPU_WEBGL_HEIGHT:-1440}
+    benchmark_urls=$webgl_demo_urls
+    benchmark_require_webgl=1
+    benchmark
+}
+
 usage() {
-    printf 'usage: %s [start-desktop|reproduce|benchmark]\n' "${BASH_SOURCE[0]}" >&2
+    printf 'usage: %s [start-desktop|reproduce|benchmark|webgl]\n' "${BASH_SOURCE[0]}" >&2
     exit 2
 }
 
@@ -543,5 +610,6 @@ case $cmd in
     start-desktop) start_desktop_cmd ;;
     reproduce) reproduce ;;
     benchmark) benchmark ;;
+    webgl) webgl ;;
     *) usage ;;
 esac
