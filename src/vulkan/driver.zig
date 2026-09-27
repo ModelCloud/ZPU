@@ -10962,6 +10962,35 @@ const ProfileScreenVertex = struct { x: f32, y: f32, z: f32, w: f32 };
 const ProfileRowBounds = struct { min_x: i32, max_x: i32 };
 const ProfilePerspectiveWeights = struct { q0: f32, q1: f32, q2: f32, denominator: f32 };
 
+fn profileInterpolateDepth(vertices: [3]ProfileScreenVertex, b0: f32, b1: f32) f32 {
+    // Edge-function weights can sum to slightly more than one in f32. A
+    // constant-depth skybox at the far plane must remain exactly at depth 1;
+    // otherwise the range check drops isolated covered pixels. Expressing
+    // depth relative to one vertex also preserves constant near-plane depth.
+    return vertices[2].z + b0 * (vertices[0].z - vertices[2].z) + b1 * (vertices[1].z - vertices[2].z);
+}
+
+test "constant-depth triangles stay in the framebuffer depth range" {
+    const vertices = [3]ProfileScreenVertex{
+        .{ .x = 0, .y = 0, .z = 1, .w = 1 },
+        .{ .x = 0, .y = 144, .z = 1, .w = 1 },
+        .{ .x = 56, .y = 144, .z = 1, .w = 1 },
+    };
+    const px: f32 = 4.5;
+    const py: f32 = 143.5;
+    const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
+    const inverse_area = 1.0 / area;
+    const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
+    const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
+    const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
+    try std.testing.expect(b0 >= 0 and b1 >= 0 and b2 >= 0);
+    try std.testing.expect(b0 + b1 + b2 > 1);
+    try std.testing.expectEqual(@as(f32, 1), profileInterpolateDepth(vertices, b0, b1));
+    var near_vertices = vertices;
+    for (&near_vertices) |*vertex| vertex.z = 0;
+    try std.testing.expectEqual(@as(f32, 0), profileInterpolateDepth(near_vertices, b0, b1));
+}
+
 /// Resolve the perspective weights used by the scalar profile rasterizer.
 /// Chromium's full-screen compositor and video quads have an exactly-one
 /// clip-space W. Preserve the normal denominator and f32 operation order,
@@ -13333,7 +13362,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
                     const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
                     if (b0 < 0 or b1 < 0 or b2 < 0) continue;
-                    const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
+                    const depth_value = profileInterpolateDepth(vertices, b0, b1) + depth_bias;
                     if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
                     const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
                     const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(target.format)));

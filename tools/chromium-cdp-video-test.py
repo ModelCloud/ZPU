@@ -535,6 +535,30 @@ def main() -> None:
         # focus again after issuing it so the compositor probe measures the
         # visible page, rather than a throttled background tab.
         devtools.call("Page.bringToFront", session_id=session_id)
+        # Page.navigate returns before Chromium has replaced about:blank's
+        # execution context. Starting the long measurement during that swap
+        # makes CDP cancel it with "Inspected target navigated or closed".
+        navigation_deadline = time.monotonic() + 60
+        destination_host = urllib.parse.urlsplit(args.page_url).hostname
+        while True:
+            try:
+                document = devtools.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "({url: location.href, ready: document.readyState})",
+                        "returnByValue": True,
+                    },
+                    session_id,
+                )["result"].get("value", {})
+                loaded_host = urllib.parse.urlsplit(document.get("url", "")).hostname
+                if loaded_host == destination_host and document.get("ready") == "complete":
+                    break
+            except RuntimeError as error:
+                if "Inspected target navigated or closed" not in str(error) and "Cannot find context" not in str(error):
+                    raise
+            if time.monotonic() >= navigation_deadline:
+                raise RuntimeError("page navigation did not complete before the probe deadline")
+            time.sleep(0.1)
         if args.exercise_game_controls:
             viewport_result = devtools.call(
                 "Runtime.evaluate",
