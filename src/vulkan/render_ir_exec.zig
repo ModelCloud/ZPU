@@ -2594,6 +2594,13 @@ pub const Executor = struct {
         return fastPathTileParallelSafe(self.fast_path);
     }
 
+    pub fn isThreePmremGgx(self: *const Executor) bool {
+        return switch (self.fast_path orelse return false) {
+            .three_pmrem_ggx => true,
+            else => false,
+        };
+    }
+
     fn uniformF32(bytes: []const u8, offset: usize) Error!f32 {
         const end = std.math.add(usize, offset, 4) catch return error.Bounds;
         if (end > bytes.len) return error.Bounds;
@@ -5294,7 +5301,7 @@ pub const Executor = struct {
 
 fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     return switch (fast_path orelse return false) {
-        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask => true,
+        .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask, .three_pmrem_ggx => true,
         else => false,
     };
 }
@@ -5344,6 +5351,8 @@ test "captured Three.js PMREM GGX matches interpreter for copy and convolution b
     var executor = try Executor.init(std.testing.allocator, &program);
     defer executor.deinit();
     try std.testing.expectEqualStrings("three_pmrem_ggx", executor.prevalidatedPathName());
+    try std.testing.expect(executor.isThreePmremGgx());
+    try std.testing.expect(executor.tileParallelSafe());
 
     const pixels = try std.testing.allocator.alloc(u8, 768 * 1024 * 4);
     defer std.testing.allocator.free(pixels);
@@ -5405,6 +5414,7 @@ test "only stateless exact profiles are tile parallel safe" {
     try std.testing.expect(!fastPathTileParallelSafe(.{ .two_axis_coverage = .{ .color_interface = 0, .distance_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .radial_mask = .{ .color_interface = 0, .coordinates_interface = 1, .uniform_interface = 2, .image_interface = 3, .output_interface = 4, .bias_literal = .{ 0, 0, 0, 0 } } }));
     try std.testing.expect(fastPathTileParallelSafe(.{ .circle_mask = .{ .circle_interface = 0, .color_interface = 1, .output_interface = 2 } }));
+    try std.testing.expect(fastPathTileParallelSafe(.{ .three_pmrem_ggx = {} }));
     try std.testing.expect(!fastPathTileParallelSafe(null));
 }
 

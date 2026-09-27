@@ -14319,6 +14319,26 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             cursor.* = candidate;
             return 1;
         }
+        // The captured Three.js GGX PMREM filter reads a separate CubeUV
+        // texture and accumulates each pixel independently. Its sample kernel
+        // is thread-local, so large one-draw filter passes can use the same
+        // disjoint worker bands after the strict profile safety check.
+        const single_pmrem_ggx = switch (first.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile.fragment.isThreePmremGgx(),
+            else => false,
+        };
+        if (single_pmrem_ggx and @as(u64, color_image.width) * color_image.height >= 256 * 256 and
+            executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context))
+        {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic PMREM GGX profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            cursor.* = candidate;
+            return 1;
+        }
         if (executeMosaicSingleRadialGradientDraw(first_raw, query_context)) {
             color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
             if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
