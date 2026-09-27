@@ -5342,6 +5342,32 @@ fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
     };
 }
 
+test "captured Three.js FPS normal filters retain their exact interpreter identities" {
+    const cases = .{
+        .{
+            .shader = @embedFile("fixtures/threejs_fps_normal_filter_a_fragment.spv"),
+            .digest = [_]u8{ 0x35, 0xc2, 0xde, 0xd2, 0x2f, 0x1c, 0x62, 0x26, 0x3d, 0xe7, 0x96, 0xfb, 0xe2, 0x93, 0x45, 0x4e, 0x39, 0x64, 0xd2, 0x41, 0x0b, 0xea, 0xf6, 0xc2, 0xd2, 0x75, 0x90, 0x6c, 0xe5, 0x1f, 0xf2, 0x26 },
+            .instructions = 132,
+        },
+        .{
+            .shader = @embedFile("fixtures/threejs_fps_normal_filter_b_fragment.spv"),
+            .digest = [_]u8{ 0xf9, 0xe7, 0x5c, 0x9e, 0xd3, 0xe1, 0x0f, 0xbb, 0x55, 0x17, 0xac, 0xb3, 0xa0, 0x43, 0xf5, 0x16, 0x59, 0x7d, 0x31, 0x4e, 0x73, 0xbb, 0xdd, 0xe7, 0xdc, 0x78, 0xaf, 0x15, 0x25, 0x32, 0x7b, 0xed },
+            .instructions = 141,
+        },
+    };
+    inline for (cases) |case| {
+        const shader_bytes align(4) = case.shader.*;
+        var expected_digest = case.digest;
+        var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+        defer program.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, &expected_digest, &program.identity.digest);
+        try std.testing.expectEqual(@as(usize, case.instructions), program.instructions.len);
+        var executor = try Executor.init(std.testing.allocator, &program);
+        defer executor.deinit();
+        try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+    }
+}
+
 test "captured Three.js PMREM blur matches interpreter for copy and spiral branches" {
     const shader_bytes align(4) = @embedFile("fixtures/threejs_pmrem_blur_fragment.spv").*;
     var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
