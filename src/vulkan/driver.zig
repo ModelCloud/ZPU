@@ -12414,6 +12414,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = push.interface, .bytes = op.push_constants.values[4][0..push.byte_size] };
         fragment_uniform_count += 1;
     }
+    if (profile.varying_count + fragment_uniform_count > fragment_bindings.len) return;
+    for (fragment_uniform_bindings[0..fragment_uniform_count], 0..) |uniform, index| {
+        fragment_bindings[profile.varying_count + index] = uniform;
+    }
     var fragment_sampled_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count], 0..) |sampled_profile, index| {
         const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required, sampled_profile.cube) orelse {
@@ -13446,11 +13450,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                                 .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
                             };
                         }
-                        var fragment_binding_count: usize = profile.varying_count;
-                        for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
-                            fragment_bindings[fragment_binding_count] = uniform;
-                            fragment_binding_count += 1;
-                        }
+                        var fragment_binding_count: usize = profile.varying_count + fragment_uniform_count;
                         var frag_coord_bytes: [16]u8 = undefined;
                         var radial_gradient_frag_coord_ready = false;
                         var frag_coord_dpdx_bytes: [16]u8 = undefined;
