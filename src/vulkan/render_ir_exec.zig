@@ -1746,6 +1746,7 @@ fn executeThreePmremBlur(bindings: []const Binding, outputs: []const Output) Err
 const FpsNormalFilterVariant = enum { red_only, red_green };
 
 const FastPath = union(enum) {
+    fps_shadow_vertex: void,
     three_pmrem_blur: void,
     three_pmrem_ggx: void,
     fps_normal_filter_8tap: FpsNormalFilterVariant,
@@ -1789,6 +1790,12 @@ fn exactInstruction(instruction: ir.Instruction, op: ir.Op, ty: ir.Type, operand
 }
 
 fn detectFastPath(program: *const ir.Program) ?FastPath {
+    const fps_shadow_vertex_identity = [_]u8{ 0x3f, 0xfa, 0xcd, 0xda, 0x06, 0xba, 0x78, 0x82, 0xa4, 0x2f, 0x1b, 0x8f, 0x57, 0x21, 0xec, 0x61, 0x6b, 0xdc, 0x07, 0xab, 0x3a, 0xaa, 0x2b, 0x0f, 0xb6, 0xfb, 0xfc, 0x14, 0xe4, 0x77, 0x1d, 0x1e };
+    if (program.stage == .vertex and program.instructions.len == 87 and program.interfaces.len == 5 and
+        std.mem.eql(u8, &program.identity.digest, &fps_shadow_vertex_identity) and
+        program.interfaces[0].storage == .input and program.interfaces[1].storage == .output and
+        program.interfaces[2].storage == .output and program.interfaces[3].storage == .uniform and
+        program.interfaces[4].storage == .push_constant) return .{ .fps_shadow_vertex = {} };
     const fps_normal_a_identity = [_]u8{ 0x35, 0xc2, 0xde, 0xd2, 0x2f, 0x1c, 0x62, 0x26, 0x3d, 0xe7, 0x96, 0xfb, 0xe2, 0x93, 0x45, 0x4e, 0x39, 0x64, 0xd2, 0x41, 0x0b, 0xea, 0xf6, 0xc2, 0xd2, 0x75, 0x90, 0x6c, 0xe5, 0x1f, 0xf2, 0x26 };
     const fps_normal_b_identity = [_]u8{ 0xf9, 0xe7, 0x5c, 0x9e, 0xd3, 0xe1, 0x0f, 0xbb, 0x55, 0x17, 0xac, 0xb3, 0xa0, 0x43, 0xf5, 0x16, 0x59, 0x7d, 0x31, 0x4e, 0x73, 0xbb, 0xdd, 0xe7, 0xdc, 0x78, 0xaf, 0x15, 0x25, 0x32, 0x7b, 0xed };
     if (program.stage == .fragment and program.interfaces.len == 5 and
@@ -2504,6 +2511,7 @@ pub const Executor = struct {
     /// interpreter before any performance conclusion is drawn.
     pub fn prevalidatedPathName(self: *const Executor) []const u8 {
         return switch (self.fast_path orelse return "interpreter") {
+            .fps_shadow_vertex => "fps_shadow_vertex",
             .three_pmrem_blur => "three_pmrem_blur",
             .three_pmrem_ggx => "three_pmrem_ggx",
             .fps_normal_filter_8tap => "fps_normal_filter_8tap",
@@ -3624,6 +3632,62 @@ pub const Executor = struct {
         try executeCircleMaskCoordinatesResolved(circle, color, output orelse return error.InvalidOutput);
     }
 
+    fn fpsShadowMatrixTimesVector(matrix: [16]f32, vector: [4]f32) [4]f32 {
+        var result: [4]f32 = undefined;
+        for (0..4) |row| {
+            var sum: f32 = 0;
+            for (0..4) |column| sum += matrix[column * 4 + row] * vector[column];
+            result[row] = canonicalF32(sum);
+        }
+        return result;
+    }
+
+    fn executeFpsShadowVertex(bindings: []const Binding, outputs: []const Output) Error!void {
+        const input = try readInputValue(.{ .scalar = .f32, .columns = 3 }, try findBindingRecord(bindings, 0));
+        const uniform = try findBinding(bindings, 3);
+        const push = try findBinding(bindings, 4);
+        if (uniform.len < 128 or push.len < 20) return error.Bounds;
+        var varying_output: ?[]u8 = null;
+        var position_output: ?[]u8 = null;
+        for (outputs) |output| switch (output.interface) {
+            1 => {
+                if (varying_output != null) return error.InvalidOutput;
+                varying_output = output.bytes;
+            },
+            2 => {
+                if (position_output != null) return error.InvalidOutput;
+                position_output = output.bytes;
+            },
+            else => {},
+        };
+        const varying = varying_output orelse return error.InvalidOutput;
+        const position = position_output orelse return error.InvalidOutput;
+        if (varying.len < 8 or position.len < 16) return error.InvalidOutput;
+        var model: [16]f32 = undefined;
+        var projection: [16]f32 = undefined;
+        for (0..16) |lane| {
+            model[lane] = try uniformF32(uniform, lane * 4);
+            projection[lane] = try uniformF32(uniform, 64 + lane * 4);
+        }
+        const source = [4]f32{ @bitCast(input.bits[0]), @bitCast(input.bits[1]), @bitCast(input.bits[2]), 1 };
+        const transformed = fpsShadowMatrixTimesVector(projection, fpsShadowMatrixTimesVector(model, source));
+        const flags = std.mem.readInt(u32, push[16..20], .little);
+        const packed_scale = std.mem.readInt(u32, push[12..16], .little);
+        const scale_x = canonicalF32(unpackNormalized((packed_scale >> 16) & 0xff, true, 8));
+        const scale_y = canonicalF32(unpackNormalized((packed_scale >> 24) & 0xff, true, 8));
+        const swapped = flags & 1 != 0;
+        const output_x = canonicalF32((if (swapped) transformed[1] else transformed[0]) * scale_x);
+        const output_y = canonicalF32((if (swapped) transformed[0] else transformed[1]) * scale_y);
+        const output_z = if (flags & (@as(u32, 1) << 20) != 0)
+            canonicalF32(canonicalF32(transformed[2] + transformed[3]) * 0.5)
+        else
+            transformed[2];
+        for ([_]f32{ transformed[2], transformed[3] }, 0..) |value, lane|
+            std.mem.writeInt(u32, varying[lane * 4 ..][0..4], canonicalFloat(@bitCast(value)), .little);
+        for ([_]f32{ output_x, output_y, output_z, transformed[3] }, 0..) |value, lane|
+            std.mem.writeInt(u32, position[lane * 4 ..][0..4], canonicalFloat(@bitCast(value)), .little);
+    }
+
     fn executeFpsNormalFilter8tap(variant: FpsNormalFilterVariant, bindings: []const Binding, outputs: []const Output) Error!void {
         const frag = try readInputValue(.{ .scalar = .f32, .columns = 4 }, try findBindingRecord(bindings, 0));
         const uniform = try findBinding(bindings, 2);
@@ -3683,6 +3747,7 @@ pub const Executor = struct {
 
     fn executeFastPath(fast_path: FastPath, bindings: []const Binding, outputs: []const Output) Error!void {
         switch (fast_path) {
+            .fps_shadow_vertex => try executeFpsShadowVertex(bindings, outputs),
             .three_pmrem_blur => try executeThreePmremBlur(bindings, outputs),
             .three_pmrem_ggx => try executeThreePmremGgx(bindings, outputs),
             .fps_normal_filter_8tap => |path| try executeFpsNormalFilter8tap(path, bindings, outputs),
@@ -5414,6 +5479,60 @@ fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
         .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask, .three_pmrem_ggx => true,
         else => false,
     };
+}
+
+test "captured Three.js FPS shadow vertex retains its interpreter identity" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_fps_shadow_vertex.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .vertex, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    const expected_digest = [_]u8{ 0x3f, 0xfa, 0xcd, 0xda, 0x06, 0xba, 0x78, 0x82, 0xa4, 0x2f, 0x1b, 0x8f, 0x57, 0x21, 0xec, 0x61, 0x6b, 0xdc, 0x07, 0xab, 0x3a, 0xaa, 0x2b, 0x0f, 0xb6, 0xfb, 0xfc, 0x14, 0xe4, 0x77, 0x1d, 0x1e };
+    try std.testing.expectEqualSlices(u8, &expected_digest, &program.identity.digest);
+    try std.testing.expectEqual(@as(usize, 87), program.instructions.len);
+    var fast = try Executor.init(std.testing.allocator, &program);
+    defer fast.deinit();
+    try std.testing.expectEqualStrings("fps_shadow_vertex", fast.prevalidatedPathName());
+    var reference = try Executor.init(std.testing.allocator, &program);
+    defer reference.deinit();
+    reference.fast_path = null;
+    var uniform = [_]u8{0} ** 128;
+    var push = [_]u8{0} ** 64;
+    const matrices = [_][16]f32{
+        .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+        .{ 0.75, 0.125, 0, 0, -0.25, 1.25, 0.125, 0, 0, 0.5, 0.875, 0, 0.25, -0.5, 0.125, 1 },
+    };
+    const positions = [_][3]f32{ .{ 0, 0, 0 }, .{ 0.25, -0.75, 1.5 }, .{ -2.25, 0.5, -0.125 } };
+    const flags = [_]u32{ 0, 1, 1 << 20, (1 << 20) | 1 };
+    const packed_scales = [_]u32{ 0x7f7f_0000, 0x8180_0000, 0x4000_0000, 0x0000_0000 };
+    for (matrices, 0..) |model, matrix_case| {
+        const projection = matrices[(matrix_case + 1) % matrices.len];
+        for (model, 0..) |value, lane| std.mem.writeInt(u32, uniform[lane * 4 ..][0..4], @bitCast(value), .little);
+        for (projection, 0..) |value, lane| std.mem.writeInt(u32, uniform[64 + lane * 4 ..][0..4], @bitCast(value), .little);
+        for (flags) |flag| {
+            std.mem.writeInt(u32, push[16..20], flag, .little);
+            for (packed_scales) |packed_scale| {
+                std.mem.writeInt(u32, push[12..16], packed_scale, .little);
+                for (positions) |point| {
+                    var input: [12]u8 = undefined;
+                    for (point, 0..) |value, lane| std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(value), .little);
+                    const bindings = [_]Binding{
+                        .{ .interface = 0, .bytes = &input },
+                        .{ .interface = 3, .bytes = &uniform },
+                        .{ .interface = 4, .bytes = &push },
+                    };
+                    var fast_varying = [_]u8{0} ** 8;
+                    var fast_position = [_]u8{0} ** 16;
+                    var reference_varying = [_]u8{0} ** 8;
+                    var reference_position = [_]u8{0} ** 16;
+                    const fast_outputs = [_]Output{ .{ .interface = 1, .bytes = &fast_varying }, .{ .interface = 2, .bytes = &fast_position } };
+                    const reference_outputs = [_]Output{ .{ .interface = 1, .bytes = &reference_varying }, .{ .interface = 2, .bytes = &reference_position } };
+                    try std.testing.expect(try fast.executePrevalidated(&bindings, &fast_outputs));
+                    try reference.execute(&bindings, &reference_outputs);
+                    try std.testing.expectEqualSlices(u8, &reference_varying, &fast_varying);
+                    try std.testing.expectEqualSlices(u8, &reference_position, &fast_position);
+                }
+            }
+        }
+    }
 }
 
 test "captured Three.js FPS normal filters retain their exact interpreter identities" {

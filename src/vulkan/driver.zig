@@ -12282,7 +12282,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
     const profile_ir_primary_tile = if (mosaic_clip) |clip| clip.min_x == 0 and clip.min_y == 0 else true;
-    const profile_ir_sequence = if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile) render_diagnostic_profile_ir.fetchAdd(1, .monotonic) else 512;
+    const profile_ir_diagnostics_enabled = profileIrDiagnosticsEnabled();
+    const selected_profile_ir = profile_ir_diagnostics_enabled and std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR_DIGEST") != null;
+    const profile_ir_sequence = if (profile_ir_diagnostics_enabled and !selected_profile_ir and profile_ir_primary_tile) render_diagnostic_profile_ir.fetchAdd(1, .monotonic) else 512;
     // Keep the hot-profile discovery window broad enough to reach animated
     // video frames. Full instruction dumps are deliberately limited because
     // they perturb the workload; compact canonical identities make every
@@ -12304,28 +12306,16 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             );
             std.debug.print("ZPU VP9 composite canonical IR end\n", .{});
         }
-        if (profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
-            std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
-            for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
-                "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
-                .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
-            );
-            for (profile.fragment.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
-                "ZPU selected profile member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
-                .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
-            );
-            for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
-                "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
-                .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
-            );
-            std.debug.print("ZPU selected profile canonical IR end\n", .{});
-        }
     }
     // A selected identity is an explicit diagnostic request, not part of the
     // bounded discovery sample. Keep its one full dump available after noisy
     // Chromium startup has consumed that sample, otherwise a late hot shader
     // cannot be turned into a precise regression candidate.
-    if (profileIrDiagnosticsEnabled() and profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+    if (selected_profile_ir and profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+        std.debug.print("ZPU selected profile draw target={d}x{d} topology={d} vertices={d} indexed={} vertex_path={s} vertex_ir={x} vertex_instructions={}\n", .{
+            target.width,                          target.height,                          op.primitive_topology,                   op.vertex_count, op.indexed != null,
+            profile.vertex.prevalidatedPathName(), profile.vertex.program.identity.digest, profile.vertex.program.instructions.len,
+        });
         std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
         for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
             "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
@@ -12340,6 +12330,20 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
         std.debug.print("ZPU selected profile canonical IR end\n", .{});
+        std.debug.print("ZPU selected vertex canonical IR begin digest={x}\n", .{profile.vertex.program.identity.digest});
+        for (profile.vertex.program.interfaces, 0..) |interface, index| std.debug.print(
+            "ZPU selected vertex interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
+            .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
+        );
+        for (profile.vertex.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
+            "ZPU selected vertex member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
+            .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
+        );
+        for (profile.vertex.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU selected vertex IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+        std.debug.print("ZPU selected vertex canonical IR end\n", .{});
     }
     if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
@@ -13040,7 +13044,14 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 vertex_bindings[binding_count] = uniform;
                 binding_count += 1;
             }
-            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
+            const vertex_fast = profile.vertex.executePrevalidated(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
+                if (render_diagnostics_enabled) std.debug.print(
+                    "ZPU render vertex fast execution failed err={s} inputs={} outputs={} vertex={d} triangle={d}\n",
+                    .{ @errorName(err), profile.input_count, profile.vertex_output_count, corner, triangle_index },
+                );
+                return;
+            };
+            if (!vertex_fast) profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
                 if (render_diagnostics_enabled) std.debug.print(
                     "ZPU render vertex execution failed err={s} inputs={} outputs={} vertex={d} triangle={d}\n",
                     .{ @errorName(err), profile.input_count, profile.vertex_output_count, corner, triangle_index },
@@ -16813,10 +16824,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
         if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
-            if (frontend_stage == .fragment and profileShaderCaptureEnabled() and profileShaderCaptureCandidate(&program) and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
+            const exact_shader_capture = std.c.getenv("ZPU_DIAGNOSE_PROFILE_SHADER_IR_DIGEST") != null;
+            if ((frontend_stage == .fragment or exact_shader_capture) and profileShaderCaptureEnabled() and profileShaderCaptureCandidate(&program) and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
                 std.debug.print(
-                    "ZPU profile shader capture spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
-                    .{ shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
+                    "ZPU profile shader capture stage={s} spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
+                    .{ @tagName(frontend_stage), shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
                 );
             }
             if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
