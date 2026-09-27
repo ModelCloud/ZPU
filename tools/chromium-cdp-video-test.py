@@ -687,7 +687,7 @@ def main() -> None:
                     # measured interval.  Keep the DevTools bound larger than all
                     # three phases so a slow real-site load is reported as
                     # telemetry, not mistaken for a transport failure.
-                    timeout=args.duration + args.warmup + 85,
+                    timeout=args.duration + args.warmup + 180,
                 )
             finally:
                 if pointer_sweep is not None:
