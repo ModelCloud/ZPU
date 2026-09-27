@@ -539,7 +539,7 @@ def main() -> None:
         # execution context. Starting the long measurement during that swap
         # makes CDP cancel it with "Inspected target navigated or closed".
         navigation_deadline = time.monotonic() + 60
-        destination_host = urllib.parse.urlsplit(args.page_url).hostname
+        destination = urllib.parse.urlsplit(args.page_url)
         while True:
             try:
                 document = devtools.call(
@@ -550,8 +550,14 @@ def main() -> None:
                     },
                     session_id,
                 )["result"].get("value", {})
-                loaded_host = urllib.parse.urlsplit(document.get("url", "")).hostname
-                if loaded_host == destination_host and document.get("ready") == "complete":
+                loaded_url = document.get("url", "")
+                loaded = urllib.parse.urlsplit(loaded_url)
+                if (
+                    loaded_url != "about:blank"
+                    and loaded.scheme == destination.scheme
+                    and loaded.hostname == destination.hostname
+                    and document.get("ready") == "complete"
+                ):
                     break
             except RuntimeError as error:
                 if "Inspected target navigated or closed" not in str(error) and "Cannot find context" not in str(error):
