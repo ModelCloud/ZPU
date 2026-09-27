@@ -12702,6 +12702,24 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         };
         fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
     }
+    const fragment_static_binding_start = profile.varying_count + fragment_uniform_count +
+        @intFromBool(profile.fragment_frag_coord != null) + @intFromBool(profile.fragment_front_facing != null);
+    const fragment_binding_total = fragment_static_binding_start + profile.fragment_sampled_image_count +
+        profile.fragment_sampler_count + profile.fragment_input_attachment_count;
+    if (fragment_binding_total > fragment_bindings.len) return;
+    var static_binding_index = fragment_static_binding_start;
+    for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+        fragment_bindings[static_binding_index] = binding;
+        static_binding_index += 1;
+    }
+    for (fragment_sampler_bindings[0..profile.fragment_sampler_count]) |binding| {
+        fragment_bindings[static_binding_index] = binding;
+        static_binding_index += 1;
+    }
+    for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+        fragment_bindings[static_binding_index] = binding;
+        static_binding_index += 1;
+    }
     var fragment_output_bytes: [16]u8 = undefined;
     var fragment_output_scratch: [8][16]u8 = undefined;
     var fragment_outputs: [8]render_ir_exec.Output = undefined;
@@ -13480,21 +13498,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                             fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
                             fragment_binding_count += 1;
                         }
-                        for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
-                            if (fragment_binding_count == fragment_bindings.len) return;
-                            fragment_bindings[fragment_binding_count] = binding;
-                            fragment_binding_count += 1;
-                        }
-                        for (fragment_sampler_bindings[0..profile.fragment_sampler_count]) |binding| {
-                            if (fragment_binding_count == fragment_bindings.len) return;
-                            fragment_bindings[fragment_binding_count] = binding;
-                            fragment_binding_count += 1;
-                        }
-                        for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
-                            if (fragment_binding_count == fragment_bindings.len) return;
-                            fragment_bindings[fragment_binding_count] = binding;
-                            fragment_binding_count += 1;
-                        }
+                        fragment_binding_count = fragment_binding_total;
                         const fragment_fast = direct: {
                             if (texture_copy_plan != null) {
                                 const coordinate_varying = texture_copy_coordinate_varying orelse break :direct false;
