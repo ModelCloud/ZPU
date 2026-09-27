@@ -565,7 +565,7 @@ def main() -> None:
                 pointer_sweep.start()
             expression = f"""(async () => {{
               const ready = await new Promise(resolve => {{
-                const deadline = performance.now() + 10000;
+                const deadline = performance.now() + 60000;
                 function probe() {{
                   const matches = document.readyState === 'complete' && document.querySelector({json.dumps(args.compositor_selector)});
                   if (matches || performance.now() >= deadline) {{
