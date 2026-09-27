@@ -4011,17 +4011,17 @@ pub const Executor = struct {
             switch (instruction.op) {
                 .local => {
                     if (instruction.operands.len == 1) {
-                        const initial_value = try valueRef(self.values, pc, instruction.operands[0]);
+                        const initial_value = try valueRefPtr(self.values, pc, instruction.operands[0]);
                         if (!same(initial_value.ty, instruction.ty)) return error.InvalidType;
-                        self.locals[pc] = initial_value;
+                        self.locals[pc] = initial_value.*;
                     } else {
                         self.locals[pc] = result;
                     }
                     result.bits[0] = @intCast(pc);
                 },
                 .local_access => {
-                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
-                    const selector = try valueRef(self.values, pc, instruction.operands[1]);
+                    const pointer = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const selector = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     if (selector.bits[0] >= pointer.ty.columns) return error.Bounds;
                     const prior_offset: usize = if (pointer.bits[1] == 0) 0 else pointer.bits[1] - 1;
                     const element_width: usize = if (pointer.ty.rows == 1) 1 else pointer.ty.rows;
@@ -4031,7 +4031,7 @@ pub const Executor = struct {
                     result.bits[1] = @intCast(offset + 1);
                 },
                 .local_load => {
-                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
+                    const pointer = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (pointer.bits[0] >= self.locals.len) return error.Bounds;
                     const source = &self.locals[pointer.bits[0]];
                     if (pointer.bits[1] == 0) {
@@ -4051,7 +4051,7 @@ pub const Executor = struct {
                     }
                 },
                 .local_store => {
-                    const pointer = try valueRef(self.values, pc, instruction.operands[0]);
+                    const pointer = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const source = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     if (pointer.bits[0] >= self.locals.len) return error.Bounds;
                     if (pointer.bits[1] == 0) {
@@ -5372,6 +5372,25 @@ test "captured Three.js PMREM GGX matches interpreter for copy and convolution b
             try std.testing.expectApproxEqAbs(expected, actual, 0.005);
         }
     };
+}
+
+test "captured Three.js instancing material retains its validated interpreter profile" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_instancing_material_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2246), program.instructions.len);
+    try std.testing.expectEqual(@as(usize, 10), program.interfaces.len);
+    var loads: usize = 0;
+    var stores: usize = 0;
+    for (program.instructions) |instruction| {
+        if (instruction.op == .local_load) loads += 1;
+        if (instruction.op == .local_store) stores += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 482), loads);
+    try std.testing.expectEqual(@as(usize, 259), stores);
+    var executor = try Executor.init(std.testing.allocator, &program);
+    defer executor.deinit();
+    try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
 }
 
 test "only stateless exact profiles are tile parallel safe" {
