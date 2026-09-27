@@ -847,6 +847,15 @@ fn sampleCube(image: SampledImage, direction: Value, bias: Value) Error!Value {
     return result;
 }
 
+// The captured Three.js clearcoat skybox has one cube lookup and never reads
+// derivatives of its result. With a single mip level, derivatives cannot
+// affect the selected texels. Keep the normal cube path for all other shaders
+// and for images with mipmaps.
+fn sampleCubeSingleMipColor(image: SampledImage, direction: Value, bias: Value) Error!Value {
+    const mapped = try cubeDirectionCoordinates(direction);
+    return sample(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), bias);
+}
+
 fn sampleCubeExplicitLod(image: SampledImage, direction: Value, lod: Value, sampler: Sampler) Error!Value {
     const mapped = try cubeDirectionCoordinates(direction);
     return sampleExplicitLod(try cubeFaceImage(image, mapped.face), cubeUvValue(mapped), lod, sampler);
@@ -2450,6 +2459,7 @@ pub const Executor = struct {
     output_scratch: []u8,
     branch_targets: ?[]BranchTargets,
     fast_path: ?FastPath,
+    clearcoat_skybox_single_mip: bool,
     jit_candidate: ?JitCandidate,
 
     pub fn init(allocator: std.mem.Allocator, source: *const ir.Program) Error!Executor {
@@ -2493,6 +2503,9 @@ pub const Executor = struct {
             .output_scratch = scratch,
             .branch_targets = branch_targets,
             .fast_path = detectFastPath(&program),
+            .clearcoat_skybox_single_mip = program.stage == .fragment and
+                program.instructions.len == 186 and
+                std.mem.eql(u8, &program.identity.digest, &[_]u8{ 0xad, 0x5c, 0xcf, 0x4b, 0x32, 0x77, 0x48, 0x07, 0xcc, 0x14, 0x61, 0x30, 0xeb, 0x64, 0x80, 0x73, 0xea, 0xe2, 0xf9, 0x60, 0x08, 0x72, 0xef, 0xc1, 0xe4, 0x02, 0x45, 0x35, 0x20, 0x6f, 0xdc, 0xba }),
             .jit_candidate = detectJitCandidate(&program),
         };
     }
@@ -4331,11 +4344,15 @@ pub const Executor = struct {
                     try valueRef(self.values, pc, instruction.operands[2]),
                     (try explicitSampleSampler(bindings, instruction.operands)).sampler,
                 ),
-                .image_cube_sample_implicit_lod => result = try sampleCube(
-                    try findSampledImage(bindings, instruction.operands[0]),
-                    try valueRef(self.values, pc, instruction.operands[1]),
-                    try valueRef(self.values, pc, instruction.operands[2]),
-                ),
+                .image_cube_sample_implicit_lod => {
+                    const image = try findSampledImage(bindings, instruction.operands[0]);
+                    const direction = try valueRef(self.values, pc, instruction.operands[1]);
+                    const bias = try valueRef(self.values, pc, instruction.operands[2]);
+                    result = if (self.clearcoat_skybox_single_mip and image.mip_count == 1)
+                        try sampleCubeSingleMipColor(image, direction, bias)
+                    else
+                        try sampleCube(image, direction, bias);
+                },
                 .image_cube_sample_explicit_lod => result = try sampleCubeExplicitLod(
                     (try explicitSampleSampler(bindings, instruction.operands)).image,
                     try valueRef(self.values, pc, instruction.operands[1]),
@@ -5486,6 +5503,42 @@ fn fastPathTileParallelSafe(fast_path: ?FastPath) bool {
         .sample_modulate, .texture_copy, .sample_coverage, .radial_mask, .passthrough, .constant_black, .analytic_coverage, .circle_mask, .three_pmrem_ggx, .fps_normal_filter_8tap => true,
         else => false,
     };
+}
+
+test "captured Three.js clearcoat skybox single-mip cube matches interpreter" {
+    const shader_bytes align(4) = @embedFile("fixtures/threejs_clearcoat_skybox_fragment.spv").*;
+    var program = try frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &shader_bytes), .fragment, "main", &.{});
+    defer program.deinit(std.testing.allocator);
+    var fast = try Executor.init(std.testing.allocator, &program);
+    defer fast.deinit();
+    var reference = try Executor.init(std.testing.allocator, &program);
+    defer reference.deinit();
+    try std.testing.expect(fast.clearcoat_skybox_single_mip);
+    reference.clearcoat_skybox_single_mip = false;
+    var pixels: [6 * 8 * 8 * 4]u8 = undefined;
+    for (&pixels, 0..) |*channel, index| channel.* = @intCast((index * 61 + index / 7 * 23) % 256);
+    const image = SampledImage{ .pixels = &pixels, .width = 8, .height = 8, .row_stride = 32, .cube = true, .cube_face_stride = 8 * 8 * 4, .format = .rgba8_unorm, .filter = .linear, .address_u = .clamp_to_edge, .address_v = .clamp_to_edge };
+    var uniform = [_]u8{0} ** 64;
+    std.mem.writeInt(u32, uniform[0..4], @bitCast(@as(f32, 1)), .little);
+    std.mem.writeInt(u32, uniform[4..8], @bitCast(@as(f32, 1)), .little);
+    for (0..3) |column| std.mem.writeInt(u32, uniform[16 + column * 16 + column * 4 ..][0..4], @bitCast(@as(f32, 1)), .little);
+    const directions = [_][3]f32{ .{ 1, 0.3, 0.4 }, .{ -1, 0.2, -0.7 }, .{ 0.2, 1, 0.5 }, .{ -0.3, -1, 0.8 }, .{ 0.4, 0.2, 1 }, .{ -0.7, 0.3, -1 } };
+    for (directions) |direction| {
+        var input: [12]u8 = undefined;
+        var dx: [12]u8 = undefined;
+        var dy: [12]u8 = undefined;
+        for (direction, 0..) |component, lane| {
+            std.mem.writeInt(u32, input[lane * 4 ..][0..4], @bitCast(component), .little);
+            std.mem.writeInt(u32, dx[lane * 4 ..][0..4], @bitCast(@as(f32, 0.04)), .little);
+            std.mem.writeInt(u32, dy[lane * 4 ..][0..4], @bitCast(@as(f32, -0.03)), .little);
+        }
+        const bindings = [_]Binding{ .{ .interface = 0, .bytes = &input, .dpdx_bytes = &dx, .dpdy_bytes = &dy }, .{ .interface = 2, .bytes = &uniform }, .{ .interface = 4, .sampled_image = image } };
+        var actual: [16]u8 = undefined;
+        var expected: [16]u8 = undefined;
+        try fast.execute(&bindings, &.{.{ .interface = 1, .bytes = &actual }});
+        try reference.execute(&bindings, &.{.{ .interface = 1, .bytes = &expected }});
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
 }
 
 test "captured Three.js FPS shadow vertex retains its interpreter identity" {
