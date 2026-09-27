@@ -11167,9 +11167,24 @@ fn profileClipPlaneDistance(clip: [4]f32, plane: usize) f32 {
 /// Clip a triangle in homogeneous Vulkan clip space while carrying smooth
 /// vertex outputs to the generated polygon. Raster interpolation then sees
 /// only positive-W vertices and cannot cross the eye-plane singularity.
-fn profileClipTriangle(input: [3]ProfileClipVertex, varyings: []const ProfileVarying) ProfileClippedPolygon {
+fn profileClipTriangle(input: *const [3]ProfileClipVertex, varyings: []const ProfileVarying) ProfileClippedPolygon {
+    var fully_inside = true;
+    for (input) |vertex| {
+        for (0..7) |plane| {
+            if (!(profileClipPlaneDistance(vertex.clip, plane) >= 0)) {
+                fully_inside = false;
+                break;
+            }
+        }
+        if (!fully_inside) break;
+    }
+    if (fully_inside) {
+        var accepted = ProfileClippedPolygon{ .count = 3 };
+        @memcpy(accepted.vertices[0..3], input);
+        return accepted;
+    }
     var source: [12]ProfileClipVertex = undefined;
-    @memcpy(source[0..3], &input);
+    @memcpy(source[0..3], input);
     var source_count: usize = 3;
     for (0..7) |plane| {
         if (source_count == 0) break;
@@ -11221,10 +11236,28 @@ test "scalar triangle clipping keeps vertices inside Vulkan clip space" {
         .{ .clip = .{ 0, 1, 0.5, 1 }, .varyings = undefined },
         .{ .clip = .{ 0, -1, 0.5, 1 }, .varyings = undefined },
     };
-    const polygon = profileClipTriangle(triangle, &.{});
+    const polygon = profileClipTriangle(&triangle, &.{});
     try std.testing.expectEqual(@as(u8, 4), polygon.count);
     for (polygon.vertices[0..polygon.count]) |vertex| {
         for (0..7) |plane| try std.testing.expect(profileClipPlaneDistance(vertex.clip, plane) >= -0.000001);
+    }
+}
+
+test "scalar triangle clipping preserves an already contained triangle" {
+    var triangle = [3]ProfileClipVertex{
+        .{ .clip = .{ -0.5, 0.25, 0.5, 1 }, .varyings = undefined },
+        .{ .clip = .{ 0.5, -0.25, 0.75, 1 }, .varyings = undefined },
+        .{ .clip = .{ 0, 0.5, 0.25, 1 }, .varyings = undefined },
+    };
+    for (&triangle, 0..) |*vertex, index| {
+        @memset(&vertex.varyings[0], @intCast(index + 1));
+    }
+    const varying = [_]ProfileVarying{.{ .vertex_interface = 0, .fragment_interface = 0, .vertex_slot = 0, .lanes = 4 }};
+    const polygon = profileClipTriangle(&triangle, &varying);
+    try std.testing.expectEqual(@as(u8, 3), polygon.count);
+    for (triangle, 0..) |vertex, index| {
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&vertex.clip), std.mem.asBytes(&polygon.vertices[index].clip));
+        try std.testing.expectEqualSlices(u8, &vertex.varyings[0], &polygon.vertices[index].varyings[0]);
     }
 }
 
@@ -13160,7 +13193,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 @memcpy(clip_input[corner].varyings[varying_index][0 .. varying.lanes * 4], clip_input[provoking_corner].varyings[varying_index][0 .. varying.lanes * 4]);
             };
         };
-        const clipped_polygon = profileClipTriangle(clip_input, profile.varyings[0..profile.varying_count]);
+        const clipped_polygon = profileClipTriangle(&clip_input, profile.varyings[0..profile.varying_count]);
         if (clipped_polygon.count < 3) continue;
         for (0..clipped_polygon.count - 2) |fan_triangle| {
             const polygon_indices = [3]usize{ 0, fan_triangle + 1, fan_triangle + 2 };
