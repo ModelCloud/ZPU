@@ -14276,6 +14276,44 @@ fn profileMosaicFpsSceneBandSafe(start: MosaicCommandCursor, color: *ImageObj, q
     return true;
 }
 
+/// The official Three.js clearcoat page submits these five material draws
+/// against one color/depth pair. The scalar programs have no external writes;
+/// retain draw order inside each disjoint band for depth and blending.
+fn profileMosaicThreeClearcoatBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (query_context.pool != null or @as(u64, color.width) * color.height < 256 * 144) return false;
+    const fragment_ids = comptime blk: {
+        var ids: [5][32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&ids[0], "ad5ccf4b32774807cc146130eb648073eae2f9600872efc1e4024535206fdcba") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[1], "f9b6c68f1e80f856a27f086dd39dc4e3458724028cc3475d598046a7cea222f1") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[2], "a933234db963e33726f4271e0a35175832e5b233efd8ed50fa3308058f478858") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[3], "bb22e53a42506ffe793c2ee5b4959920deef3f29e7dd7fe703939dec45176dd9") catch unreachable;
+        ids[4] = ids[3];
+        break :blk ids;
+    };
+    var cursor = start;
+    for (fragment_ids) |identity| {
+        const raw = cursor.current() orelse return false;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => return false,
+        };
+        if (!profileMosaicEligible(op) or op.instance_count != 1 or op.stencil.test_enable != 0) return false;
+        const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+        const depth_image = depth orelse return false;
+        if (depth_image.width != color.width or depth_image.height != color.height or !isDepthFormat(depth_image.format)) return false;
+        const profile = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*value| value,
+            else => return false,
+        };
+        if (!std.mem.eql(u8, &profile.fragment.program.identity.digest, &identity) or profile.fragment_input_attachment_count != 0) return false;
+        if (op.descriptors.texture == color or op.descriptors.texture == depth_image) return false;
+        for (op.descriptors.sampled_images) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        cursor.advance();
+    }
+    return true;
+}
+
 const ProfileMosaicLaneContext = struct {
     start: MosaicCommandCursor,
     batch_count: usize,
@@ -14357,7 +14395,8 @@ const ProfileMosaicBandContext = struct {
 fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
     if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context) and
         !(batch_count == 1 and profileMosaicSingleFpsNormalBandSafe(start, color, query_context)) and
-        !(batch_count == 2 and profileMosaicFpsSceneBandSafe(start, color, query_context))) return false;
+        !(batch_count == 2 and profileMosaicFpsSceneBandSafe(start, color, query_context)) and
+        !(batch_count == 5 and profileMosaicThreeClearcoatBandSafe(start, color, query_context))) return false;
     var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
     if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
