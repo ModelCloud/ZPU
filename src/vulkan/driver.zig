@@ -14238,6 +14238,44 @@ fn profileMosaicSingleFpsNormalBandSafe(start: MosaicCommandCursor, color: *Imag
     return true;
 }
 
+/// The captured FPS scene submits a 2160-vertex draw followed by its
+/// 5262-vertex terrain draw. Both programs are pure scalar fragments; their
+/// derivatives come from triangle interpolation, and neither samples the
+/// current color or depth attachment. Keep both draws in order within each
+/// disjoint band so depth and blending have the same per-pixel history.
+fn profileMosaicFpsSceneBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (query_context.pool != null) return false;
+    const fragment_ids = comptime blk: {
+        var ids: [2][32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&ids[0], "f1170eee045c2c7712dc9b5721bc35395dc6045e3b8e3d9a7cda4f75ef79164b") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[1], "68bee099e8c05ccb87d4544deae5f9a08e6b90cae6cd81e570ed6135f5bc97f9") catch unreachable;
+        break :blk ids;
+    };
+    var cursor = start;
+    for (fragment_ids) |identity| {
+        const raw = cursor.current() orelse return false;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => return false,
+        };
+        if (!profileMosaicEligible(op) or op.instance_count != 1 or op.stencil.test_enable != 0 or
+            op.depth_test_enable == 0 or op.depth_write_enable == 0) return false;
+        const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+        const depth_image = depth orelse return false;
+        if (depth_image.width != color.width or depth_image.height != color.height or !isDepthFormat(depth_image.format)) return false;
+        const profile = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*value| value,
+            else => return false,
+        };
+        if (!std.mem.eql(u8, &profile.fragment.program.identity.digest, &identity) or profile.fragment_input_attachment_count != 0) return false;
+        if (op.descriptors.texture == color or op.descriptors.texture == depth_image) return false;
+        for (op.descriptors.sampled_images) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        cursor.advance();
+    }
+    return true;
+}
+
 const ProfileMosaicLaneContext = struct {
     start: MosaicCommandCursor,
     batch_count: usize,
@@ -14318,7 +14356,8 @@ const ProfileMosaicBandContext = struct {
 /// state shared across pixels, so bands preserve exact per-pixel draw order.
 fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
     if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context) and
-        !(batch_count == 1 and profileMosaicSingleFpsNormalBandSafe(start, color, query_context))) return false;
+        !(batch_count == 1 and profileMosaicSingleFpsNormalBandSafe(start, color, query_context)) and
+        !(batch_count == 2 and profileMosaicFpsSceneBandSafe(start, color, query_context))) return false;
     var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
     if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
@@ -14326,13 +14365,16 @@ fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count
     color.complex_3d_content = true;
     color.force_full_present = true;
     var cursor = start;
-    if (cursor.current()) |raw| switch (raw.*) {
-        .cube_draw => |op| {
-            const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
-            if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, full_target);
-        },
-        else => {},
-    };
+    for (0..batch_count) |_| {
+        if (cursor.current()) |raw| switch (raw.*) {
+            .cube_draw => |op| {
+                const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+                if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, full_target);
+            },
+            else => {},
+        };
+        cursor.advance();
+    }
     return true;
 }
 
