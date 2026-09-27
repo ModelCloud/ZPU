@@ -17468,14 +17468,14 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
 fn frontendSampledImagesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, layout: *const PipelineLayoutObj) bool {
     for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| {
         if (interface.storage != .sampled_image and interface.storage != .image and interface.storage != .sampler) continue;
-        const descriptor_set: u32 = if (interface.storage == .sampled_image) 1 else 0;
+        const descriptor_set: u32 = interface.descriptor_set orelse return false;
         const descriptor_type: i32 = switch (interface.storage) {
             .sampled_image => 1,
             .image => 2,
             .sampler => 0,
             else => unreachable,
         };
-        if (program.stage != .fragment or interface.descriptor_set != descriptor_set or interface.binding == null or (descriptor_set == 1 and layout.set_count < 2)) return false;
+        if (program.stage != .fragment or descriptor_set > 1 or (interface.storage != .sampled_image and descriptor_set != 0) or interface.binding == null or (descriptor_set == 1 and layout.set_count < 2)) return false;
         const set_layout = if (descriptor_set == 0) layout.set0 else layout.set1;
         if (set_layout.bytes.len < 36) return false;
         const count = std.mem.readInt(u32, set_layout.bytes[32..36], .little);
@@ -17576,9 +17576,9 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.fragment_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
         .sampled_image => {
-            if (interface.descriptor_set != 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
-            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == 1 and prior.binding == interface.binding.?) return null;
-            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 1, .sampler_required = true, .cube = profileImageUsesCube(fragment, @intCast(index)) };
+            if (interface.descriptor_set == null or interface.descriptor_set.? > 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
+            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == interface.descriptor_set.? and prior.binding == interface.binding.?) return null;
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = @intCast(interface.descriptor_set.?), .sampler_required = true, .cube = profileImageUsesCube(fragment, @intCast(index)) };
             result.fragment_sampled_image_count += 1;
         },
         .image => {
@@ -21324,6 +21324,7 @@ test "scalar graphics profile admits bounded sampled bindings and aliases" {
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 1 },
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 2 },
         .{ .storage = .image, .ty = vec4, .descriptor_set = 0, .binding = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 0, .binding = 1 },
         .{ .storage = .output, .ty = vec4, .location = 0 },
     };
     const name = [_]u8{ 'm', 'a', 'i', 'n' };
@@ -21335,10 +21336,12 @@ test "scalar graphics profile admits bounded sampled bindings and aliases" {
     const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
     const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
     try std.testing.expectEqual(@as(u8, 2), contract.varying_count);
-    try std.testing.expectEqual(@as(u8, 4), contract.fragment_sampled_image_count);
+    try std.testing.expectEqual(@as(u8, 5), contract.fragment_sampled_image_count);
     try std.testing.expectEqual(@as(u32, 2), contract.fragment_sampled_images[2].binding);
     try std.testing.expectEqual(@as(u8, 0), contract.fragment_sampled_images[3].descriptor_set);
     try std.testing.expect(!contract.fragment_sampled_images[3].sampler_required);
+    try std.testing.expectEqual(@as(u8, 0), contract.fragment_sampled_images[4].descriptor_set);
+    try std.testing.expect(contract.fragment_sampled_images[4].sampler_required);
 }
 
 test "scalar graphics profile decodes normalized vertex inputs" {

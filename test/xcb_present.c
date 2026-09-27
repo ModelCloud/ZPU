@@ -56,6 +56,32 @@ static int allocate_image(VkDevice device, VkPhysicalDevice physical, VkFormat f
     return 0;
 }
 
+static size_t spirv_entry_module_size(const uint8_t *bytes, size_t length, size_t offset) {
+    if (offset > length || length - offset < 20) return 0;
+    uint32_t entry = 0, function = 0;
+    size_t module_end = 0, functions = 0, ended = 0;
+    int entry_ended = 0;
+    for (size_t at = offset + 20; at <= length - 4;) {
+        uint32_t header;
+        memcpy(&header, bytes + at, sizeof(header));
+        size_t count = header >> 16;
+        uint32_t opcode = header & 0xffff;
+        if (count == 0 || count > (length - at) / 4) break;
+        if (opcode == 15 && count >= 3) memcpy(&entry, bytes + at + 8, sizeof(entry));
+        if (opcode == 54 && count >= 3) {
+            memcpy(&function, bytes + at + 8, sizeof(function));
+            functions++;
+        }
+        at += count * 4;
+        if (opcode == 56) {
+            ended++;
+            if (entry != 0 && function == entry) entry_ended = 1;
+            module_end = at - offset;
+        }
+    }
+    return entry_ended && functions == ended ? module_end : 0;
+}
+
 static int load_vkcube_shaders(uint32_t **vertex, size_t *vertex_size, uint32_t **fragment, size_t *fragment_size) {
     FILE *file = fopen("/usr/bin/vkcube", "rb");
     CHECK_TRUE(file != NULL && fseek(file, 0, SEEK_END) == 0);
@@ -67,9 +93,10 @@ static int load_vkcube_shaders(uint32_t **vertex, size_t *vertex_size, uint32_t 
     const uint8_t magic[4] = { 3, 2, 35, 7 };
     size_t offsets[2] = { 0, 0 }, found = 0;
     for (size_t i = 0; i + 4 <= (size_t)length && found < 2; ++i) if (memcmp(bytes + i, magic, 4) == 0) offsets[found++] = i;
-    CHECK_TRUE(found == 2 && offsets[0] + 390 * 4 <= (size_t)length && offsets[1] + 320 * 4 <= (size_t)length);
-    *vertex_size = 390 * 4;
-    *fragment_size = 320 * 4;
+    CHECK_TRUE(found == 2);
+    *vertex_size = spirv_entry_module_size(bytes, (size_t)length, offsets[0]);
+    *fragment_size = spirv_entry_module_size(bytes, (size_t)length, offsets[1]);
+    CHECK_TRUE(*vertex_size != 0 && *fragment_size != 0);
     *vertex = malloc(*vertex_size);
     *fragment = malloc(*fragment_size);
     CHECK_TRUE(*vertex != NULL && *fragment != NULL);
@@ -234,18 +261,25 @@ int main(void) {
 
     VkBuffer uniform_buffer, index_buffer, indirect_buffer;
     VkDeviceMemory uniform_memory, index_memory, indirect_memory;
-    CHECK_VK(allocate_buffer(device, physical, 160, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &uniform_buffer, &uniform_memory));
+    // The distro vkcube vertex module declares two 36-element vec4 arrays
+    // after its matrix. Keep the descriptor range large enough for both.
+    CHECK_VK(allocate_buffer(device, physical, 1216, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &uniform_buffer, &uniform_memory));
     CHECK_VK(allocate_buffer(device, physical, 8, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &index_buffer, &index_memory));
     CHECK_VK(allocate_buffer(device, physical, 40, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, &indirect_buffer, &indirect_memory));
     float *uniform;
     CHECK_VK(vkMapMemory(device, uniform_memory, 0, VK_WHOLE_SIZE, 0, (void **)&uniform));
-    memset(uniform, 0, 160);
+    memset(uniform, 0, 1216);
     uniform[0] = uniform[5] = uniform[10] = uniform[15] = 1.0f;
     const float vertices[24] = {
         -0.8f, -0.8f, 0.2f, 1.0f, 0.8f, -0.8f, 0.2f, 1.0f, 0.0f, 0.8f, 0.2f, 1.0f,
         0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f, 1.0f, 0.0f, 0.0f,
     };
     memcpy(uniform + 16, vertices, sizeof(vertices));
+    for (size_t i = 0; i < 36; ++i) {
+        uniform[160 + i * 4] = 0.5f;
+        uniform[160 + i * 4 + 1] = 0.5f;
+        uniform[160 + i * 4 + 3] = 1.0f;
+    }
     vkUnmapMemory(device, uniform_memory);
     uint16_t *indices;
     CHECK_VK(vkMapMemory(device, index_memory, 0, VK_WHOLE_SIZE, 0, (void **)&indices));
@@ -287,7 +321,7 @@ int main(void) {
     VkDescriptorSetAllocateInfo descriptor_allocate = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = descriptor_pool, .descriptorSetCount = 1, .pSetLayouts = &descriptor_layout };
     VkDescriptorSet descriptor_set;
     CHECK_VK(vkAllocateDescriptorSets(device, &descriptor_allocate, &descriptor_set));
-    VkDescriptorBufferInfo descriptor_buffer = { uniform_buffer, 0, 160 };
+    VkDescriptorBufferInfo descriptor_buffer = { uniform_buffer, 0, 1216 };
     VkDescriptorImageInfo descriptor_image = { sampler, texture_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     const VkWriteDescriptorSet descriptor_writes[2] = {
         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = descriptor_set, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &descriptor_buffer },
