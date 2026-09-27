@@ -63,6 +63,10 @@ fn derivativeMask(value: Value) u16 {
     const full = fullDerivativeMask(value.lanes());
     return if (value.derivatives_valid) full else value.derivative_valid_mask & full;
 }
+fn derivativeMaskRef(value: *const Value) u16 {
+    const full = fullDerivativeMask(@as(usize, value.ty.columns) * value.ty.rows);
+    return if (value.derivatives_valid) full else value.derivative_valid_mask & full;
+}
 
 fn setDerivativeMask(value: *Value, mask: u16) void {
     const full = fullDerivativeMask(value.lanes());
@@ -190,6 +194,10 @@ fn same(a: ir.Type, b: ir.Type) bool {
 fn valueRef(values: []const Value, current: usize, id: u32) Error!Value {
     if (id >= current) return error.InvalidOperand;
     return values[id];
+}
+fn valueRefPtr(values: []const Value, current: usize, id: u32) Error!*const Value {
+    if (id >= current) return error.InvalidOperand;
+    return &values[id];
 }
 fn canonicalFloat(bits: u32) u32 {
     const x: f32 = @bitCast(bits);
@@ -4025,40 +4033,43 @@ pub const Executor = struct {
                 .local_load => {
                     const pointer = try valueRef(self.values, pc, instruction.operands[0]);
                     if (pointer.bits[0] >= self.locals.len) return error.Bounds;
-                    const source = self.locals[pointer.bits[0]];
+                    const source = &self.locals[pointer.bits[0]];
                     if (pointer.bits[1] == 0) {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
-                        result = source;
+                        result = source.*;
                     } else {
                         const lane: usize = pointer.bits[1] - 1;
                         const width = try lanes(instruction.ty);
-                        if (instruction.ty.scalar != source.ty.scalar or lane > source.lanes() or width > source.lanes() - lane) return error.InvalidType;
+                        const source_lanes = @as(usize, source.ty.columns) * source.ty.rows;
+                        if (instruction.ty.scalar != source.ty.scalar or lane > source_lanes or width > source_lanes - lane) return error.InvalidType;
                         for (0..width) |component| {
                             result.bits[component] = source.bits[lane + component];
                             result.dpdx_bits[component] = source.dpdx_bits[lane + component];
                             result.dpdy_bits[component] = source.dpdy_bits[lane + component];
                         }
-                        setDerivativeMask(&result, derivativeMask(source) >> @intCast(lane));
+                        setDerivativeMask(&result, derivativeMaskRef(source) >> @intCast(lane));
                     }
                 },
                 .local_store => {
                     const pointer = try valueRef(self.values, pc, instruction.operands[0]);
-                    const source = try valueRef(self.values, pc, instruction.operands[1]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     if (pointer.bits[0] >= self.locals.len) return error.Bounds;
                     if (pointer.bits[1] == 0) {
                         if (!same(self.locals[pointer.bits[0]].ty, source.ty)) return error.InvalidType;
-                        self.locals[pointer.bits[0]] = source;
+                        self.locals[pointer.bits[0]] = source.*;
                     } else {
                         const target = &self.locals[pointer.bits[0]];
                         const lane: usize = pointer.bits[1] - 1;
-                        if (source.ty.scalar != target.ty.scalar or lane > target.lanes() or source.lanes() > target.lanes() - lane) return error.InvalidType;
-                        for (0..source.lanes()) |component| {
+                        const source_lanes = @as(usize, source.ty.columns) * source.ty.rows;
+                        const target_lanes = @as(usize, target.ty.columns) * target.ty.rows;
+                        if (source.ty.scalar != target.ty.scalar or lane > target_lanes or source_lanes > target_lanes - lane) return error.InvalidType;
+                        for (0..source_lanes) |component| {
                             target.bits[lane + component] = source.bits[component];
                             target.dpdx_bits[lane + component] = source.dpdx_bits[component];
                             target.dpdy_bits[lane + component] = source.dpdy_bits[component];
                         }
-                        const target_range = fullDerivativeMask(source.lanes()) << @intCast(lane);
-                        const updated_mask = (derivativeMask(target.*) & ~target_range) | ((derivativeMask(source) << @intCast(lane)) & target_range);
+                        const target_range = fullDerivativeMask(source_lanes) << @intCast(lane);
+                        const updated_mask = (derivativeMaskRef(target) & ~target_range) | ((derivativeMaskRef(source) << @intCast(lane)) & target_range);
                         setDerivativeMask(target, updated_mask);
                     }
                 },
