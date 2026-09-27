@@ -478,6 +478,8 @@ benchmark_chrome() {
             ZPU_DUMP_REJECTED_SPIRV=/run/zpu-runtime/rejected.spv \
             ZPU_DUMP_REJECTED_SPIRV_DIR="$guest_rejected_spirv" \
             ZPU_DIAGNOSE_COMMAND_TIMING="${ZPU_DIAGNOSE_COMMAND_TIMING:-0}" \
+            ZPU_DIAGNOSE_PROFILE_TIMING="${ZPU_DIAGNOSE_PROFILE_TIMING:-0}" \
+            ZPU_DIAGNOSE_PROFILE_TIMING_LIMIT="${ZPU_DIAGNOSE_PROFILE_TIMING_LIMIT:-128}" \
             sh -c "rm -rf '$guest_profile'; rm -f '$guest_pid' '$guest_log' '$result'; '$chrome_bin' --no-sandbox --disable-gpu-sandbox --headless --enable-gpu --ignore-gpu-blocklist --use-angle=vulkan --ozone-platform=headless --use-vulkan=native --enable-features=Vulkan --disable-vulkan-fallback-to-gl-for-testing --disable-software-compositing-fallback --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --run-all-compositor-stages-before-draw --window-size='${width},${height}' --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=http://localhost --user-data-dir='$guest_profile' about:blank >'$guest_log' 2>&1 & echo \$! >'$guest_pid'" || return $?
         run smolvm machine exec --name "$machine" -- sh -c '
             pid=$1 log=$2

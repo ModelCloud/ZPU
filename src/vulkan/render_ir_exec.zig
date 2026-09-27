@@ -1315,6 +1315,16 @@ fn branchTarget(program: *const ir.Program, label_id: u32) Error!usize {
     return error.InvalidOperand;
 }
 
+const BranchTargets = struct {
+    on_true: u32 = std.math.maxInt(u32),
+    on_false: u32 = std.math.maxInt(u32),
+};
+
+fn cachedBranchTarget(program: *const ir.Program, label_id: u32) u32 {
+    const target = branchTarget(program, label_id) catch return std.math.maxInt(u32);
+    return @intCast(target);
+}
+
 /// An exact, validated lowering for Chromium's common final-composite
 /// fragment program: sample one image and modulate it by a vec4 varying. It
 /// is deliberately structural rather than heuristic; any extra operation,
@@ -2416,6 +2426,7 @@ pub const Executor = struct {
     values: []Value,
     locals: []Value,
     output_scratch: []u8,
+    branch_targets: ?[]BranchTargets,
     fast_path: ?FastPath,
     jit_candidate: ?JitCandidate,
 
@@ -2433,17 +2444,38 @@ pub const Executor = struct {
             total = std.math.add(usize, total, try byteSize(interface.ty)) catch return error.LimitExceeded;
         };
         const scratch = allocator.alloc(u8, total) catch return error.OutOfMemory;
+        errdefer allocator.free(scratch);
+        var branch_targets: ?[]BranchTargets = null;
+        for (program.instructions) |instruction| {
+            if (instruction.op == .branch or instruction.op == .branch_conditional) {
+                branch_targets = allocator.alloc(BranchTargets, program.instructions.len) catch return error.OutOfMemory;
+                break;
+            }
+        }
+        if (branch_targets) |targets| for (program.instructions, 0..) |instruction, pc| {
+            targets[pc] = .{};
+            switch (instruction.op) {
+                .branch => targets[pc].on_true = cachedBranchTarget(&program, std.mem.readInt(u32, instruction.literal[0..4], .little)),
+                .branch_conditional => {
+                    targets[pc].on_true = cachedBranchTarget(&program, std.mem.readInt(u32, instruction.literal[0..4], .little));
+                    targets[pc].on_false = cachedBranchTarget(&program, std.mem.readInt(u32, instruction.literal[4..8], .little));
+                },
+                else => {},
+            }
+        };
         return .{
             .allocator = allocator,
             .program = program,
             .values = values,
             .locals = locals,
             .output_scratch = scratch,
+            .branch_targets = branch_targets,
             .fast_path = detectFastPath(&program),
             .jit_candidate = detectJitCandidate(&program),
         };
     }
     pub fn deinit(self: *Executor) void {
+        if (self.branch_targets) |targets| self.allocator.free(targets);
         self.allocator.free(self.output_scratch);
         self.allocator.free(self.locals);
         self.allocator.free(self.values);
@@ -4083,14 +4115,18 @@ pub const Executor = struct {
                 .label => current_label = std.mem.readInt(u32, instruction.literal[0..4], .little),
                 .branch => {
                     predecessor_label = current_label;
-                    next_pc = try branchTarget(&self.program, std.mem.readInt(u32, instruction.literal[0..4], .little));
+                    const target = self.branch_targets.?[pc].on_true;
+                    if (target == std.math.maxInt(u32)) return error.InvalidOperand;
+                    next_pc = target;
                 },
                 .branch_conditional => {
                     const condition = try valueRef(self.values, pc, instruction.operands[0]);
                     if (condition.ty.scalar != .bool or condition.lanes() != 1) return error.InvalidType;
-                    const offset: usize = if (condition.bits[0] != 0) 0 else 4;
                     predecessor_label = current_label;
-                    next_pc = try branchTarget(&self.program, std.mem.readInt(u32, instruction.literal[offset..][0..4], .little));
+                    const targets = self.branch_targets.?[pc];
+                    const target = if (condition.bits[0] != 0) targets.on_true else targets.on_false;
+                    if (target == std.math.maxInt(u32)) return error.InvalidOperand;
+                    next_pc = target;
                 },
                 .phi => {
                     var selected: ?u32 = null;
@@ -5400,6 +5436,40 @@ test "captured Three.js instancing material retains its validated interpreter pr
     var executor = try Executor.init(std.testing.allocator, &program);
     defer executor.deinit();
     try std.testing.expectEqualStrings("interpreter", executor.prevalidatedPathName());
+    const targets = executor.branch_targets orelse return error.TestUnexpectedResult;
+    var branches: usize = 0;
+    for (executor.program.instructions, 0..) |instruction, pc| {
+        switch (instruction.op) {
+            .branch => {
+                const label = std.mem.readInt(u32, instruction.literal[0..4], .little);
+                try std.testing.expectEqual(@as(u32, @intCast(try branchTarget(&executor.program, label))), targets[pc].on_true);
+                branches += 1;
+            },
+            .branch_conditional => {
+                for (0..2) |choice| {
+                    const label = std.mem.readInt(u32, instruction.literal[choice * 4 ..][0..4], .little);
+                    const expected: u32 = @intCast(try branchTarget(&executor.program, label));
+                    try std.testing.expectEqual(expected, if (choice == 0) targets[pc].on_true else targets[pc].on_false);
+                }
+                branches += 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 206), branches);
+}
+
+test "missing cached branch label remains a runtime invalid operand" {
+    const missing_label = [_]u8{ 99, 0, 0, 0 };
+    var instructions = [_]ir.Instruction{
+        .{ .op = .branch, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &missing_label },
+        .{ .op = .return_, .ty = .{ .scalar = .u32 }, .operands = &.{}, .literal = &.{} },
+    };
+    var source = try testProgram(&.{}, &instructions);
+    defer std.testing.allocator.free(source.bytes);
+    var executor = try Executor.init(std.testing.allocator, &source);
+    defer executor.deinit();
+    try std.testing.expectError(error.InvalidOperand, executor.execute(&.{}, &.{}));
 }
 
 test "only stateless exact profiles are tile parallel safe" {
