@@ -59,8 +59,8 @@ fn fullDerivativeMask(lane_count: usize) u16 {
     return if (lane_count >= 16) std.math.maxInt(u16) else (@as(u16, 1) << @intCast(lane_count)) - 1;
 }
 
-fn derivativeMask(value: Value) u16 {
-    const full = fullDerivativeMask(value.lanes());
+fn derivativeMask(value: anytype) u16 {
+    const full = fullDerivativeMask(@as(usize, value.ty.columns) * value.ty.rows);
     return if (value.derivatives_valid) full else value.derivative_valid_mask & full;
 }
 fn derivativeMaskRef(value: *const Value) u16 {
@@ -4120,7 +4120,7 @@ pub const Executor = struct {
                     next_pc = target;
                 },
                 .branch_conditional => {
-                    const condition = try valueRef(self.values, pc, instruction.operands[0]);
+                    const condition = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (condition.ty.scalar != .bool or condition.lanes() != 1) return error.InvalidType;
                     predecessor_label = current_label;
                     const targets = self.branch_targets.?[pc];
@@ -4145,7 +4145,7 @@ pub const Executor = struct {
                     var at: usize = 0;
                     var result_mask: u16 = 0;
                     for (instruction.operands) |operand| {
-                        const part = try valueRef(self.values, pc, operand);
+                        const part = try valueRefPtr(self.values, pc, operand);
                         result_mask |= derivativeMask(part) << @intCast(at);
                         for (0..part.lanes()) |lane| {
                             result.bits[at] = part.bits[lane];
@@ -4276,10 +4276,10 @@ pub const Executor = struct {
                     }
                 },
                 .extract => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (instruction.operands.len == 1) {
                         if (!same(source.ty, instruction.ty)) return error.InvalidType;
-                        result = source;
+                        result = source.*;
                     } else if (self.program.instructions[instruction.operands[0]].op == .f_frexp_struct or self.program.instructions[instruction.operands[0]].op == .f_modf_struct) {
                         if (instruction.operands[1] >= 2 or source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 2 and source.ty.columns != 4)) return error.InvalidType;
                         const width: usize = source.ty.columns / 2;
@@ -4309,8 +4309,8 @@ pub const Executor = struct {
                     result = try valueRef(self.values, pc, instruction.operands[0]);
                 },
                 .vector_extract_dynamic => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
-                    const selector = try valueRef(self.values, pc, instruction.operands[1]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const selector = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const index = selector.bits[0];
                     if (index >= source.lanes()) return error.Bounds;
                     result.bits[0] = source.bits[index];
@@ -4319,12 +4319,12 @@ pub const Executor = struct {
                     setDerivativeMask(&result, (derivativeMask(source) >> @intCast(index)) & 1);
                 },
                 .vector_insert_dynamic => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
-                    const component = try valueRef(self.values, pc, instruction.operands[1]);
-                    const selector = try valueRef(self.values, pc, instruction.operands[2]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const component = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const selector = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     const index = selector.bits[0];
                     if (index >= source.lanes()) return error.Bounds;
-                    result = source;
+                    result = source.*;
                     result.bits[index] = component.bits[0];
                     result.dpdx_bits[index] = component.dpdx_bits[0];
                     result.dpdy_bits[index] = component.dpdy_bits[0];
@@ -4333,11 +4333,11 @@ pub const Executor = struct {
                     setDerivativeMask(&result, updated_mask);
                 },
                 .composite_insert => {
-                    const object = try valueRef(self.values, pc, instruction.operands[0]);
-                    const composite = try valueRef(self.values, pc, instruction.operands[1]);
+                    const object = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const composite = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const index = instruction.operands[2];
                     if (index >= composite.lanes()) return error.Bounds;
-                    result = composite;
+                    result = composite.*;
                     result.bits[index] = object.bits[0];
                     result.dpdx_bits[index] = object.dpdx_bits[0];
                     result.dpdy_bits[index] = object.dpdy_bits[0];
@@ -4346,8 +4346,8 @@ pub const Executor = struct {
                     setDerivativeMask(&result, updated_mask);
                 },
                 .shuffle => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var result_mask: u16 = 0;
                     for (instruction.operands[2..], 0..) |selector, i| {
                         if (selector >= a.lanes() + b.lanes()) return error.Bounds;
@@ -4363,7 +4363,7 @@ pub const Executor = struct {
                     setDerivativeMask(&result, result_mask);
                 },
                 .fneg, .ineg, .bit_not, .logical_not => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (instruction.op == .fneg) setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         result.bits[i] = switch (instruction.op) {
@@ -4380,7 +4380,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_abs, .i_abs, .f_sign, .i_sign => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (instruction.op == .f_abs or instruction.op == .f_sign) setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         if (instruction.op == .f_abs or instruction.op == .f_sign) {
@@ -4435,7 +4435,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_length, .f_normalize => {
-                    const vector = try valueRef(self.values, pc, instruction.operands[0]);
+                    const vector = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     var sum: f32 = 0;
                     for (0..vector.lanes()) |i| {
                         const x: f32 = @bitCast(vector.bits[i]);
@@ -4479,8 +4479,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_distance => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var sum: f32 = 0;
                     for (0..left.lanes()) |i| {
                         const delta = @as(f32, @bitCast(left.bits[i])) - @as(f32, @bitCast(right.bits[i]));
@@ -4489,8 +4489,8 @@ pub const Executor = struct {
                     result.bits[0] = canonicalFloat(@bitCast(std.math.sqrt(sum)));
                 },
                 .f_cross => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const ax: f32 = @bitCast(left.bits[0]);
                     const ay: f32 = @bitCast(left.bits[1]);
                     const az: f32 = @bitCast(left.bits[2]);
@@ -4518,9 +4518,9 @@ pub const Executor = struct {
                     };
                 },
                 .f_face_forward => {
-                    const normal = try valueRef(self.values, pc, instruction.operands[0]);
-                    const incident = try valueRef(self.values, pc, instruction.operands[1]);
-                    const reference = try valueRef(self.values, pc, instruction.operands[2]);
+                    const normal = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const incident = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const reference = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     var product: f32 = 0;
                     for (0..normal.lanes()) |i| product += @as(f32, @bitCast(reference.bits[i])) * @as(f32, @bitCast(incident.bits[i]));
                     for (0..result.lanes()) |i| {
@@ -4529,8 +4529,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_reflect => {
-                    const incident = try valueRef(self.values, pc, instruction.operands[0]);
-                    const normal = try valueRef(self.values, pc, instruction.operands[1]);
+                    const incident = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const normal = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var product: f32 = 0;
                     for (0..incident.lanes()) |i| product += @as(f32, @bitCast(normal.bits[i])) * @as(f32, @bitCast(incident.bits[i]));
                     for (0..result.lanes()) |i| {
@@ -4540,8 +4540,8 @@ pub const Executor = struct {
                     }
                 },
                 .f_refract => {
-                    const incident = try valueRef(self.values, pc, instruction.operands[0]);
-                    const normal = try valueRef(self.values, pc, instruction.operands[1]);
+                    const incident = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const normal = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const eta: f32 = @bitCast((try valueRef(self.values, pc, instruction.operands[2])).bits[0]);
                     var product: f32 = 0;
                     for (0..incident.lanes()) |i| product += @as(f32, @bitCast(normal.bits[i])) * @as(f32, @bitCast(incident.bits[i]));
@@ -4558,7 +4558,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_round, .f_round_even, .f_trunc, .f_floor, .f_ceil, .f_fract, .f_radians, .f_degrees, .f_sin, .f_cos, .f_tan, .f_asin, .f_acos, .f_atan, .f_sinh, .f_cosh, .f_tanh, .f_asinh, .f_acosh, .f_atanh, .f_exp, .f_log, .f_exp2, .f_log2, .f_sqrt, .f_inverse_sqrt => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     setDerivativeMask(&result, derivativeMask(a));
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
@@ -4628,7 +4628,7 @@ pub const Executor = struct {
                     }
                 },
                 .is_nan, .is_inf, .is_finite, .is_normal, .sign_bit_set => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
                         result.bits[i] = @intFromBool(switch (instruction.op) {
@@ -4642,13 +4642,13 @@ pub const Executor = struct {
                     }
                 },
                 .any, .all => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     var value = instruction.op == .all;
                     for (a.bits[0..a.lanes()]) |bit| value = if (instruction.op == .all) value and bit != 0 else value or bit != 0;
                     result.bits[0] = @intFromBool(value);
                 },
                 .bit_reverse, .bit_count => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         var value = a.bits[i];
                         if (instruction.op == .bit_reverse) {
@@ -4666,7 +4666,7 @@ pub const Executor = struct {
                     }
                 },
                 .i_find_lsb, .i_find_s_msb, .i_find_u_msb => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| {
                         const bits = a.bits[i];
                         const candidate = if (instruction.op == .i_find_s_msb and (@as(i32, @bitCast(bits)) < 0)) ~bits else bits;
@@ -4680,12 +4680,12 @@ pub const Executor = struct {
                     }
                 },
                 .bit_field_insert, .bit_field_s_extract, .bit_field_u_extract => {
-                    const base = try valueRef(self.values, pc, instruction.operands[0]);
+                    const base = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const insert = if (instruction.op == .bit_field_insert) try valueRef(self.values, pc, instruction.operands[1]) else null;
                     const offset_index: usize = if (instruction.op == .bit_field_insert) 2 else 1;
                     const count_index: usize = offset_index + 1;
-                    const offset = try valueRef(self.values, pc, instruction.operands[offset_index]);
-                    const count = try valueRef(self.values, pc, instruction.operands[count_index]);
+                    const offset = try valueRefPtr(self.values, pc, instruction.operands[offset_index]);
+                    const count = try valueRefPtr(self.values, pc, instruction.operands[count_index]);
                     for (0..result.lanes()) |i| {
                         const shift = offset.bits[if (offset.lanes() == 1) 0 else i];
                         const width = count.bits[if (count.lanes() == 1) 0 else i];
@@ -4709,8 +4709,8 @@ pub const Executor = struct {
                     }
                 },
                 .iadd_carry, .isub_borrow, .umul_extended, .smul_extended => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     if (result.lanes() != 2 or a.lanes() != 1 or b.lanes() != 1) return error.InvalidShape;
                     switch (instruction.op) {
                         .iadd_carry => {
@@ -4737,8 +4737,8 @@ pub const Executor = struct {
                     }
                 },
                 .iadd, .isub, .imul, .bit_or, .bit_xor, .bit_and => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| result.bits[i] = switch (instruction.op) {
                         .iadd => a.bits[i] +% b.bits[i],
                         .isub => a.bits[i] -% b.bits[i],
@@ -4750,8 +4750,8 @@ pub const Executor = struct {
                     };
                 },
                 .udiv, .sdiv, .umod, .srem, .smod => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         if (b.bits[i] == 0) return error.NumericDomain;
                         result.bits[i] = switch (instruction.op) {
@@ -4780,8 +4780,8 @@ pub const Executor = struct {
                     }
                 },
                 .shl_logical, .shr_logical, .shr_arithmetic => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         if (b.bits[i] >= 32) return error.NumericDomain;
                         const amount: u5 = @intCast(b.bits[i]);
@@ -4794,8 +4794,8 @@ pub const Executor = struct {
                     }
                 },
                 .ieq, .ine, .ugt, .uge, .ult, .ule, .sgt, .sge, .slt, .sle => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const lhs = a.bits[i];
                         const rhs = b.bits[i];
@@ -4815,8 +4815,8 @@ pub const Executor = struct {
                     }
                 },
                 .ford_eq, .funord_eq, .ford_ne, .funord_ne, .ford_lt, .funord_lt, .ford_gt, .funord_gt, .ford_le, .funord_le, .ford_ge, .funord_ge => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const lhs: f32 = @bitCast(a.bits[i]);
                         const rhs: f32 = @bitCast(b.bits[i]);
@@ -4839,8 +4839,8 @@ pub const Executor = struct {
                     }
                 },
                 .less_or_greater, .ordered, .unordered => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const lhs: f32 = @bitCast(a.bits[i]);
                         const rhs: f32 = @bitCast(b.bits[i]);
@@ -4854,8 +4854,8 @@ pub const Executor = struct {
                     }
                 },
                 .logical_eq, .logical_ne, .logical_or, .logical_and => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| result.bits[i] = @intFromBool(switch (instruction.op) {
                         .logical_eq => a.bits[i] == b.bits[i],
                         .logical_ne => a.bits[i] != b.bits[i],
@@ -4865,8 +4865,8 @@ pub const Executor = struct {
                     });
                 },
                 .f_ldexp => {
-                    const value = try valueRef(self.values, pc, instruction.operands[0]);
-                    const exponent = try valueRef(self.values, pc, instruction.operands[1]);
+                    const value = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const exponent = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(value.bits[i]);
                         const exp: i32 = @bitCast(exponent.bits[i]);
@@ -4881,7 +4881,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_modf, .f_frexp => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const interface_index = instruction.operands[1];
                     if (interface_index >= self.program.interfaces.len or self.program.interfaces[interface_index].storage != .output) return error.InvalidStorage;
                     var offset: usize = 0;
@@ -4908,7 +4908,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_modf_struct => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 1 and source.ty.columns != 2) or result.ty.scalar != .f32 or result.ty.rows != 1 or result.ty.columns != source.ty.columns * 2) return error.InvalidType;
                     const width: usize = source.ty.columns;
                     for (0..width) |i| {
@@ -4919,7 +4919,7 @@ pub const Executor = struct {
                     }
                 },
                 .f_frexp_struct => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (source.ty.scalar != .f32 or source.ty.rows != 1 or (source.ty.columns != 1 and source.ty.columns != 2) or result.ty.scalar != .f32 or result.ty.rows != 1 or result.ty.columns != source.ty.columns * 2) return error.InvalidType;
                     const width: usize = source.ty.columns;
                     // Validate every lane before publishing any result so a
@@ -4936,7 +4936,7 @@ pub const Executor = struct {
                     }
                 },
                 .i_pack_snorm4x8, .i_pack_unorm4x8, .i_pack_snorm2x16, .i_pack_unorm2x16 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const signed = instruction.op == .i_pack_snorm4x8 or instruction.op == .i_pack_snorm2x16;
                     const width: u5 = if (instruction.op == .i_pack_snorm4x8 or instruction.op == .i_pack_unorm4x8) 8 else 16;
                     const count: usize = if (width == 8) 4 else 2;
@@ -4949,7 +4949,7 @@ pub const Executor = struct {
                     result.bits[0] = packed_bits;
                 },
                 .f_unpack_snorm2x16, .f_unpack_unorm2x16, .f_unpack_snorm4x8, .f_unpack_unorm4x8 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const signed = instruction.op == .f_unpack_snorm2x16 or instruction.op == .f_unpack_snorm4x8;
                     const width: u5 = if (instruction.op == .f_unpack_snorm4x8 or instruction.op == .f_unpack_unorm4x8) 8 else 16;
                     const count: usize = if (width == 8) 4 else 2;
@@ -4959,7 +4959,7 @@ pub const Executor = struct {
                     }
                 },
                 .i_pack_half2x16 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const first: f32 = @bitCast(source.bits[0]);
                     const second: f32 = @bitCast(source.bits[1]);
                     const lo = packHalf(first);
@@ -4967,14 +4967,14 @@ pub const Executor = struct {
                     result.bits[0] = @as(u32, lo) | (@as(u32, hi) << 16);
                 },
                 .f_unpack_half2x16 => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     const word = source.bits[0];
                     result.bits[0] = canonicalFloat(@bitCast(unpackHalf(@truncate(word))));
                     result.bits[1] = canonicalFloat(@bitCast(unpackHalf(@truncate(word >> 16))));
                 },
                 .f_atan2, .f_pow => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         // GLSL.std.450 specifies poison for atan2(0, 0),
                         // negative bases, and non-positive exponents at zero.
@@ -4991,8 +4991,8 @@ pub const Executor = struct {
                     }
                 },
                 .fadd, .fsub, .fmul, .fdiv, .frem, .fmod, .f_min, .f_max, .f_n_min, .f_n_max, .f_step => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     result.derivatives_valid = a.derivatives_valid and b.derivatives_valid and
                         (instruction.op == .fadd or instruction.op == .fsub or instruction.op == .fmul or instruction.op == .fdiv);
                     for (0..result.lanes()) |i| {
@@ -5044,8 +5044,8 @@ pub const Executor = struct {
                     }
                 },
                 .u_min, .i_min, .u_max, .i_max => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..result.lanes()) |i| {
                         const x = a.bits[i];
                         const y = b.bits[i];
@@ -5059,9 +5059,9 @@ pub const Executor = struct {
                     }
                 },
                 .f_clamp, .f_n_clamp, .u_clamp, .i_clamp => {
-                    const value = try valueRef(self.values, pc, instruction.operands[0]);
-                    const minimum = try valueRef(self.values, pc, instruction.operands[1]);
-                    const maximum = try valueRef(self.values, pc, instruction.operands[2]);
+                    const value = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const minimum = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const maximum = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     for (0..result.lanes()) |i| {
                         if (instruction.op == .f_clamp or instruction.op == .f_n_clamp) {
                             const x: f32 = @bitCast(value.bits[i]);
@@ -5088,9 +5088,9 @@ pub const Executor = struct {
                     }
                 },
                 .f_mix, .fma => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
-                    const c = try valueRef(self.values, pc, instruction.operands[2]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const c = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     result.derivatives_valid = a.derivatives_valid and b.derivatives_valid and c.derivatives_valid;
                     for (0..result.lanes()) |i| {
                         const x: f32 = @bitCast(a.bits[i]);
@@ -5120,7 +5120,7 @@ pub const Executor = struct {
                     }
                 },
                 .dpdx, .dpdy, .fwidth => {
-                    const source = try valueRef(self.values, pc, instruction.operands[0]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     if (!source.derivatives_valid) return error.MissingInput;
                     markConstant(&result);
                     for (0..result.lanes()) |i| {
@@ -5135,9 +5135,9 @@ pub const Executor = struct {
                     }
                 },
                 .f_smooth_step => {
-                    const edge0 = try valueRef(self.values, pc, instruction.operands[0]);
-                    const edge1 = try valueRef(self.values, pc, instruction.operands[1]);
-                    const value = try valueRef(self.values, pc, instruction.operands[2]);
+                    const edge0 = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const edge1 = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const value = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     for (0..result.lanes()) |i| {
                         const e0: f32 = @bitCast(edge0.bits[i]);
                         const e1: f32 = @bitCast(edge1.bits[i]);
@@ -5148,19 +5148,19 @@ pub const Executor = struct {
                     }
                 },
                 .select => {
-                    const condition = try valueRef(self.values, pc, instruction.operands[0]);
-                    const when_true = try valueRef(self.values, pc, instruction.operands[1]);
-                    const when_false = try valueRef(self.values, pc, instruction.operands[2]);
+                    const condition = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const when_true = try valueRefPtr(self.values, pc, instruction.operands[1]);
+                    const when_false = try valueRefPtr(self.values, pc, instruction.operands[2]);
                     if (condition.ty.scalar != .bool or condition.ty.rows != 1 or condition.ty.columns < 1 or condition.ty.columns > 4 or !same(when_true.ty, when_false.ty) or !same(when_true.ty, instruction.ty) or (condition.ty.columns != 1 and (condition.ty.columns != instruction.ty.columns or instruction.ty.rows != 1))) return error.InvalidType;
                     if (condition.ty.columns == 1) {
-                        result = if (condition.bits[0] != 0) when_true else when_false;
+                        result = if (condition.bits[0] != 0) when_true.* else when_false.*;
                     } else {
                         for (0..result.lanes()) |i| result.bits[i] = if (condition.bits[i] != 0) when_true.bits[i] else when_false.bits[i];
                     }
                 },
                 .vector_times_scalar => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const scalar: f32 = @bitCast(b.bits[0]);
                     result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
                     for (0..result.lanes()) |i| {
@@ -5175,8 +5175,8 @@ pub const Executor = struct {
                     }
                 },
                 .matrix_times_vector => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
-                    const b = try valueRef(self.values, pc, instruction.operands[1]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const b = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     result.derivatives_valid = a.derivatives_valid and b.derivatives_valid;
                     for (0..a.ty.rows) |row| {
                         var sum: f32 = 0;
@@ -5200,8 +5200,8 @@ pub const Executor = struct {
                     }
                 },
                 .matrix_times_scalar => {
-                    const matrix = try valueRef(self.values, pc, instruction.operands[0]);
-                    const scalar = try valueRef(self.values, pc, instruction.operands[1]);
+                    const matrix = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const scalar = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const factor: f32 = @bitCast(scalar.bits[0]);
                     result.derivatives_valid = matrix.derivatives_valid and scalar.derivatives_valid;
                     for (0..result.lanes()) |i| {
@@ -5214,8 +5214,8 @@ pub const Executor = struct {
                     }
                 },
                 .vector_times_matrix => {
-                    const vector = try valueRef(self.values, pc, instruction.operands[0]);
-                    const matrix = try valueRef(self.values, pc, instruction.operands[1]);
+                    const vector = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const matrix = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     const width: usize = matrix.ty.columns;
                     result.derivatives_valid = vector.derivatives_valid and matrix.derivatives_valid;
                     for (0..width) |col| {
@@ -5240,8 +5240,8 @@ pub const Executor = struct {
                     }
                 },
                 .matrix_times_matrix => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     result.derivatives_valid = left.derivatives_valid and right.derivatives_valid;
                     for (0..instruction.ty.columns) |col| for (0..instruction.ty.rows) |row| {
                         var sum: f32 = 0;
@@ -5266,22 +5266,22 @@ pub const Executor = struct {
                     };
                 },
                 .transpose => {
-                    const matrix = try valueRef(self.values, pc, instruction.operands[0]);
+                    const matrix = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..4) |col| for (0..4) |row| {
                         result.bits[col * 4 + row] = matrix.bits[row * 4 + col];
                     };
                 },
                 .outer_product => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     for (0..4) |col| for (0..4) |row| {
                         const product = @as(f32, @bitCast(left.bits[row])) * @as(f32, @bitCast(right.bits[col]));
                         result.bits[col * 4 + row] = canonicalFloat(@bitCast(product));
                     };
                 },
                 .dot => {
-                    const left = try valueRef(self.values, pc, instruction.operands[0]);
-                    const right = try valueRef(self.values, pc, instruction.operands[1]);
+                    const left = try valueRefPtr(self.values, pc, instruction.operands[0]);
+                    const right = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var sum: f32 = 0;
                     var sum_dx: f32 = 0;
                     var sum_dy: f32 = 0;
@@ -5302,20 +5302,20 @@ pub const Executor = struct {
                     }
                 },
                 .convert => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = try convert(a.ty.scalar, instruction.ty.scalar, a.bits[i]);
                 },
                 .bitcast => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = a.bits[i];
                 },
                 .quantize_f16 => {
-                    const a = try valueRef(self.values, pc, instruction.operands[0]);
+                    const a = try valueRefPtr(self.values, pc, instruction.operands[0]);
                     for (0..result.lanes()) |i| result.bits[i] = quantizeF16(a.bits[i]);
                 },
                 .output => {
                     const interface_index = instruction.operands[0];
-                    const source = try valueRef(self.values, pc, instruction.operands[1]);
+                    const source = try valueRefPtr(self.values, pc, instruction.operands[1]);
                     var offset: usize = 0;
                     for (self.program.interfaces[0..interface_index]) |item| if (item.storage == .output) {
                         offset += try byteSize(item.ty);
