@@ -6,7 +6,7 @@ const std = @import("std");
 pub const profile_version: u32 = 1;
 pub const serialization_version: u32 = 7;
 pub const max_values: usize = 4096;
-pub const max_instructions: usize = 4096;
+pub const max_instructions: usize = 6144;
 
 pub const Stage = enum(u8) { vertex = 0, fragment = 1, compute = 2 };
 pub const Scalar = enum(u8) { bool = 0, i32 = 1, u32 = 2, f32 = 3 };
@@ -369,6 +369,19 @@ pub const Op = enum(u8) {
     dpdx,
     dpdy,
     fwidth,
+    /// Fetch one level-zero texel from a samplerless 2D image. Operands are
+    /// resource interface, signed integer coordinates, and signed LOD.
+    image_fetch,
+    /// Sample a 2D image with a separate sampler and explicit floating-point
+    /// LOD. Operands are image interface, normalized coordinates, LOD value,
+    /// and sampler interface.
+    image_sample_explicit_lod,
+    /// Sample a bound cube image using a three-dimensional direction and
+    /// implicit LOD. Appended to preserve serialized operation values.
+    image_cube_sample_implicit_lod,
+    /// Sample a separate cube image and sampler using a direction and
+    /// explicit floating-point LOD.
+    image_cube_sample_explicit_lod,
 };
 
 pub const Instruction = struct {
@@ -378,8 +391,8 @@ pub const Instruction = struct {
     literal: []const u8,
 };
 
-pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment };
-pub const max_uniform_members: usize = 16;
+pub const Storage = enum(u8) { input, output, uniform, push_constant, sampled_image, input_attachment, image, sampler };
+pub const max_uniform_members: usize = 32;
 pub const UniformMember = struct {
     ty: Type = .{ .scalar = .u32 },
     offset: u32 = 0,
@@ -395,6 +408,7 @@ pub const Interface = struct {
     builtin_position: bool = false,
     builtin_frag_coord: bool = false,
     builtin_front_facing: bool = false,
+    builtin_vertex_index: bool = false,
     flat: bool = false,
     block: bool = false,
     member_count: u8 = 0,
@@ -495,7 +509,10 @@ pub fn serialize(allocator: std.mem.Allocator, stage: Stage, entry_name: []const
         try list.append(allocator, @intFromBool(item.builtin_frag_coord));
         try list.append(allocator, @intFromBool(item.builtin_front_facing));
         try list.append(allocator, @intFromBool(item.flat));
-        try list.append(allocator, @intFromBool(item.block));
+        // Reuse the unused high bit of this serialized interface flag byte
+        // for BuiltIn VertexIndex so existing profile identities remain
+        // stable when they do not declare that input.
+        try list.append(allocator, @intFromBool(item.block) | (@as(u8, @intFromBool(item.builtin_vertex_index)) << 1));
         try list.append(allocator, item.member_count);
         for (item.members[0..item.member_count]) |member| {
             try list.append(allocator, @intFromEnum(member.ty.scalar));
@@ -528,8 +545,12 @@ pub fn identify(bytes: []const u8) Identity {
 
 fn valueOperand(op: Op, operand_index: usize) bool {
     return switch (op) {
-        .constant, .input, .uniform, .storage, .local, .label, .branch, .return_ => false,
-        .image_sample_implicit_lod, .image_read_input_attachment => operand_index != 0,
+        .constant, .input, .uniform, .storage, .label, .branch, .return_ => false,
+        .local => operand_index == 0,
+        .image_sample_implicit_lod, .image_read_input_attachment, .image_fetch => operand_index != 0,
+        .image_sample_explicit_lod => operand_index == 1 or operand_index == 2,
+        .image_cube_sample_implicit_lod => operand_index != 0,
+        .image_cube_sample_explicit_lod => operand_index == 1 or operand_index == 2,
         .local_access, .local_store, .phi => true,
         .local_load, .branch_conditional => operand_index == 0,
         .constant_composite => true,

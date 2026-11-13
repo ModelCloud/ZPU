@@ -87,13 +87,16 @@ resolve_cpuset_file() {
     printf '%s' "$ZPU_FANOUT_CPUSET_FILE"
     return
   fi
-  local rel candidate fd cgroup_file="${ZPU_FANOUT_CGROUP_FILE:-/proc/self/cgroup}"
+  local rel candidate cgroup_file="${ZPU_FANOUT_CGROUP_FILE:-/proc/self/cgroup}"
   local cgroup_root="${ZPU_FANOUT_CGROUP_ROOT:-/sys/fs/cgroup}"
   rel=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' "$cgroup_file" 2>/dev/null) || rel=""
   while [[ -n "$rel" && "$rel" != "." ]]; do
     candidate="${cgroup_root}${rel%/}/cpuset.cpus.effective"
-    if [[ -e "$candidate" ]] && { exec {fd}<"$candidate"; } 2>/dev/null; then
-      exec {fd}<&-
+    # Opening a procfs pseudo-file can succeed even when reading it fails
+    # (for example, /proc/<pid>/mem under ptrace restrictions). Probe the
+    # contents so an unreadable nearer cgroup file does not hide a readable
+    # ancestor. A readable empty file still qualifies and is rejected below.
+    if [[ -e "$candidate" ]] && cat -- "$candidate" >/dev/null 2>&1; then
       printf '%s' "$candidate"
       return
     fi

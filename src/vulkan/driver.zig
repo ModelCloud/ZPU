@@ -1182,10 +1182,12 @@ const ImageObj = struct {
     // lets Chromium create mipmapped upload images without losing the Vulkan
     // memory-size contract.
     mip_levels: u32 = 1,
+    mip_layouts: [max_image_mip_levels]i32 = [_]i32{0} ** max_image_mip_levels,
     array_layers: u32,
     samples: u32,
     format: i32,
     usage: u32,
+    flags: u32 = 0,
     layout: i32,
     memory: ?*MemoryObj = null,
     owned_bytes: ?[]align(64) u8 = null,
@@ -1231,7 +1233,7 @@ const YcbcrConversion = struct {
     force_explicit_reconstruction: u32,
 };
 const SamplerYcbcrConversionObj = struct { handle: usize, owner: Device, conversion: YcbcrConversion };
-const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, ycbcr: ?YcbcrConversion = null, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
+const ImageViewObj = struct { handle: usize, owner: Device, image: *ImageObj, format: i32, usage: u32, aspect_mask: u32, components: [4]i32, ycbcr: ?YcbcrConversion = null, view_type: i32 = 1, base_mip_level: u32, level_count: u32, base_array_layer: u32, layer_count: u32 };
 const SamplerObj = struct {
     owner: Device,
     mag_filter: i32 = 0,
@@ -1250,10 +1252,27 @@ const SamplerObj = struct {
     unnormalized_coordinates: bool = false,
     ycbcr: ?YcbcrConversion = null,
 };
-const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
+const FramebufferObj = struct { owner: Device, color_image: ?*ImageObj, depth_image: ?*ImageObj, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, render_compatibility: Canonical, width: u32 = 0, height: u32 = 0, layers: u32 = 1 };
 const PipelineCacheObj = struct { owner: DeviceIdentity, data: Canonical = .{} };
 const descriptor_type_count = 11;
 const max_profile_sampled_bindings = 8;
+// Terrain and CAD meshes commonly exceed a few thousand vertices. Keep the
+// scalar fallback bounded against pathological workloads while admitting a
+// million-vertex draw, which covers the live Three.js terrain probe.
+const max_profile_graphics_vertices: u32 = 1_048_576;
+
+fn profileGraphicsVertexCountSupported(vertex_count: u32) bool {
+    return vertex_count != 0 and vertex_count <= max_profile_graphics_vertices;
+}
+
+test "scalar graphics profile accepts large bounded terrain draws" {
+    try std.testing.expect(profileGraphicsVertexCountSupported(4_096));
+    try std.testing.expect(profileGraphicsVertexCountSupported(390_150));
+    try std.testing.expect(profileGraphicsVertexCountSupported(max_profile_graphics_vertices));
+    try std.testing.expect(!profileGraphicsVertexCountSupported(0));
+    try std.testing.expect(!profileGraphicsVertexCountSupported(max_profile_graphics_vertices + 1));
+}
+const DescriptorUniformBinding = struct { buffer: ?*BufferObj = null, offset: u64 = 0, range: u64 = 0, dynamic: bool = false };
 const DescriptorCounts = [descriptor_type_count]u32;
 const DescriptorPoolObj = struct { owner: DeviceIdentity, flags: u32, max_sets: u32, allocated_sets: u32, capacity: DescriptorCounts, used: DescriptorCounts };
 const DescriptorSetObj = struct {
@@ -1262,6 +1281,7 @@ const DescriptorSetObj = struct {
     counts: DescriptorCounts = [_]u32{0} ** descriptor_type_count,
     layout: Canonical = .{},
     binding_types: [max_profile_sampled_bindings]i32 = [_]i32{-1} ** max_profile_sampled_bindings,
+    uniform_bindings: [max_profile_sampled_bindings]DescriptorUniformBinding = [_]DescriptorUniformBinding{.{}} ** max_profile_sampled_bindings,
     uniform: ?*BufferObj = null,
     uniform_offset: u64 = 0,
     uniform_range: u64 = 0,
@@ -1275,6 +1295,9 @@ const DescriptorSetObj = struct {
     // Keep a bounded sampled-image table for the native profile ABI while
     // retaining the historical binding-0 aliases used by the cpu_cube ABI.
     sampled_images: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
+    // Graphics snapshots keep set 1 separate so a set-0 samplerless image
+    // does not collide with a set-1 combined image sampler at the same binding.
+    sampled_images_set1: [max_profile_sampled_bindings]DescriptorSampledImage = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings,
     // Input attachments carry no sampler. They are only consumed by the
     // bounded framebuffer-fetch profile after validation against its target.
     input_attachments: [max_profile_sampled_bindings]DescriptorInputAttachment = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings,
@@ -1288,7 +1311,36 @@ const DescriptorSetObj = struct {
     active_users: std.atomic.Value(u32) = .init(0),
     retire_pending: bool = false,
 };
-const DescriptorSampledImage = struct { image: ?*ImageObj = null, sampler: ?*SamplerObj = null, components: [4]i32 = .{ 0, 0, 0, 0 }, ycbcr: ?YcbcrConversion = null };
+
+fn descriptorUniformBinding(set: *const DescriptorSetObj, binding: u32) ?DescriptorUniformBinding {
+    if (binding >= set.uniform_bindings.len) return null;
+    const stored = set.uniform_bindings[binding];
+    if (stored.buffer != null) return stored;
+    if (binding == 0 and set.uniform != null)
+        return .{ .buffer = set.uniform, .offset = set.uniform_offset, .range = set.uniform_range, .dynamic = set.uniform_dynamic };
+    return null;
+}
+
+fn descriptorUniformBytes(set: *const DescriptorSetObj, binding: u32) ?[]const u8 {
+    const descriptor = descriptorUniformBinding(set, binding) orelse return null;
+    const buffer = descriptor.buffer orelse return null;
+    const bytes = bufferBytes(buffer);
+    const offset = std.math.cast(usize, descriptor.offset) orelse return null;
+    const range = std.math.cast(usize, descriptor.range) orelse return null;
+    if (range == 0 or offset > bytes.len or range > bytes.len - offset) return null;
+    return bytes[offset..][0..range];
+}
+const DescriptorSampledImage = struct {
+    image: ?*ImageObj = null,
+    sampler: ?*SamplerObj = null,
+    components: [4]i32 = .{ 0, 0, 0, 0 },
+    ycbcr: ?YcbcrConversion = null,
+    view_type: i32 = 1,
+    base_mip_level: u32 = 0,
+    level_count: u32 = 1,
+    base_array_layer: u32 = 0,
+    layer_count: u32 = 1,
+};
 const DescriptorInputAttachment = struct { image: ?*ImageObj = null, components: [4]i32 = .{ 0, 0, 0, 0 } };
 const DescriptorUpdateTemplateObj = struct { owner: DeviceIdentity, layout: *DescriptorSetLayoutObj, template_type: i32 = 0, pipeline_bind_point: i32 = 0, pipeline_layout: usize = 0, entry_count: u32, entries: [32]DescriptorUpdateTemplateEntry };
 const DeviceIdentity = struct {
@@ -1386,12 +1438,21 @@ const RenderPassObj = struct {
     color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
+    stencil_load_op: i32 = 2,
+    stencil_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
     depth_subpass_layout: i32 = 0,
     depth_final_layout: i32 = 0,
     subpass_color_layouts: [8]i32 = [_]i32{0} ** 8,
     subpass_depth_layouts: [8]i32 = [_]i32{0} ** 8,
 };
+fn renderPassStencilFormat(pass: *const RenderPassObj) i32 {
+    if (!pass.framebuffer_supported) return 0;
+    for (pass.framebuffer_attachments[0..pass.framebuffer_attachment_count]) |attachment| {
+        if (attachment.role == .depth and isStencilFormat(attachment.format)) return attachment.format;
+    }
+    return 0;
+}
 const SyntheticProfile = struct {
     stage: render_ir.Stage,
     executor: render_ir_exec.Executor,
@@ -1406,6 +1467,10 @@ const ProfileVertexInput = struct {
     source_byte_size: u8,
     format: i32,
     input_rate: i32,
+    matrix_columns: bool = false,
+    matrix_bindings: [4]u32 = .{ 0, 0, 0, 0 },
+    matrix_offsets: [4]u32 = .{ 0, 0, 0, 0 },
+    matrix_strides: [4]u32 = .{ 0, 0, 0, 0 },
 };
 const ProfileVarying = struct {
     vertex_interface: u32,
@@ -1418,13 +1483,15 @@ const ProfileUniform = struct {
     interface: u32,
     byte_size: u8 = 0,
 };
-const ProfileSampledImage = struct { interface: u32, binding: u32 };
+const ProfileSampledImage = struct { interface: u32, binding: u32, descriptor_set: u8 = 1, sampler_required: bool = true, cube: bool = false };
+const ProfileSampler = struct { interface: u32, binding: u32 };
 const ProfileInputAttachment = struct { interface: u32, binding: u32 };
 const ProfileGraphics = struct {
     vertex: render_ir_exec.Executor,
     fragment: render_ir_exec.Executor,
     inputs: [16]ProfileVertexInput = undefined,
     input_count: u8 = 0,
+    vertex_index_interface: ?u32 = null,
     vertex_output: u32,
     vertex_outputs: [16]u32 = [_]u32{0} ** 16,
     vertex_output_count: u8 = 1,
@@ -1442,6 +1509,8 @@ const ProfileGraphics = struct {
     fragment_needs_derivatives: bool = false,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_samplers: [8]ProfileSampler = undefined,
+    fragment_sampler_count: u8 = 0,
     fragment_input_attachments: [8]ProfileInputAttachment = undefined,
     fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
@@ -1450,6 +1519,7 @@ const ProfileGraphics = struct {
 const ProfileGraphicsContract = struct {
     inputs: [16]ProfileVertexInput = undefined,
     input_count: u8 = 0,
+    vertex_index_interface: ?u32 = null,
     vertex_output: u32,
     vertex_outputs: [16]u32 = [_]u32{0} ** 16,
     vertex_output_count: u8 = 1,
@@ -1466,6 +1536,8 @@ const ProfileGraphicsContract = struct {
     fragment_front_facing: ?u32 = null,
     fragment_sampled_images: [8]ProfileSampledImage = undefined,
     fragment_sampled_image_count: u8 = 0,
+    fragment_samplers: [8]ProfileSampler = undefined,
+    fragment_sampler_count: u8 = 0,
     fragment_input_attachments: [8]ProfileInputAttachment = undefined,
     fragment_input_attachment_count: u8 = 0,
     fragment_output: u32,
@@ -1500,6 +1572,37 @@ const ExecutionAbi = union(enum) {
         self.* = .profile_v1_metadata;
     }
 };
+const StencilFaceState = struct {
+    fail_op: i32 = 0,
+    pass_op: i32 = 0,
+    depth_fail_op: i32 = 0,
+    compare_op: i32 = 7,
+    compare_mask: u32 = std.math.maxInt(u32),
+    write_mask: u32 = std.math.maxInt(u32),
+    reference: u32 = 0,
+};
+const StencilRasterState = struct {
+    test_enable: u32 = 0,
+    front: StencilFaceState = .{},
+    back: StencilFaceState = .{},
+};
+fn stencilFaceState(state: StencilOpState) StencilFaceState {
+    return .{
+        .fail_op = state.fail_op,
+        .pass_op = state.pass_op,
+        .depth_fail_op = state.depth_fail_op,
+        .compare_op = state.compare_op,
+        .compare_mask = state.compare_mask,
+        .write_mask = state.write_mask,
+        .reference = state.reference,
+    };
+}
+fn stencilFaceStateValid(state: StencilOpState) bool {
+    return state.fail_op >= 0 and state.fail_op <= 7 and
+        state.pass_op >= 0 and state.pass_op <= 7 and
+        state.depth_fail_op >= 0 and state.depth_fail_op <= 7 and
+        state.compare_op >= 0 and state.compare_op <= 7;
+}
 const GraphicsPipelineObj = struct {
     owner: DeviceIdentity,
     canonical: Canonical,
@@ -1522,6 +1625,8 @@ const GraphicsPipelineObj = struct {
     depth_compare_op: i32 = 3,
     depth_bounds_test_enable: u32 = 0,
     depth_bounds: [2]f32 = .{ 0, 1 },
+    stencil_front: StencilFaceState = .{},
+    stencil_back: StencilFaceState = .{},
     depth_bias_enable: u32 = 0,
     depth_bias: [3]f32 = .{ 0, 0, 0 },
     color_write_mask: u32 = 0xf,
@@ -1654,16 +1759,52 @@ const QueryCommand = struct { pool: *QueryPoolObj, index: u32 };
 const QueryCopyCommand = struct { pool: *QueryPoolObj, first: u32, count: u32, destination: *BufferObj, offset: u64, stride: u64, flags: u32 };
 const IndexedDrawState = struct { buffer: *BufferObj, offset: u64, byte_count: u64, index_type: i32, vertex_offset: i32 };
 const IndirectCountState = struct { buffer: *BufferObj, offset: u64, max_draw_count: u32 };
-const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{}, count_source: ?IndirectCountState = null };
+const IndirectDrawState = struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, indirect_buffer: *BufferObj, offset: u64, draw_count: u32, stride: u64, indexed: bool, index_buffer: ?*BufferObj, index_offset: u64, index_type: i32, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, stencil: StencilRasterState = .{}, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{}, count_source: ?IndirectCountState = null };
 const BlitImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageBlit, filter: i32 };
 const ResolveImageCommand = struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageResolve };
-const DynamicState = struct { cull_mode: u32 = std.math.maxInt(u32), front_face: i32 = -1, primitive_topology: i32 = 3, primitive_topology_set: bool = false, primitive_restart_enable: u32 = 0, primitive_restart_enable_set: bool = false, rasterizer_discard_enable: u32 = 0, rasterizer_discard_enable_set: bool = false, depth_bias_enable: u32 = 0, depth_bias_enable_set: bool = false, depth_test_enable: u32 = 1, depth_test_enable_set: bool = false, depth_write_enable: u32 = 1, depth_write_enable_set: bool = false, depth_compare_op: i32 = 3, depth_compare_op_set: bool = false, depth_bounds_test_enable: u32 = 0, depth_bounds_test_enable_set: bool = false, stencil_test_enable: u32 = 0, stencil_test_enable_set: bool = false, stencil_fail_op: i32 = 0, stencil_pass_op: i32 = 0, stencil_depth_fail_op: i32 = 0, stencil_compare_op: i32 = 7, stencil_op_set: bool = false };
+const ClearDepthCommand = struct { image: *ImageObj, layout: i32, depth: f32, stencil: u32 = 0, aspect_mask: u32 = 2, base_layer: u32 = 0, layer_count: u32 = 1 };
+const RenderClearCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, depth_value: f32, stencil_value: u32 = 0, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true, clear_stencil: bool = false };
+const ClearAttachmentsCommand = struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
+const DeferredClearAttachmentsCommand = struct { color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, depth_value: f32, stencil_value: u32 = 0, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 };
+const DynamicState = struct {
+    cull_mode: u32 = std.math.maxInt(u32),
+    front_face: i32 = -1,
+    primitive_topology: i32 = 3,
+    primitive_topology_set: bool = false,
+    primitive_restart_enable: u32 = 0,
+    primitive_restart_enable_set: bool = false,
+    rasterizer_discard_enable: u32 = 0,
+    rasterizer_discard_enable_set: bool = false,
+    depth_bias_enable: u32 = 0,
+    depth_bias_enable_set: bool = false,
+    depth_test_enable: u32 = 1,
+    depth_test_enable_set: bool = false,
+    depth_write_enable: u32 = 1,
+    depth_write_enable_set: bool = false,
+    depth_compare_op: i32 = 3,
+    depth_compare_op_set: bool = false,
+    depth_bounds_test_enable: u32 = 0,
+    depth_bounds_test_enable_set: bool = false,
+    stencil_test_enable: u32 = 0,
+    stencil_test_enable_set: bool = false,
+    stencil_fail_op: [2]i32 = .{ 0, 0 },
+    stencil_pass_op: [2]i32 = .{ 0, 0 },
+    stencil_depth_fail_op: [2]i32 = .{ 0, 0 },
+    stencil_compare_op: [2]i32 = .{ 7, 7 },
+    stencil_op_set: u2 = 0,
+};
 const DispatchCommand = struct { base: [3]u32, groups: [3]u32, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const DispatchIndirectCommand = struct { buffer: *BufferObj, offset: u64, pipeline: *ComputePipelineObj, layout: ?*PipelineLayoutObj, descriptors: ?*DescriptorSetObj };
 const PrivateDataEntry = struct { object_type: i32 = 0, object: u64 = 0, data: u64 = 0 };
 const PrivateDataSlotObj = struct { owner: Device, entries: [max_api_items]PrivateDataEntry };
-const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: struct { image: *ImageObj, layout: i32, depth: f32, base_layer: u32 = 0, layer_count: u32 = 1 }, render_clear: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, clear_color: bool = true, clear_depth: bool = true }, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: struct { image: *ImageObj, depth: ?*ImageObj, color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, clear_attachments_deferred: struct { color: [4]u8, depth_value: f32, rect: Rect2D, aspect_mask: u32, base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1 }, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: struct { image: *ImageObj, old_layout: i32, new_layout: i32 }, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
-const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
+const ImageTransitionCommand = struct {
+    image: *ImageObj,
+    old_layout: i32,
+    new_layout: i32,
+    subresource_range: ?ImageSubresourceRange = null,
+};
+const Command = union(enum) { fill: struct { dst: *BufferObj, offset: u64, size: u64, data: u32 }, update_buffer: struct { dst: *BufferObj, offset: u64, data: []u8 }, copy_buffer: struct { src: *BufferObj, dst: *BufferObj, region: BufferCopy }, clear: struct { image: *ImageObj, layout: i32, color: [4]u8, half_color: ?[4]u16 = null, float_color: ?[4]f32 = null, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_depth: ClearDepthCommand, render_clear: RenderClearCommand, discard_image: struct { image: *ImageObj, base_layer: u32 = 0, layer_count: u32 = 1 }, clear_attachments: ClearAttachmentsCommand, clear_attachments_deferred: DeferredClearAttachmentsCommand, next_subpass: void, blit_image: BlitImageCommand, resolve_image: ResolveImageCommand, dispatch: DispatchCommand, dispatch_indirect: DispatchIndirectCommand, cube_draw: struct { framebuffer: ?*FramebufferObj, color_image: ?*ImageObj = null, depth_image: ?*ImageObj = null, color_base_layer: u32 = 0, depth_base_layer: u32 = 0, layer_count: u32 = 1, expected_color_layout: i32 = -1, expected_depth_layout: i32 = -1, pipeline: *GraphicsPipelineObj, descriptors: *DescriptorSetObj, vertex_count: u32, base_vertex: u32, instance_count: u32, instance_index: u32 = 0, indexed: ?IndexedDrawState, viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32 = 3, primitive_restart_enable: u32 = 0, rasterizer_discard_enable: u32 = 0, depth_test_enable: u32 = 1, depth_write_enable: u32 = 1, depth_compare_op: i32 = 3, depth_bounds_test_enable: u32 = 0, depth_bounds: [2]f32 = .{ 0, 1 }, stencil: StencilRasterState = .{}, depth_bias_enable: u32 = 0, depth_bias: [3]f32 = .{ 0, 0, 0 }, blend_constants: [4]f32 = .{ 0, 0, 0, 0 }, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, vertex_bindings: VertexBindingState = .{}, push_constants: PushConstantState = .{} }, indirect_draw: IndirectDrawState, buffer_to_image: struct { src: *BufferObj, dst: *ImageObj, layout: i32, region: BufferImageCopy }, image_to_buffer: struct { src: *ImageObj, layout: i32, dst: *BufferObj, region: BufferImageCopy }, copy_image: struct { src: *ImageObj, src_layout: i32, dst: *ImageObj, dst_layout: i32, region: ImageCopy }, transition: ImageTransitionCommand, event_set: EventSetCommand, event_reset: *EventObj, event_wait: *EventObj, buffer_barrier: *BufferObj, query_reset: struct { pool: *QueryPoolObj, first: u32, count: u32 }, query_begin: QueryCommand, query_end: QueryCommand, query_timestamp: QueryCommand, query_copy: QueryCopyCommand };
+const CommandBufferImpl = struct { owner: *DeviceObj, pool: *CommandPoolObj, level: u8, state: u8, invalid: bool, begin_flags: u32, count: u16, owned_update_count: u16, secondary_count: u16, primary_ref_count: u16, render_pass_continue: bool, render_contents: i32, inherited_occlusion: bool, inherited_subpass: u32, active_subpass: u32, active_framebuffer: ?*FramebufferObj, active_render_pass: ?*RenderPassObj, dynamic_rendering: bool = false, dynamic_inheritance: bool = false, dynamic_color_image: ?*ImageObj = null, dynamic_depth_image: ?*ImageObj = null, dynamic_color_base_layer: u32 = 0, dynamic_depth_base_layer: u32 = 0, dynamic_layer_count: u32 = 1, dynamic_color_store_none: bool = false, dynamic_depth_store_none: bool = false, dynamic_color_store_discard: bool = false, dynamic_depth_store_discard: bool = false, inherited_dynamic_view_mask: u32 = 0, inherited_dynamic_color_format: i32 = 0, inherited_dynamic_depth_format: i32 = 0, inherited_dynamic_stencil_format: i32 = 0, inherited_dynamic_samples: u32 = 0, rendering_location_count: u32 = 0, rendering_locations: [8]u32 = undefined, rendering_input_count: u32 = 0, rendering_input_indices: [8]u32 = undefined, rendering_depth_input_index: ?u32 = null, rendering_stencil_input_index: ?u32 = null, device_mask: u32 = 1, active_query_pool: ?*QueryPoolObj, active_query_index: u32, bound_pipeline: ?*GraphicsPipelineObj, bound_pipeline_handle: usize, bound_compute_pipeline: ?*ComputePipelineObj = null, bound_compute_pipeline_handle: usize = 0, bound_descriptors: ?*DescriptorSetObj, bound_sampled_descriptors: ?*DescriptorSetObj = null, bound_descriptor_bind_point: i32 = 0, bound_descriptor_stage_flags: u32 = 0, bound_layout: ?*PipelineLayoutObj, bound_layout_handle: usize, dynamic_uniform_offset: u64 = 0, dynamic_uniform_offsets: [max_profile_sampled_bindings]u64 = [_]u64{0} ** max_profile_sampled_bindings, push_descriptor: DescriptorSetObj = .{}, push_descriptor_active: bool = false, push_descriptor_bind_point: i32 = 0, push_descriptor_stage_flags: u32 = 0, descriptor_snapshots: []DescriptorSetObj, dynamic: DynamicState, vertex_bindings: VertexBindingState, index_buffer: ?*BufferObj, index_buffer_handle: usize, index_offset: u64, index_size: u64, index_type: i32, index_buffer_set: bool, viewport: Viewport, viewport_set: bool, scissor: cpu_cube.Rect, scissor_set: bool, line_width: f32, line_width_set: bool, line_stipple_factor: u32 = 1, line_stipple_pattern: u16 = 0xffff, line_stipple_set: bool, blend_constants: [4]f32, blend_constants_set: bool, depth_bias: [3]f32, depth_bias_set: bool, depth_bounds: [2]f32, depth_bounds_set: bool, stencil_compare_mask: [2]u32, stencil_compare_mask_set: u2, stencil_write_mask: [2]u32, stencil_write_mask_set: u2, stencil_reference: [2]u32, stencil_reference_set: u2, push_constants: PushConstantState, commands: []Command, owned_updates: [256][]u8, secondaries: [256]*CommandBufferObj };
 pub const CommandBufferObj = extern struct { loader_data: usize, impl: *CommandBufferImpl };
 pub const CommandBuffer = *CommandBufferObj;
 
@@ -1672,6 +1813,10 @@ const max_child_objects = 64;
 const max_command_pool_objects = 4096;
 const max_buffer_objects = 4096;
 const max_image_view_objects = 4096;
+const ImageMipLayouts = [max_image_objects][max_image_mip_levels]i32;
+fn emptyImageMipLayouts() ImageMipLayouts {
+    return [_][max_image_mip_levels]i32{[_]i32{0} ** max_image_mip_levels} ** max_image_objects;
+}
 // Chromium may retain conversion objects through several compositor frames.
 // Keep this independent bounded registry so conversion churn cannot consume
 // the generic child-object pool.
@@ -2427,12 +2572,18 @@ fn pipelineVertexInputDivisorStateValid(raw: ?*const anyopaque) bool {
     while (next) |item| {
         if (depth == 16) return false;
         const header: *const ChainHeader = @ptrCast(@alignCast(item));
-        if (header.s_type != 1_000_191_001 or seen) return false;
+        if (header.s_type != 1_000_190_001 or seen) return false;
         const info: *const PipelineVertexInputDivisorStateCreateInfo = @ptrCast(@alignCast(item));
-        // Vertex-attribute divisor is not advertised.  A zero-entry node is
-        // still a valid ABI extension and has no execution effect; nonzero
-        // divisors would require the disabled feature and are rejected.
-        if (info.vertex_binding_divisor_count > max_api_items or info.vertex_binding_divisor_count != 0) return false;
+        // The scalar backend supports the core divisor of one. Divisor zero
+        // and values greater than one require additional execution semantics.
+        if (info.vertex_binding_divisor_count > max_api_items or
+            (info.vertex_binding_divisor_count != 0 and info.vertex_binding_divisors == null)) return false;
+        if (info.vertex_binding_divisors) |divisors| {
+            for (divisors[0..info.vertex_binding_divisor_count], 0..) |divisor, index| {
+                if (divisor.divisor != 1) return false;
+                for (divisors[0..index]) |prior| if (prior.binding == divisor.binding) return false;
+            }
+        }
         seen = true;
         next = header.p_next;
         depth += 1;
@@ -2562,7 +2713,7 @@ fn graphicsPipelinePNext(raw: ?*const anyopaque, legacy: u32) ?GraphicsPipelineP
             pipeline_rendering_create_info_stype => {
                 if (seen_rendering) return null;
                 const info: *const PipelineRenderingCreateInfo = @ptrCast(@alignCast(item));
-                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !colorAttachmentFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or info.stencil_attachment_format != 0) return null;
+                if (info.view_mask != 0 or info.color_attachment_count > 1 or (info.color_attachment_count != 0 and (info.color_attachment_formats == null or !colorAttachmentFormat(info.color_attachment_formats.?[0]))) or (info.depth_attachment_format != 0 and !isDepthFormat(info.depth_attachment_format)) or (info.stencil_attachment_format != 0 and !isStencilFormat(info.stencil_attachment_format))) return null;
                 const color_format = if (info.color_attachment_count == 0) 0 else info.color_attachment_formats.?[0];
                 // ZPU's dynamic-rendering attachment path is deliberately
                 // bounded to the same formats accepted by vkCmdBeginRendering.
@@ -2980,6 +3131,10 @@ fn populateCoreFeatureChain(raw: ?*anyopaque) bool {
                 propertyWriteU32(payload, 0, 1);
                 propertyWriteU32(payload, 4, 0);
             },
+            1000191002 => { // VkPhysicalDeviceVertexAttributeDivisorFeatures
+                propertyWriteU32(payload, 0, 1);
+                propertyWriteU32(payload, 4, 0);
+            },
             else => {},
         }
         next = if (header.p_next) |p| @ptrCast(@constCast(p)) else null;
@@ -3011,6 +3166,12 @@ fn coreFeatureChainHasEnabledValue(raw: ?*const anyopaque) bool {
                 const preserve = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
                 if (last != 0 and last != 1) return true;
                 if (preserve != 0) return true;
+            },
+            1000191002 => { // VkPhysicalDeviceVertexAttributeDivisorFeatures
+                const divisor = std.mem.readInt(u32, @ptrCast(&bytes[16]), .little);
+                const zero_divisor = std.mem.readInt(u32, @ptrCast(&bytes[20]), .little);
+                if (divisor != 0 and divisor != 1) return true;
+                if (zero_divisor != 0) return true;
             },
             else => {
                 for (bytes[16 .. 16 + words * @sizeOf(u32)]) |value| if (value != 0) return true;
@@ -4185,7 +4346,164 @@ fn getMemoryProperties(physical: ?Physical, output: ?*MemoryProperties) callconv
     out.memory_heaps[0] = .{ .size = 256 * 1024 * 1024, .flags = 0 };
 }
 fn isDepthFormat(format: i32) bool {
-    return format == 124 or format == 126;
+    return format == 124 or format == format_x8_d24_unorm_pack32 or format == 126 or format == format_d24_unorm_s8_uint;
+}
+const format_d24_unorm_s8_uint: i32 = 129;
+const format_d32_sfloat: i32 = 126;
+const format_x8_d24_unorm_pack32: i32 = 125;
+const format_s8_uint: i32 = 127;
+const image_aspect_depth_bit: u32 = 0x2;
+const image_aspect_stencil_bit: u32 = 0x4;
+const depth_stencil_sampled_image_features: u32 = 0x1 | 0x200 | 0x4000 | 0x8000;
+const depth_sampled_image_features: u32 = depth_stencil_sampled_image_features | 0x1000;
+const depth_stencil_image_usage: u32 = 0x1 | 0x2 | 0x4 | 0x20;
+
+fn isStencilFormat(format: i32) bool {
+    return format == format_s8_uint or format == format_d24_unorm_s8_uint;
+}
+
+fn isDepthStencilFormat(format: i32) bool {
+    return isDepthFormat(format) or isStencilFormat(format);
+}
+
+fn imageAspectMaskForFormat(format: i32) u32 {
+    if (!isDepthStencilFormat(format)) return image_aspect_color_bit;
+    return (if (isDepthFormat(format)) image_aspect_depth_bit else 0) |
+        (if (isStencilFormat(format)) image_aspect_stencil_bit else 0);
+}
+
+fn validImageAspectMask(image: *const ImageObj, mask: u32) bool {
+    const supported = imageAspectMaskForFormat(image.format);
+    return mask != 0 and mask & ~supported == 0;
+}
+
+fn depthValueFromStorage(format: i32, bytes: []const u8, offset: usize) f32 {
+    const packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+    if (format == format_d24_unorm_s8_uint) {
+        return @as(f32, @floatFromInt(packed_word >> 8)) / 16_777_215.0;
+    }
+    if (format == format_x8_d24_unorm_pack32) {
+        return @as(f32, @floatFromInt(packed_word & 0x00ff_ffff)) / 16_777_215.0;
+    }
+    return @bitCast(packed_word);
+}
+
+fn writeDepthValueToStorage(format: i32, bytes: []u8, offset: usize, value: f32) void {
+    if (format == format_d24_unorm_s8_uint) {
+        const old = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        const normalized = std.math.clamp(value, 0, 1);
+        const depth_bits: u32 = @intFromFloat(@round(normalized * 16_777_215.0));
+        std.mem.writeInt(u32, bytes[offset..][0..4], (depth_bits << 8) | (old & 0xff), .little);
+        return;
+    }
+    if (format == format_x8_d24_unorm_pack32) {
+        const old = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        const depth_bits: u32 = @intFromFloat(@round(std.math.clamp(value, 0, 1) * 16_777_215.0));
+        std.mem.writeInt(u32, bytes[offset..][0..4], (old & 0xff00_0000) | (depth_bits & 0x00ff_ffff), .little);
+        return;
+    }
+    std.mem.writeInt(u32, bytes[offset..][0..4], @bitCast(value), .little);
+}
+
+fn clearDepthStencilBytes(image: *const ImageObj, bytes: []u8, depth: f32, stencil: u32, aspects: u32) void {
+    if (image.format == format_s8_uint) {
+        if (aspects & image_aspect_stencil_bit == 0) return;
+        var offset: usize = 0;
+        while (offset + 4 <= bytes.len) : (offset += 4) {
+            const packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+            std.mem.writeInt(u32, bytes[offset..][0..4], (packed_word & 0xffff_ff00) | (stencil & 0xff), .little);
+        }
+        return;
+    }
+    if (image.format == format_x8_d24_unorm_pack32) {
+        if (aspects & image_aspect_depth_bit == 0) return;
+        const depth_bits: u32 = @intFromFloat(@round(std.math.clamp(depth, 0, 1) * 16_777_215.0));
+        var offset: usize = 0;
+        while (offset + 4 <= bytes.len) : (offset += 4) {
+            const old = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+            std.mem.writeInt(u32, bytes[offset..][0..4], (old & 0xff00_0000) | (depth_bits & 0x00ff_ffff), .little);
+        }
+        return;
+    }
+    if (image.format != format_d24_unorm_s8_uint) {
+        if (aspects & image_aspect_depth_bit != 0) fillImagePattern(bytes, @bitCast(depth));
+        return;
+    }
+    const clear_depth = aspects & image_aspect_depth_bit != 0;
+    const clear_stencil = aspects & image_aspect_stencil_bit != 0;
+    const depth_bits: u32 = if (clear_depth) @intFromFloat(@round(std.math.clamp(depth, 0, 1) * 16_777_215.0)) else 0;
+    const stencil_bits = stencil & 0xff;
+    if (clear_depth and clear_stencil) {
+        const packed_word = (depth_bits << 8) | stencil_bits;
+        fillImagePattern(bytes, packed_word);
+        return;
+    }
+    var offset: usize = 0;
+    while (offset + 4 <= bytes.len) : (offset += 4) {
+        var packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        if (clear_depth) packed_word = (depth_bits << 8) | (packed_word & 0xff);
+        if (clear_stencil) packed_word = (packed_word & 0xffff_ff00) | stencil_bits;
+        std.mem.writeInt(u32, bytes[offset..][0..4], packed_word, .little);
+    }
+}
+
+fn clearDepthStencilRect(image: *const ImageObj, bytes: []u8, rect: Rect2D, depth: f32, stencil: u32, aspects: u32) void {
+    if (image.format == format_s8_uint) {
+        if (aspects & image_aspect_stencil_bit == 0) return;
+        const x0: u32 = @intCast(rect.offset.x);
+        const y0: u32 = @intCast(rect.offset.y);
+        const x1 = x0 + rect.extent.width;
+        const y1 = y0 + rect.extent.height;
+        for (y0..y1) |y| for (x0..x1) |x| {
+            const offset = (y * image.width + x) * 4;
+            const packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+            std.mem.writeInt(u32, bytes[offset..][0..4], (packed_word & 0xffff_ff00) | (stencil & 0xff), .little);
+        };
+        return;
+    }
+    if (image.format == format_x8_d24_unorm_pack32) {
+        if (aspects & image_aspect_depth_bit == 0) return;
+        const depth_bits: u32 = @intFromFloat(@round(std.math.clamp(depth, 0, 1) * 16_777_215.0));
+        const x0: u32 = @intCast(rect.offset.x);
+        const y0: u32 = @intCast(rect.offset.y);
+        const x1 = x0 + rect.extent.width;
+        const y1 = y0 + rect.extent.height;
+        for (y0..y1) |y| for (x0..x1) |x| {
+            const offset = (y * image.width + x) * 4;
+            const old = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+            std.mem.writeInt(u32, bytes[offset..][0..4], (old & 0xff00_0000) | (depth_bits & 0x00ff_ffff), .little);
+        };
+        return;
+    }
+    if (image.format != format_d24_unorm_s8_uint) {
+        if (aspects & image_aspect_depth_bit != 0) fillImagePatternRect(bytes, image.width, .{ .x = rect.offset.x, .y = rect.offset.y, .width = rect.extent.width, .height = rect.extent.height }, @bitCast(depth));
+        return;
+    }
+    const clear_depth = aspects & image_aspect_depth_bit != 0;
+    const clear_stencil = aspects & image_aspect_stencil_bit != 0;
+    const depth_bits: u32 = if (clear_depth) @intFromFloat(@round(std.math.clamp(depth, 0, 1) * 16_777_215.0)) else 0;
+    const stencil_bits = stencil & 0xff;
+    const x0: u32 = @intCast(rect.offset.x);
+    const y0: u32 = @intCast(rect.offset.y);
+    const x1 = x0 + rect.extent.width;
+    const y1 = y0 + rect.extent.height;
+    for (y0..y1) |y| for (x0..x1) |x| {
+        const offset = (y * image.width + x) * 4;
+        var packed_word = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+        if (clear_depth) packed_word = (depth_bits << 8) | (packed_word & 0xff);
+        if (clear_stencil) packed_word = (packed_word & 0xffff_ff00) | stencil_bits;
+        std.mem.writeInt(u32, bytes[offset..][0..4], packed_word, .little);
+    };
+}
+// WebGL 1 requires the RGBA4, RGB565, and RGB5_A1 renderbuffer families before
+// ANGLE permits a context. Both Vulkan channel orders are required because
+// ANGLE probes them separately. ZPU retains these optimal-tiling images in its
+// existing four-byte internal color surface, so they are deliberately not
+// exposed to linear mappings or transfer commands. The scalar renderer sees
+// normalized RGBA values, while ANGLE owns the GL-facing packed-format
+// conversion.
+fn webglBootstrapColorFormat(format: i32) bool {
+    return format >= 2 and format <= 7;
 }
 const format_g8_b8r8_2plane_420_unorm: i32 = 1000156003;
 const image_aspect_color_bit: u32 = 0x1;
@@ -4209,13 +4527,57 @@ fn nv12ImageByteSize(width: u32, height: u32) ?u64 {
 
 fn imageFormatMipChainLayerByteSize(format: i32, width: u32, height: u32, mip_levels: u32) ?u64 {
     if (ycbcr420Nv12Format(format)) return if (mip_levels == 1) nv12ImageByteSize(width, height) else null;
-    return imageMipChainLayerByteSize(width, height, mip_levels);
+    return imageMipChainLayerByteSizeForBpp(width, height, mip_levels, imageStorageBytesPerTexel(format));
+}
+
+fn imageStorageBytesPerTexel(format: i32) u64 {
+    return switch (format) {
+        76 => 2, // VK_FORMAT_R16_SFLOAT
+        83, 100, 122 => 4,
+        97 => 8,
+        103 => 8,
+        109 => 16,
+        else => 4,
+    };
+}
+
+fn halfFloatColorFormat(format: i32) bool {
+    return format == 76 or format == 83 or format == 97;
+}
+
+fn floatColorFormat(format: i32) bool {
+    return halfFloatColorFormat(format) or format == 100 or format == 103 or format == 109 or format == 122;
+}
+
+fn floatColorChannelCount(format: i32) ?usize {
+    return switch (format) {
+        76, 100 => 1,
+        83, 103 => 2,
+        122 => 3,
+        97, 109 => 4,
+        else => null,
+    };
+}
+
+fn floatColorHasAlpha(format: i32) bool {
+    return format == 97 or format == 109;
 }
 
 fn imageFormatUsage(format: i32, tiling: i32) u32 {
     // Linear and optimal feature sets can differ; vkGetPhysicalDeviceImageFormatProperties
     // and vkCreateImage both receive the tiling explicitly.
-    _ = tiling;
+    // The WebGL bootstrap formats deliberately have no linear image support:
+    // they are backed only by ZPU's private optimal-tiled RGBA surface.
+    if (webglBootstrapColorFormat(format)) return if (tiling == 0) 0x4 | 0x10 else 0;
+    // ANGLE exposes depth and stencil renderbuffer formats only when their
+    // sampled-image and attachment features agree with the image-usage
+    // combinations it probes. ZPU keeps these images in its four-byte CPU
+    // backing store and supports sampled, transfer, and attachment use there.
+    if (isDepthStencilFormat(format)) return if (tiling == 0) depth_stencil_image_usage else 0;
+    // EXT_color_buffer_float covers R16F, RG16F, RGBA16F, R32F, RG32F,
+    // RGBA32F, and packed R11G11B10F. Keep them optimal-tiled because the
+    // CPU image store uses each format's native texel encoding.
+    if (floatColorFormat(format)) return if (tiling == 0) 0x1 | 0x2 | 0x4 | 0x10 | 0x80 else 0;
     return switch (format) {
         // R8_UNORM is retained in the internal image store as one red byte
         // per texel followed by an opaque padding word. It supports the
@@ -4226,15 +4588,12 @@ fn imageFormatUsage(format: i32, tiling: i32) u32 {
         // R8G8 for interleaved chroma. Both are sampled/transfer resources;
         // neither is exposed as a color attachment in this bounded profile.
         16 => 0x1 | 0x2 | 0x4 | 0x10,
-        37 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
-        43 => 0x4,
+        37, 43 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         44 => 0x1 | 0x2 | 0x4 | 0x10 | 0x80,
         // Bounded NV12 support is sampled and transferred only. It is not a
         // render target or input attachment, and every plane shares one
         // allocation rather than exposing disjoint-memory semantics.
         format_g8_b8r8_2plane_420_unorm => 0x2 | 0x4,
-        124 => 0x2 | 0x20,
-        126 => 0x2 | 0x20,
         else => 0,
     };
 }
@@ -4262,15 +4621,35 @@ fn sparseImageFormatQueryValid(format: i32, image_type: i32, samples: u32, usage
 fn getFormatPropertiesLocked(physical: Physical, format: i32, output: ?*FormatProperties) bool {
     if (!validPhysicalLocked(physical)) return false;
     const out = output orelse return false;
+    if (webglBootstrapColorFormat(format)) {
+        // ANGLE validates standard renderbuffers as blendable color targets.
+        out.* = .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x80 | 0x100, .buffer_features = 0 };
+        return true;
+    }
+    if (isDepthStencilFormat(format)) {
+        out.* = .{
+            .linear_tiling_features = 0,
+            .optimal_tiling_features = if (format == format_s8_uint) depth_stencil_sampled_image_features else depth_sampled_image_features,
+            .buffer_features = 0,
+        };
+        return true;
+    }
+    if (floatColorFormat(format)) {
+        // These formats use native half, float, or packed-float texels in
+        // the scalar image path. Sampling, color attachment blending, linear
+        // filtering, blits, and transfers are implemented for each encoding.
+        out.* = .{
+            .linear_tiling_features = 0,
+            .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000,
+            .buffer_features = 0,
+        };
+        return true;
+    }
     out.* = switch (format) {
-        9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        37 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
-        43 => .{ .linear_tiling_features = 0x1, .optimal_tiling_features = 0x1, .buffer_features = 0 },
-        44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        9 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        16 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
+        37, 43, 44 => .{ .linear_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .optimal_tiling_features = 0x1 | 0x80 | 0x100 | 0x400 | 0x800 | 0x1000 | 0x4000 | 0x8000, .buffer_features = 0 },
         format_g8_b8r8_2plane_420_unorm => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x1 | 0x8000, .buffer_features = 0 },
-        124 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
-        126 => .{ .linear_tiling_features = 0, .optimal_tiling_features = 0x200 | 0x8000, .buffer_features = 0 },
         else => std.mem.zeroes(FormatProperties),
     };
     return true;
@@ -4299,7 +4678,7 @@ fn getImageFormatProperties(physical: ?Physical, format: i32, image_type: i32, t
     const result: Result = result: {
         if (!validPhysicalLocked(physical orelse break :result .error_initialization_failed)) break :result .error_initialization_failed;
         const allowed_usage = imageFormatUsage(format, tiling);
-        if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or !imageCreateFlagsValid(flags) or usage == 0 or usage & ~allowed_usage != 0 or (isDepthFormat(format) and tiling != 0)) break :result .error_format_not_supported;
+        if (allowed_usage == 0 or image_type != 1 or (tiling != 0 and tiling != 1) or !imageCreateFlagsValid(flags) or usage == 0 or usage & ~allowed_usage != 0 or (isDepthStencilFormat(format) and tiling != 0)) break :result .error_format_not_supported;
         const out = output orelse break :result .error_initialization_failed;
         out.* = .{ .max_extent = .{ .width = max_2d_extent, .height = max_2d_extent, .depth = 1 }, .max_mip_levels = max_image_mip_levels, .max_array_layers = max_image_array_layers, .sample_counts = 1, .max_resource_size = heap_size };
         break :result .success;
@@ -4469,7 +4848,12 @@ fn validExternalHandleTypes(handle_types: u32) bool {
     return handle_types & ~external_handle_type_mask == 0;
 }
 fn imageCreateFlagsValid(flags: u32) bool {
-    return flags == 0 or flags == 8;
+    // VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT and CUBE_COMPATIBLE_BIT.
+    return flags & ~@as(u32, 0x18) == 0;
+}
+fn imageCreateShapeValid(flags: u32, width: u32, height: u32, layers: u32) bool {
+    if (flags & 0x10 == 0) return true;
+    return width == height and layers >= 6;
 }
 fn getPhysicalDeviceExternalBufferProperties(physical: ?Physical, info: ?*const PhysicalDeviceExternalBufferInfo, output: ?*ExternalBufferProperties) callconv(.c) void {
     const h = physical orelse return;
@@ -5234,11 +5618,13 @@ fn releasePinnedPipelineLayoutsLocked(pinned: *PinnedPipelineLayouts) void {
 fn retireDescriptorSetLocked(set: *DescriptorSetObj) void {
     if (!set.retire_pending or set.active_users.load(.acquire) != 0) return;
     set.layout.deinit();
+    set.uniform_bindings = [_]DescriptorUniformBinding{.{}} ** max_profile_sampled_bindings;
     set.uniform = null;
     set.storage = null;
     set.texture = null;
     set.sampler = null;
     set.sampled_images = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
+    set.sampled_images_set1 = [_]DescriptorSampledImage{.{}} ** max_profile_sampled_bindings;
     set.input_attachments = [_]DescriptorInputAttachment{.{}} ** max_profile_sampled_bindings;
     set.source_set = null;
     set.sampled_source_set = null;
@@ -5425,7 +5811,12 @@ fn pinDescriptorResourcesLocked(descriptors: ?*DescriptorSetObj, owner: Device, 
     if (set.source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
     if (set.sampled_source_set) |source| if (!pinDescriptorSetLocked(source, owner, pinned_sets)) return false;
     if (set.layout_source) |layout| if (!pinPipelineLayoutLocked(layout, owner, pinned_layouts)) return false;
-    if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+    var pinned_uniform_zero = false;
+    for (set.uniform_bindings, 0..) |binding, index| if (binding.buffer) |buffer| {
+        if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
+        if (index == 0) pinned_uniform_zero = true;
+    };
+    if (!pinned_uniform_zero) if (set.uniform) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.storage) |buffer| if (!pinBufferMemoryLocked(buffer, owner, pinned)) return false;
     if (set.texture) |image| if (!pinImageLocked(image, owner, pinned)) return false;
     for (set.sampled_images) |sampled| if (sampled.image) |image| {
@@ -5795,6 +6186,9 @@ fn bindBufferMemory(device: ?Device, handle: usize, memory_handle: usize, offset
     return .success;
 }
 fn imageMipChainLayerByteSize(width: u32, height: u32, mip_levels: u32) ?u64 {
+    return imageMipChainLayerByteSizeForBpp(width, height, mip_levels, 4);
+}
+fn imageMipChainLayerByteSizeForBpp(width: u32, height: u32, mip_levels: u32, bytes_per_texel: u64) ?u64 {
     var total: u64 = 0;
     var mip_width = width;
     var mip_height = height;
@@ -5804,7 +6198,7 @@ fn imageMipChainLayerByteSize(width: u32, height: u32, mip_levels: u32) ?u64 {
             hit(.overflow_image_size);
             return null;
         };
-        const bytes = std.math.mul(u64, pixels, 4) catch {
+        const bytes = std.math.mul(u64, pixels, bytes_per_texel) catch {
             hit(.overflow_image_size);
             return null;
         };
@@ -5855,7 +6249,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage usage rejected format={d} tiling={d} usage=0x{x} allowed=0x{x}\n", .{ ci.format, ci.tiling, ci.usage, allowed_usage });
         return .error_initialization_failed;
     }
-    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ycbcr420Nv12Format(ci.format) and (ci.mip_levels != 1 or ci.array_layers != 1)) or (ci.tiling != 0 and ci.tiling != 1) or (isDepthFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
+    if (alloc != null or ci.s_type != 14 or !imageCreatePNextValid(ci.p_next, ci.format) or !imageCreateFlagsValid(ci.flags) or ci.image_type != 1 or allowed_usage == 0 or ci.extent.width == 0 or ci.extent.height == 0 or ci.extent.width > max_2d_extent or ci.extent.height > max_2d_extent or ci.extent.depth != 1 or !imageCreateShapeValid(ci.flags, ci.extent.width, ci.extent.height, ci.array_layers) or !validImageMipCount(ci.extent.width, ci.extent.height, ci.mip_levels) or ci.array_layers == 0 or ci.array_layers > max_image_array_layers or ci.samples != 1 or (ycbcr420Nv12Format(ci.format) and (ci.mip_levels != 1 or ci.array_layers != 1)) or (ci.tiling != 0 and ci.tiling != 1) or (isDepthStencilFormat(ci.format) and ci.tiling != 0) or ci.sharing_mode != 0 or ci.queue_family_index_count != 0 or (ci.initial_layout != 0 and ci.initial_layout != 8)) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU createImage rejected alloc={} s_type={d} pnext={} flags=0x{x} type={d} allowed=0x{x} extent={d}x{d}x{d} mips={d} layers={d} samples={d} tiling={d} sharing={d} families={d} layout={d} format={d} usage=0x{x}\n", .{ alloc != null, ci.s_type, imageCreatePNextValid(ci.p_next, ci.format), ci.flags, ci.image_type, allowed_usage, ci.extent.width, ci.extent.height, ci.extent.depth, ci.mip_levels, ci.array_layers, ci.samples, ci.tiling, ci.sharing_mode, ci.queue_family_index_count, ci.initial_layout, ci.format, ci.usage });
         return if (allowed_usage == 0) .error_format_not_supported else .error_initialization_failed;
     }
@@ -5864,7 +6258,7 @@ fn createImage(device: ?Device, info: ?*const ImageCreateInfo, alloc: ?*const Al
     if (!validDeviceLocked(d)) return .error_initialization_failed;
     for (&image_objects, &image_state) |*object, *state| if (state.* == .never or (state.* == .tombstone and !object.retire_pending)) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .layout = ci.initial_layout };
+        object.* = .{ .handle = handle, .owner = d, .width = ci.extent.width, .height = ci.extent.height, .mip_levels = ci.mip_levels, .mip_layouts = [_]i32{ci.initial_layout} ** max_image_mip_levels, .array_layers = ci.array_layers, .samples = ci.samples, .format = ci.format, .usage = ci.usage, .flags = ci.flags, .layout = ci.initial_layout };
         if (imageByteSize(object) == null) return .error_initialization_failed;
         state.* = .live;
         out.* = handle;
@@ -5948,7 +6342,7 @@ fn getImageMemoryRequirements2(device: ?Device, info: ?*const ImageMemoryRequire
 }
 fn imageCreateRequirements(info: *const ImageCreateInfo) ?MemoryRequirements {
     const allowed_usage = imageFormatUsage(info.format, info.tiling);
-    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (ycbcr420Nv12Format(info.format) and (info.mip_levels != 1 or info.array_layers != 1)) or (info.tiling != 0 and info.tiling != 1) or (isDepthFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
+    if (info.s_type != 14 or !imageCreatePNextValid(info.p_next, info.format) or !imageCreateFlagsValid(info.flags) or info.image_type != 1 or allowed_usage == 0 or info.usage == 0 or info.usage & ~allowed_usage != 0 or info.extent.width == 0 or info.extent.height == 0 or info.extent.depth != 1 or info.extent.width > max_2d_extent or info.extent.height > max_2d_extent or !imageCreateShapeValid(info.flags, info.extent.width, info.extent.height, info.array_layers) or !validImageMipCount(info.extent.width, info.extent.height, info.mip_levels) or info.array_layers == 0 or info.array_layers > max_image_array_layers or info.samples != 1 or (ycbcr420Nv12Format(info.format) and (info.mip_levels != 1 or info.array_layers != 1)) or (info.tiling != 0 and info.tiling != 1) or (isDepthStencilFormat(info.format) and info.tiling != 0) or info.sharing_mode != 0 or info.queue_family_index_count != 0 or (info.initial_layout != 0 and info.initial_layout != 8)) return null;
     const bytes = imageMipChainByteSize(info.format, info.extent.width, info.extent.height, info.mip_levels, info.array_layers) orelse return null;
     return .{ .size = bytes, .alignment = 4, .memory_type_bits = 1 };
 }
@@ -5971,11 +6365,11 @@ fn hostCopyMemcpyRegionValid(image: *const ImageObj, offset: Offset3D, extent: E
 fn hostCopyRowsValid(row_length: u32, image_height: u32, width: u32, height: u32) bool {
     return (row_length == 0 or row_length >= width) and (image_height == 0 or image_height >= height);
 }
-fn hostCopyLayerStride(row_length: u32, image_height: u32, width: u32, height: u32) ?usize {
+fn hostCopyLayerStride(row_length: u32, image_height: u32, width: u32, height: u32, bytes_per_texel: u64) ?usize {
     const row = if (row_length == 0) width else row_length;
     const rows = if (image_height == 0) height else image_height;
     const texels = std.math.mul(u64, row, rows) catch return null;
-    const bytes = std.math.mul(u64, texels, 4) catch return null;
+    const bytes = std.math.mul(u64, texels, bytes_per_texel) catch return null;
     return std.math.cast(usize, bytes);
 }
 fn hostImageMemoryRangesOverlap(a: *const ImageObj, b: *const ImageObj) bool {
@@ -6018,13 +6412,15 @@ fn copyMemoryToImage(device: ?Device, info: ?*const CopyMemoryToImageInfo) callc
     for (ci.regions.?[0..ci.region_count]) |region| {
         const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
         const image_height = if (region.memory_image_height == 0) region.image_extent.height else region.memory_image_height;
-        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height) orelse return .error_initialization_failed;
+        const bytes_per_texel = imageStorageBytesPerTexel(image.format);
+        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height, bytes_per_texel) orelse return .error_initialization_failed;
         const source: [*]const u8 = @ptrCast(region.host_pointer.?);
         for (0..region.image_subresource.layer_count) |layer| {
             const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             const source_layer = source[layer * layer_stride ..][0..layer_stride];
-            const dst_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            copyHostRows(dst[dst_offset..], @as(usize, image.width) * 4, source_layer, @as(usize, row_length) * 4, @as(usize, region.image_extent.width) * 4, region.image_extent.height);
+            const dst_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * @as(usize, @intCast(bytes_per_texel));
+            const row_bytes = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
+            copyHostRows(dst[dst_offset..], @as(usize, image.width) * @as(usize, @intCast(bytes_per_texel)), source_layer, @as(usize, row_length) * @as(usize, @intCast(bytes_per_texel)), row_bytes, region.image_extent.height);
         }
     }
     invalidateImageContents(image);
@@ -6045,13 +6441,15 @@ fn copyImageToMemory(device: ?Device, info: ?*const CopyImageToMemoryInfo) callc
     for (ci.regions.?[0..ci.region_count]) |region| {
         const row_length = if (region.memory_row_length == 0) region.image_extent.width else region.memory_row_length;
         const image_height = if (region.memory_image_height == 0) region.image_extent.height else region.memory_image_height;
-        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height) orelse return .error_initialization_failed;
+        const bytes_per_texel = imageStorageBytesPerTexel(image.format);
+        const layer_stride = hostCopyLayerStride(row_length, image_height, region.image_extent.width, region.image_extent.height, bytes_per_texel) orelse return .error_initialization_failed;
         const destination: [*]u8 = @ptrCast(region.host_pointer.?);
         for (0..region.image_subresource.layer_count) |layer| {
             const layer_offset = imageLayerOffset(image, region.image_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             const destination_layer = destination[layer * layer_stride ..][0..layer_stride];
-            const src_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * 4;
-            copyHostRows(destination_layer, @as(usize, row_length) * 4, src[src_offset..], @as(usize, image.width) * 4, @as(usize, region.image_extent.width) * 4, region.image_extent.height);
+            const src_offset = layer_offset + (@as(usize, @intCast(region.image_offset.y)) * image.width + @as(usize, @intCast(region.image_offset.x))) * @as(usize, @intCast(bytes_per_texel));
+            const row_bytes = @as(usize, region.image_extent.width) * @as(usize, @intCast(bytes_per_texel));
+            copyHostRows(destination_layer, @as(usize, row_length) * @as(usize, @intCast(bytes_per_texel)), src[src_offset..], @as(usize, image.width) * @as(usize, @intCast(bytes_per_texel)), row_bytes, region.image_extent.height);
         }
     }
     return .success;
@@ -6078,9 +6476,10 @@ fn copyImageToImage(device: ?Device, info: ?*const CopyImageToImageInfo) callcon
             const src_layer_offset = imageLayerOffset(src_image, region.src_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             const dst_layer_offset = imageLayerOffset(dst_image, region.dst_subresource.base_array_layer + @as(u32, @intCast(layer))) orelse return .error_initialization_failed;
             for (0..region.extent.height) |row| {
-                const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * 4;
-                const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * 4;
-                const bytes = @as(usize, region.extent.width) * 4;
+                const bytes_per_texel = @as(usize, @intCast(imageStorageBytesPerTexel(src_image.format)));
+                const src_offset = src_layer_offset + ((@as(usize, @intCast(region.src_offset.y)) + row) * src_image.width + @as(usize, @intCast(region.src_offset.x))) * bytes_per_texel;
+                const dst_offset = dst_layer_offset + ((@as(usize, @intCast(region.dst_offset.y)) + row) * dst_image.width + @as(usize, @intCast(region.dst_offset.x))) * bytes_per_texel;
+                const bytes = @as(usize, region.extent.width) * bytes_per_texel;
                 std.mem.copyForwards(u8, dst[dst_offset..][0..bytes], src[src_offset..][0..bytes]);
             }
         }
@@ -6099,7 +6498,11 @@ fn transitionImageLayout(device: ?Device, count: u32, transitions: ?[*]const Hos
         if (transition.s_type != 1000270006 or transition.p_next != null or image.owner != d or !hostCopyTransitionOldLayoutValid(transition.old_layout) or !hostCopyLayoutValid(transition.new_layout) or image.layout != transition.old_layout or !validRangeForImage(image, transition.subresource_range)) return .error_initialization_failed;
         for (transitions.?[0..index]) |prior| if (prior.image == transition.image) return .error_initialization_failed;
     }
-    for (transitions.?[0..count]) |transition| validImageLocked(transition.image).?.layout = transition.new_layout;
+    for (transitions.?[0..count]) |transition| {
+        const image = validImageLocked(transition.image).?;
+        image.layout = transition.new_layout;
+        image.mip_layouts[0] = transition.new_layout;
+    }
     return .success;
 }
 fn getDeviceBufferMemoryRequirements(device: ?Device, info: ?*const DeviceBufferMemoryRequirements, output: ?*MemoryRequirements2) callconv(.c) void {
@@ -6202,12 +6605,14 @@ fn imageSubresourceLayout(device: ?Device, handle: usize, subresource: ImageSubr
     lock();
     defer mutex.unlock();
     const image = validImageLocked(handle) orelse return null;
-    const expected_aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
+    const expected_aspect = if (isDepthFormat(image.format)) image_aspect_depth_bit else if (isStencilFormat(image.format)) image_aspect_stencil_bit else image_aspect_color_bit;
     if (!validDeviceLocked(d) or !validOwner(d, image.owner) or subresource.aspect_mask != expected_aspect or subresource.mip_level != 0 or subresource.array_layer >= image.array_layers) return null;
-    const layer_size = imageLayerByteSize(image) orelse return null;
-    const offset = std.math.mul(u64, layer_size, subresource.array_layer) catch return null;
-    const row_pitch = std.math.mul(u64, image.width, 4) catch return null;
-    return .{ .offset = offset, .size = layer_size, .row_pitch = row_pitch, .array_pitch = layer_size, .depth_pitch = layer_size };
+    const layer_size = std.math.mul(u64, image.width, image.height) catch return null;
+    const subresource_size = std.math.mul(u64, layer_size, imageStorageBytesPerTexel(image.format)) catch return null;
+    const array_pitch = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
+    const offset = imageSubresourceOffset(image, 0, subresource.array_layer) orelse return null;
+    const row_pitch = std.math.mul(u64, image.width, imageStorageBytesPerTexel(image.format)) catch return null;
+    return .{ .offset = offset, .size = subresource_size, .row_pitch = row_pitch, .array_pitch = array_pitch, .depth_pitch = subresource_size };
 }
 
 fn getImageSubresourceLayout(device: ?Device, handle: usize, subresource: ?*const ImageSubresource, output: ?*SubresourceLayout) callconv(.c) void {
@@ -6236,7 +6641,7 @@ fn getDeviceImageSubresourceLayout(device: ?Device, info: ?*const DeviceImageSub
     const subresource = ci.subresource orelse return;
     if (subresource.s_type != 1000338003 or subresource.p_next != null) return;
     const requirements = imageCreateRequirements(create_info) orelse return;
-    const expected_aspect: u32 = if (isDepthFormat(create_info.format)) 2 else 1;
+    const expected_aspect = if (isDepthFormat(create_info.format)) image_aspect_depth_bit else if (isStencilFormat(create_info.format)) image_aspect_stencil_bit else image_aspect_color_bit;
     if (subresource.image_subresource.aspect_mask != expected_aspect or subresource.image_subresource.mip_level != 0 or subresource.image_subresource.array_layer >= create_info.array_layers) return;
     const layer_size = requirements.size / create_info.array_layers;
     const offset = std.math.mul(u64, layer_size, subresource.image_subresource.array_layer) catch return;
@@ -6250,7 +6655,7 @@ fn getRenderingAreaGranularity(device: ?Device, info: ?*const RenderingAreaInfo,
     const out = output orelse return;
     if (ci.s_type != 1000470003 or ci.p_next != null or ci.view_mask != 0 or ci.color_attachment_count > 1 or
         (ci.color_attachment_count != 0 and (ci.color_attachment_formats == null or imageFormatUsage(ci.color_attachment_formats.?[0], 0) & 0x10 == 0)) or
-        (ci.depth_attachment_format != 0 and !isDepthFormat(ci.depth_attachment_format)) or ci.stencil_attachment_format != 0) return;
+        (ci.depth_attachment_format != 0 and !isDepthFormat(ci.depth_attachment_format)) or (ci.stencil_attachment_format != 0 and !isStencilFormat(ci.stencil_attachment_format))) return;
     lock();
     defer mutex.unlock();
     if (validDeviceLocked(d)) out.* = .{ .width = 1, .height = 1 };
@@ -6662,6 +7067,7 @@ fn resetCommandBufferState(c: *CommandBufferObj) void {
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.dynamic_uniform_offset = 0;
+    c.impl.dynamic_uniform_offsets = [_]u64{0} ** max_profile_sampled_bindings;
     c.impl.push_descriptor = .{};
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
@@ -6755,7 +7161,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
             const header: *const ChainHeader = @ptrCast(@alignCast(raw_dynamic));
             if (header.s_type != 1000044004 or header.p_next != null or bi.flags & 2 == 0 or inheritance.render_pass != 0 or inheritance.subpass != 0 or inheritance.framebuffer != 0) return .error_initialization_failed;
             const dynamic_info: *const CommandBufferInheritanceRenderingInfo = @ptrCast(@alignCast(raw_dynamic));
-            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !colorAttachmentFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or dynamic_info.stencil_attachment_format != 0 or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
+            if (dynamic_info.flags != 0 or dynamic_info.view_mask != 0 or dynamic_info.color_attachment_count > 1 or (dynamic_info.color_attachment_count != 0 and (dynamic_info.color_attachment_formats == null or !colorAttachmentFormat(dynamic_info.color_attachment_formats.?[0]))) or (dynamic_info.depth_attachment_format != 0 and !isDepthFormat(dynamic_info.depth_attachment_format)) or (dynamic_info.stencil_attachment_format != 0 and !isStencilFormat(dynamic_info.stencil_attachment_format)) or dynamic_info.rasterization_samples != 1) return .error_initialization_failed;
             inherited_dynamic = true;
             inherited_dynamic_view_mask = dynamic_info.view_mask;
             inherited_dynamic_color_format = if (dynamic_info.color_attachment_count == 0) 0 else dynamic_info.color_attachment_formats.?[0];
@@ -6822,6 +7228,7 @@ fn beginCommandBuffer(cb: ?CommandBuffer, info: ?*const CommandBufferBeginInfo) 
     c.impl.bound_layout = null;
     c.impl.bound_layout_handle = 0;
     c.impl.dynamic_uniform_offset = 0;
+    c.impl.dynamic_uniform_offsets = [_]u64{0} ** max_profile_sampled_bindings;
     c.impl.push_descriptor = .{};
     c.impl.push_descriptor_active = false;
     c.impl.push_descriptor_bind_point = 0;
@@ -6912,10 +7319,28 @@ fn record(cb: CommandBuffer, command: Command) void {
         }
     } else if (cb.impl.active_framebuffer) |framebuffer| {
         switch (owned) {
-            .render_clear => |*clear| clear.layer_count = framebuffer.layers,
-            .clear_depth => |*clear| clear.layer_count = framebuffer.layers,
-            .cube_draw => |*draw| draw.layer_count = framebuffer.layers,
-            .indirect_draw => |*draw| draw.layer_count = framebuffer.layers,
+            .discard_image => |*discard| {
+                if (framebuffer.color_image == discard.image) discard.base_layer = framebuffer.color_base_layer else if (framebuffer.depth_image == discard.image) discard.base_layer = framebuffer.depth_base_layer;
+            },
+            .render_clear => |*clear| {
+                clear.color_base_layer = framebuffer.color_base_layer;
+                clear.depth_base_layer = framebuffer.depth_base_layer;
+                clear.layer_count = framebuffer.layers;
+            },
+            .clear_depth => |*clear| {
+                clear.base_layer = framebuffer.depth_base_layer;
+                clear.layer_count = framebuffer.layers;
+            },
+            .cube_draw => |*draw| {
+                draw.color_base_layer = framebuffer.color_base_layer;
+                draw.depth_base_layer = framebuffer.depth_base_layer;
+                draw.layer_count = framebuffer.layers;
+            },
+            .indirect_draw => |*draw| {
+                draw.color_base_layer = framebuffer.color_base_layer;
+                draw.depth_base_layer = framebuffer.depth_base_layer;
+                draw.layer_count = framebuffer.layers;
+            },
             else => {},
         }
     }
@@ -6956,6 +7381,9 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.expected_depth_layout = depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
+                draw.color_base_layer = if (framebuffer) |fb| fb.color_base_layer else 0;
+                draw.depth_base_layer = if (framebuffer) |fb| fb.depth_base_layer else 0;
+                draw.layer_count = if (framebuffer) |fb| fb.layers else 1;
                 draw.expected_color_layout = color_layout;
                 draw.expected_depth_layout = depth_layout;
             }
@@ -6971,20 +7399,29 @@ fn commandForSecondaryExecution(command: Command, framebuffer: ?*FramebufferObj,
                 draw.expected_depth_layout = depth_layout;
             } else {
                 draw.framebuffer = framebuffer;
+                draw.color_base_layer = if (framebuffer) |fb| fb.color_base_layer else 0;
+                draw.depth_base_layer = if (framebuffer) |fb| fb.depth_base_layer else 0;
+                draw.layer_count = if (framebuffer) |fb| fb.layers else 1;
                 draw.expected_color_layout = color_layout;
                 draw.expected_depth_layout = depth_layout;
             }
         },
         .clear_attachments_deferred => |op| {
             const dynamic = dynamic_color != null or dynamic_depth != null;
-            const image = if (op.aspect_mask == 1) dynamic_color orelse (if (framebuffer) |fb| fb.color_image else null) else if (op.aspect_mask == 2) dynamic_depth orelse (if (framebuffer) |fb| fb.depth_image else null) else null;
+            const image = if (op.aspect_mask == image_aspect_color_bit) dynamic_color orelse (if (framebuffer) |fb| fb.color_image else null) else if (op.aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0) dynamic_depth orelse (if (framebuffer) |fb| fb.depth_image else null) else null;
             const target = image orelse return null;
-            const base_layer = std.math.add(u32, op.base_layer, if (dynamic) (if (op.aspect_mask == 1) dynamic_color_base_layer else dynamic_depth_base_layer) else 0) catch return null;
+            const base_offset = if (dynamic)
+                (if (op.aspect_mask == image_aspect_color_bit) dynamic_color_base_layer else dynamic_depth_base_layer)
+            else if (framebuffer) |fb|
+                (if (op.aspect_mask == image_aspect_color_bit) fb.color_base_layer else fb.depth_base_layer)
+            else
+                0;
+            const base_layer = std.math.add(u32, op.base_layer, base_offset) catch return null;
             if (op.layer_count == 0 or base_layer >= target.array_layers or op.layer_count > target.array_layers - base_layer or op.rect.offset.x < 0 or op.rect.offset.y < 0 or op.rect.extent.width == 0 or op.rect.extent.height == 0) return null;
             const end_x = std.math.add(u64, @intCast(op.rect.offset.x), op.rect.extent.width) catch return null;
             const end_y = std.math.add(u64, @intCast(op.rect.offset.y), op.rect.extent.height) catch return null;
             if (end_x > target.width or end_y > target.height) return null;
-            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .depth_value = op.depth_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
+            result = .{ .clear_attachments = .{ .image = target, .depth = if (dynamic) dynamic_depth else if (framebuffer) |fb| fb.depth_image else null, .color = op.color, .half_color = op.half_color, .float_color = op.float_color, .depth_value = op.depth_value, .stencil_value = op.stencil_value, .rect = op.rect, .aspect_mask = op.aspect_mask, .base_layer = base_layer, .layer_count = op.layer_count, .expected_color_layout = color_layout, .expected_depth_layout = depth_layout } };
         },
         else => {},
     }
@@ -7027,7 +7464,7 @@ fn cmdExecuteCommands(cb: ?CommandBuffer, count: u32, buffers: ?[*]const Command
         } else if (primary.impl.dynamic_rendering) {
             const primary_color_format = if (primary.impl.dynamic_color_image) |color| color.format else 0;
             const primary_samples = if (primary.impl.dynamic_color_image) |color| color.samples else if (primary.impl.dynamic_depth_image) |depth| depth.samples else 1;
-            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion) or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != 0 or secondary.impl.inherited_dynamic_samples != primary_samples) {
+            if (primary.impl.render_contents != 1 or !secondary.impl.render_pass_continue or !secondary.impl.dynamic_inheritance or (primary.impl.active_query_pool != null and !secondary.impl.inherited_occlusion) or secondary.impl.inherited_dynamic_view_mask != 0 or secondary.impl.inherited_dynamic_color_format != primary_color_format or secondary.impl.inherited_dynamic_depth_format != (if (primary.impl.dynamic_depth_image) |depth| depth.format else 0) or secondary.impl.inherited_dynamic_stencil_format != primary.impl.inherited_dynamic_stencil_format or secondary.impl.inherited_dynamic_samples != primary_samples) {
                 primary.impl.invalid = true;
                 return;
             }
@@ -7195,7 +7632,7 @@ fn colorBytesForFormat(format: i32, value: *const ClearColorValue) ?[4]u8 {
         if (!std.math.isFinite(component)) return null;
         rgba[i] = @intFromFloat(@round(std.math.clamp(component, 0, 1) * 255));
     }
-    if (format == 44) std.mem.swap(u8, &rgba[0], &rgba[2]);
+    if (format == 43 or format == 44) std.mem.swap(u8, &rgba[0], &rgba[2]);
     return rgba;
 }
 fn colorBytes(image: *const ImageObj, value: *const ClearColorValue) ?[4]u8 {
@@ -7208,12 +7645,14 @@ fn validRange(r: ImageSubresourceRange) bool {
     return r.aspect_mask == 1 and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < max_image_array_layers and r.layer_count <= max_image_array_layers - r.base_array_layer;
 }
 fn validRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
-    const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
-    return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
+    return validImageAspectMask(image, r.aspect_mask) and r.base_mip_level == 0 and r.level_count == 1 and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validBarrierRangeForImage(image: *const ImageObj, r: ImageSubresourceRange) bool {
-    const aspect: u32 = if (isDepthFormat(image.format)) 2 else 1;
-    return r.aspect_mask == aspect and r.base_mip_level == 0 and r.level_count != 0 and r.level_count <= image.mip_levels and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
+    const aspects_valid = if (isDepthFormat(image.format) and isStencilFormat(image.format))
+        r.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit) // without separateDepthStencilLayouts, combined images transition both aspects
+    else
+        validImageAspectMask(image, r.aspect_mask);
+    return aspects_valid and r.base_mip_level < image.mip_levels and r.level_count != 0 and r.level_count <= image.mip_levels - r.base_mip_level and r.layer_count != 0 and r.base_array_layer < image.array_layers and r.layer_count <= image.array_layers - r.base_array_layer;
 }
 fn validLayersForImage(image: *const ImageObj, layers: ImageSubresourceLayers) bool {
     const aspect_valid = if (ycbcr420Nv12Format(image.format)) layers.aspect_mask == image_aspect_plane_0_bit or layers.aspect_mask == image_aspect_plane_1_bit else layers.aspect_mask == image_aspect_color_bit;
@@ -7261,7 +7700,7 @@ fn imageMipOffsetInLayer(image: *const ImageObj, mip_level: u32) ?usize {
     var mip: u32 = 0;
     while (mip < mip_level) : (mip += 1) {
         const pixels = std.math.mul(u64, width, height) catch return null;
-        offset = std.math.add(u64, offset, std.math.mul(u64, pixels, 4) catch return null) catch return null;
+        offset = std.math.add(u64, offset, std.math.mul(u64, pixels, imageStorageBytesPerTexel(image.format)) catch return null) catch return null;
         width = @max(@as(u32, 1), width / 2);
         height = @max(@as(u32, 1), height / 2);
     }
@@ -7304,6 +7743,23 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
         c.impl.invalid = true;
         return;
     };
+    const half_color: ?[4]u16 = if (halfFloatColorFormat(image.format)) blk: {
+        var converted: [4]u16 = undefined;
+        for (value.float32, 0..) |component, index| {
+            if (!std.math.isFinite(component)) {
+                hit(.invalid_clear_color);
+                c.impl.invalid = true;
+                return;
+            }
+            converted[index] = @bitCast(@as(f16, @floatCast(component)));
+        }
+        break :blk converted;
+    } else null;
+    const float_color: ?[4]f32 = if (floatColorFormat(image.format) and !halfFloatColorFormat(image.format)) floatColorFromComponents(value.float32) orelse {
+        hit(.invalid_clear_color);
+        c.impl.invalid = true;
+        return;
+    } else null;
     var unique_count: usize = 0;
     for (list[0..count], 0..) |range, index| {
         var duplicate = false;
@@ -7324,7 +7780,7 @@ fn cmdClearColorImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, colo
             break;
         };
         if (duplicate) continue;
-        record(c, .{ .clear = .{ .image = image, .layout = layout, .color = bytes, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
+        record(c, .{ .clear = .{ .image = image, .layout = layout, .color = bytes, .half_color = half_color, .float_color = float_color, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
     }
 }
 fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i32, value: ?*const ClearDepthStencilValue, count: u32, ranges: ?[*]const ImageSubresourceRange) callconv(.c) void {
@@ -7339,14 +7795,22 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or !isDepthFormat(image.format) or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7) or !std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or c.impl.count == c.impl.commands.len or image.owner != c.impl.owner or !isDepthStencilFormat(image.format) or image.usage & 0x2 == 0 or image.memory == null or (layout != 1 and layout != 7)) {
         c.impl.invalid = true;
         return;
     }
-    for (ranges.?[0..count]) |range| if (!validRangeForImage(image, range)) {
+    var depth_aspect_requested = false;
+    for (ranges.?[0..count]) |range| {
+        if (!validRangeForImage(image, range)) {
+            c.impl.invalid = true;
+            return;
+        }
+        depth_aspect_requested = depth_aspect_requested or range.aspect_mask & image_aspect_depth_bit != 0;
+    }
+    if (depth_aspect_requested and (!std.math.isFinite(value.?.depth) or value.?.depth < 0 or value.?.depth > 1)) {
         c.impl.invalid = true;
         return;
-    };
+    }
     var unique_count: usize = 0;
     for (ranges.?[0..count], 0..) |range, index| {
         var duplicate = false;
@@ -7367,7 +7831,7 @@ fn cmdClearDepthStencilImage(cb: ?CommandBuffer, image_handle: usize, layout: i3
             break;
         };
         if (duplicate) continue;
-        record(c, .{ .clear_depth = .{ .image = image, .layout = layout, .depth = value.?.depth, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
+        record(c, .{ .clear_depth = .{ .image = image, .layout = layout, .depth = value.?.depth, .stencil = value.?.stencil, .aspect_mask = range.aspect_mask, .base_layer = range.base_array_layer, .layer_count = range.layer_count } });
     }
 }
 fn clearRectValid(rect: ClearRect, width: u32, height: u32, layers: u32) bool {
@@ -7381,6 +7845,7 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     defer mutex.unlock();
     const c = validCommandBufferLocked(cb) orelse return;
     const dynamic_rendering = c.impl.dynamic_rendering;
+    const active_framebuffer = if (dynamic_rendering) null else c.impl.active_framebuffer;
     const framebuffer = c.impl.active_framebuffer;
     const color = if (dynamic_rendering) c.impl.dynamic_color_image else (if (framebuffer) |value| value.color_image else null);
     const color_image = color;
@@ -7422,11 +7887,11 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
         break :blk format;
     } else 0;
     for (attachments.?[0..attachment_count]) |attachment| {
-        if (attachment.aspect_mask != 1 and attachment.aspect_mask != 2) {
+        if (attachment.aspect_mask != image_aspect_color_bit and attachment.aspect_mask != image_aspect_depth_bit and attachment.aspect_mask != image_aspect_stencil_bit and attachment.aspect_mask != (image_aspect_depth_bit | image_aspect_stencil_bit)) {
             c.impl.invalid = true;
             return;
         }
-        if (attachment.aspect_mask == 1) {
+        if (attachment.aspect_mask == image_aspect_color_bit) {
             if (attachment.color_attachment != 0) {
                 c.impl.invalid = true;
                 return;
@@ -7441,11 +7906,12 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
                 return;
             }
         } else {
-            if (depth_image == null and !isDepthFormat(inherited_depth_format)) {
+            const actual_depth_format = if (depth_image) |depth| depth.format else inherited_depth_format;
+            if (attachment.aspect_mask & ~imageAspectMaskForFormat(actual_depth_format) != 0) {
                 c.impl.invalid = true;
                 return;
             }
-            if (!std.math.isFinite(attachment.clear_value.depth_stencil.depth) or attachment.clear_value.depth_stencil.depth < 0 or attachment.clear_value.depth_stencil.depth > 1) {
+            if (attachment.aspect_mask & image_aspect_depth_bit != 0 and (!std.math.isFinite(attachment.clear_value.depth_stencil.depth) or attachment.clear_value.depth_stencil.depth < 0 or attachment.clear_value.depth_stencil.depth > 1)) {
                 c.impl.invalid = true;
                 return;
             }
@@ -7453,7 +7919,8 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     }
     for (rects.?[0..rect_count]) |rect| {
         if (color_image != null) {
-            const color_base = std.math.add(u32, rect.base_array_layer, if (dynamic_rendering) c.impl.dynamic_color_base_layer else 0) catch {
+            const color_base_offset = if (dynamic_rendering) c.impl.dynamic_color_base_layer else if (active_framebuffer) |fb_obj| fb_obj.color_base_layer else 0;
+            const color_base = std.math.add(u32, rect.base_array_layer, color_base_offset) catch {
                 c.impl.invalid = true;
                 return;
             };
@@ -7463,7 +7930,8 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
             }
         }
         if (depth_image) |depth| {
-            const depth_base = std.math.add(u32, rect.base_array_layer, if (dynamic_rendering) c.impl.dynamic_depth_base_layer else 0) catch {
+            const depth_base_offset = if (dynamic_rendering) c.impl.dynamic_depth_base_layer else if (active_framebuffer) |fb_obj| fb_obj.depth_base_layer else 0;
+            const depth_base = std.math.add(u32, rect.base_array_layer, depth_base_offset) catch {
                 c.impl.invalid = true;
                 return;
             };
@@ -7476,13 +7944,34 @@ fn cmdClearAttachments(cb: ?CommandBuffer, attachment_count: u32, attachments: ?
     const expected_color_layout = if (color_image != null) recordedAttachmentLayout(c, true) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, true);
     const expected_depth_layout = if (depth_image != null) recordedAttachmentLayout(c, false) else if (dynamic_rendering) -1 else renderPassAttachmentLayout(c, false);
     for (attachments.?[0..attachment_count]) |attachment| for (rects.?[0..rect_count]) |rect| {
-        const bytes = if (attachment.aspect_mask == 1) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
-        const base_layer = rect.base_array_layer + if (dynamic_rendering) (if (attachment.aspect_mask == 1) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer) else 0;
+        const bytes = if (attachment.aspect_mask == image_aspect_color_bit) (if (color_image) |target| colorBytes(target, &attachment.clear_value.color).? else colorBytesForFormat(inherited_color_format, &attachment.clear_value.color).?) else .{ 0, 0, 0, 0 };
+        const target_color_format = if (color_image) |target| target.format else inherited_color_format;
+        const half_color: ?[4]u16 = if (attachment.aspect_mask == image_aspect_color_bit and halfFloatColorFormat(target_color_format))
+            halfColorFromComponents(attachment.clear_value.color.float32) orelse {
+                c.impl.invalid = true;
+                return;
+            }
+        else
+            null;
+        const float_color: ?[4]f32 = if (attachment.aspect_mask == image_aspect_color_bit and floatColorFormat(target_color_format) and !halfFloatColorFormat(target_color_format))
+            floatColorFromComponents(attachment.clear_value.color.float32) orelse {
+                c.impl.invalid = true;
+                return;
+            }
+        else
+            null;
+        const base_offset = if (dynamic_rendering)
+            (if (attachment.aspect_mask == image_aspect_color_bit) c.impl.dynamic_color_base_layer else c.impl.dynamic_depth_base_layer)
+        else if (active_framebuffer) |fb_obj|
+            (if (attachment.aspect_mask == image_aspect_color_bit) fb_obj.color_base_layer else fb_obj.depth_base_layer)
+        else
+            0;
+        const base_layer = rect.base_array_layer + base_offset;
         if (inherited_secondary and color_image == null and depth_image == null) {
-            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+            record(c, .{ .clear_attachments_deferred = .{ .color = bytes, .half_color = half_color, .float_color = float_color, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = rect.base_array_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         } else {
-            const image = if (attachment.aspect_mask == 1) color_image.? else depth_image.?;
-            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .depth_value = attachment.clear_value.depth_stencil.depth, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
+            const image = if (attachment.aspect_mask == image_aspect_color_bit) color_image.? else depth_image.?;
+            record(c, .{ .clear_attachments = .{ .image = image, .depth = depth_image, .color = bytes, .half_color = half_color, .float_color = float_color, .depth_value = attachment.clear_value.depth_stencil.depth, .stencil_value = attachment.clear_value.depth_stencil.stencil, .rect = rect.rect, .aspect_mask = attachment.aspect_mask, .base_layer = base_layer, .layer_count = rect.layer_count, .expected_color_layout = expected_color_layout, .expected_depth_layout = expected_depth_layout } });
         }
     };
 }
@@ -7581,6 +8070,14 @@ fn validBlitRegion(src: *const ImageObj, dst: *const ImageObj, region: ImageBlit
     if (blitSpan(region.src_offsets[0].x, region.src_offsets[1].x, src_mip.width) == null or blitSpan(region.src_offsets[0].y, region.src_offsets[1].y, src_mip.height) == null or blitSpan(region.dst_offsets[0].x, region.dst_offsets[1].x, dst_mip.width) == null or blitSpan(region.dst_offsets[0].y, region.dst_offsets[1].y, dst_mip.height) == null) return false;
     return region.src_offsets[0].z == 0 and region.src_offsets[1].z == 1 and region.dst_offsets[0].z == 0 and region.dst_offsets[1].z == 1;
 }
+fn blitSubresourcesDisjoint(region: ImageBlit) bool {
+    if (region.src_subresource.mip_level != region.dst_subresource.mip_level) return true;
+    const src_start = region.src_subresource.base_array_layer;
+    const dst_start = region.dst_subresource.base_array_layer;
+    const src_end = src_start + region.src_subresource.layer_count;
+    const dst_end = dst_start + region.dst_subresource.layer_count;
+    return src_end <= dst_start or dst_end <= src_start;
+}
 fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_handle: usize, dst_layout: i32, count: u32, regions: ?[*]const ImageBlit, filter: i32) callconv(.c) void {
     lock();
     defer mutex.unlock();
@@ -7597,11 +8094,11 @@ fn cmdBlitImage(cb: ?CommandBuffer, src_handle: usize, src_layout: i32, dst_hand
         c.impl.invalid = true;
         return;
     };
-    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src == dst or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !transferableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
+    if (c.impl.state != 1 or c.impl.invalid or c.impl.active_render_pass != null or c.impl.dynamic_rendering or @as(usize, c.impl.count) + count > c.impl.commands.len or src.owner != c.impl.owner or dst.owner != c.impl.owner or src.format != dst.format or !blittableColorFormat(src.format) or src.usage & 1 == 0 or dst.usage & 2 == 0 or src.memory == null or dst.memory == null or (src_layout != 1 and src_layout != 6) or (dst_layout != 1 and dst_layout != 7)) {
         c.impl.invalid = true;
         return;
     }
-    for (regions.?[0..count]) |region| if (!validBlitRegion(src, dst, region)) {
+    for (regions.?[0..count]) |region| if (!validBlitRegion(src, dst, region) or (src == dst and !blitSubresourcesDisjoint(region))) {
         c.impl.invalid = true;
         return;
     };
@@ -7715,12 +8212,13 @@ fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImage
     const mip = imageMipExtent(image, image_region.image_subresource.mip_level) orelse return true;
     const image_row_texels = checkedBufferImageMul(@as(u64, @intCast(image_region.image_offset.y)), mip.width) orelse return true;
     const image_row_start = checkedBufferImageAdd(image_row_texels, @as(u64, @intCast(image_region.image_offset.x))) orelse return true;
-    const image_row_offset = checkedBufferImageMul(image_row_start, 4) orelse return true;
+    const image_bytes_per_texel = imageStorageBytesPerTexel(image.format);
+    const image_row_offset = checkedBufferImageMul(image_row_start, image_bytes_per_texel) orelse return true;
     const buffer_base = checkedBufferImageAdd(buffer.offset, buffer_region.buffer_offset) orelse return true;
     const buffer_stride = checkedBufferImageMul(buffer_row, buffer_bytes_per_texel) orelse return true;
     const buffer_width = checkedBufferImageMul(buffer_region.image_extent.width, buffer_bytes_per_texel) orelse return true;
-    const image_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
-    const image_width = checkedBufferImageMul(image_region.image_extent.width, 4) orelse return true;
+    const image_stride = checkedBufferImageMul(mip.width, image_bytes_per_texel) orelse return true;
+    const image_width = checkedBufferImageMul(image_region.image_extent.width, image_bytes_per_texel) orelse return true;
     for (0..buffer_region.image_subresource.layer_count) |buffer_layer| {
         const buffer_layer_offset = checkedBufferImageMul(buffer_layer_stride, buffer_layer) orelse return true;
         const buffer_layer_base = checkedBufferImageAdd(buffer_base, buffer_layer_offset) orelse return true;
@@ -7733,15 +8231,15 @@ fn bufferImageMemoryOverlap(buffer: *const BufferObj, buffer_region: BufferImage
     }
     return false;
 }
-fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy) bool {
+fn bufferRegionsOverlap(a: BufferImageCopy, b: BufferImageCopy, bytes_per_texel: u64) bool {
     const a_row = if (a.buffer_row_length == 0) a.image_extent.width else a.buffer_row_length;
     const b_row = if (b.buffer_row_length == 0) b.image_extent.width else b.buffer_row_length;
-    const a_layer_stride = bufferImageLayerStride(a) orelse return true;
-    const b_layer_stride = bufferImageLayerStride(b) orelse return true;
-    const a_stride = checkedBufferImageMul(a_row, 4) orelse return true;
-    const b_stride = checkedBufferImageMul(b_row, 4) orelse return true;
-    const a_width = checkedBufferImageMul(a.image_extent.width, 4) orelse return true;
-    const b_width = checkedBufferImageMul(b.image_extent.width, 4) orelse return true;
+    const a_layer_stride = bufferImageLayerStrideForBpp(a, bytes_per_texel) orelse return true;
+    const b_layer_stride = bufferImageLayerStrideForBpp(b, bytes_per_texel) orelse return true;
+    const a_stride = checkedBufferImageMul(a_row, bytes_per_texel) orelse return true;
+    const b_stride = checkedBufferImageMul(b_row, bytes_per_texel) orelse return true;
+    const a_width = checkedBufferImageMul(a.image_extent.width, bytes_per_texel) orelse return true;
+    const b_width = checkedBufferImageMul(b.image_extent.width, bytes_per_texel) orelse return true;
     for (0..a.image_subresource.layer_count) |a_layer| {
         const a_layer_offset = checkedBufferImageMul(a_layer_stride, a_layer) orelse return true;
         const a_base = checkedBufferImageAdd(a.buffer_offset, a_layer_offset) orelse return true;
@@ -7768,11 +8266,12 @@ fn imageRegionsOverlap(image: *const ImageObj, a_layers: ImageSubresourceLayers,
     const b_row_texels = checkedBufferImageMul(@as(u64, @intCast(b_offset.y)), mip.width) orelse return true;
     const a_row_start = checkedBufferImageAdd(a_row_texels, @as(u64, @intCast(a_offset.x))) orelse return true;
     const b_row_start = checkedBufferImageAdd(b_row_texels, @as(u64, @intCast(b_offset.x))) orelse return true;
-    const a_row_offset = checkedBufferImageMul(a_row_start, 4) orelse return true;
-    const b_row_offset = checkedBufferImageMul(b_row_start, 4) orelse return true;
-    const row_stride = checkedBufferImageMul(mip.width, 4) orelse return true;
-    const a_width = checkedBufferImageMul(a_extent.width, 4) orelse return true;
-    const b_width = checkedBufferImageMul(b_extent.width, 4) orelse return true;
+    const image_bytes_per_texel = imageStorageBytesPerTexel(image.format);
+    const a_row_offset = checkedBufferImageMul(a_row_start, image_bytes_per_texel) orelse return true;
+    const b_row_offset = checkedBufferImageMul(b_row_start, image_bytes_per_texel) orelse return true;
+    const row_stride = checkedBufferImageMul(mip.width, image_bytes_per_texel) orelse return true;
+    const a_width = checkedBufferImageMul(a_extent.width, image_bytes_per_texel) orelse return true;
+    const b_width = checkedBufferImageMul(b_extent.width, image_bytes_per_texel) orelse return true;
     for (0..a_layers.layer_count) |a_layer| {
         const a_layer_number = checkedBufferImageAdd(a_layers.base_array_layer, a_layer) orelse return true;
         const a_base = checkedBufferImageAdd(image.offset, imageSubresourceOffset(image, a_layers.mip_level, @intCast(a_layer_number)) orelse return true) orelse return true;
@@ -7793,12 +8292,14 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
     const destination_row_texels = checkedBufferImageMul(@as(u64, @intCast(destination.dst_offset.y)), destination_mip.width) orelse return true;
     const source_row_start = checkedBufferImageAdd(source_row_texels, @as(u64, @intCast(source.src_offset.x))) orelse return true;
     const destination_row_start = checkedBufferImageAdd(destination_row_texels, @as(u64, @intCast(destination.dst_offset.x))) orelse return true;
-    const source_row_offset = checkedBufferImageMul(source_row_start, 4) orelse return true;
-    const destination_row_offset = checkedBufferImageMul(destination_row_start, 4) orelse return true;
-    const source_stride = checkedBufferImageMul(source_mip.width, 4) orelse return true;
-    const destination_stride = checkedBufferImageMul(destination_mip.width, 4) orelse return true;
-    const source_width = checkedBufferImageMul(source.extent.width, 4) orelse return true;
-    const destination_width = checkedBufferImageMul(destination.extent.width, 4) orelse return true;
+    const source_bytes_per_texel = imageStorageBytesPerTexel(src.format);
+    const destination_bytes_per_texel = imageStorageBytesPerTexel(dst.format);
+    const source_row_offset = checkedBufferImageMul(source_row_start, source_bytes_per_texel) orelse return true;
+    const destination_row_offset = checkedBufferImageMul(destination_row_start, destination_bytes_per_texel) orelse return true;
+    const source_stride = checkedBufferImageMul(source_mip.width, source_bytes_per_texel) orelse return true;
+    const destination_stride = checkedBufferImageMul(destination_mip.width, destination_bytes_per_texel) orelse return true;
+    const source_width = checkedBufferImageMul(source.extent.width, source_bytes_per_texel) orelse return true;
+    const destination_width = checkedBufferImageMul(destination.extent.width, destination_bytes_per_texel) orelse return true;
     for (0..source.src_subresource.layer_count) |source_index| {
         const source_layer_number = checkedBufferImageAdd(source.src_subresource.base_array_layer, source_index) orelse return true;
         const source_base = checkedBufferImageAdd(src.offset, imageSubresourceOffset(src, source.src_subresource.mip_level, @intCast(source_layer_number)) orelse return true) orelse return true;
@@ -7813,23 +8314,31 @@ fn imageCopyMemoryOverlap(src: *const ImageObj, source: ImageCopy, dst: *const I
     return false;
 }
 
-// The advertised transfer profile exposes the two four-byte UNORM color
-// formats.  Their memory layout is byte-addressable and the CPU transfer
-// backend can copy/filter them without format conversion.  sRGB and depth
-// formats retain their narrower sampled/destination-only contracts.
+// The advertised transfer profile exposes byte-addressable color formats.
+// The B8G8R8A8 UNORM and sRGB variants share BGRA storage, while RG16F keeps
+// its two half-float channels; CPU transfer and raster paths preserve both.
+// Depth formats retain their narrower sampled/destination-only contracts.
 fn transferableColorFormat(format: i32) bool {
-    return format == 37 or format == 44;
+    return format == 9 or format == 16 or format == 37 or format == 43 or format == 44 or floatColorFormat(format);
+}
+
+fn blittableColorFormat(format: i32) bool {
+    return transferableColorFormat(format);
 }
 
 fn colorAttachmentFormat(format: i32) bool {
-    return format == 9 or format == 16 or transferableColorFormat(format);
+    return format == 9 or format == 16 or webglBootstrapColorFormat(format) or transferableColorFormat(format);
 }
 
 fn bufferImageBytesPerTexel(format: i32) ?u64 {
     return switch (format) {
         9 => 1,
         16 => 2,
-        37, 44 => 4,
+        37, 43, 44 => 4,
+        76 => 2,
+        83, 100, 122 => 4,
+        97, 103 => 8,
+        109 => 16,
         else => null,
     };
 }
@@ -7941,7 +8450,7 @@ fn cmdCopyImageToBuffer(cb: ?CommandBuffer, src_handle: usize, layout: i32, dst_
             return;
         }
     }
-    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (bufferRegionsOverlap(a, b)) {
+    for (list[0..count], 0..) |a, i| for (list[i + 1 .. count]) |b| if (bufferRegionsOverlap(a, b, bufferImageBytesPerTexel(src.format) orelse 0)) {
         c.impl.invalid = true;
         return;
     };
@@ -8111,14 +8620,37 @@ fn cmdCopyImageToBuffer2(cb: ?CommandBuffer, info: ?*const CopyImageToBufferInfo
     cmdCopyImageToBuffer(cb, ci.src_image, ci.src_image_layout, ci.dst_buffer, ci.region_count, if (ci.region_count == 0) null else &regions);
 }
 fn supportedLayout(layout: i32) bool {
-    return layout == 0 or layout == 8 or layout == 1 or layout == 2 or layout == 3 or layout == 5 or layout == 6 or layout == 7 or layout == 1_000_001_002;
+    return layout == 0 or layout == 8 or layout == 1 or layout == 2 or layout == 3 or layout == 4 or layout == 5 or layout == 6 or layout == 7 or
+        layout == 1_000_001_002 or layout == 1_000_117_000 or layout == 1_000_117_001 or
+        (layout >= 1_000_241_000 and layout <= 1_000_241_003);
 }
 fn renderingAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
-    // The narrow CPU render path supports GENERAL plus the matching legacy
-    // color/depth attachment layouts.  Undefined, transfer, shader, present,
-    // preinitialized, and cross-aspect layouts are never valid while an
-    // attachment is accessed by dynamic rendering.
-    return layout == 1 or (aspect_mask == 1 and layout == 2) or (aspect_mask == 2 and layout == 3);
+    // The narrow CPU render path supports GENERAL, legacy combined
+    // depth/stencil layouts, and the promoted per-aspect layouts.  Undefined,
+    // transfer, shader, present, and preinitialized layouts are never valid
+    // while an attachment is accessed by dynamic rendering.
+    return layout == 1 or
+        (aspect_mask == image_aspect_color_bit and layout == 2) or
+        ((aspect_mask == image_aspect_depth_bit or aspect_mask == image_aspect_stencil_bit) and (layout == 3 or layout == 4 or layout == 1_000_117_000 or layout == 1_000_117_001)) or
+        (aspect_mask == image_aspect_depth_bit and (layout == 1_000_241_000 or layout == 1_000_241_001)) or
+        (aspect_mask == image_aspect_stencil_bit and (layout == 1_000_241_002 or layout == 1_000_241_003));
+}
+fn clearAttachmentLayoutValid(layout: i32, aspect_mask: u32) bool {
+    if (layout == 1) return true; // GENERAL
+    if (aspect_mask == image_aspect_color_bit) return layout == 2;
+    if (layout == 3 or layout == 4) return aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0;
+    if (aspect_mask == image_aspect_depth_bit) return layout == 1_000_117_001 or layout == 1_000_117_002 or layout == 1_000_241_000 or layout == 1_000_241_001;
+    if (aspect_mask == image_aspect_stencil_bit) return layout == 1_000_117_000 or layout == 1_000_241_002 or layout == 1_000_241_003;
+    return false;
+}
+
+test "clear attachment layouts permit writes only to active depth or stencil aspects" {
+    try std.testing.expect(clearAttachmentLayoutValid(1_000_117_001, image_aspect_depth_bit));
+    try std.testing.expect(!clearAttachmentLayoutValid(1_000_117_001, image_aspect_stencil_bit));
+    try std.testing.expect(clearAttachmentLayoutValid(1_000_117_000, image_aspect_stencil_bit));
+    try std.testing.expect(!clearAttachmentLayoutValid(1_000_117_000, image_aspect_depth_bit));
+    try std.testing.expect(clearAttachmentLayoutValid(2, image_aspect_color_bit));
+    try std.testing.expect(!clearAttachmentLayoutValid(2, image_aspect_depth_bit));
 }
 fn dependencyKeyMix(hash: *u64, value: u64) void {
     hash.* ^= value;
@@ -8288,12 +8820,29 @@ fn commandBufferImageLayout(command_buffer: *const CommandBufferObj, image: *con
     for (command_buffer.impl.commands[0..command_buffer.impl.count]) |command| {
         switch (command) {
             .transition => |transition| {
-                if (transition.image == image) layout = transition.new_layout;
+                if (transition.image == image and transitionTracksBaseMip(transition)) layout = transition.new_layout;
             },
             else => {},
         }
     }
     return layout;
+}
+fn transitionTracksBaseMip(transition: ImageTransitionCommand) bool {
+    const range = transition.subresource_range orelse return true;
+    return range.base_mip_level == 0;
+}
+fn transitionCoversAllBaseLayers(transition: ImageTransitionCommand) bool {
+    const range = transition.subresource_range orelse return true;
+    return range.base_mip_level == 0 and range.base_array_layer == 0 and range.layer_count == transition.image.array_layers;
+}
+fn transitionCoversAllLayers(transition: ImageTransitionCommand) bool {
+    const range = transition.subresource_range orelse return true;
+    return range.base_array_layer == 0 and range.layer_count == transition.image.array_layers;
+}
+fn angleAttachmentLayoutResync(format: i32, current_layout: i32, old_layout: i32, new_layout: i32) bool {
+    return current_layout == new_layout and
+        ((format == 83 and old_layout == 5 and new_layout == 2) or
+            (format == format_d32_sfloat and old_layout == 4 and new_layout == 1000117001));
 }
 fn dynamicAttachmentLayout(command_buffer: *const CommandBufferObj, image: ?*ImageObj) i32 {
     return if (image) |value| commandBufferImageLayout(command_buffer, value) else -1;
@@ -8784,7 +9333,7 @@ fn cmdPipelineBarrier(cb: ?CommandBuffer, src_stage_mask: u32, dst_stage_mask: u
         return;
     }
     for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
-    for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
+    for (image_list) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout, .subresource_range = barrier.subresource_range } });
     if (failureDiagnosticsEnabled()) std.debug.print("ZPU pipeline barrier recorded cb=0x{x} invalid={} count={d}\n", .{ @intFromPtr(c), c.impl.invalid, c.impl.count });
 }
 fn validPipelineStageMask(stage_mask: u32) bool {
@@ -8981,7 +9530,7 @@ fn cmdWaitEventsCommon(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const 
     }
     for (events) |handle| record(c, .{ .event_wait = validEventLocked(handle).? });
     for (buffer_list) |barrier| record(c, .{ .buffer_barrier = validBufferLocked(barrier.buffer).? });
-    for (barriers) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout } });
+    for (barriers) |barrier| record(c, .{ .transition = .{ .image = validImageLocked(barrier.image).?, .old_layout = barrier.old_layout, .new_layout = barrier.new_layout, .subresource_range = barrier.subresource_range } });
 }
 fn cmdWaitEvents(cb: ?CommandBuffer, event_count: u32, handles: ?[*]const usize, src_stage_mask: u32, dst_stage_mask: u32, memory_barrier_count: u32, memory_barriers: ?[*]const MemoryBarrier, buffer_barrier_count: u32, buffer_barriers: ?[*]const BufferMemoryBarrier, image_barrier_count: u32, image_barriers: ?[*]const ImageMemoryBarrier) callconv(.c) void {
     cmdWaitEventsCommon(cb, event_count, handles, src_stage_mask, dst_stage_mask, memory_barrier_count, memory_barriers, buffer_barrier_count, buffer_barriers, image_barrier_count, image_barriers, false, 0);
@@ -9323,33 +9872,58 @@ fn prevalidateProfileVertexBindings(op: anytype, owner: *DeviceObj) bool {
     }
     const last_instance = std.math.add(u64, op.instance_index, @as(u64, op.instance_count) - 1) catch return false;
     for (profile.inputs[0..profile.input_count]) |input| {
-        if (input.binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
-        if (op.pipeline.dynamic_vertex_input_binding_stride and op.vertex_bindings.stride_set & (@as(u16, 1) << @intCast(input.binding)) == 0) return false;
-        const buffer = op.vertex_bindings.buffers[input.binding] orelse return deadResource();
-        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
-        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
-        if (!bufferStorageValid(buffer)) return false;
-        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-        const element = if (input.input_rate == 0) last_vertex else last_instance;
-        const relative = std.math.add(u64, input.offset, std.math.mul(u64, element, stride) catch return false) catch return false;
-        const end = std.math.add(u64, relative, input.source_byte_size) catch return false;
-        const offset = op.vertex_bindings.offsets[input.binding];
-        if (offset > buffer.size or end > buffer.size - offset or end > op.vertex_bindings.sizes[input.binding]) return false;
+        const columns: usize = if (input.matrix_columns) 4 else 1;
+        for (0..columns) |column| {
+            const binding: usize = if (input.matrix_columns) input.matrix_bindings[column] else input.binding;
+            const attribute_offset = if (input.matrix_columns) input.matrix_offsets[column] else input.offset;
+            const static_stride = if (input.matrix_columns) input.matrix_strides[column] else input.stride;
+            const source_size: u64 = if (input.matrix_columns) 16 else input.source_byte_size;
+            if (binding >= 16 or op.vertex_bindings.set & (@as(u16, 1) << @intCast(binding)) == 0) return false;
+            if (op.pipeline.dynamic_vertex_input_binding_stride and op.vertex_bindings.stride_set & (@as(u16, 1) << @intCast(binding)) == 0) return false;
+            const buffer = op.vertex_bindings.buffers[binding] orelse return deadResource();
+            if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+            if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+            if (!bufferStorageValid(buffer)) return false;
+            const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[binding] else if (op.vertex_bindings.strides[binding] == 0) static_stride else op.vertex_bindings.strides[binding];
+            const element = if (input.input_rate == 0) last_vertex else last_instance;
+            const relative = std.math.add(u64, attribute_offset, std.math.mul(u64, element, stride) catch return false) catch return false;
+            const end = std.math.add(u64, relative, source_size) catch return false;
+            const offset = op.vertex_bindings.offsets[binding];
+            if (offset > buffer.size or end > buffer.size - offset or end > op.vertex_bindings.sizes[binding]) return false;
+        }
     }
     return true;
 }
 
 fn prevalidateProfileUniforms(op: anytype, owner: *DeviceObj) bool {
-    const needs_uniform = switch (op.pipeline.execution_abi) {
-        .profile_v1_scalar_graphics => |profile| profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0,
-        else => false,
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return true,
     };
-    if (!needs_uniform) return true;
-    const uniform = op.descriptors.uniform orelse return deadResource();
-    if (!liveBufferObject(uniform) or uniform.memory == null or !liveMemoryObject(uniform.memory.?)) return deadResource();
-    if (uniform.owner != owner or uniform.memory.?.owner != owner) return wrongSubmittingDevice();
-    if (!bufferStorageValid(uniform)) return false;
-    if (op.descriptors.uniform_offset > uniform.size or op.descriptors.uniform_range == 0 or op.descriptors.uniform_range > uniform.size - op.descriptors.uniform_offset) return false;
+    for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
+        const interface = profile.vertex.program.interfaces[uniform.interface];
+        const binding = interface.binding orelse return false;
+        const descriptor = descriptorUniformBinding(op.descriptors, binding) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU profile vertex uniform missing binding={d} descriptorType={d}\n", .{ binding, op.descriptors.binding_types[binding] });
+            return deadResource();
+        };
+        const buffer = descriptor.buffer orelse return deadResource();
+        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        if (!bufferStorageValid(buffer) or descriptor.offset > buffer.size or descriptor.range == 0 or descriptor.range > buffer.size - descriptor.offset) return false;
+    }
+    for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+        const interface = profile.fragment.program.interfaces[uniform.interface];
+        const binding = interface.binding orelse return false;
+        const descriptor = descriptorUniformBinding(op.descriptors, binding) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU profile fragment uniform missing set=0x{x} binding={d} descriptorType={d}\n", .{ @intFromPtr(op.descriptors), binding, op.descriptors.binding_types[binding] });
+            return deadResource();
+        };
+        const buffer = descriptor.buffer orelse return deadResource();
+        if (!liveBufferObject(buffer) or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return deadResource();
+        if (buffer.owner != owner or buffer.memory.?.owner != owner) return wrongSubmittingDevice();
+        if (!bufferStorageValid(buffer) or descriptor.offset > buffer.size or descriptor.range == 0 or descriptor.range > buffer.size - descriptor.offset) return false;
+    }
     return true;
 }
 
@@ -9359,13 +9933,31 @@ fn prevalidateProfileSampledImages(op: anytype, owner: *DeviceObj) bool {
         else => return true,
     };
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count]) |sampled_profile| {
-        if (sampled_profile.binding >= op.descriptors.sampled_images.len) return false;
-        const sampled = op.descriptors.sampled_images[sampled_profile.binding];
-        const image = sampled.image orelse return deadResource();
-        const sampler = sampled.sampler orelse return deadResource();
+        const source = if (sampled_profile.descriptor_set == 1) op.descriptors.sampled_source_set orelse return false else op.descriptors;
+        const expected_descriptor_type: i32 = if (sampled_profile.sampler_required) 1 else 2;
+        if (sampled_profile.binding >= source.binding_types.len or source.binding_types[sampled_profile.binding] != expected_descriptor_type) return false;
+        const sampled = source.sampled_images[sampled_profile.binding];
+        const image = sampled.image orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU profile sampled image missing set={d} binding={d} descriptorType={d}\n", .{ sampled_profile.descriptor_set, sampled_profile.binding, source.binding_types[sampled_profile.binding] });
+            return deadResource();
+        };
         if (!liveImageObject(image) or !imageStorageValid(image)) return deadResource();
         if (image.owner != owner or (image.memory != null and image.memory.?.owner != owner)) return wrongSubmittingDevice();
         if (!imageStorageValid(image)) return false;
+        const expected_view_type: i32 = if (sampled_profile.cube) 3 else 1;
+        const expected_layer_count: u32 = if (sampled_profile.cube) 6 else 1;
+        if (sampled.view_type != expected_view_type or (sampled_profile.cube and (image.flags & 0x10 == 0 or image.width != image.height or sampled.base_array_layer % 6 != 0)) or sampled.base_mip_level >= image.mip_levels or sampled.level_count == 0 or sampled.level_count > image.mip_levels - sampled.base_mip_level or sampled.base_array_layer >= image.array_layers or expected_layer_count > image.array_layers - sampled.base_array_layer or sampled.layer_count != expected_layer_count) return false;
+        if (sampled_profile.sampler_required) {
+            const sampler = sampled.sampler orelse return deadResource();
+            if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
+            if (sampler.owner != owner) return wrongSubmittingDevice();
+        } else {
+            if (sampled.sampler != null or sampled.ycbcr != null or sampled.view_type != expected_view_type or (sampled_profile.cube and (image.flags & 0x10 == 0 or image.width != image.height or sampled.base_array_layer % 6 != 0)) or sampled.base_mip_level >= image.mip_levels or sampled.level_count == 0 or sampled.level_count > image.mip_levels - sampled.base_mip_level or sampled.base_array_layer >= image.array_layers or expected_layer_count > image.array_layers - sampled.base_array_layer or sampled.layer_count != expected_layer_count) return false;
+        }
+    }
+    for (profile.fragment_samplers[0..profile.fragment_sampler_count]) |sampler_profile| {
+        if (sampler_profile.binding >= op.descriptors.binding_types.len or op.descriptors.binding_types[sampler_profile.binding] != 0) return false;
+        const sampler = op.descriptors.sampled_images[sampler_profile.binding].sampler orelse return deadResource();
         if ((stateForObject(SamplerObj, sampler, &sampler_objects, &sampler_state) orelse return deadResource()).* != .live) return deadResource();
         if (sampler.owner != owner) return wrongSubmittingDevice();
     }
@@ -9405,9 +9997,9 @@ fn prevalidateIndirectProfileDraw(op: IndirectDrawState, owner: *DeviceObj) bool
             const index_start = std.math.add(u64, op.index_offset, std.math.mul(u64, first_index, index_size) catch return false) catch return false;
             const index_bytes = std.math.mul(u64, vertex_count, index_size) catch return false;
             if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) return false;
-            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = 0, .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
         } else {
-            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = std.mem.readInt(u32, words[12..16], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
+            cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = vertex_count, .base_vertex = std.mem.readInt(u32, words[8..12], .little), .instance_count = std.mem.readInt(u32, words[4..8], .little), .instance_index = std.mem.readInt(u32, words[12..16], .little), .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .vertex_bindings = op.vertex_bindings } };
         }
         cube.cube_draw.push_constants = op.push_constants;
         if (!prevalidateProfileVertexBindings(cube.cube_draw, owner)) return false;
@@ -9441,6 +10033,30 @@ fn indirectFirstInstanceValid(op: IndirectDrawState) bool {
 }
 
 fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_objects]i32) bool {
+    var mip_layouts: ImageMipLayouts = undefined;
+    switch (command) {
+        .blit_image => |op| {
+            const src_slot = imageSlot(op.src) orelse return deadResource();
+            const dst_slot = imageSlot(op.dst) orelse return deadResource();
+            mip_layouts[src_slot] = op.src.mip_layouts;
+            mip_layouts[src_slot][0] = layouts[src_slot];
+            if (dst_slot != src_slot) {
+                mip_layouts[dst_slot] = op.dst.mip_layouts;
+                mip_layouts[dst_slot][0] = layouts[dst_slot];
+            }
+            return prevalidateCommandWithMipLayouts(command, owner, layouts, &mip_layouts);
+        },
+        .transition => |op| {
+            const slot = imageSlot(op.image) orelse return deadResource();
+            mip_layouts[slot] = op.image.mip_layouts;
+            mip_layouts[slot][0] = layouts[slot];
+            return prevalidateCommandWithMipLayouts(command, owner, layouts, &mip_layouts);
+        },
+        else => return prevalidateCommandWithMipLayouts(command, owner, layouts, null),
+    }
+}
+
+fn prevalidateCommandWithMipLayouts(command: Command, owner: *DeviceObj, layouts: *[max_image_objects]i32, mip_layouts: ?*ImageMipLayouts) bool {
     switch (command) {
         .fill => |op| {
             if (!liveBufferObject(op.dst) or op.dst.memory == null or !liveMemoryObject(op.dst.memory.?)) return deadResource();
@@ -9471,7 +10087,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.memory == null or !liveMemoryObject(op.image.memory.?)) return deadResource();
             if (op.image.owner != owner or op.image.memory.?.owner != owner) return wrongSubmittingDevice();
-            if (!imageStorageValid(op.image)) return false;
+            if (!imageStorageValid(op.image) or !isDepthStencilFormat(op.image.format) or !validImageAspectMask(op.image, op.aspect_mask)) return false;
             if (layouts[slot] != op.layout) {
                 hit(.layout_mismatch);
                 return false;
@@ -9493,6 +10109,7 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
                 const depth_slot = imageSlot(depth) orelse return deadResource();
                 if (depth.owner != owner or (depth.memory == null and depth.owned_bytes == null) or (depth.memory != null and !liveMemoryObject(depth.memory.?))) return wrongSubmittingDevice();
                 if (!imageStorageValid(depth)) return false;
+                if ((op.clear_depth and !isDepthFormat(depth.format)) or (op.clear_stencil and !isStencilFormat(depth.format))) return false;
                 if (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout) {
                     hit(.layout_mismatch);
                     return false;
@@ -9508,19 +10125,48 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             if (op.layer_count == 0 or op.base_layer >= op.image.array_layers or op.layer_count > op.image.array_layers - op.base_layer) return false;
         },
         .clear_attachments => |op| {
-            const image_slot = imageSlot(op.image) orelse return deadResource();
-            if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) return wrongSubmittingDevice();
-            const expected_layout = if (op.aspect_mask == 1) op.expected_color_layout else if (op.aspect_mask == 2) op.expected_depth_layout else -1;
+            const image_slot = imageSlot(op.image) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment preflight rejected stale image={x}\n", .{@intFromPtr(op.image)});
+                return deadResource();
+            };
+            if (op.image.owner != owner or (op.image.memory == null and op.image.owned_bytes == null) or (op.image.memory != null and !liveMemoryObject(op.image.memory.?))) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment preflight owner/storage mismatch aspect=0x{x} owner={} memory={} owned_bytes={}\n", .{ op.aspect_mask, op.image.owner == owner, op.image.memory != null, op.image.owned_bytes != null });
+                return wrongSubmittingDevice();
+            }
+            if (op.aspect_mask == image_aspect_color_bit) {
+                if (!colorAttachmentFormat(op.image.format)) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment unsupported color format={d}\n", .{op.image.format});
+                    return false;
+                }
+            } else if (!isDepthStencilFormat(op.image.format) or !validImageAspectMask(op.image, op.aspect_mask)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment unsupported depth/stencil format={d} aspect=0x{x}\n", .{ op.image.format, op.aspect_mask });
+                return false;
+            }
+            const expected_layout = if (op.aspect_mask == image_aspect_color_bit) op.expected_color_layout else op.expected_depth_layout;
             if (expected_layout >= 0 and layouts[image_slot] != expected_layout) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment color/depth layout mismatch expected={d} actual={d}\n", .{ expected_layout, layouts[image_slot] });
                 hit(.layout_mismatch);
                 return false;
             }
-            if (layouts[image_slot] != 0 and layouts[image_slot] != 1 and layouts[image_slot] != 2 and layouts[image_slot] != 3 and layouts[image_slot] != 5 and layouts[image_slot] != 6 and layouts[image_slot] != 7) return false;
+            if (!clearAttachmentLayoutValid(layouts[image_slot], op.aspect_mask)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment layout unsupported={} aspect=0x{x}\n", .{ layouts[image_slot], op.aspect_mask });
+                return false;
+            }
             if (op.depth) |depth| {
-                const depth_slot = imageSlot(depth) orelse return deadResource();
-                if (depth.owner != owner or depth.memory == null or !liveMemoryObject(depth.memory.?)) return wrongSubmittingDevice();
-                if (!imageStorageValid(depth)) return false;
+                const depth_slot = imageSlot(depth) orelse {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment stale depth image={x}\n", .{@intFromPtr(depth)});
+                    return deadResource();
+                };
+                if (depth.owner != owner or (depth.memory == null and depth.owned_bytes == null) or (depth.memory != null and !liveMemoryObject(depth.memory.?))) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment depth owner/storage mismatch owner={} memory={} owned_bytes={}\n", .{ depth.owner == owner, depth.memory != null, depth.owned_bytes != null });
+                    return wrongSubmittingDevice();
+                }
+                if (!imageStorageValid(depth)) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment depth storage invalid\n", .{});
+                    return false;
+                }
                 if (op.expected_depth_layout >= 0 and layouts[depth_slot] != op.expected_depth_layout) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU clear attachment depth layout mismatch expected={d} actual={d}\n", .{ op.expected_depth_layout, layouts[depth_slot] });
                     hit(.layout_mismatch);
                     return false;
                 }
@@ -9611,7 +10257,11 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
             if (op.src.memory == null or op.dst.memory == null or !liveMemoryObject(op.src.memory.?) or !liveMemoryObject(op.dst.memory.?)) return deadResource();
             if (op.src.owner != owner or op.dst.owner != owner or op.src.memory.?.owner != owner or op.dst.memory.?.owner != owner) return wrongSubmittingDevice();
             if (!imageStorageValid(op.src) or !imageStorageValid(op.dst)) return false;
-            if (layouts[src_slot] != op.src_layout or layouts[dst_slot] != op.dst_layout) {
+            const tracked_mips = mip_layouts orelse return false;
+            if ((op.src == op.dst and !blitSubresourcesDisjoint(op.region)) or
+                tracked_mips[src_slot][op.region.src_subresource.mip_level] != op.src_layout or
+                tracked_mips[dst_slot][op.region.dst_subresource.mip_level] != op.dst_layout)
+            {
                 hit(.layout_mismatch);
                 return false;
             }
@@ -9895,15 +10545,38 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
         .transition => |op| {
             const slot = imageSlot(op.image) orelse return deadResource();
             if (op.image.owner != owner) return wrongSubmittingDevice();
-            if (op.old_layout != 0 and layouts[slot] != op.old_layout) {
-                if (failureDiagnosticsEnabled()) std.debug.print(
-                    "ZPU transition rejected image=0x{x} slot={} current={} old={} new={} format={} size={}x{} mips={}\n",
-                    .{ @intFromPtr(op.image), slot, layouts[slot], op.old_layout, op.new_layout, op.image.format, op.image.width, op.image.height, op.image.mip_levels },
-                );
-                hit(.layout_mismatch);
-                return false;
+            const tracked_mips = mip_layouts orelse return false;
+            const range = op.subresource_range orelse ImageSubresourceRange{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = op.image.array_layers };
+            const tracks_all_layers = transitionCoversAllLayers(op);
+            // Combined D24/S8 images can reach ZPU through ANGLE's
+            // attachment path with an externally established layout that
+            // the scalar per-image tracker has not observed. A same-layout
+            // dependency does not perform a layout transition, so accept it
+            // from UNDEFINED and synchronize the tracker to that declared
+            // layout. Keep layout-changing barriers strict.
+            const d24_stencil_layout_resync = op.image.format == format_d24_unorm_s8_uint and
+                layouts[slot] == 0 and op.old_layout == op.new_layout;
+            var mip = range.base_mip_level;
+            while (mip < range.base_mip_level + range.level_count) : (mip += 1) {
+                if (!tracks_all_layers) continue;
+                const current_layout = tracked_mips[slot][mip];
+                const base_mip_resync = mip == 0 and d24_stencil_layout_resync;
+                // ANGLE may replay these two attachment transitions after
+                // ZPU has already reached their destination layout. Treat
+                // those exact no-op layout pairs as synchronized dependencies;
+                // keep rejecting unrelated stale layout-changing barriers.
+                const angle_attachment_layout_resync = angleAttachmentLayoutResync(op.image.format, current_layout, op.old_layout, op.new_layout);
+                if (op.old_layout != 0 and current_layout != op.old_layout and !base_mip_resync and !angle_attachment_layout_resync) {
+                    if (failureDiagnosticsEnabled()) std.debug.print(
+                        "ZPU transition rejected image=0x{x} slot={} mip={} current={} old={} new={} format={} size={}x{} mips={}\n",
+                        .{ @intFromPtr(op.image), slot, mip, current_layout, op.old_layout, op.new_layout, op.image.format, op.image.width, op.image.height, op.image.mip_levels },
+                    );
+                    hit(.layout_mismatch);
+                    return false;
+                }
+                tracked_mips[slot][mip] = op.new_layout;
             }
-            layouts[slot] = op.new_layout;
+            if (transitionTracksBaseMip(op)) layouts[slot] = op.new_layout;
         },
         .event_set => |operation| {
             if (!liveEventObject(operation.event)) return deadResource();
@@ -9936,6 +10609,46 @@ fn prevalidateCommand(command: Command, owner: *DeviceObj, layouts: *[max_image_
 fn fillImagePattern(bytes: []u8, pattern: u32) void {
     const aligned: []align(4) u8 = @alignCast(bytes);
     @memset(std.mem.bytesAsSlice(u32, aligned), pattern);
+}
+
+fn imageClearPattern(format: i32, color: [4]u8) ?u32 {
+    return if (floatColorFormat(format)) null else @bitCast(color);
+}
+
+fn floatColorForImageClear(color: [4]u8, half_color: ?[4]u16, float_color: ?[4]f32) [4]f32 {
+    if (float_color) |value| return value;
+    if (half_color) |value| {
+        var result: [4]f32 = undefined;
+        for (value, 0..) |component, index| result[index] = @as(f32, @floatCast(@as(f16, @bitCast(component))));
+        return result;
+    }
+    var result: [4]f32 = undefined;
+    for (color, 0..) |component, index| result[index] = @as(f32, @floatFromInt(component)) / 255.0;
+    return result;
+}
+
+fn fillImageClearColor(bytes: []u8, format: i32, color: [4]u8, half_color: ?[4]u16, float_color: ?[4]f32) void {
+    if (!floatColorFormat(format)) {
+        fillImagePattern(bytes, @bitCast(color));
+        return;
+    }
+    const components = floatColorForImageClear(color, half_color, float_color);
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(format));
+    for (0..bytes.len / bytes_per_texel) |pixel| writeFloatColorTexel(bytes[pixel * bytes_per_texel ..][0..bytes_per_texel], format, components);
+}
+
+fn fillImageClearColorRect(bytes: []u8, width: u32, format: i32, color: [4]u8, half_color: ?[4]u16, float_color: ?[4]f32, rect: cpu_cube.Rect) void {
+    if (!floatColorFormat(format)) {
+        fillImagePatternRect(bytes, width, rect, @bitCast(color));
+        return;
+    }
+    if (rect.width == 0 or rect.height == 0) return;
+    const components = floatColorForImageClear(color, half_color, float_color);
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(format));
+    for (@intCast(rect.y)..@intCast(rect.y + @as(i32, @intCast(rect.height)))) |y| for (@intCast(rect.x)..@intCast(rect.x + @as(i32, @intCast(rect.width)))) |x| {
+        const pixel_offset = (y * width + x) * bytes_per_texel;
+        writeFloatColorTexel(bytes[pixel_offset..][0..bytes_per_texel], format, components);
+    };
 }
 
 fn emptyRect() cpu_cube.Rect {
@@ -9991,13 +10704,133 @@ fn sampleLinear(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [4]u
     return result;
 }
 
+fn readHalfFloat(bytes: []const u8, offset: usize) f32 {
+    const bits = std.mem.readInt(u16, bytes[offset..][0..2], .little);
+    return @as(f32, @floatCast(@as(f16, @bitCast(bits))));
+}
+
+fn halfColorFromComponents(components: [4]f32) ?[4]u16 {
+    var result: [4]u16 = undefined;
+    for (components, 0..) |component, index| {
+        if (!std.math.isFinite(component)) return null;
+        result[index] = @bitCast(@as(f16, @floatCast(component)));
+    }
+    return result;
+}
+
+fn floatColorFromComponents(components: [4]f32) ?[4]f32 {
+    for (components) |component| if (!std.math.isFinite(component)) return null;
+    return components;
+}
+
+fn writeHalfFloat(bytes: []u8, offset: usize, value: f32) void {
+    std.mem.writeInt(u16, bytes[offset..][0..2], @bitCast(@as(f16, @floatCast(value))), .little);
+}
+
+fn readUnsignedFloat(bits: u32, mantissa_bits: u32) f32 {
+    const mantissa_mask = (@as(u32, 1) << @intCast(mantissa_bits)) - 1;
+    const mantissa = bits & mantissa_mask;
+    const exponent = (bits >> @intCast(mantissa_bits)) & 0x1f;
+    if (exponent == 0) return @floatCast(@as(f64, @floatFromInt(mantissa)) *
+        std.math.pow(f64, 2.0, -14.0 - @as(f64, @floatFromInt(mantissa_bits))));
+    if (exponent == 0x1f) return if (mantissa == 0) std.math.inf(f32) else std.math.nan(f32);
+    const scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exponent)) - 15.0);
+    return @floatCast((1.0 + @as(f64, @floatFromInt(mantissa)) /
+        std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)))) * scale);
+}
+
+fn writeUnsignedFloat(value: f32, mantissa_bits: u32) u32 {
+    if (!(value > 0)) return 0;
+    if (!std.math.isFinite(value)) return @as(u32, 0x1f) << @intCast(mantissa_bits);
+    const x: f64 = @floatCast(value);
+    const mantissa_scale = std.math.pow(f64, 2.0, @as(f64, @floatFromInt(mantissa_bits)));
+    const minimum_normal = std.math.pow(f64, 2.0, -14.0);
+    if (x < minimum_normal) {
+        const scaled = x * std.math.pow(f64, 2.0, 14.0 + @as(f64, @floatFromInt(mantissa_bits)));
+        return @intFromFloat(@floor(scaled));
+    }
+    var exponent: i32 = @intFromFloat(@floor(std.math.log2(x)));
+    const scaled_mantissa = (x / std.math.pow(f64, 2.0, @floatFromInt(exponent)) - 1.0) * mantissa_scale;
+    var mantissa: u32 = @intFromFloat(@floor(scaled_mantissa));
+    const mantissa_limit = @as(u32, 1) << @intCast(mantissa_bits);
+    if (mantissa >= mantissa_limit) {
+        exponent += 1;
+        mantissa = 0;
+    }
+    if (exponent > 15) return @as(u32, 0x1f) << @intCast(mantissa_bits);
+    return (@as(u32, @intCast(exponent + 15)) << @intCast(mantissa_bits)) | mantissa;
+}
+
+fn readFloatColorTexel(bytes: []const u8, format: i32) [4]f32 {
+    return switch (format) {
+        76 => .{ readHalfFloat(bytes, 0), 0, 0, 1 },
+        83 => .{ readHalfFloat(bytes, 0), readHalfFloat(bytes, 2), 0, 1 },
+        97 => .{ readHalfFloat(bytes, 0), readHalfFloat(bytes, 2), readHalfFloat(bytes, 4), readHalfFloat(bytes, 6) },
+        100 => .{ @bitCast(std.mem.readInt(u32, bytes[0..4], .little)), 0, 0, 1 },
+        103 => .{ @bitCast(std.mem.readInt(u32, bytes[0..4], .little)), @bitCast(std.mem.readInt(u32, bytes[4..8], .little)), 0, 1 },
+        109 => .{ @bitCast(std.mem.readInt(u32, bytes[0..4], .little)), @bitCast(std.mem.readInt(u32, bytes[4..8], .little)), @bitCast(std.mem.readInt(u32, bytes[8..12], .little)), @bitCast(std.mem.readInt(u32, bytes[12..16], .little)) },
+        122 => blk: {
+            const bits = std.mem.readInt(u32, bytes[0..4], .little);
+            break :blk .{ readUnsignedFloat(bits & 0x7ff, 6), readUnsignedFloat((bits >> 11) & 0x7ff, 6), readUnsignedFloat((bits >> 22) & 0x3ff, 5), 1 };
+        },
+        else => unreachable,
+    };
+}
+
+fn writeFloatColorTexel(bytes: []u8, format: i32, color: [4]f32) void {
+    switch (format) {
+        76 => writeHalfFloat(bytes, 0, color[0]),
+        83 => {
+            writeHalfFloat(bytes, 0, color[0]);
+            writeHalfFloat(bytes, 2, color[1]);
+        },
+        97 => for (color, 0..) |component, channel| writeHalfFloat(bytes, channel * 2, component),
+        100 => std.mem.writeInt(u32, bytes[0..4], @bitCast(color[0]), .little),
+        103 => {
+            std.mem.writeInt(u32, bytes[0..4], @bitCast(color[0]), .little);
+            std.mem.writeInt(u32, bytes[4..8], @bitCast(color[1]), .little);
+        },
+        109 => for (color, 0..) |component, channel| std.mem.writeInt(u32, bytes[channel * 4 ..][0..4], @bitCast(component), .little),
+        122 => {
+            const bits = writeUnsignedFloat(color[0], 6) |
+                (writeUnsignedFloat(color[1], 6) << 11) |
+                (writeUnsignedFloat(color[2], 5) << 22);
+            std.mem.writeInt(u32, bytes[0..4], bits, .little);
+        },
+        else => unreachable,
+    }
+}
+
+fn sampleLinearFloat(bytes: []const u8, format: i32, width: u32, height: u32, x: f32, y: f32) [4]f32 {
+    const clamped_x = std.math.clamp(x, 0, @as(f32, @floatFromInt(width - 1)));
+    const clamped_y = std.math.clamp(y, 0, @as(f32, @floatFromInt(height - 1)));
+    const x0: usize = @intFromFloat(@floor(clamped_x));
+    const y0: usize = @intFromFloat(@floor(clamped_y));
+    const x1 = @min(x0 + 1, width - 1);
+    const y1 = @min(y0 + 1, height - 1);
+    const tx = clamped_x - @as(f32, @floatFromInt(x0));
+    const ty = clamped_y - @as(f32, @floatFromInt(y0));
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(format));
+    const offsets = .{ (y0 * width + x0) * bytes_per_texel, (y0 * width + x1) * bytes_per_texel, (y1 * width + x0) * bytes_per_texel, (y1 * width + x1) * bytes_per_texel };
+    const a = readFloatColorTexel(bytes[offsets[0]..], format);
+    const b = readFloatColorTexel(bytes[offsets[1]..], format);
+    const c = readFloatColorTexel(bytes[offsets[2]..], format);
+    const d = readFloatColorTexel(bytes[offsets[3]..], format);
+    var result: [4]f32 = undefined;
+    for (0..4) |channel| {
+        result[channel] = (a[channel] * (1 - tx) + b[channel] * tx) * (1 - ty) + (c[channel] * (1 - tx) + d[channel] * tx) * ty;
+    }
+    return result;
+}
+
 fn executeBlitImage(item: BlitImageCommand) void {
     const src = imageBytes(item.src);
     const dst = imageBytes(item.dst);
     const src_mip = imageMipExtent(item.src, item.region.src_subresource.mip_level).?;
     const dst_mip = imageMipExtent(item.dst, item.region.dst_subresource.mip_level).?;
     const src_pixels = std.math.mul(u64, src_mip.width, src_mip.height) catch unreachable;
-    const src_layer_size: usize = @intCast(std.math.mul(u64, src_pixels, 4) catch unreachable);
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(item.src.format));
+    const src_layer_size: usize = @intCast(std.math.mul(u64, src_pixels, bytes_per_texel) catch unreachable);
     const src_width = blitSpan(item.region.src_offsets[0].x, item.region.src_offsets[1].x, src_mip.width).?;
     const src_height = blitSpan(item.region.src_offsets[0].y, item.region.src_offsets[1].y, src_mip.height).?;
     const dst_width = blitSpan(item.region.dst_offsets[0].x, item.region.dst_offsets[1].x, dst_mip.width).?;
@@ -10013,7 +10846,7 @@ fn executeBlitImage(item: BlitImageCommand) void {
             var x: u32 = 0;
             while (x < dst_width) : (x += 1) {
                 const dx = if (item.region.dst_offsets[0].x < item.region.dst_offsets[1].x) @as(usize, @intCast(item.region.dst_offsets[0].x)) + x else @as(usize, @intCast(item.region.dst_offsets[0].x)) - x - 1;
-                const destination = dst_layer_offset + (dy * dst_mip.width + dx) * 4;
+                const destination = dst_layer_offset + (dy * dst_mip.width + dx) * bytes_per_texel;
                 if (item.filter == 1) {
                     const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(dst_width));
                     const t = u * @as(f32, @floatFromInt(src_width)) - 0.5;
@@ -10021,12 +10854,18 @@ fn executeBlitImage(item: BlitImageCommand) void {
                     const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(dst_height));
                     const ty = v * @as(f32, @floatFromInt(src_height)) - 0.5;
                     const syf = if (item.region.src_offsets[0].y < item.region.src_offsets[1].y) @as(f32, @floatFromInt(item.region.src_offsets[0].y)) + ty else @as(f32, @floatFromInt(item.region.src_offsets[0].y - 1)) - ty;
-                    const sample = sampleLinear(src[src_layer_offset..][0..src_layer_size], src_mip.width, src_mip.height, sx, syf);
-                    @memcpy(dst[destination..][0..4], &sample);
+                    const source_pixels = src[src_layer_offset..][0..src_layer_size];
+                    if (floatColorFormat(item.src.format)) {
+                        const sample = sampleLinearFloat(source_pixels, item.src.format, src_mip.width, src_mip.height, sx, syf);
+                        writeFloatColorTexel(dst[destination..][0..bytes_per_texel], item.src.format, sample);
+                    } else {
+                        const sample = sampleLinear(source_pixels, src_mip.width, src_mip.height, sx, syf);
+                        @memcpy(dst[destination..][0..4], &sample);
+                    }
                 } else {
                     const sx = blitCoordinate(item.region.src_offsets[0].x, item.region.src_offsets[1].x, x, dst_width, src_width);
-                    const source = src_layer_offset + (sy * src_mip.width + sx) * 4;
-                    std.mem.copyForwards(u8, dst[destination..][0..4], src[source..][0..4]);
+                    const source = src_layer_offset + (sy * src_mip.width + sx) * bytes_per_texel;
+                    std.mem.copyForwards(u8, dst[destination..][0..bytes_per_texel], src[source..][0..bytes_per_texel]);
                 }
             }
         }
@@ -10039,15 +10878,16 @@ fn executeResolveImage(item: ResolveImageCommand) void {
     const dst = imageBytes(item.dst);
     const src_mip = imageMipExtent(item.src, item.region.src_subresource.mip_level).?;
     const dst_mip = imageMipExtent(item.dst, item.region.dst_subresource.mip_level).?;
+    const bytes_per_texel = @as(usize, @intCast(imageStorageBytesPerTexel(item.src.format)));
     var layer: u32 = 0;
     while (layer < item.region.src_subresource.layer_count) : (layer += 1) {
         const src_layer_offset = imageSubresourceOffset(item.src, item.region.src_subresource.mip_level, item.region.src_subresource.base_array_layer + layer).?;
         const dst_layer_offset = imageSubresourceOffset(item.dst, item.region.dst_subresource.mip_level, item.region.dst_subresource.base_array_layer + layer).?;
         var y: u32 = 0;
         while (y < item.region.extent.height) : (y += 1) {
-            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * src_mip.width + @as(usize, @intCast(item.region.src_offset.x))) * 4;
-            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * dst_mip.width + @as(usize, @intCast(item.region.dst_offset.x))) * 4;
-            const bytes = @as(usize, item.region.extent.width) * 4;
+            const source = src_layer_offset + ((@as(usize, @intCast(item.region.src_offset.y)) + y) * src_mip.width + @as(usize, @intCast(item.region.src_offset.x))) * bytes_per_texel;
+            const destination = dst_layer_offset + ((@as(usize, @intCast(item.region.dst_offset.y)) + y) * dst_mip.width + @as(usize, @intCast(item.region.dst_offset.x))) * bytes_per_texel;
+            const bytes = @as(usize, item.region.extent.width) * bytes_per_texel;
             std.mem.copyForwards(u8, dst[destination..][0..bytes], src[source..][0..bytes]);
         }
     }
@@ -10121,6 +10961,35 @@ fn executeComputeDispatch(op: DispatchCommand) void {
 const ProfileScreenVertex = struct { x: f32, y: f32, z: f32, w: f32 };
 const ProfileRowBounds = struct { min_x: i32, max_x: i32 };
 const ProfilePerspectiveWeights = struct { q0: f32, q1: f32, q2: f32, denominator: f32 };
+
+fn profileInterpolateDepth(vertices: [3]ProfileScreenVertex, b0: f32, b1: f32) f32 {
+    // Edge-function weights can sum to slightly more than one in f32. A
+    // constant-depth skybox at the far plane must remain exactly at depth 1;
+    // otherwise the range check drops isolated covered pixels. Expressing
+    // depth relative to one vertex also preserves constant near-plane depth.
+    return vertices[2].z + b0 * (vertices[0].z - vertices[2].z) + b1 * (vertices[1].z - vertices[2].z);
+}
+
+test "constant-depth triangles stay in the framebuffer depth range" {
+    const vertices = [3]ProfileScreenVertex{
+        .{ .x = 0, .y = 0, .z = 1, .w = 1 },
+        .{ .x = 0, .y = 144, .z = 1, .w = 1 },
+        .{ .x = 56, .y = 144, .z = 1, .w = 1 },
+    };
+    const px: f32 = 4.5;
+    const py: f32 = 143.5;
+    const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
+    const inverse_area = 1.0 / area;
+    const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
+    const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
+    const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
+    try std.testing.expect(b0 >= 0 and b1 >= 0 and b2 >= 0);
+    try std.testing.expect(b0 + b1 + b2 > 1);
+    try std.testing.expectEqual(@as(f32, 1), profileInterpolateDepth(vertices, b0, b1));
+    var near_vertices = vertices;
+    for (&near_vertices) |*vertex| vertex.z = 0;
+    try std.testing.expectEqual(@as(f32, 0), profileInterpolateDepth(near_vertices, b0, b1));
+}
 
 /// Resolve the perspective weights used by the scalar profile rasterizer.
 /// Chromium's full-screen compositor and video quads have an exactly-one
@@ -10215,6 +11084,20 @@ fn profileEdge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
 
+fn profileFrontFacing(area: f32, front_face: i32) bool {
+    return if (front_face == 0) area > 0 else area < 0;
+}
+
+test "scalar rasterizer follows Vulkan framebuffer winding" {
+    const clockwise_area = profileEdge(0, 0, 256, 0, 256, 256);
+    try std.testing.expect(clockwise_area < 0);
+    try std.testing.expect(!profileFrontFacing(clockwise_area, 0));
+    try std.testing.expect(profileFrontFacing(clockwise_area, 1));
+    const counter_clockwise_area = -clockwise_area;
+    try std.testing.expect(profileFrontFacing(counter_clockwise_area, 0));
+    try std.testing.expect(!profileFrontFacing(counter_clockwise_area, 1));
+}
+
 /// Return a conservative horizontal bound for one right triangle whose two
 /// non-diagonal edges are axis-aligned.  Chromium's VP9 compositor emits two
 /// such triangles for each video quad.  The caller still runs the ordinary
@@ -10288,7 +11171,126 @@ fn profileReadClip(bytes: []const u8) ?[4]f32 {
     return result;
 }
 
-fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storage: *[16]u8) ?[]const u8 {
+const ProfileClipVertex = struct {
+    clip: [4]f32,
+    varyings: [8][16]u8,
+};
+const ProfileClippedPolygon = struct {
+    vertices: [12]ProfileClipVertex = undefined,
+    count: u8 = 0,
+};
+
+fn profileClipPlaneDistance(clip: [4]f32, plane: usize) f32 {
+    return switch (plane) {
+        0 => clip[0] + clip[3], // left
+        1 => clip[3] - clip[0], // right
+        2 => clip[1] + clip[3], // bottom
+        3 => clip[3] - clip[1], // top
+        4 => clip[2], // Vulkan near plane
+        5 => clip[3] - clip[2], // far
+        6 => clip[3] - 0.000001, // avoid the eye-plane singularity
+        else => unreachable,
+    };
+}
+
+/// Clip a triangle in homogeneous Vulkan clip space while carrying smooth
+/// vertex outputs to the generated polygon. Raster interpolation then sees
+/// only positive-W vertices and cannot cross the eye-plane singularity.
+fn profileClipTriangle(input: *const [3]ProfileClipVertex, varyings: []const ProfileVarying) ProfileClippedPolygon {
+    var fully_inside = true;
+    for (input) |vertex| {
+        for (0..7) |plane| {
+            if (!(profileClipPlaneDistance(vertex.clip, plane) >= 0)) {
+                fully_inside = false;
+                break;
+            }
+        }
+        if (!fully_inside) break;
+    }
+    if (fully_inside) {
+        var accepted = ProfileClippedPolygon{ .count = 3 };
+        @memcpy(accepted.vertices[0..3], input);
+        return accepted;
+    }
+    var source: [12]ProfileClipVertex = undefined;
+    @memcpy(source[0..3], input);
+    var source_count: usize = 3;
+    for (0..7) |plane| {
+        if (source_count == 0) break;
+        var output: [12]ProfileClipVertex = undefined;
+        var output_count: usize = 0;
+        var previous = source[source_count - 1];
+        var previous_distance = profileClipPlaneDistance(previous.clip, plane);
+        var previous_inside = previous_distance >= 0;
+        for (source[0..source_count]) |current| {
+            const current_distance = profileClipPlaneDistance(current.clip, plane);
+            const current_inside = current_distance >= 0;
+            if (current_inside != previous_inside) {
+                const denominator = previous_distance - current_distance;
+                if (!std.math.isFinite(denominator) or @abs(denominator) < 0.0000001 or output_count == output.len) return .{};
+                const t = previous_distance / denominator;
+                var intersection = ProfileClipVertex{ .clip = undefined, .varyings = undefined };
+                for (0..4) |lane| intersection.clip[lane] = previous.clip[lane] + (current.clip[lane] - previous.clip[lane]) * t;
+                for (varyings, 0..) |varying, varying_index| {
+                    for (0..varying.lanes) |lane| {
+                        const offset = lane * 4;
+                        const a: f32 = @bitCast(std.mem.readInt(u32, previous.varyings[varying_index][offset..][0..4], .little));
+                        const b: f32 = @bitCast(std.mem.readInt(u32, current.varyings[varying_index][offset..][0..4], .little));
+                        std.mem.writeInt(u32, intersection.varyings[varying_index][offset..][0..4], @bitCast(a + (b - a) * t), .little);
+                    }
+                }
+                output[output_count] = intersection;
+                output_count += 1;
+            }
+            if (current_inside) {
+                if (output_count == output.len) return .{};
+                output[output_count] = current;
+                output_count += 1;
+            }
+            previous = current;
+            previous_distance = current_distance;
+            previous_inside = current_inside;
+        }
+        source = output;
+        source_count = output_count;
+    }
+    var result = ProfileClippedPolygon{ .count = @intCast(source_count) };
+    @memcpy(result.vertices[0..source_count], source[0..source_count]);
+    return result;
+}
+
+test "scalar triangle clipping keeps vertices inside Vulkan clip space" {
+    const triangle = [3]ProfileClipVertex{
+        .{ .clip = .{ -2, 0, 0.5, 1 }, .varyings = undefined },
+        .{ .clip = .{ 0, 1, 0.5, 1 }, .varyings = undefined },
+        .{ .clip = .{ 0, -1, 0.5, 1 }, .varyings = undefined },
+    };
+    const polygon = profileClipTriangle(&triangle, &.{});
+    try std.testing.expectEqual(@as(u8, 4), polygon.count);
+    for (polygon.vertices[0..polygon.count]) |vertex| {
+        for (0..7) |plane| try std.testing.expect(profileClipPlaneDistance(vertex.clip, plane) >= -0.000001);
+    }
+}
+
+test "scalar triangle clipping preserves an already contained triangle" {
+    var triangle = [3]ProfileClipVertex{
+        .{ .clip = .{ -0.5, 0.25, 0.5, 1 }, .varyings = undefined },
+        .{ .clip = .{ 0.5, -0.25, 0.75, 1 }, .varyings = undefined },
+        .{ .clip = .{ 0, 0.5, 0.25, 1 }, .varyings = undefined },
+    };
+    for (&triangle, 0..) |*vertex, index| {
+        @memset(&vertex.varyings[0], @intCast(index + 1));
+    }
+    const varying = [_]ProfileVarying{.{ .vertex_interface = 0, .fragment_interface = 0, .vertex_slot = 0, .lanes = 4 }};
+    const polygon = profileClipTriangle(&triangle, &varying);
+    try std.testing.expectEqual(@as(u8, 3), polygon.count);
+    for (triangle, 0..) |vertex, index| {
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&vertex.clip), std.mem.asBytes(&polygon.vertices[index].clip));
+        try std.testing.expectEqualSlices(u8, &vertex.varyings[0], &polygon.vertices[index].varyings[0]);
+    }
+}
+
+fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storage: *[64]u8) ?[]const u8 {
     if (source.len < input.source_byte_size or input.byte_size > storage.len) return null;
     switch (input.format) {
         37 => {
@@ -10310,7 +11312,11 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
                 std.mem.writeInt(u32, storage[index * 4 ..][0..4], value, .little);
             }
         },
-        100, 103, 106, 109 => {
+        109 => {
+            if ((input.source_byte_size != input.byte_size and !(input.source_byte_size == 16 and input.byte_size <= 16)) or input.byte_size == 0 or input.byte_size > storage.len) return null;
+            @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
+        },
+        100, 103, 106 => {
             if (input.source_byte_size != input.byte_size) return null;
             @memcpy(storage[0..input.byte_size], source[0..input.byte_size]);
         },
@@ -10319,10 +11325,57 @@ fn profileVertexInputBytes(input: ProfileVertexInput, source: []const u8, storag
     return storage[0..input.byte_size];
 }
 
+fn profileReadVertexInput(op: anytype, input: ProfileVertexInput, vertex_index: u64, storage: *[64]u8) ?[]const u8 {
+    const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
+    if (input.matrix_columns) {
+        for (0..4) |column| {
+            const binding: usize = input.matrix_bindings[column];
+            const buffer = op.vertex_bindings.buffers[binding] orelse return null;
+            const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[binding] else if (op.vertex_bindings.strides[binding] == 0) input.matrix_strides[column] else op.vertex_bindings.strides[binding];
+            const relative = std.math.add(u64, input.matrix_offsets[column], std.math.mul(u64, element_index, stride) catch return null) catch return null;
+            const start = std.math.add(u64, op.vertex_bindings.offsets[binding], relative) catch return null;
+            const source = bufferBytes(buffer);
+            if (start > source.len or source.len - start < 16) return null;
+            @memcpy(storage[column * 16 ..][0..16], source[@intCast(start)..][0..16]);
+        }
+        return storage[0..64];
+    }
+    const binding: usize = input.binding;
+    const buffer = op.vertex_bindings.buffers[binding] orelse return null;
+    const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[binding] else if (op.vertex_bindings.strides[binding] == 0) input.stride else op.vertex_bindings.strides[binding];
+    const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return null) catch return null;
+    const start = std.math.add(u64, op.vertex_bindings.offsets[binding], relative) catch return null;
+    const source = bufferBytes(buffer);
+    if (start > source.len or source.len - start < input.source_byte_size) return null;
+    return profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], storage);
+}
+
 const ProfileVertexEvaluation = struct {
+    clip: [4]f32,
     screen: ProfileScreenVertex,
     varyings: [8][16]u8,
 };
+
+const profile_vertex_cache_slot_count = 512;
+const ProfileVertexCacheEntry = struct {
+    vertex_index: u32 = 0,
+    valid: bool = false,
+    evaluation: ProfileVertexEvaluation = undefined,
+};
+
+fn profileVertexCacheSlot(vertex_index: u32) usize {
+    return @intCast((vertex_index *% 0x9e37_79b9) & (profile_vertex_cache_slot_count - 1));
+}
+
+test "profile vertex cache slots are bounded and mix adjacent indices" {
+    var seen = [_]bool{false} ** profile_vertex_cache_slot_count;
+    for (0..profile_vertex_cache_slot_count) |index| {
+        const slot = profileVertexCacheSlot(@intCast(index));
+        try std.testing.expect(slot < profile_vertex_cache_slot_count);
+        try std.testing.expect(!seen[slot]);
+        seen[slot] = true;
+    }
+}
 
 /// Run one bounded profile vertex exactly as the scalar triangle path does,
 /// but retain its screen-space position and declared varying outputs in a
@@ -10330,23 +11383,25 @@ const ProfileVertexEvaluation = struct {
 /// four vertices before replacing the triangle scan conversion; all ordinary
 /// draws continue through the original per-triangle setup below.
 fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, uniform_bindings: []const render_ir_exec.Binding) ?ProfileVertexEvaluation {
-    var bindings: [21]render_ir_exec.Binding = undefined;
-    var binding_storage: [16][16]u8 = undefined;
+    var bindings: [22]render_ir_exec.Binding = undefined;
+    var binding_storage: [16][64]u8 = undefined;
     var output_storage: [16][16]u8 = undefined;
     var outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| outputs[slot] = .{ .interface = interface, .bytes = &output_storage[slot] };
     var binding_count: usize = 0;
     for (profile.inputs[0..profile.input_count]) |input| {
-        const buffer = op.vertex_bindings.buffers[input.binding] orelse return null;
-        const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
         const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return null) else std.math.add(u64, op.base_vertex, emitted) catch return null;
-        const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
-        const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return null) catch return null;
-        const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return null;
-        const source = bufferBytes(buffer);
-        if (start > source.len or source.len - start < input.source_byte_size or binding_count == bindings.len) return null;
-        const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &binding_storage[binding_count]) orelse return null;
+        if (binding_count == bindings.len) return null;
+        const bytes = profileReadVertexInput(op, input, vertex_index, &binding_storage[binding_count]) orelse return null;
         bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
+        binding_count += 1;
+    }
+    var vertex_index_storage: [4]u8 = undefined;
+    if (profile.vertex_index_interface) |interface| {
+        const vertex_index = profileVertexIndexValue(op, emitted) orelse return null;
+        std.mem.writeInt(u32, &vertex_index_storage, vertex_index, .little);
+        if (binding_count == bindings.len) return null;
+        bindings[binding_count] = .{ .interface = interface, .bytes = &vertex_index_storage };
         binding_count += 1;
     }
     for (uniform_bindings) |uniform| {
@@ -10368,7 +11423,7 @@ fn profileEvaluateVertex(op: anytype, profile: *ProfileGraphics, emitted: u32, u
         .w = clip[3],
     };
     if (!std.math.isFinite(screen.x) or !std.math.isFinite(screen.y) or !std.math.isFinite(screen.z)) return null;
-    var result = ProfileVertexEvaluation{ .screen = screen, .varyings = undefined };
+    var result = ProfileVertexEvaluation{ .clip = clip, .screen = screen, .varyings = undefined };
     for (profile.varyings[0..profile.varying_count], 0..) |varying, index| @memcpy(result.varyings[index][0 .. varying.lanes * 4], output_storage[varying.vertex_slot][0 .. varying.lanes * 4]);
     return result;
 }
@@ -10429,13 +11484,38 @@ fn profileBlendEquation(op: i32, source: f32, destination: f32) ?f32 {
 fn colorStorageIndices(format: i32) ?[4]usize {
     return switch (format) {
         9 => .{ 0, 1, 2, 3 },
+        2, 4, 6 => .{ 0, 1, 2, 3 },
+        3, 5, 7 => .{ 2, 1, 0, 3 },
         37 => .{ 0, 1, 2, 3 },
-        44 => .{ 2, 1, 0, 3 },
+        43, 44 => .{ 2, 1, 0, 3 },
         else => null,
     };
 }
 
 fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32, blend: ProfileBlendState) ?u32 {
+    if (floatColorFormat(format)) {
+        const channels = floatColorChannelCount(format) orelse return null;
+        if (bytes.len < imageStorageBytesPerTexel(format) or color_write_mask & ~@as(u32, 0xf) != 0) return null;
+        const source = source_values;
+        for (source) |value| if (!std.math.isFinite(value)) return null;
+        const destination = readFloatColorTexel(bytes, format);
+        var result = source;
+        if (blend.enable != 0) {
+            for (0..channels) |channel| {
+                const alpha = floatColorHasAlpha(format) and channel == 3;
+                const src_factor = profileBlendFactor(if (alpha) blend.src_alpha_factor else blend.src_color_factor, source, destination, blend.constants, channel, alpha) orelse return null;
+                const dst_factor = profileBlendFactor(if (alpha) blend.dst_alpha_factor else blend.dst_color_factor, source, destination, blend.constants, channel, alpha) orelse return null;
+                result[channel] = profileBlendEquation(if (alpha) blend.alpha_op else blend.color_op, source[channel] * src_factor, destination[channel] * dst_factor) orelse return null;
+                if (!std.math.isFinite(result[channel])) return null;
+            }
+        }
+        var destination_result = destination;
+        for (0..channels) |channel| {
+            if (color_write_mask & (@as(u32, 1) << @intCast(channel)) != 0) destination_result[channel] = result[channel];
+        }
+        writeFloatColorTexel(bytes, format, destination_result);
+        return 1;
+    }
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     var source = source_values;
@@ -10469,6 +11549,7 @@ fn profileWriteColorComponents(bytes: []u8, format: i32, source_values: [4]f32, 
 /// operation order and u8 conversion; it only removes repeated factor and
 /// equation dispatch after the caller has selected this exact fixed state.
 fn profileWriteSourceOverColorComponents(bytes: []u8, format: i32, source_values: [4]f32, color_write_mask: u32) ?u32 {
+    if (floatColorFormat(format)) return profileWriteColorComponents(bytes, format, source_values, color_write_mask, .{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 });
     if (bytes.len < 4 or color_write_mask & ~@as(u32, 0xf) != 0) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     var source = source_values;
@@ -10558,6 +11639,13 @@ fn profileTextureCopyPreparedIsOpaque(prepared: render_ir_exec.TextureCopyPrepar
 /// state has no destination contribution.  Other pipelines remain on the
 /// general bounded blend implementation above.
 fn profileWriteOpaqueColorComponents(bytes: []u8, format: i32, components: [4]f32) ?u32 {
+    if (floatColorFormat(format)) {
+        const channels = floatColorChannelCount(format) orelse return null;
+        if (bytes.len < imageStorageBytesPerTexel(format)) return null;
+        for (components[0..channels]) |component| if (!std.math.isFinite(component)) return null;
+        writeFloatColorTexel(bytes, format, components);
+        return 1;
+    }
     if (bytes.len < 4) return null;
     const storage_indices = colorStorageIndices(format) orelse return null;
     for (components, 0..) |component, channel| {
@@ -10594,15 +11682,17 @@ test "scalar profile color writes preserve RGBA and BGRA storage order" {
     try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&rgba, 37, false, &output, 0xf, .{}));
     try std.testing.expectEqual([_]u8{ 255, 127, 63, 255 }, rgba);
 
-    var bgra = [_]u8{0} ** 4;
-    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, 44, false, &output, 0xf, .{}));
-    try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
+    for ([_]i32{ 43, 44 }) |format| {
+        var bgra = [_]u8{0} ** 4;
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&bgra, format, false, &output, 0xf, .{}));
+        try std.testing.expectEqual([_]u8{ 63, 127, 255, 255 }, bgra);
+    }
 }
 
 test "opaque profile color write matches disabled and alpha-one source blending" {
     var output = [_]u8{0} ** 16;
     for ([_]f32{ 0.75, 0.5, 0.25, 1 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
-    for ([_]i32{ 37, 44 }) |format| {
+    for ([_]i32{ 37, 43, 44 }) |format| {
         var opaque_bytes = [_]u8{ 11, 22, 33, 44 };
         var disabled = opaque_bytes;
         var blended = opaque_bytes;
@@ -10612,6 +11702,112 @@ test "opaque profile color write matches disabled and alpha-one source blending"
         try std.testing.expectEqualSlices(u8, &disabled, &opaque_bytes);
         try std.testing.expectEqualSlices(u8, &blended, &opaque_bytes);
     }
+}
+
+test "RGBA16F profile writes preserve floating point range and masked channels" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 1.5, -0.5, 4, 0.25 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var pixel: [8]u8 = undefined;
+    for ([_]f32{ 0.25, 0.5, 0.75, 1 }, 0..) |value, index| writeHalfFloat(&pixel, index * 2, value);
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&pixel, 97, false, &output, 0x5, .{}));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&pixel, 0));
+    try std.testing.expectEqual(@as(f32, 0.5), readHalfFloat(&pixel, 2));
+    try std.testing.expectEqual(@as(f32, 4), readHalfFloat(&pixel, 4));
+    try std.testing.expectEqual(@as(f32, 1), readHalfFloat(&pixel, 6));
+}
+
+test "RGBA16F source-over blending does not clamp float attachment values" {
+    const source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 2, -0.5, 1.25, 0.5 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var generic: [8]u8 = undefined;
+    var specialized: [8]u8 = undefined;
+    for ([_]f32{ 0.25, 1.5, -2, 0.5 }, 0..) |value, index| {
+        writeHalfFloat(&generic, index * 2, value);
+        writeHalfFloat(&specialized, index * 2, value);
+    }
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&generic, 97, false, &output, 0xf, source_over));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteSourceOverColor(&specialized, 97, false, &output, 0xf));
+    try std.testing.expectEqualSlices(u8, &generic, &specialized);
+    try std.testing.expectEqual(@as(f32, 2.125), readHalfFloat(&generic, 0));
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&generic, 2));
+}
+
+test "RG16F profile attachments preserve half-float range and masked channels" {
+    var output = [_]u8{0} ** 16;
+    for ([_]f32{ 1.5, -0.5, 4, 0.25 }, 0..) |value, index| std.mem.writeInt(u32, output[index * 4 ..][0..4], @bitCast(value), .little);
+    var pixel: [4]u8 = undefined;
+    writeHalfFloat(&pixel, 0, 0.25);
+    writeHalfFloat(&pixel, 2, 0.5);
+    try std.testing.expect(colorAttachmentFormat(83));
+    try std.testing.expectEqual(@as(u64, 4), imageStorageBytesPerTexel(83));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColor(&pixel, 83, false, &output, 0x1, .{}));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&pixel, 0));
+    try std.testing.expectEqual(@as(f32, 0.5), readHalfFloat(&pixel, 2));
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteOpaqueColor(&pixel, 83, &output));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&pixel, 0));
+    try std.testing.expectEqual(@as(f32, -0.5), readHalfFloat(&pixel, 2));
+}
+
+test "floating-point color formats clear and write native texels" {
+    const cases = [_]struct { format: i32, bytes: usize, expected: [4]f32 }{
+        .{ .format = 76, .bytes = 2, .expected = .{ 0.25, 0, 0, 1 } },
+        .{ .format = 83, .bytes = 4, .expected = .{ 0.25, 0.5, 0, 1 } },
+        .{ .format = 97, .bytes = 8, .expected = .{ 0.25, 0.5, 0.75, 1 } },
+        .{ .format = 100, .bytes = 4, .expected = .{ 0.25, 0, 0, 1 } },
+        .{ .format = 103, .bytes = 8, .expected = .{ 0.25, 0.5, 0, 1 } },
+        .{ .format = 109, .bytes = 16, .expected = .{ 0.25, 0.5, 0.75, 1 } },
+        .{ .format = 122, .bytes = 4, .expected = .{ 0.25, 0.5, 0.75, 1 } },
+    };
+    const clear = [4]f32{ 0.25, 0.5, 0.75, 1 };
+    const replacement = [4]f32{ 0.75, 0.125, 0.25, 0.5 };
+    for (cases) |case| {
+        var pixels: [32]u8 = [_]u8{0xa5} ** 32;
+        const image_bytes = pixels[0 .. case.bytes * 2];
+        try std.testing.expect(floatColorFormat(case.format));
+        try std.testing.expectEqual(@as(u64, @intCast(case.bytes)), imageStorageBytesPerTexel(case.format));
+        try std.testing.expectEqual(@as(?u64, @intCast(case.bytes)), bufferImageBytesPerTexel(case.format));
+        try std.testing.expect(imageClearPattern(case.format, .{ 0, 0, 0, 0 }) == null);
+        fillImageClearColor(image_bytes, case.format, .{ 0, 0, 0, 0 }, null, clear);
+        fillImageClearColorRect(image_bytes, 2, case.format, .{ 0, 0, 0, 0 }, null, replacement, .{ .x = 1, .y = 0, .width = 1, .height = 1 });
+        const first = readFloatColorTexel(image_bytes, case.format);
+        const second = readFloatColorTexel(image_bytes[case.bytes..], case.format);
+        for (case.expected, 0..) |component, channel| try std.testing.expectApproxEqAbs(component, first[channel], 0.0001);
+        const replacement_expected: [4]f32 = switch (case.format) {
+            76, 100 => .{ 0.75, 0, 0, 1 },
+            83, 103 => .{ 0.75, 0.125, 0, 1 },
+            97, 109 => replacement,
+            122 => .{ 0.75, 0.125, 0.25, 1 },
+            else => unreachable,
+        };
+        for (replacement_expected, 0..) |component, channel| try std.testing.expectApproxEqAbs(component, second[channel], 0.0001);
+        try std.testing.expectEqual(@as(?u32, 1), profileWriteColorComponents(image_bytes[0..case.bytes], case.format, .{ 1.5, -0.25, 2, 0.5 }, 0x1, .{}));
+        const masked = readFloatColorTexel(image_bytes, case.format);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.5), masked[0], 0.0001);
+        for (case.expected[1..], 1..) |component, channel| try std.testing.expectApproxEqAbs(component, masked[channel], 0.0001);
+    }
+}
+
+test "RGBA32F blending retains values outside the normalized range" {
+    const source_over = ProfileBlendState{ .enable = 1, .src_color_factor = 1, .dst_color_factor = 7, .color_op = 0, .src_alpha_factor = 1, .dst_alpha_factor = 7, .alpha_op = 0 };
+    var pixel: [16]u8 = undefined;
+    writeFloatColorTexel(&pixel, 109, .{ 0.25, 1.5, -2, 0.5 });
+    try std.testing.expectEqual(@as(?u32, 1), profileWriteColorComponents(&pixel, 109, .{ 2, -0.5, 1.25, 0.5 }, 0xf, source_over));
+    const result = readFloatColorTexel(&pixel, 109);
+    try std.testing.expectEqual([_]f32{ 2.125, 0.25, 0.25, 0.75 }, result);
+}
+
+test "RG16F attachment clears preserve half-float channels and rectangular bounds" {
+    var bytes: [16]u8 = [_]u8{0xa5} ** 16;
+    const clear = [_]u16{ @bitCast(@as(f16, 1.5)), @bitCast(@as(f16, -0.25)), 0, 0 };
+    fillImageClearColor(&bytes, 83, .{ 0, 0, 0, 0 }, clear, null);
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
+    try std.testing.expectEqual(@as(f32, -0.25), readHalfFloat(&bytes, 2));
+    const replacement = [_]u16{ @bitCast(@as(f16, 0.25)), @bitCast(@as(f16, 0.5)), 0, 0 };
+    fillImageClearColorRect(&bytes, 2, 83, .{ 0, 0, 0, 0 }, replacement, null, .{ .x = 1, .y = 0, .width = 1, .height = 1 });
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&bytes, 4));
+    try std.testing.expectEqual(@as(f32, 0.5), readHalfFloat(&bytes, 6));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
 }
 
 test "scalar profile color writes preserve R8 red storage" {
@@ -10691,6 +11887,139 @@ fn profileDepthCompare(op: i32, incoming: f32, stored: f32) bool {
     };
 }
 
+fn stencilValueFromStorage(format: i32, bytes: []const u8, offset: usize) ?u32 {
+    if (!isStencilFormat(format) or offset >= bytes.len) return null;
+    return bytes[offset];
+}
+
+fn writeStencilValueToStorage(format: i32, bytes: []u8, offset: usize, value: u32) void {
+    if (!isStencilFormat(format) or offset >= bytes.len) return;
+    bytes[offset] = @intCast(value & 0xff);
+}
+
+fn profileStencilCompare(op: i32, reference: u32, stored: u32) bool {
+    return switch (op) {
+        0 => false,
+        1 => reference < stored,
+        2 => reference == stored,
+        3 => reference <= stored,
+        4 => reference > stored,
+        5 => reference != stored,
+        6 => reference >= stored,
+        7 => true,
+        else => false,
+    };
+}
+
+fn profileStencilOperation(op: i32, current: u32, reference: u32) u32 {
+    const value = current & 0xff;
+    return switch (op) {
+        0 => value,
+        1 => 0,
+        2 => reference & 0xff,
+        3 => @min(value + 1, 0xff),
+        4 => if (value == 0) 0 else value - 1,
+        5 => (~value) & 0xff,
+        6 => (value + 1) & 0xff,
+        7 => (value -% 1) & 0xff,
+        else => value,
+    };
+}
+
+fn applyProfileStencilOperation(bytes: []u8, image: *const ImageObj, offset: usize, face: StencilFaceState, operation: i32) void {
+    const stored = stencilValueFromStorage(image.format, bytes, offset) orelse return;
+    const generated = profileStencilOperation(operation, stored, face.reference);
+    const mask = face.write_mask & 0xff;
+    writeStencilValueToStorage(image.format, bytes, offset, (stored & ~mask) | (generated & mask));
+}
+
+fn profileDepthStencilTest(op: anytype, depth: ?*ImageObj, storage: ?[]u8, offset: usize, depth_value: f32, front_facing: bool) bool {
+    const image = depth;
+    const has_depth = if (image) |value| isDepthFormat(value.format) else false;
+    const has_stencil = if (image) |value| isStencilFormat(value.format) else false;
+
+    // Vulkan applies depth bounds before stencil. A fragment rejected by this
+    // test does not update the stencil value.
+    if (has_depth and op.depth_bounds_test_enable != 0 and
+        (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) return false;
+
+    const face = if (front_facing) op.stencil.front else op.stencil.back;
+    if (op.stencil.test_enable != 0) {
+        const stencil_image = image orelse return false;
+        const bytes = storage orelse return false;
+        if (!has_stencil) return false;
+        const stored = stencilValueFromStorage(stencil_image.format, bytes, offset) orelse return false;
+        const reference = face.reference & face.compare_mask;
+        const masked_stored = stored & face.compare_mask;
+        if (!profileStencilCompare(face.compare_op, reference, masked_stored)) {
+            applyProfileStencilOperation(bytes, stencil_image, offset, face, face.fail_op);
+            return false;
+        }
+    }
+
+    var depth_pass = true;
+    if (has_depth and op.depth_test_enable != 0) {
+        const depth_image = image.?;
+        const bytes = storage orelse return false;
+        const stored_depth = depthValueFromStorage(depth_image.format, bytes, offset);
+        depth_pass = std.math.isFinite(stored_depth) and profileDepthCompare(op.depth_compare_op, depth_value, stored_depth);
+    }
+    if (op.stencil.test_enable != 0) {
+        const stencil_image = image.?;
+        const bytes = storage orelse return false;
+        applyProfileStencilOperation(bytes, stencil_image, offset, face, if (depth_pass) face.pass_op else face.depth_fail_op);
+    }
+    return depth_pass;
+}
+
+test "profile depth and bounds tests reject occluded fragments" {
+    var bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    for (0..4) |pixel| std.mem.writeInt(u32, bytes[pixel * 4 ..][0..4], @bitCast(@as(f32, 0.5)), .little);
+    var memory = MemoryObj{ .owner = undefined, .bytes = bytes[0..], .mapped = true };
+    var image = ImageObj{ .owner = undefined, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 126, .usage = 0x2, .layout = 1, .memory = &memory };
+    const State = struct { depth_test_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32, stencil: StencilRasterState };
+    const less_equal = State{ .depth_test_enable = 1, .depth_compare_op = 3, .depth_bounds_test_enable = 0, .depth_bounds = .{ 0, 1 }, .stencil = .{} };
+    try std.testing.expect(profileDepthStencilTest(less_equal, &image, bytes[0..], 0, 0.25, true));
+    try std.testing.expect(!profileDepthStencilTest(less_equal, &image, bytes[0..], 0, 0.75, true));
+    const bounded = State{ .depth_test_enable = 0, .depth_compare_op = 3, .depth_bounds_test_enable = 1, .depth_bounds = .{ 0.2, 0.4 }, .stencil = .{} };
+    try std.testing.expect(profileDepthStencilTest(bounded, &image, bytes[0..], 0, 0.3, true));
+    try std.testing.expect(!profileDepthStencilTest(bounded, &image, bytes[0..], 0, 0.5, true));
+}
+
+test "profile stencil applies masked front and back operations around depth" {
+    var bytes: [16]u8 align(64) = [_]u8{0} ** 16;
+    // D24S8 packs the stencil byte in the least-significant byte.
+    std.mem.writeInt(u32, bytes[0..4], 0x4000_00a3, .little);
+    std.mem.writeInt(u32, bytes[4..8], 0x8000_00ff, .little);
+    var memory = MemoryObj{ .owner = undefined, .bytes = bytes[0..], .mapped = true };
+    var image = ImageObj{ .owner = undefined, .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x20, .layout = 1, .memory = &memory };
+    const State = struct { depth_test_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32, stencil: StencilRasterState };
+    var state = State{
+        .depth_test_enable = 0,
+        .depth_compare_op = 3,
+        .depth_bounds_test_enable = 0,
+        .depth_bounds = .{ 0, 1 },
+        .stencil = .{ .test_enable = 1, .front = .{ .pass_op = 2, .compare_op = 5, .compare_mask = 0xf, .write_mask = 0xf, .reference = 0x15 }, .back = .{ .fail_op = 1, .compare_op = 0, .compare_mask = 0xff, .write_mask = 0xff } },
+    };
+    try std.testing.expect(profileDepthStencilTest(state, &image, bytes[0..], 0, 0.5, true));
+    try std.testing.expectEqual(@as(u8, 0xa5), bytes[0]);
+    try std.testing.expectEqual(@as(u32, 0x4000_00a5), std.mem.readInt(u32, bytes[0..4], .little));
+    try std.testing.expect(!profileDepthStencilTest(state, &image, bytes[0..], 4, 0.5, false));
+    try std.testing.expectEqual(@as(u8, 0), bytes[4]);
+
+    // A failed depth comparison selects depthFailOp; bounds rejection occurs
+    // first and leaves stencil untouched.
+    state.stencil.front = .{ .depth_fail_op = 6, .compare_op = 7, .compare_mask = 0xff, .write_mask = 0xff };
+    state.depth_test_enable = 1;
+    state.depth_compare_op = 1;
+    try std.testing.expect(!profileDepthStencilTest(state, &image, bytes[4..], 0, 0.75, true));
+    try std.testing.expectEqual(@as(u8, 1), bytes[4]);
+    state.depth_bounds_test_enable = 1;
+    state.depth_bounds = .{ 0.1, 0.2 };
+    try std.testing.expect(!profileDepthStencilTest(state, &image, bytes[4..], 0, 0.5, true));
+    try std.testing.expectEqual(@as(u8, 1), bytes[4]);
+}
+
 fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
     const index_size: usize = if (indexed.index_type == 0) 2 else if (indexed.index_type == 1) 4 else return null;
     const at = std.math.add(usize, @intCast(indexed.offset), std.math.mul(usize, emitted, index_size) catch return null) catch return null;
@@ -10700,6 +12029,11 @@ fn profileIndexValue(indexed: IndexedDrawState, emitted: u32) ?u32 {
     const adjusted = @as(i64, raw) + indexed.vertex_offset;
     if (adjusted < 0 or adjusted > std.math.maxInt(u32)) return null;
     return @intCast(adjusted);
+}
+
+fn profileVertexIndexValue(op: anytype, emitted: u32) ?u32 {
+    if (op.indexed) |indexed| return profileIndexValue(indexed, emitted);
+    return std.math.add(u32, op.base_vertex, emitted) catch null;
 }
 
 fn profileTriangleVertex(topology: i32, triangle: u32, corner: usize) ?u32 {
@@ -10791,36 +12125,95 @@ test "scalar profile depth bias applies constant slope and clamp terms" {
     try std.testing.expect(profileDepthBias(vertices, area, .{ std.math.inf(f32), 0, 0 }) == null);
 }
 
-fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?render_ir_exec.SampledImage {
+fn profileSampler(descriptors: *const DescriptorSetObj, binding: u32) ?render_ir_exec.Sampler {
     if (binding >= descriptors.sampled_images.len) return null;
-    const sampled = descriptors.sampled_images[binding];
-    const image = sampled.image orelse return null;
-    const sampler = sampled.sampler orelse return null;
-    if (!liveImageObject(image) or image.samples != 1 or image.array_layers != 1 or sampler.unnormalized_coordinates or sampler.mag_filter != sampler.min_filter) return null;
-    const format: render_ir_exec.SampledImage.Format = switch (image.format) {
-        9 => .r8_unorm,
-        16 => .rg8_unorm,
-        37 => .rgba8_unorm,
-        44 => .bgra8_unorm,
-        format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
-        else => return null,
-    };
-    const filter: render_ir_exec.SampledImage.Filter = switch (sampler.mag_filter) {
+    const value = descriptors.sampled_images[binding].sampler orelse return null;
+    if (value.unnormalized_coordinates) return null;
+    const mag_filter: render_ir_exec.SampledImage.Filter = switch (value.mag_filter) {
         0 => .nearest,
         1 => .linear,
         else => return null,
     };
-    const address_u = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, sampler.address_mode_u) orelse return null;
-    const address_v = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, sampler.address_mode_v) orelse return null;
-    const border: [4]f32 = switch (sampler.border_color) {
+    const min_filter: render_ir_exec.SampledImage.Filter = switch (value.min_filter) {
+        0 => .nearest,
+        1 => .linear,
+        else => return null,
+    };
+    const border: [4]f32 = switch (value.border_color) {
         0, 1 => .{ 0, 0, 0, 0 },
         2, 3 => .{ 0, 0, 0, 1 },
         4, 5 => .{ 1, 1, 1, 1 },
         else => return null,
     };
+    return .{
+        .mag_filter = mag_filter,
+        .min_filter = min_filter,
+        .mipmap_mode = std.enums.fromInt(render_ir_exec.Sampler.MipmapMode, value.mipmap_mode) orelse return null,
+        .address_u = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_u) orelse return null,
+        .address_v = std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_v) orelse return null,
+        .border = border,
+        .lod_bias = value.mip_lod_bias,
+        .min_lod = value.min_lod,
+        .max_lod = value.max_lod,
+    };
+}
+
+fn profileImageUsesCube(program: *const render_ir.Program, interface: u32) bool {
+    for (program.instructions) |instruction| {
+        if (instruction.operands.len == 0 or instruction.operands[0] != interface) continue;
+        if (instruction.op == .image_cube_sample_implicit_lod or instruction.op == .image_cube_sample_explicit_lod) return true;
+    }
+    return false;
+}
+
+fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32, descriptor_set: u8, sampler_required: bool, cube: bool) ?render_ir_exec.SampledImage {
+    const table = if (descriptor_set == 1) &descriptors.sampled_images_set1 else &descriptors.sampled_images;
+    if (binding >= table.len) return null;
+    const sampled = table[binding];
+    const image = sampled.image orelse return null;
+    const sampler = sampled.sampler;
+    if (!liveImageObject(image) or image.samples != 1 or sampler_required != (sampler != null)) return null;
+    const expected_view_type: i32 = if (cube) 3 else 1;
+    const expected_layer_count: u32 = if (cube) 6 else 1;
+    if (sampled.view_type != expected_view_type or sampled.layer_count != expected_layer_count or sampled.base_array_layer >= image.array_layers or expected_layer_count > image.array_layers - sampled.base_array_layer or (cube and (image.flags & 0x10 == 0 or image.width != image.height or sampled.base_array_layer % 6 != 0)) or sampled.level_count == 0 or sampled.level_count > image.mip_levels or sampled.base_mip_level >= image.mip_levels or sampled.level_count > image.mip_levels - sampled.base_mip_level) return null;
+    if (sampler_required) {
+        const value = sampler.?;
+        if (value.unnormalized_coordinates or value.mag_filter != value.min_filter) return null;
+    }
+    const format: render_ir_exec.SampledImage.Format = switch (image.format) {
+        9 => .r8_unorm,
+        16 => .rg8_unorm,
+        76 => .r16_sfloat,
+        83 => .rg16_sfloat,
+        97 => .rgba16_sfloat,
+        100, 126 => .r32_sfloat,
+        103 => .rg32_sfloat,
+        109 => .rgba32_sfloat,
+        122 => .r11g11b10_ufloat,
+        2, 4, 6 => .rgba8_unorm,
+        3, 5, 7 => .bgra8_unorm,
+        37 => .rgba8_unorm,
+        43, 44 => .bgra8_unorm,
+        format_g8_b8r8_2plane_420_unorm => .ycbcr_420_2plane,
+        else => return null,
+    };
+    const filter: render_ir_exec.SampledImage.Filter = if (sampler) |value| switch (value.mag_filter) {
+        0 => .nearest,
+        1 => .linear,
+        else => return null,
+    } else .nearest;
+    const address_u = if (sampler) |value| std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_u) orelse return null else .clamp_to_edge;
+    const address_v = if (sampler) |value| std.enums.fromInt(render_ir_exec.SampledImage.AddressMode, value.address_mode_v) orelse return null else .clamp_to_edge;
+    const border: [4]f32 = if (sampler) |value| switch (value.border_color) {
+        0, 1 => .{ 0, 0, 0, 0 },
+        2, 3 => .{ 0, 0, 0, 1 },
+        4, 5 => .{ 1, 1, 1, 1 },
+        else => return null,
+    } else .{ 0, 0, 0, 0 };
     const bytes = imageBytes(image);
     if (format == .ycbcr_420_2plane) {
-        const conversion = sampled.ycbcr orelse return null;
+        if (cube or !sampler_required or sampled.ycbcr == null or sampled.base_mip_level != 0 or sampled.level_count != 1 or sampled.base_array_layer != 0 or image.array_layers != 1) return null;
+        const conversion = sampled.ycbcr.?;
         const model: render_ir_exec.SampledImage.YcbcrModel = switch (conversion.model) {
             1 => .identity,
             2 => .bt709,
@@ -10853,21 +12246,53 @@ fn profileSampledImage(descriptors: *const DescriptorSetObj, binding: u32) ?rend
             .ycbcr_range = range,
         };
     }
-    return .{
-        .pixels = bytes,
-        .width = image.width,
-        .height = image.height,
-        .row_stride = image.width * 4,
-        .bytes_per_texel = 4,
+    if (sampled.ycbcr != null) return null;
+    const bytes_per_texel: u32 = switch (format) {
+        .r8_unorm => 1,
+        .rg8_unorm, .r16_sfloat => 2,
+        .rg16_sfloat, .rgba8_unorm, .bgra8_unorm, .r32_sfloat, .r11g11b10_ufloat => 4,
+        .rgba16_sfloat, .rg32_sfloat => 8,
+        .rgba32_sfloat => 16,
+        .ycbcr_420_2plane, .ycbcr_420_3plane => return null,
+    };
+    const base_width = imageMipExtent(image, sampled.base_mip_level) orelse return null;
+    const base_offset = imageSubresourceOffset(image, sampled.base_mip_level, sampled.base_array_layer) orelse return null;
+    const view_byte_count = if (cube) blk: {
+        const face_stride = imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null;
+        const all_faces = std.math.mul(u64, face_stride, 6) catch return null;
+        const base_mip_offset = imageMipOffsetInLayer(image, sampled.base_mip_level) orelse return null;
+        break :blk std.math.sub(u64, all_faces, base_mip_offset) catch return null;
+    } else imageFormatMipChainLayerByteSize(image.format, base_width.width, base_width.height, sampled.level_count) orelse return null;
+    const view_start = std.math.cast(usize, base_offset) orelse return null;
+    const view_size = std.math.cast(usize, view_byte_count) orelse return null;
+    if (view_start > bytes.len or view_size > bytes.len - view_start) return null;
+    var result = render_ir_exec.SampledImage{
+        .pixels = bytes[view_start..][0..view_size],
+        .width = base_width.width,
+        .height = base_width.height,
+        .row_stride = std.math.mul(u32, base_width.width, bytes_per_texel) catch return null,
+        .bytes_per_texel = bytes_per_texel,
         .format = format,
         .swizzle = sampled.components,
         .filter = filter,
         .address_u = address_u,
         .address_v = address_v,
         .border = border,
+        .mip_count = @intCast(sampled.level_count),
+        .cube = cube,
+        .cube_face_stride = if (cube) std.math.cast(usize, imageFormatMipChainLayerByteSize(image.format, image.width, image.height, image.mip_levels) orelse return null) orelse return null else 0,
     };
+    const base_mip_offset = imageMipOffsetInLayer(image, sampled.base_mip_level) orelse return null;
+    for (0..sampled.level_count) |level| {
+        const mip_level = sampled.base_mip_level + @as(u32, @intCast(level));
+        const extent = imageMipExtent(image, mip_level) orelse return null;
+        const offset = imageMipOffsetInLayer(image, mip_level) orelse return null;
+        result.mip_offsets[level] = offset - base_mip_offset;
+        result.mip_widths[level] = extent.width;
+        result.mip_heights[level] = extent.height;
+    }
+    return result;
 }
-
 /// Input-attachment reads are framebuffer fetches, not filtered texture
 /// samples.  Keep the implemented profile intentionally narrow: the
 /// descriptor must name the live color target currently being rendered, with
@@ -10876,18 +12301,28 @@ fn profileInputAttachment(descriptors: *const DescriptorSetObj, binding: u32, co
     if (binding >= descriptors.input_attachments.len) return null;
     const input = descriptors.input_attachments[binding];
     const image = input.image orelse return null;
-    if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * 4) return null;
+    const bytes_per_texel: usize = @intCast(imageStorageBytesPerTexel(color.format));
+    if (image != color or !liveImageObject(image) or image.samples != 1 or image.array_layers == 0 or color_bytes.len != @as(usize, color.width) * color.height * bytes_per_texel) return null;
     const format: render_ir_exec.SampledImage.Format = switch (color.format) {
+        2, 4, 6 => .rgba8_unorm,
+        3, 5, 7 => .bgra8_unorm,
         37 => .rgba8_unorm,
-        44 => .bgra8_unorm,
+        43, 44 => .bgra8_unorm,
+        76 => .r16_sfloat,
+        83 => .rg16_sfloat,
+        97 => .rgba16_sfloat,
+        100 => .r32_sfloat,
+        103 => .rg32_sfloat,
+        109 => .rgba32_sfloat,
+        122 => .r11g11b10_ufloat,
         else => return null,
     };
     return .{
         .pixels = color_bytes,
         .width = color.width,
         .height = color.height,
-        .row_stride = color.width * 4,
-        .bytes_per_texel = 4,
+        .row_stride = color.width * @as(u32, @intCast(bytes_per_texel)),
+        .bytes_per_texel = @intCast(bytes_per_texel),
         .format = format,
         .swizzle = input.components,
         .filter = .nearest,
@@ -10903,12 +12338,15 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         .profile_v1_scalar_graphics => |*value| value,
         else => return,
     };
-    const diagnostic_draw = if (renderDiagnosticsEnabled()) render_diagnostic_draws.fetchAdd(1, .monotonic) else 0;
+    const render_diagnostics_enabled = renderDiagnosticsEnabled();
+    const diagnostic_draw = if (render_diagnostics_enabled) render_diagnostic_draws.fetchAdd(1, .monotonic) else 0;
     const color = op.color_image orelse if (op.framebuffer) |fb| fb.color_image else null;
     const depth = op.depth_image orelse if (op.framebuffer) |fb| fb.depth_image else null;
     const target = color orelse depth orelse return;
     const profile_ir_primary_tile = if (mosaic_clip) |clip| clip.min_x == 0 and clip.min_y == 0 else true;
-    const profile_ir_sequence = if (profileIrDiagnosticsEnabled() and profile_ir_primary_tile) render_diagnostic_profile_ir.fetchAdd(1, .monotonic) else 512;
+    const profile_ir_diagnostics_enabled = profileIrDiagnosticsEnabled();
+    const selected_profile_ir = profile_ir_diagnostics_enabled and std.c.getenv("ZPU_DIAGNOSE_PROFILE_IR_DIGEST") != null;
+    const profile_ir_sequence = if (profile_ir_diagnostics_enabled and !selected_profile_ir and profile_ir_primary_tile) render_diagnostic_profile_ir.fetchAdd(1, .monotonic) else 512;
     // Keep the hot-profile discovery window broad enough to reach animated
     // video frames. Full instruction dumps are deliberately limited because
     // they perturb the workload; compact canonical identities make every
@@ -10930,28 +12368,16 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             );
             std.debug.print("ZPU VP9 composite canonical IR end\n", .{});
         }
-        if (profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
-            std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
-            for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
-                "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
-                .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
-            );
-            for (profile.fragment.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
-                "ZPU selected profile member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
-                .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
-            );
-            for (profile.fragment.program.instructions, 0..) |instruction, index| std.debug.print(
-                "ZPU selected profile IR instruction={} op={s} type={any} operands={any} literal={any}\n",
-                .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
-            );
-            std.debug.print("ZPU selected profile canonical IR end\n", .{});
-        }
     }
     // A selected identity is an explicit diagnostic request, not part of the
     // bounded discovery sample. Keep its one full dump available after noisy
     // Chromium startup has consumed that sample, otherwise a late hot shader
     // cannot be turned into a precise regression candidate.
-    if (profileIrDiagnosticsEnabled() and profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+    if (selected_profile_ir and profileIrTargetDigestMatches(&profile.fragment.program.identity.digest) and render_diagnostic_profile_target_ir_dump.fetchAdd(1, .monotonic) == 0) {
+        std.debug.print("ZPU selected profile draw target={d}x{d} topology={d} vertices={d} indexed={} vertex_path={s} vertex_ir={x} vertex_instructions={}\n", .{
+            target.width,                          target.height,                          op.primitive_topology,                   op.vertex_count, op.indexed != null,
+            profile.vertex.prevalidatedPathName(), profile.vertex.program.identity.digest, profile.vertex.program.instructions.len,
+        });
         std.debug.print("ZPU selected profile canonical IR begin digest={x}\n", .{profile.fragment.program.identity.digest});
         for (profile.fragment.program.interfaces, 0..) |interface, index| std.debug.print(
             "ZPU selected profile interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
@@ -10966,8 +12392,22 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
         std.debug.print("ZPU selected profile canonical IR end\n", .{});
+        std.debug.print("ZPU selected vertex canonical IR begin digest={x}\n", .{profile.vertex.program.identity.digest});
+        for (profile.vertex.program.interfaces, 0..) |interface, index| std.debug.print(
+            "ZPU selected vertex interface={} storage={s} type={any} location={any} set={any} binding={any} members={}\n",
+            .{ index, @tagName(interface.storage), interface.ty, interface.location, interface.descriptor_set, interface.binding, interface.member_count },
+        );
+        for (profile.vertex.program.interfaces, 0..) |interface, interface_index| for (interface.members[0..interface.member_count], 0..) |member, member_index| std.debug.print(
+            "ZPU selected vertex member interface={} member={} type={any} offset={} array_count={} array_stride={}\n",
+            .{ interface_index, member_index, member.ty, member.offset, member.array_count, member.array_stride },
+        );
+        for (profile.vertex.program.instructions, 0..) |instruction, index| std.debug.print(
+            "ZPU selected vertex IR instruction={} op={s} type={any} operands={any} literal={any}\n",
+            .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
+        );
+        std.debug.print("ZPU selected vertex canonical IR end\n", .{});
     }
-    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+    if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256 and
         render_diagnostic_profile_ir.fetchAdd(1, .monotonic) == 0)
     {
@@ -10990,7 +12430,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             .{ index, @tagName(instruction.op), instruction.ty, instruction.operands, instruction.literal },
         );
     }
-    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
+    if (render_diagnostics_enabled and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw seq={d} target={x} {d}x{d} color={} depth={} topology={d} vertices={d} uniforms={d}/{d} sampled={} varyings={d} mask={x} blend={d}/{d}/{d} tex={x} {d}x{d}/format={d}/alpha={d}/darkalpha={d}/darkbounds={d},{d} {d}x{d}\n",
         .{ diagnostic_draw, @intFromPtr(target), target.width, target.height, color != null, depth != null, op.primitive_topology, op.vertex_count, profile.vertex_uniform_count, profile.fragment_uniform_count, profile.fragment_sampled_image_count, profile.varying_count, op.pipeline.color_write_mask, op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor, if (op.descriptors.texture) |texture| @intFromPtr(texture) else 0, if (op.descriptors.texture) |texture| texture.width else 0, if (op.descriptors.texture) |texture| texture.height else 0, if (op.descriptors.texture) |texture| texture.format else 0, if (op.descriptors.texture) |texture| diagnosticAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkAlphaPixelCount(texture) else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).x else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).y else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).width else 0, if (op.descriptors.texture) |texture| diagnosticDarkBounds(texture).height else 0 },
     );
@@ -11001,16 +12441,16 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         4 => if (op.vertex_count >= 3) op.vertex_count - 2 else return,
         else => return,
     };
-    if (triangle_count == 0 or op.vertex_count > 4096 or op.instance_count == 0) return;
+    if (triangle_count == 0 or !profileGraphicsVertexCountSupported(op.vertex_count) or op.instance_count == 0) return;
     var bounds = emptyRect();
     var pixels_written: usize = 0;
-    var vertex_bindings: [21]render_ir_exec.Binding = undefined;
-    var vertex_binding_storage: [16][16]u8 = undefined;
+    var vertex_bindings: [22]render_ir_exec.Binding = undefined;
+    var vertex_binding_storage: [16][64]u8 = undefined;
     var vertex_output_bytes: [16][16]u8 = undefined;
     var vertex_outputs: [16]render_ir_exec.Output = undefined;
     for (profile.vertex_outputs[0..profile.vertex_output_count], 0..) |interface, slot| vertex_outputs[slot] = .{ .interface = interface, .bytes = &vertex_output_bytes[slot] };
     var varying_bytes: [3][8][16]u8 = undefined;
-    var fragment_bindings: [24]render_ir_exec.Binding = undefined;
+    var fragment_bindings: [40]render_ir_exec.Binding = undefined;
     var fragment_binding_storage: [8][16]u8 = undefined;
     var fragment_dpdx_storage: [8][16]u8 = undefined;
     var fragment_dpdy_storage: [8][16]u8 = undefined;
@@ -11018,21 +12458,17 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var fragment_uniform_bindings: [5]render_ir_exec.Binding = undefined;
     var vertex_uniform_count: usize = 0;
     var fragment_uniform_count: usize = 0;
-    var uniform_bytes: []const u8 = &.{};
-    if (profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0) {
-        const uniform_buffer = op.descriptors.uniform orelse return;
-        const start = op.descriptors.uniform_offset;
-        const range = op.descriptors.uniform_range;
-        if (start > uniform_buffer.size or range == 0 or range > uniform_buffer.size - start) return;
-        uniform_bytes = bufferBytes(uniform_buffer)[@intCast(start)..][0..@intCast(range)];
-        for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
-            vertex_uniform_bindings[vertex_uniform_count] = .{ .interface = uniform.interface, .bytes = uniform_bytes };
-            vertex_uniform_count += 1;
-        }
-        for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
-            fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = uniform.interface, .bytes = uniform_bytes };
-            fragment_uniform_count += 1;
-        }
+    for (profile.vertex_uniforms[0..profile.vertex_uniform_count]) |uniform| {
+        const interface = profile.vertex.program.interfaces[uniform.interface];
+        const bytes = descriptorUniformBytes(op.descriptors, interface.binding orelse return) orelse return;
+        vertex_uniform_bindings[vertex_uniform_count] = .{ .interface = uniform.interface, .bytes = bytes };
+        vertex_uniform_count += 1;
+    }
+    for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
+        const interface = profile.fragment.program.interfaces[uniform.interface];
+        const bytes = descriptorUniformBytes(op.descriptors, interface.binding orelse return) orelse return;
+        fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = uniform.interface, .bytes = bytes };
+        fragment_uniform_count += 1;
     }
     if (profile.vertex_push_constant) |push| {
         if (!pushConstantBytesInitialized(op.push_constants, 0, push.byte_size)) return;
@@ -11044,13 +12480,56 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         fragment_uniform_bindings[fragment_uniform_count] = .{ .interface = push.interface, .bytes = op.push_constants.values[4][0..push.byte_size] };
         fragment_uniform_count += 1;
     }
+    if (profile.varying_count + fragment_uniform_count > fragment_bindings.len) return;
+    for (fragment_uniform_bindings[0..fragment_uniform_count], 0..) |uniform, index| {
+        fragment_bindings[profile.varying_count + index] = uniform;
+    }
     var fragment_sampled_bindings: [8]render_ir_exec.Binding = undefined;
     for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count], 0..) |sampled_profile, index| {
-        const sampled = profileSampledImage(op.descriptors, sampled_profile.binding) orelse {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sampled-image setup failed binding={d} interface={d}\n", .{ sampled_profile.binding, sampled_profile.interface });
+        const sampled = profileSampledImage(op.descriptors, sampled_profile.binding, sampled_profile.descriptor_set, sampled_profile.sampler_required, sampled_profile.cube) orelse {
+            if (render_diagnostics_enabled) {
+                const table = if (sampled_profile.descriptor_set == 1) &op.descriptors.sampled_images_set1 else &op.descriptors.sampled_images;
+                const descriptor = if (sampled_profile.binding < table.len) table[sampled_profile.binding] else DescriptorSampledImage{};
+                const image = descriptor.image;
+                const sampler = descriptor.sampler;
+                std.debug.print(
+                    "ZPU render sampled-image setup failed set={} binding={d} interface={d} sampler_required={} image={any} format={d} size={d}x{d} layers={d} mips={d} view={d} base={d},{d} range={d},{d} sampler={any} filters={d},{d} address={d},{d} unnormalized={}\n",
+                    .{
+                        sampled_profile.descriptor_set,
+                        sampled_profile.binding,
+                        sampled_profile.interface,
+                        sampled_profile.sampler_required,
+                        if (image) |value| @intFromPtr(value) else 0,
+                        if (image) |value| value.format else 0,
+                        if (image) |value| value.width else 0,
+                        if (image) |value| value.height else 0,
+                        if (image) |value| value.array_layers else 0,
+                        if (image) |value| value.mip_levels else 0,
+                        descriptor.view_type,
+                        descriptor.base_array_layer,
+                        descriptor.base_mip_level,
+                        descriptor.layer_count,
+                        descriptor.level_count,
+                        if (sampler) |value| @intFromPtr(value) else 0,
+                        if (sampler) |value| value.mag_filter else -1,
+                        if (sampler) |value| value.min_filter else -1,
+                        if (sampler) |value| value.address_mode_u else -1,
+                        if (sampler) |value| value.address_mode_v else -1,
+                        if (sampler) |value| value.unnormalized_coordinates else false,
+                    },
+                );
+            }
             return;
         };
         fragment_sampled_bindings[index] = .{ .interface = sampled_profile.interface, .sampled_image = sampled };
+    }
+    var fragment_sampler_bindings: [8]render_ir_exec.Binding = undefined;
+    for (profile.fragment_samplers[0..profile.fragment_sampler_count], 0..) |sampler_profile, index| {
+        const sampler = profileSampler(op.descriptors, sampler_profile.binding) orelse {
+            if (render_diagnostics_enabled) std.debug.print("ZPU render sampler setup failed set=0 binding={d} interface={d}\n", .{ sampler_profile.binding, sampler_profile.interface });
+            return;
+        };
+        fragment_sampler_bindings[index] = .{ .interface = sampler_profile.interface, .sampler = sampler };
     }
     // Resolve the exact sample-modulate profile's interface slots once per
     // draw. The regular binding path remains the fallback for every other
@@ -11069,7 +12548,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) sample_modulate_image = binding.sampled_image;
         }
     }
-    if (renderDiagnosticsEnabled() and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
+    if (render_diagnostics_enabled and sample_modulate_color_varying != null and sample_modulate_coordinate_varying != null and sample_modulate_image != null)
         _ = render_diagnostic_direct_sample_modulate_draws.fetchAdd(1, .monotonic);
     // Resolve Chromium's exact full-screen texture-copy ABI once per draw.
     // The selected Render IR identity is stricter than a generic sampled
@@ -11105,11 +12584,11 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (binding.interface == plan.image_interface) sample_coverage_image = binding.sampled_image;
         }
         if (sample_coverage_image) |image| sample_coverage_prepared = profile.fragment.prepareSampleCoverage(image) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render sample-coverage preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render sample-coverage preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
-    if (renderDiagnosticsEnabled() and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
+    if (render_diagnostics_enabled and sample_coverage_coordinate_varying != null and sample_coverage_scalar_varying != null and sample_coverage_image != null)
         _ = render_diagnostic_direct_sample_coverage_draws.fetchAdd(1, .monotonic);
     // The VP9 decoder supplies separate Y and UV planes. Chromium's exact
     // color-transform fragment combines them through its validated transfer
@@ -11127,7 +12606,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (varying.fragment_interface == plan.chroma_coordinate_interface) vp9_chroma_coordinate_varying = index;
         }
         for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
-            if (uniform.interface == plan.uniform_interface) vp9_uniform = uniform_bytes;
+            if (uniform.interface == plan.uniform_interface) {
+                const interface = profile.fragment.program.interfaces[uniform.interface];
+                vp9_uniform = descriptorUniformBytes(op.descriptors, interface.binding orelse return);
+            }
         }
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.luma_image_interface) vp9_luma_image = binding.sampled_image;
@@ -11137,7 +12619,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var vp9_color_transform_prepared: ?render_ir_exec.Vp9ColorTransformPrepared = null;
     if (vp9_color_transform_plan != null and vp9_uniform != null and vp9_luma_image != null and vp9_chroma_image != null) {
         vp9_color_transform_prepared = profile.fragment.prepareVp9ColorTransform(vp9_uniform.?, vp9_luma_image.?, vp9_chroma_image.?) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render VP9 color-transform preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
@@ -11175,7 +12657,10 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             if (varying.fragment_interface == plan.coordinates_interface) radial_gradient_coordinate_varying = index;
         }
         for (profile.fragment_uniforms[0..profile.fragment_uniform_count]) |uniform| {
-            if (uniform.interface == plan.uniform_interface) radial_gradient_uniform = uniform_bytes;
+            if (uniform.interface == plan.uniform_interface) {
+                const interface = profile.fragment.program.interfaces[uniform.interface];
+                radial_gradient_uniform = descriptorUniformBytes(op.descriptors, interface.binding orelse return);
+            }
         }
         for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
             if (binding.interface == plan.image_interface) radial_gradient_image = binding.sampled_image;
@@ -11183,12 +12668,12 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         radial_gradient_frag_coord = profile.fragment_frag_coord != null and profile.fragment_frag_coord.? == plan.frag_coord_interface;
         if (radial_gradient_uniform) |uniform| {
             if (radial_gradient_image) |image| radial_gradient_prepared = profile.fragment.prepareRadialGradient(uniform, image) catch |err| {
-                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-gradient preparation failed err={s}\n", .{@errorName(err)});
+                if (render_diagnostics_enabled) std.debug.print("ZPU render radial-gradient preparation failed err={s}\n", .{@errorName(err)});
                 return;
             } orelse return;
         }
     }
-    if (renderDiagnosticsEnabled() and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
+    if (render_diagnostics_enabled and radial_gradient_circle_varying != null and radial_gradient_coordinate_varying != null and radial_gradient_uniform != null and radial_gradient_image != null and radial_gradient_frag_coord)
         _ = render_diagnostic_direct_radial_gradient_draws.fetchAdd(1, .monotonic);
     // The exact two-distance-field radial mask is another common Chromium
     // tile profile. Its push constants and sampled image are immutable for a
@@ -11215,7 +12700,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var radial_mask_prepared: ?render_ir_exec.RadialMaskPrepared = null;
     if (radial_mask_plan != null and radial_mask_push_constants != null and radial_mask_image != null) {
         radial_mask_prepared = profile.fragment.prepareRadialMask(radial_mask_push_constants.?, radial_mask_image.?) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render radial-mask preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render radial-mask preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
@@ -11262,7 +12747,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     var two_axis_coverage_prepared: ?render_ir_exec.TwoAxisCoveragePrepared = null;
     if (two_axis_coverage_plan != null and two_axis_coverage_push_constants != null and two_axis_coverage_image != null) {
         two_axis_coverage_prepared = profile.fragment.prepareTwoAxisCoverage(two_axis_coverage_push_constants.?, two_axis_coverage_image.?) catch |err| {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render two-axis coverage preparation failed err={s}\n", .{@errorName(err)});
+            if (render_diagnostics_enabled) std.debug.print("ZPU render two-axis coverage preparation failed err={s}\n", .{@errorName(err)});
             return;
         } orelse return;
     }
@@ -11278,13 +12763,43 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         const input_color = color orelse return;
         const bytes = color_bytes orelse return;
         const input = profileInputAttachment(op.descriptors, input_profile.binding, input_color, bytes) orelse {
-            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render input-attachment setup failed binding={d} interface={d}\n", .{ input_profile.binding, input_profile.interface });
+            if (render_diagnostics_enabled) std.debug.print("ZPU render input-attachment setup failed binding={d} interface={d}\n", .{ input_profile.binding, input_profile.interface });
             return;
         };
         fragment_input_attachment_bindings[index] = .{ .interface = input_profile.interface, .input_attachment = input };
     }
+    const fragment_static_binding_start = profile.varying_count + fragment_uniform_count +
+        @intFromBool(profile.fragment_frag_coord != null) + @intFromBool(profile.fragment_front_facing != null);
+    const fragment_binding_total = fragment_static_binding_start + profile.fragment_sampled_image_count +
+        profile.fragment_sampler_count + profile.fragment_input_attachment_count;
+    if (fragment_binding_total > fragment_bindings.len) return;
+    var static_binding_index = fragment_static_binding_start;
+    for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+        fragment_bindings[static_binding_index] = binding;
+        static_binding_index += 1;
+    }
+    for (fragment_sampler_bindings[0..profile.fragment_sampler_count]) |binding| {
+        fragment_bindings[static_binding_index] = binding;
+        static_binding_index += 1;
+    }
+    for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+        fragment_bindings[static_binding_index] = binding;
+        static_binding_index += 1;
+    }
     var fragment_output_bytes: [16]u8 = undefined;
-    var fragment_outputs = [_]render_ir_exec.Output{.{ .interface = profile.fragment_output, .bytes = &fragment_output_bytes }};
+    var fragment_output_scratch: [8][16]u8 = undefined;
+    var fragment_outputs: [8]render_ir_exec.Output = undefined;
+    var fragment_output_count: usize = 0;
+    for (profile.fragment.program.interfaces, 0..) |interface, interface_index| {
+        if (interface.storage != .output) continue;
+        if (fragment_output_count == fragment_outputs.len) return;
+        fragment_outputs[fragment_output_count] = .{
+            .interface = @intCast(interface_index),
+            .bytes = if (interface_index == profile.fragment_output) &fragment_output_bytes else &fragment_output_scratch[fragment_output_count],
+        };
+        fragment_output_count += 1;
+    }
+    if (fragment_output_count == 0) return;
 
     // Chromium's captured VP9 compositor is a four-vertex strip whose two
     // triangles form one axis-aligned, affine rectangle. Validate all four
@@ -11310,7 +12825,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_vp9_affine_quad = blk: {
         if (vp9_color_transform_prepared == null or vp9_luma_coordinate_varying == null or vp9_chroma_coordinate_varying == null or
             op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
-            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            op.cull_mode != 0 or op.stencil.test_enable != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
             depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
             !vp9_varying_abi or profile.varyings[vp9_luma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_luma_coordinate_varying.?].flat or
             profile.varyings[vp9_chroma_coordinate_varying.?].lanes != 2 or profile.varyings[vp9_chroma_coordinate_varying.?].flat or
@@ -11366,8 +12881,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     c0[1] + vertical * (c1[1] - c0[1]),
                 };
                 const fragment_color = profile.fragment.executeVp9ColorTransformPreparedCoordinatesColor(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates) catch break :blk false;
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                if (profileWriteOpaqueColorComponents(color_bytes.?[offset..][0..4], color.?.format, fragment_color) == null) break :blk false;
+                const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
+                const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)));
+                if (profileWriteOpaqueColorComponents(color_bytes.?[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, fragment_color) == null) break :blk false;
             }
         }
         vp9_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
@@ -11398,7 +12914,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_texture_copy_affine_quad = blk: {
         if (texture_copy_prepared == null or texture_copy_coordinate_varying == null or
             op.primitive_topology != 4 or op.vertex_count != 4 or op.instance_count != 1 or op.rasterizer_discard_enable != 0 or
-            op.cull_mode != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
+            op.cull_mode != 0 or op.stencil.test_enable != 0 or op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or
             depth != null or profile.fragment_bool or profile.fragment_needs_derivatives or profile.fragment_frag_coord != null or
             profile.varying_count != 1 or profile.varyings[texture_copy_coordinate_varying.?].lanes != 2 or profile.varyings[texture_copy_coordinate_varying.?].flat or
             profile.fragment_input_attachment_count != 0 or color == null or color_bytes == null or colorStorageIndices(color.?.format) == null or
@@ -11453,8 +12969,9 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     t0[1] + vertical * (t1[1] - t0[1]),
                 };
                 profile.fragment.executeTextureCopyPreparedCoordinates(texture_copy_prepared.?, coordinates, &fragment_output_bytes) catch return;
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                if (profileWriteColor(color_bytes.?[offset..][0..4], color.?.format, false, &fragment_output_bytes, op.pipeline.color_write_mask, blend) == null) return;
+                const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
+                const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)));
+                if (profileWriteColor(color_bytes.?[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, false, &fragment_output_bytes, op.pipeline.color_write_mask, blend) == null) return;
             }
         }
         texture_copy_quad_bounds = .{ .x = @intCast(min_x), .y = @intCast(min_y), .width = @intCast(max_x - min_x), .height = @intCast(max_y - min_y) };
@@ -11462,7 +12979,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         break :blk true;
     };
     if (direct_texture_copy_affine_quad) {
-        if (renderDiagnosticsEnabled()) _ = render_diagnostic_direct_texture_copy_quad_draws.fetchAdd(1, .monotonic);
+        if (render_diagnostics_enabled) _ = render_diagnostic_direct_texture_copy_quad_draws.fetchAdd(1, .monotonic);
         if (!publish_metadata) return;
         if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(texture_copy_quad_pixels, .monotonic);
         if (color) |color_image| {
@@ -11485,43 +13002,65 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
     const direct_source_over_write = draw_blend.enable == 1 and draw_blend.src_color_factor == 1 and draw_blend.dst_color_factor == 7 and draw_blend.color_op == 0 and
         draw_blend.src_alpha_factor == 1 and draw_blend.dst_alpha_factor == 7 and draw_blend.alpha_op == 0;
     var vertices: [3]ProfileScreenVertex = undefined;
+    var clip_coordinates: [3][4]f32 = undefined;
+    const cache_indexed_vertices = op.indexed != null;
+    var vertex_cache: [profile_vertex_cache_slot_count]ProfileVertexCacheEntry = undefined;
+    var vertex_cache_valid: [profile_vertex_cache_slot_count / 64]u64 = [_]u64{0} ** (profile_vertex_cache_slot_count / 64);
+    var vertex_cache_hits: u64 = 0;
+    var vertex_cache_misses: u64 = 0;
     for (0..triangle_count) |triangle_index| {
         for (0..3) |corner| {
             var binding_count: usize = 0;
+            const emitted = profileTriangleVertex(
+                op.primitive_topology,
+                @intCast(triangle_index),
+                corner,
+            ) orelse return;
+            const vertex_index = profileVertexIndexValue(op, emitted) orelse return;
+            const cache_slot = profileVertexCacheSlot(vertex_index);
+            if (cache_indexed_vertices) {
+                const cache_word = cache_slot / 64;
+                const cache_bit = @as(u64, 1) << @intCast(cache_slot % 64);
+                if (vertex_cache_valid[cache_word] & cache_bit != 0 and vertex_cache[cache_slot].vertex_index == vertex_index) {
+                    const cached = vertex_cache[cache_slot];
+                    vertex_cache_hits += 1;
+                    clip_coordinates[corner] = cached.evaluation.clip;
+                    vertices[corner] = cached.evaluation.screen;
+                    for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                        @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], cached.evaluation.varyings[varying_index][0 .. varying.lanes * 4]);
+                    }
+                    continue;
+                }
+                vertex_cache_misses += 1;
+            }
             for (profile.inputs[0..profile.input_count]) |input| {
                 const buffer = op.vertex_bindings.buffers[input.binding] orelse {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
+                    if (render_diagnostics_enabled) std.debug.print(
                         "ZPU render vertex input missing buffer binding={d} vertex={d} triangle={d}\n",
                         .{ input.binding, corner, triangle_index },
                     );
                     return;
                 };
                 const stride = if (op.pipeline.dynamic_vertex_input_binding_stride) op.vertex_bindings.strides[input.binding] else if (op.vertex_bindings.strides[input.binding] == 0) input.stride else op.vertex_bindings.strides[input.binding];
-                const emitted = profileTriangleVertex(
-                    op.primitive_topology,
-                    @intCast(triangle_index),
-                    corner,
-                ) orelse return;
-                const vertex_index = if (op.indexed) |indexed| @as(u64, profileIndexValue(indexed, emitted) orelse return) else std.math.add(u64, op.base_vertex, emitted) catch return;
-                const element_index = if (input.input_rate == 0) vertex_index else op.instance_index;
+                const element_index = if (input.input_rate == 0) @as(u64, vertex_index) else op.instance_index;
                 const relative = std.math.add(u64, input.offset, std.math.mul(u64, element_index, stride) catch return) catch return;
                 const start = std.math.add(u64, op.vertex_bindings.offsets[input.binding], relative) catch return;
                 const source = bufferBytes(buffer);
-                if (start > source.len or source.len - start < input.source_byte_size or binding_count == vertex_bindings.len) {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
+                if (binding_count == vertex_bindings.len) {
+                    if (render_diagnostics_enabled) std.debug.print(
+                        "ZPU render vertex input binding limit binding={d} vertex={d} triangle={d}\n",
+                        .{ input.binding, corner, triangle_index },
+                    );
+                    return;
+                }
+                const bytes = profileReadVertexInput(op, input, vertex_index, &vertex_binding_storage[binding_count]) orelse {
+                    if (render_diagnostics_enabled) std.debug.print(
                         "ZPU render vertex input bounds binding={d} format={d} source_len={} start={} bytes={} stride={} offset={} vertex_index={} vertex={d} triangle={d}\n",
                         .{ input.binding, input.format, source.len, start, input.source_byte_size, stride, input.offset, vertex_index, corner, triangle_index },
                     );
                     return;
-                }
-                const bytes = profileVertexInputBytes(input, source[@intCast(start)..][0..input.source_byte_size], &vertex_binding_storage[binding_count]) orelse {
-                    if (renderDiagnosticsEnabled()) std.debug.print(
-                        "ZPU render vertex input format rejected binding={d} format={d} bytes={} vertex={d} triangle={d}\n",
-                        .{ input.binding, input.format, input.source_byte_size, corner, triangle_index },
-                    );
-                    return;
                 };
-                if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
+                if (render_diagnostics_enabled and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
                     const geometry_sequence = render_diagnostic_page_geometry.fetchAdd(1, .monotonic);
                     if (geometry_sequence < 24) std.debug.print(
                         "ZPU page geometry input seq={d} triangle={d} corner={d} location={d} binding={d} vertex_index={} start={} stride={} values={d:.5},{d:.5},{d:.5},{d:.5}\n",
@@ -11541,7 +13080,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                         },
                     );
                 }
-                if (renderDiagnosticsEnabled() and input.interface == 2 and op.descriptors.texture != null and
+                if (render_diagnostics_enabled and input.interface == 2 and op.descriptors.texture != null and
                     op.descriptors.texture.?.width == 1024 and op.descriptors.texture.?.height == 512)
                 {
                     const input_sequence = render_diagnostic_vertex_inputs.fetchAdd(1, .monotonic);
@@ -11556,18 +13095,33 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 vertex_bindings[binding_count] = .{ .interface = input.interface, .bytes = bytes };
                 binding_count += 1;
             }
+            var vertex_index_storage: [4]u8 = undefined;
+            if (profile.vertex_index_interface) |interface| {
+                std.mem.writeInt(u32, &vertex_index_storage, vertex_index, .little);
+                if (binding_count == vertex_bindings.len) return;
+                vertex_bindings[binding_count] = .{ .interface = interface, .bytes = &vertex_index_storage };
+                binding_count += 1;
+            }
             for (vertex_uniform_bindings[0..vertex_uniform_count]) |uniform| {
                 vertex_bindings[binding_count] = uniform;
                 binding_count += 1;
             }
-            profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
-                if (renderDiagnosticsEnabled()) std.debug.print(
+            const vertex_fast = profile.vertex.executePrevalidated(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
+                if (render_diagnostics_enabled) std.debug.print(
+                    "ZPU render vertex fast execution failed err={s} inputs={} outputs={} vertex={d} triangle={d}\n",
+                    .{ @errorName(err), profile.input_count, profile.vertex_output_count, corner, triangle_index },
+                );
+                return;
+            };
+            if (!vertex_fast) profile.vertex.execute(vertex_bindings[0..binding_count], vertex_outputs[0..profile.vertex_output_count]) catch |err| {
+                if (render_diagnostics_enabled) std.debug.print(
                     "ZPU render vertex execution failed err={s} inputs={} outputs={} vertex={d} triangle={d}\n",
                     .{ @errorName(err), profile.input_count, profile.vertex_output_count, corner, triangle_index },
                 );
                 return;
             };
             const clip = profileReadClip(&vertex_output_bytes[profile.vertex_position_slot]) orelse return;
+            clip_coordinates[corner] = clip;
             if (@abs(clip[3]) < 0.000001) return;
             const inverse_w = 1.0 / clip[3];
             const ndc_x = clip[0] * inverse_w;
@@ -11577,7 +13131,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             const y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height;
             const z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth);
             if (!std.math.isFinite(x) or !std.math.isFinite(y) or !std.math.isFinite(z)) return;
-            if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
+            if (render_diagnostics_enabled and target.width == 1280 and target.height == 256 and op.vertex_count == 102) {
                 const geometry_sequence = render_diagnostic_page_geometry.fetchAdd(1, .monotonic);
                 if (geometry_sequence < 48) std.debug.print(
                     "ZPU page geometry output seq={d} triangle={d} corner={d} clip={d:.5},{d:.5},{d:.5},{d:.5} screen={d:.2},{d:.2}\n",
@@ -11586,6 +13140,14 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
             }
             vertices[corner] = .{ .x = x, .y = y, .z = z, .w = clip[3] };
             for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], vertex_output_bytes[varying.vertex_slot][0 .. varying.lanes * 4]);
+            if (cache_indexed_vertices) {
+                var evaluation = ProfileVertexEvaluation{ .clip = clip_coordinates[corner], .screen = vertices[corner], .varyings = undefined };
+                for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                    @memcpy(evaluation.varyings[varying_index][0 .. varying.lanes * 4], varying_bytes[corner][varying_index][0 .. varying.lanes * 4]);
+                }
+                vertex_cache[cache_slot] = .{ .vertex_index = vertex_index, .valid = true, .evaluation = evaluation };
+                vertex_cache_valid[cache_slot / 64] |= @as(u64, 1) << @intCast(cache_slot % 64);
+            }
             if (profileTimingDiagnosticsEnabled() and vp9_color_transform_prepared != null and render_diagnostic_vp9_geometry.fetchAdd(1, .monotonic) < 6) {
                 std.debug.print(
                     "ZPU VP9 geometry triangle={d} corner={d} screen={d:.5},{d:.5},{d:.5},w={d:.5} luma={d:.7},{d:.7} chroma={d:.7},{d:.7}\n",
@@ -11625,7 +13187,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     },
                 );
             }
-            if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+            if (render_diagnostics_enabled and op.descriptors.texture != null and
                 op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
                 target.width == 1280 and target.height == 256 and triangle_index < 2)
             {
@@ -11634,7 +13196,7 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                     .{ diagnostic_draw, triangle_index, corner, clip[0], clip[1], clip[2], clip[3], x, y, if (profile.varying_count > 0) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][0..4], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 1) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][4..8], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 2) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][8..12], .little))) else 0, if (profile.varying_count > 0 and profile.varyings[0].lanes > 3) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][0][12..16], .little))) else 0, if (profile.varying_count > 1) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][1][0..4], .little))) else 0, if (profile.varying_count > 1 and profile.varyings[1].lanes > 1) @as(f32, @bitCast(std.mem.readInt(u32, varying_bytes[corner][1][4..8], .little))) else 0 },
                 );
             }
-            if (renderDiagnosticsEnabled() and target.width == 512 and target.height == 256) {
+            if (render_diagnostics_enabled and target.width == 512 and target.height == 256) {
                 const geometry_sequence = render_diagnostic_geometry.fetchAdd(1, .monotonic);
                 if (geometry_sequence < 12) {
                     std.debug.print(
@@ -11647,515 +13209,559 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
                 }
             }
         }
-        const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
-        if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
-        const front_facing = if (op.front_face == 0) area < 0 else area > 0;
-        if ((front_facing and op.cull_mode & 1 != 0) or (!front_facing and op.cull_mode & 2 != 0)) continue;
-        const depth_bias = if (op.depth_bias_enable != 0) profileDepthBias(vertices, area, op.depth_bias) orelse return else 0;
-        if (profile.varying_count == 0 and profile.fragment_frag_coord == null) {
-            var fragment_binding_count: usize = 0;
-            for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
-                fragment_bindings[fragment_binding_count] = uniform;
-                fragment_binding_count += 1;
+        var clip_input: [3]ProfileClipVertex = undefined;
+        for (0..3) |corner| {
+            clip_input[corner].clip = clip_coordinates[corner];
+            for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                @memcpy(clip_input[corner].varyings[varying_index][0 .. varying.lanes * 4], varying_bytes[corner][varying_index][0 .. varying.lanes * 4]);
             }
-            var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
-            if (profile.fragment_front_facing) |interface| {
-                fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
-                fragment_binding_count += 1;
-            }
-            for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
-                if (fragment_binding_count == fragment_bindings.len) return;
-                fragment_bindings[fragment_binding_count] = binding;
-                fragment_binding_count += 1;
-            }
-            for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
-                if (fragment_binding_count == fragment_bindings.len) return;
-                fragment_bindings[fragment_binding_count] = binding;
-                fragment_binding_count += 1;
-            }
-            const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
-                return;
-            };
-            if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                if (renderDiagnosticsEnabled()) std.debug.print(
-                    "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
-                    .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index },
-                );
-                return;
-            };
         }
-        const inverse_area = 1.0 / area;
-        // This is deliberately stricter than merely having a prepared VP9
-        // transform. The direct coordinate form is valid only for the exact
-        // two non-flat vec2 varyings with no fragment-coordinate or
-        // derivatives. The exact VP9 identity may declare FrontFacing, but
-        // its already-validated direct transform does not consume that input.
-        // Any other shader keeps the ordinary
-        // per-pixel binding and interpolation path below.
-        const direct_vp9_coordinates = vp9_color_transform_prepared != null and
-            vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and
-            profile.varying_count == 2 and !profile.fragment_needs_derivatives and
-            profile.fragment_frag_coord == null and
-            profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
-            profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
-        const direct_texture_copy_coordinates = texture_copy_plan != null and texture_copy_coordinate_varying != null and texture_copy_image != null and
-            profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
-            profile.varyings[texture_copy_coordinate_varying.?].lanes == 2 and !profile.varyings[texture_copy_coordinate_varying.?].flat;
-        // The VP9 transform's canonical IR unconditionally writes alpha one.
-        // Therefore Chromium's normal source-over state is provably opaque,
-        // provided every component is written and its fixed factors are the
-        // exact alpha-one source-over combination.  Keep all other blend
-        // states on the general path: a similar-looking configuration is not
-        // sufficient to skip destination reads.
-        const direct_vp9_opaque_write = direct_vp9_coordinates and color != null and !profile.fragment_bool and
-            op.pipeline.color_write_mask == 0xf and
-            (op.pipeline.color_blend_enable == 0 or
-                (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
-                    op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0));
-        // The canonical radial mask consumes exactly two perspective vec4
-        // varyings. Its declared FrontFacing input is not data-dependent in
-        // the validated program, and it needs neither derivatives nor
-        // fragment coordinates. All other shader shapes keep the generic
-        // interpolation/binding path below.
-        const direct_radial_mask_coordinates = radial_mask_prepared != null and
-            radial_mask_color_varying != null and radial_mask_coordinate_varying != null and
-            profile.varying_count == 2 and !profile.fragment_needs_derivatives and
-            profile.fragment_frag_coord == null and
-            profile.varyings[radial_mask_color_varying.?].lanes == 4 and !profile.varyings[radial_mask_color_varying.?].flat and
-            profile.varyings[radial_mask_coordinate_varying.?].lanes == 4 and !profile.varyings[radial_mask_coordinate_varying.?].flat;
-        const direct_passthrough_coordinates = passthrough_plan != null and passthrough_varying != null and
-            profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
-            profile.varyings[passthrough_varying.?].lanes == 4 and !profile.varyings[passthrough_varying.?].flat;
-        const direct_constant_black = constant_black_plan != null and !profile.fragment_bool;
-        const direct_circle_mask_coordinates = circle_mask_plan != null and
-            circle_mask_circle_varying != null and circle_mask_color_varying != null and
-            profile.varying_count == 2 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
-            profile.varyings[circle_mask_circle_varying.?].lanes == 4 and !profile.varyings[circle_mask_circle_varying.?].flat and
-            profile.varyings[circle_mask_color_varying.?].lanes == 4 and !profile.varyings[circle_mask_color_varying.?].flat;
-        const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
-        const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
-        const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
-        const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
-        if (max_x <= min_x or max_y <= min_y) continue;
-        for (@intCast(min_y)..@intCast(max_y)) |y| {
-            // A video quad is represented as two axis-aligned right
-            // triangles.  Shrink each triangle's rectangular scan to its
-            // diagonal without trusting the bound for coverage: the normal
-            // edge test below remains authoritative.
-            const row: ProfileRowBounds = if (direct_vp9_coordinates)
-                profileAxisAlignedTriangleRowBounds(vertices, @as(f32, @floatFromInt(y)) + 0.5, min_x, max_x) orelse .{ .min_x = min_x, .max_x = max_x }
-            else
-                .{ .min_x = min_x, .max_x = max_x };
-            if (row.max_x <= row.min_x) continue;
-            for (@intCast(row.min_x)..@intCast(row.max_x)) |x| {
-                const px = @as(f32, @floatFromInt(x)) + 0.5;
-                const py = @as(f32, @floatFromInt(y)) + 0.5;
-                const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
-                const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
-                const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
-                if (b0 < 0 or b1 < 0 or b2 < 0) continue;
-                const depth_value = b0 * vertices[0].z + b1 * vertices[1].z + b2 * vertices[2].z + depth_bias;
-                if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
-                var direct_fragment_color: ?[4]f32 = null;
-                if (direct_constant_black) {
-                    direct_fragment_color = .{ 0, 0, 0, 0 };
-                } else if (direct_vp9_coordinates) {
-                    // Preserve the normal perspective interpolation order, but
-                    // feed its resolved f32 lanes directly to the exact VP9
-                    // transform. This removes temporary byte packing/decoding
-                    // and construction of a generic fragment binding table.
-                    const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
-                    const luma_varying = vp9_luma_coordinate_varying.?;
-                    const chroma_varying = vp9_chroma_coordinate_varying.?;
-                    var luma_coordinates: [2]f32 = undefined;
-                    var chroma_coordinates: [2]f32 = undefined;
-                    for (0..2) |lane| {
-                        const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
-                        const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
-                        const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
-                        luma_coordinates[lane] = (weights.q0 * luma_a + weights.q1 * luma_b + weights.q2 * luma_c) / weights.denominator;
-                        const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
-                        const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
-                        const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
-                        chroma_coordinates[lane] = (weights.q0 * chroma_a + weights.q1 * chroma_b + weights.q2 * chroma_c) / weights.denominator;
-                    }
-                    profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                        return;
-                    };
-                } else if (direct_texture_copy_coordinates) {
-                    const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
-                    const varying = texture_copy_coordinate_varying.?;
-                    var coordinates: [2]f32 = undefined;
-                    for (0..2) |lane| {
-                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
-                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
-                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
-                        coordinates[lane] = (weights.q0 * a + weights.q1 * b + weights.q2 * c) / weights.denominator;
-                    }
-                    if (texture_copy_prepared) |prepared| {
-                        profile.fragment.executeTextureCopyPreparedCoordinates(prepared, coordinates, &fragment_output_bytes) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                    } else {
-                        var coordinate_bytes: [8]u8 = undefined;
-                        for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
-                        _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                            return;
-                        };
-                    }
-                } else if (direct_radial_mask_coordinates) {
-                    const q0 = b0 / vertices[0].w;
-                    const q1 = b1 / vertices[1].w;
-                    const q2 = b2 / vertices[2].w;
-                    const denominator = q0 + q1 + q2;
-                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                    const color_varying = radial_mask_color_varying.?;
-                    const coordinate_varying = radial_mask_coordinate_varying.?;
-                    var radial_color: [4]f32 = undefined;
-                    var radial_coordinates: [4]f32 = undefined;
-                    for (0..4) |lane| {
-                        const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
-                        const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
-                        const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
-                        radial_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
-                        const coordinate_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][coordinate_varying][lane * 4 ..][0..4], .little));
-                        const coordinate_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][coordinate_varying][lane * 4 ..][0..4], .little));
-                        const coordinate_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][coordinate_varying][lane * 4 ..][0..4], .little));
-                        radial_coordinates[lane] = (q0 * coordinate_a + q1 * coordinate_b + q2 * coordinate_c) / denominator;
-                    }
-                    profile.fragment.executeRadialMaskPreparedCoordinates(radial_mask_prepared.?, radial_color, radial_coordinates, &fragment_output_bytes) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                        return;
-                    };
-                } else if (direct_circle_mask_coordinates) {
-                    const q0 = b0 / vertices[0].w;
-                    const q1 = b1 / vertices[1].w;
-                    const q2 = b2 / vertices[2].w;
-                    const denominator = q0 + q1 + q2;
-                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                    const circle_varying = circle_mask_circle_varying.?;
-                    const color_varying = circle_mask_color_varying.?;
-                    var circle: [4]f32 = undefined;
-                    var circle_color: [4]f32 = undefined;
-                    for (0..4) |lane| {
-                        const circle_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][circle_varying][lane * 4 ..][0..4], .little));
-                        const circle_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][circle_varying][lane * 4 ..][0..4], .little));
-                        const circle_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][circle_varying][lane * 4 ..][0..4], .little));
-                        circle[lane] = (q0 * circle_a + q1 * circle_b + q2 * circle_c) / denominator;
-                        const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
-                        const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
-                        const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
-                        circle_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
-                    }
-                    _ = profile.fragment.executeCircleMaskCoordinates(circle, circle_color, &fragment_output_bytes) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct circle-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                        return;
-                    };
-                } else if (direct_passthrough_coordinates) {
-                    const q0 = b0 / vertices[0].w;
-                    const q1 = b1 / vertices[1].w;
-                    const q2 = b2 / vertices[2].w;
-                    const denominator = q0 + q1 + q2;
-                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                    const varying = passthrough_varying.?;
-                    var value: [4]f32 = undefined;
-                    for (0..4) |lane| {
-                        const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
-                        const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
-                        const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
-                        value[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
-                    }
-                    _ = profile.fragment.executePassthroughCoordinates(value, &fragment_output_bytes) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct pass-through failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                        return;
-                    };
-                } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
-                    const q0 = b0 / vertices[0].w;
-                    const q1 = b1 / vertices[1].w;
-                    const q2 = b2 / vertices[2].w;
-                    const denominator = q0 + q1 + q2;
-                    if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
-                    const needs_derivatives = profile.fragment_needs_derivatives;
-                    const db0_dx = if (needs_derivatives) (vertices[2].y - vertices[1].y) * inverse_area else 0;
-                    const db1_dx = if (needs_derivatives) (vertices[0].y - vertices[2].y) * inverse_area else 0;
-                    const db2_dx = if (needs_derivatives) (vertices[1].y - vertices[0].y) * inverse_area else 0;
-                    const db0_dy = if (needs_derivatives) (vertices[1].x - vertices[2].x) * inverse_area else 0;
-                    const db1_dy = if (needs_derivatives) (vertices[2].x - vertices[0].x) * inverse_area else 0;
-                    const db2_dy = if (needs_derivatives) (vertices[0].x - vertices[1].x) * inverse_area else 0;
-                    const dq0_dx = if (needs_derivatives) db0_dx / vertices[0].w else 0;
-                    const dq1_dx = if (needs_derivatives) db1_dx / vertices[1].w else 0;
-                    const dq2_dx = if (needs_derivatives) db2_dx / vertices[2].w else 0;
-                    const dq0_dy = if (needs_derivatives) db0_dy / vertices[0].w else 0;
-                    const dq1_dy = if (needs_derivatives) db1_dy / vertices[1].w else 0;
-                    const dq2_dy = if (needs_derivatives) db2_dy / vertices[2].w else 0;
-                    const denominator_dx = if (needs_derivatives) dq0_dx + dq1_dx + dq2_dx else 0;
-                    const denominator_dy = if (needs_derivatives) dq0_dy + dq1_dy + dq2_dy else 0;
-                    for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
-                        for (0..varying.lanes) |lane| {
-                            const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
-                            const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
-                            const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
-                            const numerator = q0 * a + q1 * b + q2 * c;
-                            // VK_EXT_provoking_vertex selects which triangle
-                            // vertex supplies flat-qualified outputs.  The
-                            // profile emits the logical triangle in API order,
-                            // so first/last map directly to a/c here.
-                            const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
-                            const value = if (varying.flat) flat_value else numerator / denominator;
-                            const numerator_dx = if (needs_derivatives) dq0_dx * a + dq1_dx * b + dq2_dx * c else 0;
-                            const numerator_dy = if (needs_derivatives) dq0_dy * a + dq1_dy * b + dq2_dy * c else 0;
-                            const derivative_scale = if (needs_derivatives) denominator * denominator else 1;
-                            const dpdx = if (!needs_derivatives or varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
-                            const dpdy = if (!needs_derivatives or varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
-                            if (!std.math.isFinite(value) or (needs_derivatives and (!std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)))) return;
-                            std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
-                            std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
-                            std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
-                        }
-                        fragment_bindings[varying_index] = .{
-                            .interface = varying.fragment_interface,
-                            .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
-                            .dpdx_bytes = if (needs_derivatives) fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4] else &.{},
-                            .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
-                        };
-                    }
-                    var fragment_binding_count: usize = profile.varying_count;
-                    for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
-                        fragment_bindings[fragment_binding_count] = uniform;
-                        fragment_binding_count += 1;
-                    }
-                    var frag_coord_bytes: [16]u8 = undefined;
-                    var radial_gradient_frag_coord_ready = false;
-                    var frag_coord_dpdx_bytes: [16]u8 = undefined;
-                    var frag_coord_dpdy_bytes: [16]u8 = undefined;
-                    if (profile.fragment_frag_coord) |interface| {
-                        const depth_dx = db0_dx * vertices[0].z + db1_dx * vertices[1].z + db2_dx * vertices[2].z;
-                        const depth_dy = db0_dy * vertices[0].z + db1_dy * vertices[1].z + db2_dy * vertices[2].z;
-                        const frag_coord = [_]f32{ px, py, depth_value, denominator };
-                        const frag_coord_dpdx = [_]f32{ 1, 0, depth_dx, denominator_dx };
-                        const frag_coord_dpdy = [_]f32{ 0, 1, depth_dy, denominator_dy };
-                        for (0..4) |lane| {
-                            std.mem.writeInt(u32, frag_coord_bytes[lane * 4 ..][0..4], @bitCast(frag_coord[lane]), .little);
-                            std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
-                            std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
-                        }
-                        radial_gradient_frag_coord_ready = true;
-                        fragment_bindings[fragment_binding_count] = .{
-                            .interface = interface,
-                            .bytes = &frag_coord_bytes,
-                            .dpdx_bytes = if (needs_derivatives) &frag_coord_dpdx_bytes else &.{},
-                            .dpdy_bytes = if (needs_derivatives) &frag_coord_dpdy_bytes else &.{},
-                        };
-                        fragment_binding_count += 1;
-                    }
-                    var front_facing_bytes = [_]u8{@intFromBool(front_facing)};
-                    if (profile.fragment_front_facing) |interface| {
-                        fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
-                        fragment_binding_count += 1;
-                    }
-                    for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
-                        if (fragment_binding_count == fragment_bindings.len) return;
-                        fragment_bindings[fragment_binding_count] = binding;
-                        fragment_binding_count += 1;
-                    }
-                    for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
-                        if (fragment_binding_count == fragment_bindings.len) return;
-                        fragment_bindings[fragment_binding_count] = binding;
-                        fragment_binding_count += 1;
-                    }
-                    const fragment_fast = direct: {
-                        if (texture_copy_plan != null) {
-                            const coordinate_varying = texture_copy_coordinate_varying orelse break :direct false;
-                            const image = texture_copy_image orelse break :direct false;
-                            break :direct profile.fragment.executeTextureCopyDirect(
-                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                image,
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct texture-copy failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                        }
-                        if (sample_modulate_plan != null) {
-                            const color_varying = sample_modulate_color_varying orelse break :direct false;
-                            const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
-                            const image = sample_modulate_image orelse break :direct false;
-                            break :direct profile.fragment.executeSampleModulateDirect(
-                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
-                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                image,
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                        }
-                        if (analytic_coverage_plan != null) {
-                            const color_varying = analytic_coverage_color_varying orelse break :direct false;
-                            const coordinate_varying = analytic_coverage_coordinate_varying orelse break :direct false;
-                            break :direct profile.fragment.executeAnalyticCoverageDirect(
-                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
-                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                fragment_dpdx_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                fragment_dpdy_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                        }
-                        if (two_axis_coverage_plan != null) {
-                            const color_varying = two_axis_coverage_color_varying orelse break :direct false;
-                            const distance_varying = two_axis_coverage_distance_varying orelse break :direct false;
-                            const prepared = two_axis_coverage_prepared orelse break :direct false;
-                            break :direct profile.fragment.executeTwoAxisCoveragePrepared(
-                                prepared,
-                                fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
-                                fragment_binding_storage[distance_varying][0 .. profile.varyings[distance_varying].lanes * 4],
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct two-axis coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                        }
-                        if (sample_coverage_plan != null) {
-                            const coordinate_varying = sample_coverage_coordinate_varying orelse break :direct false;
-                            const scalar_varying = sample_coverage_scalar_varying orelse break :direct false;
-                            const prepared = sample_coverage_prepared orelse break :direct false;
-                            profile.fragment.executeSampleCoveragePrepared(
-                                prepared,
-                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                            break :direct true;
-                        }
-                        if (vp9_color_transform_plan != null) {
-                            const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
-                            const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
-                            const prepared = vp9_color_transform_prepared orelse break :direct false;
-                            profile.fragment.executeVp9ColorTransformPrepared(
-                                prepared,
-                                fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
-                                fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                            break :direct true;
-                        }
-                        if (radial_gradient_plan != null) {
-                            const circle_varying = radial_gradient_circle_varying orelse break :direct false;
-                            const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
-                            const prepared = radial_gradient_prepared orelse break :direct false;
-                            if (!radial_gradient_frag_coord_ready) break :direct false;
-                            profile.fragment.executeRadialGradientPrepared(
-                                prepared,
-                                fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
-                                fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
-                                &frag_coord_bytes,
-                                &fragment_output_bytes,
-                            ) catch |err| {
-                                if (renderDiagnosticsEnabled()) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
-                                return;
-                            };
-                            break :direct true;
-                        }
-                        break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                            if (renderDiagnosticsEnabled()) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
-                            return;
-                        };
-                    };
-                    if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..]) catch |err| {
-                        if (renderDiagnosticsEnabled()) std.debug.print(
-                            "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
-                            .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
-                        );
-                        return;
-                    };
-                    if (renderDiagnosticsEnabled() and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
-                        ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
-                    {
-                        var diagnostic_output: [4]f32 = undefined;
-                        for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                        std.debug.print(
-                            "ZPU text coverage xy={d},{d} varying0={d:.6},{d:.6} output={d:.6},{d:.6},{d:.6},{d:.6}\n",
-                            .{ x, y, @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][0..4], .little))), @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][4..8], .little))), diagnostic_output[0], diagnostic_output[1], diagnostic_output[2], diagnostic_output[3] },
-                        );
-                    }
+        for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| if (varying.flat) {
+            const provoking_corner: usize = if (op.pipeline.provoking_vertex_mode == 1) 2 else 0;
+            for (0..3) |corner| if (corner != provoking_corner) {
+                @memcpy(clip_input[corner].varyings[varying_index][0 .. varying.lanes * 4], clip_input[provoking_corner].varyings[varying_index][0 .. varying.lanes * 4]);
+            };
+        };
+        const clipped_polygon = profileClipTriangle(&clip_input, profile.varyings[0..profile.varying_count]);
+        if (clipped_polygon.count < 3) continue;
+        for (0..clipped_polygon.count - 2) |fan_triangle| {
+            const polygon_indices = [3]usize{ 0, fan_triangle + 1, fan_triangle + 2 };
+            var valid_fan_triangle = true;
+            for (0..3) |corner| {
+                const clipped_vertex = clipped_polygon.vertices[polygon_indices[corner]];
+                const clip = clipped_vertex.clip;
+                if (!std.math.isFinite(clip[3]) or clip[3] <= 0.000001) {
+                    valid_fan_triangle = false;
+                    break;
                 }
-                const offset = (@as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x))) * 4;
-                if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
-                    target.width == 1280 and target.height == 256 and x == 100 and y == 50 and
-                    render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
-                {
-                    var diagnostic_source: [4]f32 = undefined;
-                    for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                    std.debug.print(
-                        "ZPU glyph fragment xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
-                        .{ x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                const inverse_w = 1.0 / clip[3];
+                const ndc_x = clip[0] * inverse_w;
+                const ndc_y = clip[1] * inverse_w;
+                const ndc_z = clip[2] * inverse_w;
+                vertices[corner] = .{
+                    .x = op.viewport.x + (ndc_x * 0.5 + 0.5) * op.viewport.width,
+                    .y = op.viewport.y + (ndc_y * 0.5 + 0.5) * op.viewport.height,
+                    .z = op.viewport.min_depth + ndc_z * (op.viewport.max_depth - op.viewport.min_depth),
+                    .w = clip[3],
+                };
+                for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                    @memcpy(varying_bytes[corner][varying_index][0 .. varying.lanes * 4], clipped_vertex.varyings[varying_index][0 .. varying.lanes * 4]);
+                }
+            }
+            if (!valid_fan_triangle) continue;
+            const area = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y);
+            if (!std.math.isFinite(area) or @abs(area) < 0.00001) continue;
+            const front_facing = profileFrontFacing(area, op.front_face);
+            if ((front_facing and op.cull_mode & 1 != 0) or (!front_facing and op.cull_mode & 2 != 0)) continue;
+            const depth_bias = if (op.depth_bias_enable != 0) profileDepthBias(vertices, area, op.depth_bias) orelse return else 0;
+            if (profile.varying_count == 0 and profile.fragment_frag_coord == null) {
+                var fragment_binding_count: usize = 0;
+                for (fragment_uniform_bindings[0..fragment_uniform_count]) |uniform| {
+                    fragment_bindings[fragment_binding_count] = uniform;
+                    fragment_binding_count += 1;
+                }
+                var front_facing_bytes = [_]u8{ @intFromBool(front_facing), 0, 0, 0 };
+                if (profile.fragment_front_facing) |interface| {
+                    fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
+                    fragment_binding_count += 1;
+                }
+                for (fragment_sampled_bindings[0..profile.fragment_sampled_image_count]) |binding| {
+                    if (fragment_binding_count == fragment_bindings.len) return;
+                    fragment_bindings[fragment_binding_count] = binding;
+                    fragment_binding_count += 1;
+                }
+                for (fragment_sampler_bindings[0..profile.fragment_sampler_count]) |binding| {
+                    if (fragment_binding_count == fragment_bindings.len) return;
+                    fragment_bindings[fragment_binding_count] = binding;
+                    fragment_binding_count += 1;
+                }
+                for (fragment_input_attachment_bindings[0..profile.fragment_input_attachment_count]) |binding| {
+                    if (fragment_binding_count == fragment_bindings.len) return;
+                    fragment_bindings[fragment_binding_count] = binding;
+                    fragment_binding_count += 1;
+                }
+                const fragment_fast = profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
+                    if (render_diagnostics_enabled) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                    return;
+                };
+                if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
+                    if (render_diagnostics_enabled) std.debug.print(
+                        "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n",
+                        .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index },
                     );
-                }
-                if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
-                    op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
-                    target.width == 1280 and target.height == 256 and x == 30 and y == 10)
-                {
-                    var diagnostic_source: [4]f32 = undefined;
-                    for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                    std.debug.print(
-                        "ZPU text fragment draw={d} xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
-                        .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
-                    );
-                }
-                if (renderDiagnosticsEnabled() and diagnostic_draw == 71 and x == 166 and y == 1) {
-                    var diagnostic_source: [4]f32 = undefined;
-                    var diagnostic_destination: [4]f32 = undefined;
-                    for (0..4) |channel| {
-                        diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
-                        const storage_index = colorStorageIndices(color.?.format).?[channel];
-                        diagnostic_destination[channel] = @as(f32, @floatFromInt(color_bytes.?[offset + storage_index])) / 255;
-                    }
-                    std.debug.print(
-                        "ZPU targeted fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
-                        .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
-                    );
-                }
-                if (depth_bytes != null and op.depth_bounds_test_enable != 0 and (depth_value < op.depth_bounds[0] or depth_value > op.depth_bounds[1])) continue;
-                if (depth_bytes) |depth_storage| {
-                    const stored_depth: f32 = @bitCast(std.mem.readInt(u32, depth_storage[offset..][0..4], .little));
-                    if (op.depth_test_enable != 0 and (!std.math.isFinite(stored_depth) or !profileDepthCompare(op.depth_compare_op, depth_value, stored_depth))) continue;
-                }
-                if (color_bytes) |color_storage| {
-                    const wrote = if (direct_vp9_opaque_write)
-                        profileWriteOpaqueColor(color_storage[offset..][0..4], color.?.format, &fragment_output_bytes)
-                    else if (direct_fragment_color) |components|
-                        if (direct_source_over_write)
-                            profileWriteSourceOverColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask)
-                        else
-                            profileWriteColorComponents(color_storage[offset..][0..4], color.?.format, components, op.pipeline.color_write_mask, draw_blend)
-                    else if (direct_source_over_write)
-                        profileWriteSourceOverColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask)
+                    return;
+                };
+            }
+            const inverse_area = 1.0 / area;
+            // This is deliberately stricter than merely having a prepared VP9
+            // transform. The direct coordinate form is valid only for the exact
+            // two non-flat vec2 varyings with no fragment-coordinate or
+            // derivatives. The exact VP9 identity may declare FrontFacing, but
+            // its already-validated direct transform does not consume that input.
+            // Any other shader keeps the ordinary
+            // per-pixel binding and interpolation path below.
+            const direct_vp9_coordinates = vp9_color_transform_prepared != null and
+                vp9_luma_coordinate_varying != null and vp9_chroma_coordinate_varying != null and
+                profile.varying_count == 2 and !profile.fragment_needs_derivatives and
+                profile.fragment_frag_coord == null and
+                profile.varyings[vp9_luma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_luma_coordinate_varying.?].flat and
+                profile.varyings[vp9_chroma_coordinate_varying.?].lanes == 2 and !profile.varyings[vp9_chroma_coordinate_varying.?].flat;
+            const direct_texture_copy_coordinates = texture_copy_plan != null and texture_copy_coordinate_varying != null and texture_copy_image != null and
+                profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+                profile.varyings[texture_copy_coordinate_varying.?].lanes == 2 and !profile.varyings[texture_copy_coordinate_varying.?].flat;
+            // The VP9 transform's canonical IR unconditionally writes alpha one.
+            // Therefore Chromium's normal source-over state is provably opaque,
+            // provided every component is written and its fixed factors are the
+            // exact alpha-one source-over combination.  Keep all other blend
+            // states on the general path: a similar-looking configuration is not
+            // sufficient to skip destination reads.
+            const direct_vp9_opaque_write = direct_vp9_coordinates and color != null and !profile.fragment_bool and
+                op.pipeline.color_write_mask == 0xf and
+                (op.pipeline.color_blend_enable == 0 or
+                    (op.pipeline.color_blend_enable == 1 and op.pipeline.src_color_blend_factor == 1 and op.pipeline.dst_color_blend_factor == 7 and op.pipeline.color_blend_op == 0 and
+                        op.pipeline.src_alpha_blend_factor == 1 and op.pipeline.dst_alpha_blend_factor == 7 and op.pipeline.alpha_blend_op == 0));
+            // The canonical radial mask consumes exactly two perspective vec4
+            // varyings. Its declared FrontFacing input is not data-dependent in
+            // the validated program, and it needs neither derivatives nor
+            // fragment coordinates. All other shader shapes keep the generic
+            // interpolation/binding path below.
+            const direct_radial_mask_coordinates = radial_mask_prepared != null and
+                radial_mask_color_varying != null and radial_mask_coordinate_varying != null and
+                profile.varying_count == 2 and !profile.fragment_needs_derivatives and
+                profile.fragment_frag_coord == null and
+                profile.varyings[radial_mask_color_varying.?].lanes == 4 and !profile.varyings[radial_mask_color_varying.?].flat and
+                profile.varyings[radial_mask_coordinate_varying.?].lanes == 4 and !profile.varyings[radial_mask_coordinate_varying.?].flat;
+            const direct_passthrough_coordinates = passthrough_plan != null and passthrough_varying != null and
+                profile.varying_count == 1 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+                profile.varyings[passthrough_varying.?].lanes == 4 and !profile.varyings[passthrough_varying.?].flat;
+            const direct_constant_black = constant_black_plan != null and !profile.fragment_bool;
+            const direct_circle_mask_coordinates = circle_mask_plan != null and
+                circle_mask_circle_varying != null and circle_mask_color_varying != null and
+                profile.varying_count == 2 and !profile.fragment_needs_derivatives and profile.fragment_frag_coord == null and
+                profile.varyings[circle_mask_circle_varying.?].lanes == 4 and !profile.varyings[circle_mask_circle_varying.?].flat and
+                profile.varyings[circle_mask_color_varying.?].lanes == 4 and !profile.varyings[circle_mask_color_varying.?].flat;
+            const min_x = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].x, @min(vertices[1].x, vertices[2].x))))), op.scissor.x, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_x)) else 0);
+            const min_y = @max(@as(i32, @intFromFloat(@floor(@min(vertices[0].y, @min(vertices[1].y, vertices[2].y))))), op.scissor.y, 0, if (mosaic_clip) |clip| @as(i32, @intCast(clip.min_y)) else 0);
+            const max_x = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].x, @max(vertices[1].x, vertices[2].x))))), op.scissor.x + @as(i32, @intCast(op.scissor.width)), @as(i32, @intCast(target.width)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_x)) else @as(i32, @intCast(target.width)));
+            const max_y = @min(@as(i32, @intFromFloat(@ceil(@max(vertices[0].y, @max(vertices[1].y, vertices[2].y))))), op.scissor.y + @as(i32, @intCast(op.scissor.height)), @as(i32, @intCast(target.height)), if (mosaic_clip) |clip| @as(i32, @intCast(clip.max_y)) else @as(i32, @intCast(target.height)));
+            if (max_x <= min_x or max_y <= min_y) continue;
+            for (@intCast(min_y)..@intCast(max_y)) |y| {
+                // A video quad is represented as two axis-aligned right
+                // triangles.  Shrink each triangle's rectangular scan to its
+                // diagonal without trusting the bound for coverage: the normal
+                // edge test below remains authoritative.
+                const row: ProfileRowBounds = if (direct_vp9_coordinates)
+                    profileAxisAlignedTriangleRowBounds(vertices, @as(f32, @floatFromInt(y)) + 0.5, min_x, max_x) orelse .{ .min_x = min_x, .max_x = max_x }
+                else
+                    .{ .min_x = min_x, .max_x = max_x };
+                if (row.max_x <= row.min_x) continue;
+                for (@intCast(row.min_x)..@intCast(row.max_x)) |x| {
+                    const px = @as(f32, @floatFromInt(x)) + 0.5;
+                    const py = @as(f32, @floatFromInt(y)) + 0.5;
+                    const b0 = profileEdge(vertices[1].x, vertices[1].y, vertices[2].x, vertices[2].y, px, py) * inverse_area;
+                    const b1 = profileEdge(vertices[2].x, vertices[2].y, vertices[0].x, vertices[0].y, px, py) * inverse_area;
+                    const b2 = profileEdge(vertices[0].x, vertices[0].y, vertices[1].x, vertices[1].y, px, py) * inverse_area;
+                    if (b0 < 0 or b1 < 0 or b2 < 0) continue;
+                    const depth_value = profileInterpolateDepth(vertices, b0, b1) + depth_bias;
+                    if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) continue;
+                    const pixel_index = @as(usize, @intCast(y)) * target.width + @as(usize, @intCast(x));
+                    const offset = pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(target.format)));
+                    const depth_offset = if (depth) |depth_image|
+                        pixel_index * @as(usize, @intCast(imageStorageBytesPerTexel(depth_image.format)))
                     else
-                        profileWriteColor(color_storage[offset..][0..4], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
-                    if (wrote == null) return;
+                        offset;
+                    // The scalar profile accepts only pure fragment programs:
+                    // its IR has no kill, depth output, or external write. Test
+                    // depth before running the expensive fragment interpreter so
+                    // hidden terrain faces do not shade pixels they cannot write.
+                    if (!profileDepthStencilTest(op, depth, depth_bytes, depth_offset, depth_value, front_facing)) continue;
+                    var direct_fragment_color: ?[4]f32 = null;
+                    if (direct_constant_black) {
+                        direct_fragment_color = .{ 0, 0, 0, 0 };
+                    } else if (direct_vp9_coordinates) {
+                        // Preserve the normal perspective interpolation order, but
+                        // feed its resolved f32 lanes directly to the exact VP9
+                        // transform. This removes temporary byte packing/decoding
+                        // and construction of a generic fragment binding table.
+                        const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
+                        const luma_varying = vp9_luma_coordinate_varying.?;
+                        const chroma_varying = vp9_chroma_coordinate_varying.?;
+                        var luma_coordinates: [2]f32 = undefined;
+                        var chroma_coordinates: [2]f32 = undefined;
+                        for (0..2) |lane| {
+                            const luma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][luma_varying][lane * 4 ..][0..4], .little));
+                            const luma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][luma_varying][lane * 4 ..][0..4], .little));
+                            const luma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][luma_varying][lane * 4 ..][0..4], .little));
+                            luma_coordinates[lane] = (weights.q0 * luma_a + weights.q1 * luma_b + weights.q2 * luma_c) / weights.denominator;
+                            const chroma_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][chroma_varying][lane * 4 ..][0..4], .little));
+                            const chroma_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][chroma_varying][lane * 4 ..][0..4], .little));
+                            const chroma_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][chroma_varying][lane * 4 ..][0..4], .little));
+                            chroma_coordinates[lane] = (weights.q0 * chroma_a + weights.q1 * chroma_b + weights.q2 * chroma_c) / weights.denominator;
+                        }
+                        profile.fragment.executeVp9ColorTransformPreparedCoordinates(vp9_color_transform_prepared.?, luma_coordinates, chroma_coordinates, &fragment_output_bytes) catch |err| {
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct VP9 coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    } else if (direct_texture_copy_coordinates) {
+                        const weights = profilePerspectiveWeights(vertices, b0, b1, b2) orelse continue;
+                        const varying = texture_copy_coordinate_varying.?;
+                        var coordinates: [2]f32 = undefined;
+                        for (0..2) |lane| {
+                            const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
+                            const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
+                            const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
+                            coordinates[lane] = (weights.q0 * a + weights.q1 * b + weights.q2 * c) / weights.denominator;
+                        }
+                        if (texture_copy_prepared) |prepared| {
+                            profile.fragment.executeTextureCopyPreparedCoordinates(prepared, coordinates, &fragment_output_bytes) catch |err| {
+                                if (render_diagnostics_enabled) std.debug.print("ZPU render prepared texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        } else {
+                            var coordinate_bytes: [8]u8 = undefined;
+                            for (0..2) |lane| std.mem.writeInt(u32, coordinate_bytes[lane * 4 ..][0..4], @bitCast(coordinates[lane]), .little);
+                            _ = profile.fragment.executeTextureCopyDirect(&coordinate_bytes, texture_copy_image.?, &fragment_output_bytes) catch |err| {
+                                if (render_diagnostics_enabled) std.debug.print("ZPU render direct texture-copy coordinates failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                return;
+                            };
+                        }
+                    } else if (direct_radial_mask_coordinates) {
+                        const q0 = b0 / vertices[0].w;
+                        const q1 = b1 / vertices[1].w;
+                        const q2 = b2 / vertices[2].w;
+                        const denominator = q0 + q1 + q2;
+                        if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                        const color_varying = radial_mask_color_varying.?;
+                        const coordinate_varying = radial_mask_coordinate_varying.?;
+                        var radial_color: [4]f32 = undefined;
+                        var radial_coordinates: [4]f32 = undefined;
+                        for (0..4) |lane| {
+                            const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
+                            const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
+                            const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
+                            radial_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
+                            const coordinate_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][coordinate_varying][lane * 4 ..][0..4], .little));
+                            const coordinate_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][coordinate_varying][lane * 4 ..][0..4], .little));
+                            const coordinate_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][coordinate_varying][lane * 4 ..][0..4], .little));
+                            radial_coordinates[lane] = (q0 * coordinate_a + q1 * coordinate_b + q2 * coordinate_c) / denominator;
+                        }
+                        profile.fragment.executeRadialMaskPreparedCoordinates(radial_mask_prepared.?, radial_color, radial_coordinates, &fragment_output_bytes) catch |err| {
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct radial-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    } else if (direct_circle_mask_coordinates) {
+                        const q0 = b0 / vertices[0].w;
+                        const q1 = b1 / vertices[1].w;
+                        const q2 = b2 / vertices[2].w;
+                        const denominator = q0 + q1 + q2;
+                        if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                        const circle_varying = circle_mask_circle_varying.?;
+                        const color_varying = circle_mask_color_varying.?;
+                        var circle: [4]f32 = undefined;
+                        var circle_color: [4]f32 = undefined;
+                        for (0..4) |lane| {
+                            const circle_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][circle_varying][lane * 4 ..][0..4], .little));
+                            const circle_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][circle_varying][lane * 4 ..][0..4], .little));
+                            const circle_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][circle_varying][lane * 4 ..][0..4], .little));
+                            circle[lane] = (q0 * circle_a + q1 * circle_b + q2 * circle_c) / denominator;
+                            const color_a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][color_varying][lane * 4 ..][0..4], .little));
+                            const color_b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][color_varying][lane * 4 ..][0..4], .little));
+                            const color_c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][color_varying][lane * 4 ..][0..4], .little));
+                            circle_color[lane] = (q0 * color_a + q1 * color_b + q2 * color_c) / denominator;
+                        }
+                        _ = profile.fragment.executeCircleMaskCoordinates(circle, circle_color, &fragment_output_bytes) catch |err| {
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct circle-mask coordinate transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    } else if (direct_passthrough_coordinates) {
+                        const q0 = b0 / vertices[0].w;
+                        const q1 = b1 / vertices[1].w;
+                        const q2 = b2 / vertices[2].w;
+                        const denominator = q0 + q1 + q2;
+                        if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                        const varying = passthrough_varying.?;
+                        var value: [4]f32 = undefined;
+                        for (0..4) |lane| {
+                            const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying][lane * 4 ..][0..4], .little));
+                            const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying][lane * 4 ..][0..4], .little));
+                            const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying][lane * 4 ..][0..4], .little));
+                            value[lane] = (q0 * a + q1 * b + q2 * c) / denominator;
+                        }
+                        _ = profile.fragment.executePassthroughCoordinates(value, &fragment_output_bytes) catch |err| {
+                            if (render_diagnostics_enabled) std.debug.print("ZPU render direct pass-through failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                            return;
+                        };
+                    } else if (profile.varying_count != 0 or profile.fragment_frag_coord != null) {
+                        const q0 = b0 / vertices[0].w;
+                        const q1 = b1 / vertices[1].w;
+                        const q2 = b2 / vertices[2].w;
+                        const denominator = q0 + q1 + q2;
+                        if (!std.math.isFinite(denominator) or @abs(denominator) < 0.000001) continue;
+                        const needs_derivatives = profile.fragment_needs_derivatives;
+                        const db0_dx = if (needs_derivatives) (vertices[2].y - vertices[1].y) * inverse_area else 0;
+                        const db1_dx = if (needs_derivatives) (vertices[0].y - vertices[2].y) * inverse_area else 0;
+                        const db2_dx = if (needs_derivatives) (vertices[1].y - vertices[0].y) * inverse_area else 0;
+                        const db0_dy = if (needs_derivatives) (vertices[1].x - vertices[2].x) * inverse_area else 0;
+                        const db1_dy = if (needs_derivatives) (vertices[2].x - vertices[0].x) * inverse_area else 0;
+                        const db2_dy = if (needs_derivatives) (vertices[0].x - vertices[1].x) * inverse_area else 0;
+                        const dq0_dx = if (needs_derivatives) db0_dx / vertices[0].w else 0;
+                        const dq1_dx = if (needs_derivatives) db1_dx / vertices[1].w else 0;
+                        const dq2_dx = if (needs_derivatives) db2_dx / vertices[2].w else 0;
+                        const dq0_dy = if (needs_derivatives) db0_dy / vertices[0].w else 0;
+                        const dq1_dy = if (needs_derivatives) db1_dy / vertices[1].w else 0;
+                        const dq2_dy = if (needs_derivatives) db2_dy / vertices[2].w else 0;
+                        const denominator_dx = if (needs_derivatives) dq0_dx + dq1_dx + dq2_dx else 0;
+                        const denominator_dy = if (needs_derivatives) dq0_dy + dq1_dy + dq2_dy else 0;
+                        for (profile.varyings[0..profile.varying_count], 0..) |varying, varying_index| {
+                            for (0..varying.lanes) |lane| {
+                                const a: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[0][varying_index][lane * 4 ..][0..4], .little));
+                                const b: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[1][varying_index][lane * 4 ..][0..4], .little));
+                                const c: f32 = @bitCast(std.mem.readInt(u32, varying_bytes[2][varying_index][lane * 4 ..][0..4], .little));
+                                const numerator = q0 * a + q1 * b + q2 * c;
+                                // VK_EXT_provoking_vertex selects which triangle
+                                // vertex supplies flat-qualified outputs.  The
+                                // profile emits the logical triangle in API order,
+                                // so first/last map directly to a/c here.
+                                const flat_value = if (op.pipeline.provoking_vertex_mode == 1) c else a;
+                                const value = if (varying.flat) flat_value else numerator / denominator;
+                                const numerator_dx = if (needs_derivatives) dq0_dx * a + dq1_dx * b + dq2_dx * c else 0;
+                                const numerator_dy = if (needs_derivatives) dq0_dy * a + dq1_dy * b + dq2_dy * c else 0;
+                                const derivative_scale = if (needs_derivatives) denominator * denominator else 1;
+                                const dpdx = if (!needs_derivatives or varying.flat) 0 else (numerator_dx * denominator - numerator * denominator_dx) / derivative_scale;
+                                const dpdy = if (!needs_derivatives or varying.flat) 0 else (numerator_dy * denominator - numerator * denominator_dy) / derivative_scale;
+                                if (!std.math.isFinite(value) or (needs_derivatives and (!std.math.isFinite(dpdx) or !std.math.isFinite(dpdy)))) return;
+                                std.mem.writeInt(u32, fragment_binding_storage[varying_index][lane * 4 ..][0..4], @bitCast(value), .little);
+                                std.mem.writeInt(u32, fragment_dpdx_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdx), .little);
+                                std.mem.writeInt(u32, fragment_dpdy_storage[varying_index][lane * 4 ..][0..4], @bitCast(dpdy), .little);
+                            }
+                            fragment_bindings[varying_index] = .{
+                                .interface = varying.fragment_interface,
+                                .bytes = fragment_binding_storage[varying_index][0 .. varying.lanes * 4],
+                                .dpdx_bytes = if (needs_derivatives) fragment_dpdx_storage[varying_index][0 .. varying.lanes * 4] else &.{},
+                                .dpdy_bytes = if (needs_derivatives) fragment_dpdy_storage[varying_index][0 .. varying.lanes * 4] else &.{},
+                            };
+                        }
+                        var fragment_binding_count: usize = profile.varying_count + fragment_uniform_count;
+                        var frag_coord_bytes: [16]u8 = undefined;
+                        var radial_gradient_frag_coord_ready = false;
+                        var frag_coord_dpdx_bytes: [16]u8 = undefined;
+                        var frag_coord_dpdy_bytes: [16]u8 = undefined;
+                        if (profile.fragment_frag_coord) |interface| {
+                            const depth_dx = db0_dx * vertices[0].z + db1_dx * vertices[1].z + db2_dx * vertices[2].z;
+                            const depth_dy = db0_dy * vertices[0].z + db1_dy * vertices[1].z + db2_dy * vertices[2].z;
+                            const frag_coord = [_]f32{ px, py, depth_value, denominator };
+                            const frag_coord_dpdx = [_]f32{ 1, 0, depth_dx, denominator_dx };
+                            const frag_coord_dpdy = [_]f32{ 0, 1, depth_dy, denominator_dy };
+                            for (0..4) |lane| {
+                                std.mem.writeInt(u32, frag_coord_bytes[lane * 4 ..][0..4], @bitCast(frag_coord[lane]), .little);
+                                std.mem.writeInt(u32, frag_coord_dpdx_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdx[lane]), .little);
+                                std.mem.writeInt(u32, frag_coord_dpdy_bytes[lane * 4 ..][0..4], @bitCast(frag_coord_dpdy[lane]), .little);
+                            }
+                            radial_gradient_frag_coord_ready = true;
+                            fragment_bindings[fragment_binding_count] = .{
+                                .interface = interface,
+                                .bytes = &frag_coord_bytes,
+                                .dpdx_bytes = if (needs_derivatives) &frag_coord_dpdx_bytes else &.{},
+                                .dpdy_bytes = if (needs_derivatives) &frag_coord_dpdy_bytes else &.{},
+                            };
+                            fragment_binding_count += 1;
+                        }
+                        var front_facing_bytes = [_]u8{ @intFromBool(front_facing), 0, 0, 0 };
+                        if (profile.fragment_front_facing) |interface| {
+                            fragment_bindings[fragment_binding_count] = .{ .interface = interface, .bytes = &front_facing_bytes };
+                            fragment_binding_count += 1;
+                        }
+                        fragment_binding_count = fragment_binding_total;
+                        const fragment_fast = direct: {
+                            if (texture_copy_plan != null) {
+                                const coordinate_varying = texture_copy_coordinate_varying orelse break :direct false;
+                                const image = texture_copy_image orelse break :direct false;
+                                break :direct profile.fragment.executeTextureCopyDirect(
+                                    fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    image,
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct texture-copy failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                            }
+                            if (sample_modulate_plan != null) {
+                                const color_varying = sample_modulate_color_varying orelse break :direct false;
+                                const coordinate_varying = sample_modulate_coordinate_varying orelse break :direct false;
+                                const image = sample_modulate_image orelse break :direct false;
+                                break :direct profile.fragment.executeSampleModulateDirect(
+                                    fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                    fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    image,
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct sample-modulate failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                            }
+                            if (analytic_coverage_plan != null) {
+                                const color_varying = analytic_coverage_color_varying orelse break :direct false;
+                                const coordinate_varying = analytic_coverage_coordinate_varying orelse break :direct false;
+                                break :direct profile.fragment.executeAnalyticCoverageDirect(
+                                    fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                    fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    fragment_dpdx_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    fragment_dpdy_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct analytic coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                            }
+                            if (two_axis_coverage_plan != null) {
+                                const color_varying = two_axis_coverage_color_varying orelse break :direct false;
+                                const distance_varying = two_axis_coverage_distance_varying orelse break :direct false;
+                                const prepared = two_axis_coverage_prepared orelse break :direct false;
+                                break :direct profile.fragment.executeTwoAxisCoveragePrepared(
+                                    prepared,
+                                    fragment_binding_storage[color_varying][0 .. profile.varyings[color_varying].lanes * 4],
+                                    fragment_binding_storage[distance_varying][0 .. profile.varyings[distance_varying].lanes * 4],
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct two-axis coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                            }
+                            if (sample_coverage_plan != null) {
+                                const coordinate_varying = sample_coverage_coordinate_varying orelse break :direct false;
+                                const scalar_varying = sample_coverage_scalar_varying orelse break :direct false;
+                                const prepared = sample_coverage_prepared orelse break :direct false;
+                                profile.fragment.executeSampleCoveragePrepared(
+                                    prepared,
+                                    fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    fragment_binding_storage[scalar_varying][0 .. profile.varyings[scalar_varying].lanes * 4],
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct sample-coverage failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                                break :direct true;
+                            }
+                            if (vp9_color_transform_plan != null) {
+                                const luma_coordinate_varying = vp9_luma_coordinate_varying orelse break :direct false;
+                                const chroma_coordinate_varying = vp9_chroma_coordinate_varying orelse break :direct false;
+                                const prepared = vp9_color_transform_prepared orelse break :direct false;
+                                profile.fragment.executeVp9ColorTransformPrepared(
+                                    prepared,
+                                    fragment_binding_storage[luma_coordinate_varying][0 .. profile.varyings[luma_coordinate_varying].lanes * 4],
+                                    fragment_binding_storage[chroma_coordinate_varying][0 .. profile.varyings[chroma_coordinate_varying].lanes * 4],
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct VP9 color-transform failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                                break :direct true;
+                            }
+                            if (radial_gradient_plan != null) {
+                                const circle_varying = radial_gradient_circle_varying orelse break :direct false;
+                                const coordinate_varying = radial_gradient_coordinate_varying orelse break :direct false;
+                                const prepared = radial_gradient_prepared orelse break :direct false;
+                                if (!radial_gradient_frag_coord_ready) break :direct false;
+                                profile.fragment.executeRadialGradientPrepared(
+                                    prepared,
+                                    fragment_binding_storage[circle_varying][0 .. profile.varyings[circle_varying].lanes * 4],
+                                    fragment_binding_storage[coordinate_varying][0 .. profile.varyings[coordinate_varying].lanes * 4],
+                                    &frag_coord_bytes,
+                                    &fragment_output_bytes,
+                                ) catch |err| {
+                                    if (render_diagnostics_enabled) std.debug.print("ZPU render direct radial-gradient failed err={s} triangle={d}\n", .{ @errorName(err), triangle_index });
+                                    return;
+                                };
+                                break :direct true;
+                            }
+                            break :direct profile.fragment.executePrevalidated(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
+                                if (render_diagnostics_enabled) std.debug.print("ZPU render fragment fast execution failed err={s} bindings={} varying={} sampled={} triangle={d}\n", .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, triangle_index });
+                                return;
+                            };
+                        };
+                        if (!fragment_fast) profile.fragment.execute(fragment_bindings[0..fragment_binding_count], fragment_outputs[0..fragment_output_count]) catch |err| {
+                            if (render_diagnostics_enabled) std.debug.print(
+                                "ZPU render fragment execution failed err={s} bindings={} varying={} sampled={} fragcoord={} triangle={d}\n",
+                                .{ @errorName(err), fragment_binding_count, profile.varying_count, profile.fragment_sampled_image_count, profile.fragment_frag_coord != null, triangle_index },
+                            );
+                            return;
+                        };
+                        if (render_diagnostics_enabled and target.width == 1280 and target.height == 256 and op.vertex_count == 102 and
+                            ((x == 20 and y == 160) or (x == 50 and y == 160) or (x == 100 and y == 160) or (x == 50 and y == 175)))
+                        {
+                            var diagnostic_output: [4]f32 = undefined;
+                            for (0..4) |channel| diagnostic_output[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                            std.debug.print(
+                                "ZPU text coverage xy={d},{d} varying0={d:.6},{d:.6} output={d:.6},{d:.6},{d:.6},{d:.6}\n",
+                                .{ x, y, @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][0..4], .little))), @as(f32, @bitCast(std.mem.readInt(u32, fragment_binding_storage[0][4..8], .little))), diagnostic_output[0], diagnostic_output[1], diagnostic_output[2], diagnostic_output[3] },
+                            );
+                        }
+                    }
+                    if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
+                        target.width == 1280 and target.height == 256 and x == 100 and y == 50 and
+                        render_diagnostic_glyph_fragment.fetchAdd(1, .monotonic) == 0)
+                    {
+                        var diagnostic_source: [4]f32 = undefined;
+                        for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                        std.debug.print(
+                            "ZPU glyph fragment xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
+                            .{ x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                        );
+                    }
+                    if (render_diagnostics_enabled and op.descriptors.texture != null and
+                        op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
+                        target.width == 1280 and target.height == 256 and x == 30 and y == 10)
+                    {
+                        var diagnostic_source: [4]f32 = undefined;
+                        for (0..4) |channel| diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                        std.debug.print(
+                            "ZPU text fragment draw={d} xy={d},{d} source={d:.6},{d:.6},{d:.6},{d:.6} dest={d},{d},{d},{d} blend={d}/{d}/{d}\n",
+                            .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], color_bytes.?.ptr[offset], color_bytes.?.ptr[offset + 1], color_bytes.?.ptr[offset + 2], color_bytes.?.ptr[offset + 3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                        );
+                    }
+                    if (render_diagnostics_enabled and diagnostic_draw == 71 and x == 166 and y == 1) {
+                        var diagnostic_source: [4]f32 = undefined;
+                        var diagnostic_destination: [4]f32 = undefined;
+                        for (0..4) |channel| {
+                            diagnostic_source[channel] = @bitCast(std.mem.readInt(u32, fragment_output_bytes[channel * 4 ..][0..4], .little));
+                            const storage_index = colorStorageIndices(color.?.format).?[channel];
+                            diagnostic_destination[channel] = @as(f32, @floatFromInt(color_bytes.?[offset + storage_index])) / 255;
+                        }
+                        std.debug.print(
+                            "ZPU targeted fragment seq={d} xy={d},{d} source={d:.3},{d:.3},{d:.3},{d:.3} dest={d:.3},{d:.3},{d:.3},{d:.3} blend={d}/{d}/{d}\n",
+                            .{ diagnostic_draw, x, y, diagnostic_source[0], diagnostic_source[1], diagnostic_source[2], diagnostic_source[3], diagnostic_destination[0], diagnostic_destination[1], diagnostic_destination[2], diagnostic_destination[3], op.pipeline.color_blend_enable, op.pipeline.src_color_blend_factor, op.pipeline.dst_color_blend_factor },
+                        );
+                    }
+                    if (color_bytes) |color_storage| {
+                        const wrote = if (direct_vp9_opaque_write)
+                            profileWriteOpaqueColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, &fragment_output_bytes)
+                        else if (direct_fragment_color) |components|
+                            if (direct_source_over_write)
+                                profileWriteSourceOverColorComponents(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, components, op.pipeline.color_write_mask)
+                            else
+                                profileWriteColorComponents(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, components, op.pipeline.color_write_mask, draw_blend)
+                        else if (direct_source_over_write)
+                            profileWriteSourceOverColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask)
+                        else
+                            profileWriteColor(color_storage[offset..][0..@as(usize, @intCast(imageStorageBytesPerTexel(color.?.format)))], color.?.format, profile.fragment_bool, &fragment_output_bytes, op.pipeline.color_write_mask, draw_blend);
+                        if (wrote == null) return;
+                    }
+                    if (depth_bytes) |depth_storage| if (op.depth_test_enable != 0 and op.depth_write_enable != 0 and isDepthFormat(depth.?.format)) {
+                        writeDepthValueToStorage(depth.?.format, depth_storage, depth_offset, depth_value);
+                    };
+                    bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
+                    pixels_written += 1;
                 }
-                if (depth_bytes) |depth_storage| if (op.depth_write_enable != 0) std.mem.writeInt(u32, depth_storage[offset..][0..4], @bitCast(depth_value), .little);
-                bounds = unionRect(bounds, .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 });
-                pixels_written += 1;
             }
         }
     }
     // A parallel Mosaic lane owns disjoint pixels but must not race on image
     // content metadata. Its caller publishes a conservative whole-target
     // envelope after every lane has completed.
+    if (profileTimingDiagnosticsEnabled() and cache_indexed_vertices) std.debug.print(
+        "ZPU indexed profile summary vertices={d} cache_hits={} cache_misses={} pixels={} bounds={d},{d} {d}x{d}\n",
+        .{ op.vertex_count, vertex_cache_hits, vertex_cache_misses, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height },
+    );
     if (!publish_metadata) return;
     if (query_context.pool) |query_pool| _ = query_pool.slots[query_context.index].value.fetchAdd(pixels_written, .monotonic);
     if (color) |color_image| {
@@ -12164,18 +13770,18 @@ fn executeProfileDraw(op: anytype, profile_override: ?*ProfileGraphics, query_co
         color_image.force_full_present = true;
     }
     if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, bounds);
-    if (renderDiagnosticsEnabled() and diagnostic_draw < 512) std.debug.print(
+    if (render_diagnostics_enabled and diagnostic_draw < 512) std.debug.print(
         "ZPU profile draw complete seq={d} pixels={} bounds={d},{d} {d}x{d} dark={} alpha={} darkalpha={}\n",
         .{ diagnostic_draw, pixels_written, bounds.x, bounds.y, bounds.width, bounds.height, diagnosticDarkPixelCount(target), diagnosticAlphaPixelCount(target), diagnosticDarkAlphaPixelCount(target) },
     );
-    if (renderDiagnosticsEnabled() and op.descriptors.texture != null and
+    if (render_diagnostics_enabled and op.descriptors.texture != null and
         op.descriptors.texture.?.width == 256 and op.descriptors.texture.?.height == 64 and
         target.width == 1280 and target.height == 256)
     {
         dumpDiagnosticImage(op.descriptors.texture.?, "ZPU_TEXT_TEXTURE_DUMP", &render_diagnostic_text_texture_dump);
         dumpDiagnosticImage(target, "ZPU_TEXT_TARGET_DUMP", &render_diagnostic_text_target_dump);
     }
-    if (renderDiagnosticsEnabled() and op.descriptors.texture == null and op.vertex_count == 90 and
+    if (render_diagnostics_enabled and op.descriptors.texture == null and op.vertex_count == 90 and
         target.width == 1280 and target.height == 256)
         dumpDiagnosticImage(target, "ZPU_GLYPH_TARGET_DUMP", &render_diagnostic_glyph_target_dump);
     if (target.width == 1024 and target.height == 512) {
@@ -12191,7 +13797,7 @@ fn cpuCubeBatchCommand(op: anytype) ?cpu_cube.DrawCommand {
         .cpu_cube_v1 => {},
         else => return null,
     }
-    if (op.rasterizer_discard_enable != 0 or op.primitive_topology != 3 or op.primitive_restart_enable != 0 or
+    if (op.rasterizer_discard_enable != 0 or op.stencil.test_enable != 0 or op.primitive_topology != 3 or op.primitive_restart_enable != 0 or
         op.depth_test_enable != 1 or op.depth_write_enable != 1 or op.depth_compare_op != 3 or
         op.depth_bounds_test_enable != 0 or op.depth_bias_enable != 0 or op.pipeline.color_write_mask != 0xf or
         op.pipeline.color_blend_enable != 0 or op.cull_mode != 0 or op.front_face != 0 or
@@ -12493,7 +14099,7 @@ fn executeMosaicSingleRadialGradientDraw(command: *const Command, query_context:
         .cube_draw => |value| value,
         else => return false,
     };
-    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null or op.depth_image != null or
+    if (op.instance_count != 1 or op.layer_count != 1 or query_context.pool != null or op.depth_image != null or op.stencil.test_enable != 0 or
         op.depth_test_enable != 0 or op.depth_write_enable != 0 or op.depth_bounds_test_enable != 0 or op.rasterizer_discard_enable != 0) return false;
     const profile = switch (op.pipeline.execution_abi) {
         .profile_v1_scalar_graphics => |*value| value,
@@ -12536,7 +14142,7 @@ fn profileMosaicTarget(op: anytype) struct { color: ?*ImageObj, depth: ?*ImageOb
 
 fn profileMosaicEligible(op: anytype) bool {
     return op.pipeline.execution_abi == .profile_v1_scalar_graphics and
-        op.rasterizer_discard_enable == 0 and op.layer_count == 1;
+        op.rasterizer_discard_enable == 0 and op.stencil.test_enable == 0 and op.layer_count == 1;
 }
 
 /// Resolve one image-order Mosaic tile.  Tile ownership is static and a lane
@@ -12620,7 +14226,7 @@ fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: u
         // discarding this otherwise stateless path merely for using the
         // framebuffer form of the Vulkan API.
         const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
-        if (op.instance_count != 1 or depth != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
+        if (op.instance_count != 1 or op.stencil.test_enable != 0 or depth != null or op.depth_test_enable != 0 or op.depth_write_enable != 0) return false;
         const profile = switch (op.pipeline.execution_abi) {
             .profile_v1_scalar_graphics => |*value| value,
             else => return false,
@@ -12628,6 +14234,111 @@ fn profileMosaicBatchTileParallelSafe(start: MosaicCommandCursor, batch_count: u
         if (!profile.fragment.tileParallelSafe() or profile.fragment_input_attachment_count != 0) return false;
         if (op.descriptors.texture == color) return false;
         for (op.descriptors.sampled_images) |sampled| if (sampled.image == color) return false;
+        for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color) return false;
+        cursor.advance();
+    }
+    return true;
+}
+
+/// The exact FPS normal filter also arrives with a writable depth attachment.
+/// Its shader reads a separate sampled image, and each band owns disjoint
+/// color and depth pixels. Keep this exception limited to one validated draw.
+fn profileMosaicSingleFpsNormalBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (query_context.pool != null) return false;
+    var cursor = start;
+    const raw = cursor.current() orelse return false;
+    const op = switch (raw.*) {
+        .cube_draw => |value| value,
+        else => return false,
+    };
+    if (!profileMosaicEligible(op) or op.instance_count != 1 or op.stencil.test_enable != 0 or
+        op.depth_test_enable == 0 or op.depth_write_enable == 0) return false;
+    const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+    const depth_image = depth orelse return false;
+    if (depth_image.width != color.width or depth_image.height != color.height or !isDepthFormat(depth_image.format)) return false;
+    const profile = switch (op.pipeline.execution_abi) {
+        .profile_v1_scalar_graphics => |*value| value,
+        else => return false,
+    };
+    if (!profile.fragment.isFpsNormalFilter8tap() or !profile.fragment.tileParallelSafe() or profile.fragment_input_attachment_count != 0) return false;
+    if (op.descriptors.texture == color or op.descriptors.texture == depth_image) return false;
+    for (op.descriptors.sampled_images) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+    for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+    return true;
+}
+
+/// The captured FPS scene submits a 2160-vertex draw followed by its
+/// 5262-vertex terrain draw. Both programs are pure scalar fragments; their
+/// derivatives come from triangle interpolation, and neither samples the
+/// current color or depth attachment. Keep both draws in order within each
+/// disjoint band so depth and blending have the same per-pixel history.
+fn profileMosaicFpsSceneBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (query_context.pool != null) return false;
+    const fragment_ids = comptime blk: {
+        var ids: [2][32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&ids[0], "f1170eee045c2c7712dc9b5721bc35395dc6045e3b8e3d9a7cda4f75ef79164b") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[1], "68bee099e8c05ccb87d4544deae5f9a08e6b90cae6cd81e570ed6135f5bc97f9") catch unreachable;
+        break :blk ids;
+    };
+    var cursor = start;
+    for (fragment_ids) |identity| {
+        const raw = cursor.current() orelse return false;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => return false,
+        };
+        if (!profileMosaicEligible(op) or op.instance_count != 1 or op.stencil.test_enable != 0 or
+            op.depth_test_enable == 0 or op.depth_write_enable == 0) return false;
+        const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+        const depth_image = depth orelse return false;
+        if (depth_image.width != color.width or depth_image.height != color.height or !isDepthFormat(depth_image.format)) return false;
+        const profile = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*value| value,
+            else => return false,
+        };
+        if (!std.mem.eql(u8, &profile.fragment.program.identity.digest, &identity) or profile.fragment_input_attachment_count != 0) return false;
+        if (op.descriptors.texture == color or op.descriptors.texture == depth_image) return false;
+        for (op.descriptors.sampled_images) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        cursor.advance();
+    }
+    return true;
+}
+
+/// The official Three.js clearcoat page submits these six ordered draws
+/// against one color/depth pair. The scalar programs have no external writes;
+/// retain draw order inside each disjoint band for depth and blending.
+fn profileMosaicThreeClearcoatBandSafe(start: MosaicCommandCursor, color: *ImageObj, query_context: *QueryExecutionContext) bool {
+    if (query_context.pool != null or @as(u64, color.width) * color.height < 256 * 144) return false;
+    const fragment_ids = comptime blk: {
+        var ids: [6][32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&ids[0], "ad5ccf4b32774807cc146130eb648073eae2f9600872efc1e4024535206fdcba") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[1], "d7e9075a72461ada750e845ae64b1ab0c463c20a99d62ec05ec4dd442c635881") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[2], "f9b6c68f1e80f856a27f086dd39dc4e3458724028cc3475d598046a7cea222f1") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[3], "a933234db963e33726f4271e0a35175832e5b233efd8ed50fa3308058f478858") catch unreachable;
+        _ = std.fmt.hexToBytes(&ids[4], "bb22e53a42506ffe793c2ee5b4959920deef3f29e7dd7fe703939dec45176dd9") catch unreachable;
+        ids[5] = ids[4];
+        break :blk ids;
+    };
+    var cursor = start;
+    for (fragment_ids) |identity| {
+        const raw = cursor.current() orelse return false;
+        const op = switch (raw.*) {
+            .cube_draw => |value| value,
+            else => return false,
+        };
+        if (!profileMosaicEligible(op) or op.instance_count != 1 or op.stencil.test_enable != 0) return false;
+        const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+        const depth_image = depth orelse return false;
+        if (depth_image.width != color.width or depth_image.height != color.height or !isDepthFormat(depth_image.format)) return false;
+        const profile = switch (op.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*value| value,
+            else => return false,
+        };
+        if (!std.mem.eql(u8, &profile.fragment.program.identity.digest, &identity) or profile.fragment_input_attachment_count != 0) return false;
+        if (op.descriptors.texture == color or op.descriptors.texture == depth_image) return false;
+        for (op.descriptors.sampled_images) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
+        for (op.descriptors.sampled_images_set1) |sampled| if (sampled.image == color or sampled.image == depth_image) return false;
         cursor.advance();
     }
     return true;
@@ -12712,13 +14423,27 @@ const ProfileMosaicBandContext = struct {
 /// The tile safety gate rules out target reads, depth, queries, and fragment
 /// state shared across pixels, so bands preserve exact per-pixel draw order.
 fn executeMosaicBandParallelProfileBatch(start: MosaicCommandCursor, batch_count: usize, color: *ImageObj, query_context: *QueryExecutionContext) bool {
-    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context)) return false;
+    if (!profileMosaicBatchTileParallelSafe(start, batch_count, color, query_context) and
+        !(batch_count == 1 and profileMosaicSingleFpsNormalBandSafe(start, color, query_context)) and
+        !(batch_count == 2 and profileMosaicFpsSceneBandSafe(start, color, query_context)) and
+        !(batch_count == 6 and profileMosaicThreeClearcoatBandSafe(start, color, query_context))) return false;
     var context = ProfileMosaicBandContext{ .start = start, .batch_count = batch_count, .query_context = query_context, .width = color.width, .height = color.height };
     if (!cpu_cube.dispatchParallelLanes(&context, ProfileMosaicBandContext.run)) return false;
     const full_target = cpu_cube.Rect{ .x = 0, .y = 0, .width = color.width, .height = color.height };
     color.content_bounds = unionRect(color.content_bounds, full_target);
     color.complex_3d_content = true;
     color.force_full_present = true;
+    var cursor = start;
+    for (0..batch_count) |_| {
+        if (cursor.current()) |raw| switch (raw.*) {
+            .cube_draw => |op| {
+                const depth = op.depth_image orelse if (op.framebuffer) |framebuffer| framebuffer.depth_image else null;
+                if (depth) |depth_image| depth_image.content_bounds = unionRect(depth_image.content_bounds, full_target);
+            },
+            else => {},
+        };
+        cursor.advance();
+    }
     return true;
 }
 
@@ -12791,6 +14516,47 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
             cursor.* = candidate;
             return 1;
         }
+        // The captured Three.js GGX PMREM filter reads a separate CubeUV
+        // texture and accumulates each pixel independently. Its sample kernel
+        // is thread-local, so large one-draw filter passes can use the same
+        // disjoint worker bands after the strict profile safety check.
+        const single_pmrem_ggx = switch (first.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile.fragment.isThreePmremGgx(),
+            else => false,
+        };
+        if (single_pmrem_ggx and @as(u64, color_image.width) * color_image.height >= 256 * 256 and
+            executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context))
+        {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic PMREM GGX profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            cursor.* = candidate;
+            return 1;
+        }
+        // The captured FPS normal-reconstruction filter samples a distinct
+        // image at eight fixed offsets for each output pixel. Disjoint bands
+        // retain the exact scalar sample order within each pixel.
+        const single_fps_normal_filter = switch (first.pipeline.execution_abi) {
+            .profile_v1_scalar_graphics => |*profile| profile.fragment.isFpsNormalFilter8tap(),
+            else => false,
+        };
+        if (single_fps_normal_filter and @as(u64, color_image.width) * color_image.height >= 256 * 256 and
+            executeMosaicBandParallelProfileBatch(cursor.*, 1, color_image, query_context))
+        {
+            color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
+            if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
+            if (renderDiagnosticsEnabled()) {
+                const diagnostic_batch = render_diagnostic_mosaic_batches.fetchAdd(1, .monotonic);
+                if (diagnostic_batch < 64) std.debug.print("ZPU Mosaic FPS normal-filter profile batch seq={d} commands=1 target={x} {d}x{d} lanes=auto\n", .{ diagnostic_batch, @intFromPtr(color_image), color_image.width, color_image.height });
+            }
+            if (profileTimingDiagnosticsEnabled() and render_diagnostic_profile_timing_batches.fetchAdd(1, .monotonic) < profileTimingDiagnosticLimit(128))
+                std.debug.print("ZPU Mosaic FPS normal-filter profile timing target={d}x{d} commands=1 total_ns={d}\n", .{ color_image.width, color_image.height, color_image.last_draw_ns });
+            cursor.* = candidate;
+            return 1;
+        }
         if (executeMosaicSingleRadialGradientDraw(first_raw, query_context)) {
             color_image.last_draw_ns = frame_pacing.monotonicNs() - operation_start;
             if (commandTimingDiagnosticsEnabled()) recordCommandTiming(.mosaic_profile_batch, color_image.last_draw_ns);
@@ -12827,7 +14593,8 @@ fn executeMosaicProfileBatchStreams(cursor: *MosaicCommandCursor, query_context:
         // medium, potentially sparse targets where its work stealing is more
         // useful; very short targets are likewise better as bands.
         const area = @as(u64, color_image.width) * color_image.height;
-        const use_bands = area <= 192 * 192 or area >= 640 * 256;
+        const use_bands = area <= 192 * 192 or area >= 640 * 256 or
+            (parallel_count == 6 and profileMosaicThreeClearcoatBandSafe(parallel_start, color_image, query_context));
         const parallel_executed = if (use_bands)
             executeMosaicBandParallelProfileBatch(parallel_start, parallel_count, color_image, query_context)
         else
@@ -13042,22 +14809,21 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             benchmarkHostMemoryCopy(dst, src);
         },
         .clear => |op| {
-            const pattern: u32 = @bitCast(op.color);
             const bytes = imageBytes(op.image);
             const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
             const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer).?);
-            fillImagePattern(bytes[start..][0 .. layer_size * op.layer_count], pattern);
-            op.image.clear_pattern = pattern;
+            const clear_bytes = bytes[start..][0 .. layer_size * op.layer_count];
+            fillImageClearColor(clear_bytes, op.image.format, op.color, op.half_color, op.float_color);
+            op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
             op.image.content_bounds = emptyRect();
             op.image.force_full_present = true;
             op.image.complex_3d_content = false;
         },
         .clear_depth => |op| {
             const pattern: u32 = @bitCast(op.depth);
-            const bytes = imageBytes(op.image);
-            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
-            const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer).?);
-            fillImagePattern(bytes[start..][0 .. layer_size * op.layer_count], pattern);
+            for (0..op.layer_count) |layer| {
+                clearDepthStencilBytes(op.image, imageLayerBytes(op.image, op.base_layer + @as(u32, @intCast(layer))), op.depth, op.stencil, op.aspect_mask);
+            }
             op.image.clear_pattern = pattern;
             op.image.content_bounds = emptyRect();
             op.image.force_full_present = true;
@@ -13075,24 +14841,39 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             const diagnostic_before = if (renderDiagnosticsEnabled() and diagnostic_clear < 64) diagnosticDarkPixelCount(op.image) else 0;
             const full_color_clear = op.color_base_layer == 0 and op.layer_count == op.image.array_layers;
             const full_depth_clear = if (op.depth) |depth| op.depth_base_layer == 0 and op.layer_count == depth.array_layers else true;
+            if (op.depth) |depth| if (isDepthStencilFormat(depth.format) and depth.format != 124 and depth.format != 126 and (op.clear_depth or op.clear_stencil)) {
+                const depth_aspects = (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0);
+                for (0..op.layer_count) |layer| {
+                    const index: u32 = @intCast(layer);
+                    if (op.clear_color) fillImageClearColor(imageLayerBytes(op.image, op.color_base_layer + index), op.image.format, op.color, op.half_color, op.float_color);
+                    clearDepthStencilBytes(depth, imageLayerBytes(depth, op.depth_base_layer + index), op.depth_value, op.stencil_value, depth_aspects);
+                }
+                if (op.clear_color) {
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
+                    op.image.content_bounds = emptyRect();
+                    op.image.force_full_present = true;
+                    op.image.complex_3d_content = false;
+                }
+                depth.clear_pattern = @bitCast(op.depth_value);
+                depth.content_bounds = emptyRect();
+                op.image.last_clear_ns = frame_pacing.monotonicNs() - operation_start;
+                return;
+            };
             if (!full_color_clear or !full_depth_clear) {
-                const color_pattern: u32 = @bitCast(op.color);
                 const depth_pattern: u32 = @bitCast(op.depth_value);
                 for (0..op.layer_count) |layer| {
                     const index: u32 = @intCast(layer);
-                    if (op.clear_color) fillImagePattern(imageLayerBytes(op.image, op.color_base_layer + index), color_pattern);
-                    if (op.depth) |depth| {
-                        if (op.clear_depth) fillImagePattern(imageLayerBytes(depth, op.depth_base_layer + index), depth_pattern);
-                    }
+                    if (op.clear_color) fillImageClearColor(imageLayerBytes(op.image, op.color_base_layer + index), op.image.format, op.color, op.half_color, op.float_color);
+                    if (op.depth) |depth| if (op.clear_depth or op.clear_stencil) clearDepthStencilBytes(depth, imageLayerBytes(depth, op.depth_base_layer + index), op.depth_value, op.stencil_value, (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0));
                 }
                 if (op.clear_color) {
-                    op.image.clear_pattern = color_pattern;
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
                 }
                 if (op.depth) |depth| {
-                    if (op.clear_depth) {
+                    if (op.clear_depth or op.clear_stencil) {
                         depth.clear_pattern = depth_pattern;
                         depth.content_bounds = emptyRect();
                     }
@@ -13109,7 +14890,7 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                 const depth_bytes = imageBytes(depth);
                 const color_pattern: u32 = @bitCast(op.color);
                 const depth_pattern: u32 = @bitCast(op.depth_value);
-                const sparse = op.clear_color and op.clear_depth and bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
+                const sparse = !floatColorFormat(op.image.format) and op.clear_color and op.clear_depth and bytes.len >= 8 * 1024 * 1024 and op.image.width == depth.width and op.image.height == depth.height and op.image.clear_pattern == color_pattern and depth.clear_pattern == depth_pattern and depth.memory != null and !depth.memory.?.mapped;
                 if (op.clear_color and op.clear_depth) {
                     if (sparse) {
                         if (op.image.dirty_tiles) |tiles| {
@@ -13126,29 +14907,32 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                                 fillImagePatternRect(depth_bytes, depth.width, rect, depth_pattern);
                             }
                         }
+                    } else if (floatColorFormat(op.image.format)) {
+                        fillImageClearColor(bytes, op.image.format, op.color, op.half_color, op.float_color);
+                        fillImagePattern(depth_bytes, depth_pattern);
                     } else if (bytes.len < 8 * 1024 * 1024 or !cpu_cube.clearImagesParallel(bytes, color_pattern, depth_bytes, depth_pattern)) {
-                        fillImagePattern(bytes, color_pattern);
+                        fillImageClearColor(bytes, op.image.format, op.color, op.half_color, op.float_color);
                         fillImagePattern(depth_bytes, depth_pattern);
                     }
                 } else {
-                    if (op.clear_color) fillImagePattern(bytes, color_pattern);
-                    if (op.clear_depth) fillImagePattern(depth_bytes, depth_pattern);
+                    if (op.clear_color) fillImageClearColor(bytes, op.image.format, op.color, op.half_color, op.float_color);
+                    if (op.clear_depth or op.clear_stencil) clearDepthStencilBytes(depth, depth_bytes, op.depth_value, op.stencil_value, (if (op.clear_depth) image_aspect_depth_bit else 0) | (if (op.clear_stencil) image_aspect_stencil_bit else 0));
                 }
                 if (op.clear_color) {
                     if (!sparse) if (op.image.dirty_tiles) |tiles| @memset(tiles, 0);
-                    op.image.clear_pattern = color_pattern;
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     if (!sparse) op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
                 }
-                if (op.clear_depth) {
+                if (op.clear_depth or op.clear_stencil) {
                     depth.clear_pattern = depth_pattern;
                     depth.content_bounds = emptyRect();
                 }
             } else {
                 if (op.clear_color) {
-                    fillImagePattern(bytes, @bitCast(op.color));
-                    op.image.clear_pattern = @bitCast(op.color);
+                    fillImageClearColor(bytes, op.image.format, op.color, op.half_color, op.float_color);
+                    op.image.clear_pattern = imageClearPattern(op.image.format, op.color);
                     op.image.content_bounds = emptyRect();
                     op.image.force_full_present = true;
                     op.image.complex_3d_content = false;
@@ -13163,19 +14947,17 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
         .discard_image => |op| invalidateImageContents(op.image),
         .clear_attachments => |op| {
             const region = cpu_cube.Rect{ .x = op.rect.offset.x, .y = op.rect.offset.y, .width = op.rect.extent.width, .height = op.rect.extent.height };
-            const layer_size: usize = @intCast(imageLayerByteSize(op.image).?);
-            const bytes = imageBytes(op.image);
             for (0..op.layer_count) |layer| {
-                const start: usize = @intCast(imageLayerOffset(op.image, op.base_layer + @as(u32, @intCast(layer))).?);
-                if (op.aspect_mask == 1) {
-                    fillImagePatternRect(bytes[start..][0..layer_size], op.image.width, region, @bitCast(op.color));
+                const layer_bytes = imageLayerBytes(op.image, op.base_layer + @as(u32, @intCast(layer)));
+                if (op.aspect_mask == image_aspect_color_bit) {
+                    fillImageClearColorRect(layer_bytes, op.image.width, op.image.format, op.color, op.half_color, op.float_color, region);
                 } else {
-                    fillImagePatternRect(bytes[start..][0..layer_size], op.image.width, region, @bitCast(op.depth_value));
+                    clearDepthStencilRect(op.image, layer_bytes, op.rect, op.depth_value, op.stencil_value, op.aspect_mask);
                 }
             }
             op.image.clear_pattern = null;
             op.image.content_bounds = unionRect(op.image.content_bounds, region);
-            if (op.aspect_mask == 1) op.image.force_full_present = true;
+            if (op.aspect_mask == image_aspect_color_bit) op.image.force_full_present = true;
             op.image.complex_3d_content = false;
         },
         .clear_attachments_deferred => {},
@@ -13307,11 +15089,11 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
                     const index_start = op.index_offset + @as(u64, first_index) * index_size;
                     const index_bytes = @as(u64, first) * index_size;
                     if (index_start > index_buffer.size or index_bytes > index_buffer.size - index_start) continue;
-                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = 0, .instance_count = instances, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = index_start, .byte_count = index_bytes, .index_type = op.index_type, .vertex_offset = vertex_offset }, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
                 } else {
                     const first_vertex = std.mem.readInt(u32, words[8..12], .little);
                     const first_instance = std.mem.readInt(u32, words[12..16], .little);
-                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .instance_index = first_instance, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
+                    cube = .{ .cube_draw = .{ .framebuffer = op.framebuffer, .color_image = op.color_image, .depth_image = op.depth_image, .pipeline = op.pipeline, .descriptors = op.descriptors, .vertex_count = first, .base_vertex = first_vertex, .instance_count = instances, .instance_index = first_instance, .indexed = null, .viewport = op.viewport, .scissor = op.scissor, .cull_mode = op.cull_mode, .front_face = op.front_face, .primitive_topology = op.primitive_topology, .primitive_restart_enable = op.primitive_restart_enable, .rasterizer_discard_enable = op.rasterizer_discard_enable, .depth_test_enable = op.depth_test_enable, .depth_write_enable = op.depth_write_enable, .depth_compare_op = op.depth_compare_op, .depth_bounds_test_enable = op.depth_bounds_test_enable, .depth_bounds = op.depth_bounds, .stencil = op.stencil, .depth_bias_enable = op.depth_bias_enable, .depth_bias = op.depth_bias, .blend_constants = op.blend_constants, .line_stipple_factor = op.line_stipple_factor, .line_stipple_pattern = op.line_stipple_pattern, .vertex_bindings = op.vertex_bindings } };
                 }
                 cube.cube_draw.push_constants = op.push_constants;
                 cube.cube_draw.color_base_layer = op.color_base_layer;
@@ -13350,18 +15132,19 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             const dst = imageBytes(op.dst);
             const src_mip = imageMipExtent(op.src, op.region.src_subresource.mip_level).?;
             const dst_mip = imageMipExtent(op.dst, op.region.dst_subresource.mip_level).?;
+            const bytes_per_texel = @as(usize, @intCast(imageStorageBytesPerTexel(op.src.format)));
             var layer: u32 = 0;
             while (layer < op.region.src_subresource.layer_count) : (layer += 1) {
                 const src_layer_offset = imageSubresourceOffset(op.src, op.region.src_subresource.mip_level, op.region.src_subresource.base_array_layer + layer).?;
                 const dst_layer_offset = imageSubresourceOffset(op.dst, op.region.dst_subresource.mip_level, op.region.dst_subresource.base_array_layer + layer).?;
-                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * src_mip.width + @as(usize, @intCast(op.region.src_offset.x))) * 4;
-                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * dst_mip.width + @as(usize, @intCast(op.region.dst_offset.x))) * 4;
-                const len = @as(usize, op.region.extent.width) * 4;
+                const so = src_layer_offset + (@as(usize, @intCast(op.region.src_offset.y)) * src_mip.width + @as(usize, @intCast(op.region.src_offset.x))) * bytes_per_texel;
+                const do = dst_layer_offset + (@as(usize, @intCast(op.region.dst_offset.y)) * dst_mip.width + @as(usize, @intCast(op.region.dst_offset.x))) * bytes_per_texel;
+                const len = @as(usize, op.region.extent.width) * bytes_per_texel;
                 // Command recording rejects overlapping image ranges, so the
                 // whole layer can use one non-overlap copy. Besides removing
                 // one helper call per row, this lets tight full-image copies
                 // collapse to one contiguous memcpy.
-                copyTransferRows(dst[do..], @as(usize, dst_mip.width) * 4, src[so..], @as(usize, src_mip.width) * 4, len, op.region.extent.height);
+                copyTransferRows(dst[do..], @as(usize, dst_mip.width) * bytes_per_texel, src[so..], @as(usize, src_mip.width) * bytes_per_texel, len, op.region.extent.height);
             }
             invalidateImageContents(op.dst);
         },
@@ -13374,7 +15157,12 @@ fn executeValidatedCommandImpl(command: Command, query_context: *QueryExecutionC
             executeResolveImage(op);
         },
         .transition => |op| {
-            op.image.layout = op.new_layout;
+            if (transitionTracksBaseMip(op)) op.image.layout = op.new_layout;
+            if (transitionCoversAllLayers(op)) {
+                const range = op.subresource_range orelse ImageSubresourceRange{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = op.image.array_layers };
+                var mip = range.base_mip_level;
+                while (mip < range.base_mip_level + range.level_count) : (mip += 1) op.image.mip_layouts[mip] = op.new_layout;
+            }
             if (renderDiagnosticsEnabled()) _ = render_diagnostic_executed_transitions.fetchAdd(1, .monotonic);
             // This coverage marker proves a successfully executed transition,
             // so hit() intentionally suppresses its rejection-only log line.
@@ -13454,7 +15242,7 @@ test "2D presentation stays one-core and only complex 3D enables the auxiliary w
     try std.testing.expect(!usePresentWorker(false, false));
     try std.testing.expect(!usePresentWorker(false, true));
     try std.testing.expect(!usePresentWorker(true, true));
-    try std.testing.expect(usePresentWorker(true, false));
+    try std.testing.expect(usePresentWorkerForProfile(true, false, 3, null));
 }
 
 test "Vulkan host-memory benchmark helpers implement exact command byte semantics" {
@@ -13660,16 +15448,17 @@ fn copyBufferImage(buffer: *BufferObj, image: *ImageObj, region: BufferImageCopy
     while (layer < region.image_subresource.layer_count) : (layer += 1) {
         const image_layer_offset = imageSubresourceOffset(image, region.image_subresource.mip_level, region.image_subresource.base_array_layer + layer).?;
         const bo = @as(usize, @intCast(region.buffer_offset + layer_stride * layer));
-        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * mip.width + @as(usize, @intCast(region.image_offset.x)))) * 4;
+        const image_bytes_per_texel = imageStorageBytesPerTexel(image.format);
+        const io = image_layer_offset + ((@as(usize, @intCast(region.image_offset.y)) * mip.width + @as(usize, @intCast(region.image_offset.x)))) * @as(usize, @intCast(image_bytes_per_texel));
         // Buffer/image overlap is rejected by cmdCopyBufferToImage and
         // cmdCopyImageToBuffer before this recorded command executes. Copying
         // a complete layer in one call avoids per-row dispatch overhead while
         // retaining explicit strides for pitched transfers.
         if (image.format != 9 and image.format != 16) {
             if (to_image)
-                copyTransferRows(pixels[io..], @as(usize, mip.width) * 4, b[bo..], @as(usize, row) * 4, len, region.image_extent.height)
+                copyTransferRows(pixels[io..], @as(usize, mip.width) * @as(usize, @intCast(image_bytes_per_texel)), b[bo..], @as(usize, row) * @as(usize, @intCast(bytes_per_texel)), len, region.image_extent.height)
             else
-                copyTransferRows(b[bo..], @as(usize, row) * 4, pixels[io..], @as(usize, mip.width) * 4, len, region.image_extent.height);
+                copyTransferRows(b[bo..], @as(usize, row) * @as(usize, @intCast(bytes_per_texel)), pixels[io..], @as(usize, mip.width) * @as(usize, @intCast(image_bytes_per_texel)), len, region.image_extent.height);
         } else {
             // Keep the public R8/R8G8 transfer layouts while using the
             // driver's existing four-byte sampled storage. This is the path
@@ -13766,6 +15555,121 @@ test "mipmapped buffer image transfers use the selected subresource footprint" {
     @memset(&buffer_storage, 0);
     copyBufferImage(&buffer, &image, region, false);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, &buffer_storage);
+}
+
+test "RGBA16F mip and array storage keeps eight-byte texel transfer strides" {
+    const owner: Device = @ptrFromInt(8);
+    var buffer_storage: [32]u8 align(64) = undefined;
+    for (&buffer_storage, 0..) |*byte, index| byte.* = @intCast(index + 1);
+    var image_storage: [80]u8 align(64) = [_]u8{0} ** 80;
+    var memory = MemoryObj{ .owner = owner, .bytes = buffer_storage[0..], .mapped = false };
+    var buffer = BufferObj{ .owner = owner, .size = buffer_storage.len, .usage = 3, .memory = &memory };
+    var image = ImageObj{ .owner = owner, .width = 2, .height = 2, .mip_levels = 2, .array_layers = 2, .samples = 1, .format = 97, .usage = 3, .layout = 1, .owned_bytes = image_storage[0..] };
+    const region = BufferImageCopy{ .buffer_offset = 0, .buffer_row_length = 0, .buffer_image_height = 0, .image_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 1, .layer_count = 1 }, .image_offset = .{ .x = 0, .y = 0, .z = 0 }, .image_extent = .{ .width = 2, .height = 2, .depth = 1 } };
+    try std.testing.expectEqual(@as(u64, 8), imageStorageBytesPerTexel(97));
+    try std.testing.expectEqual(@as(?u64, 40), imageFormatMipChainLayerByteSize(97, 2, 2, 2));
+    try std.testing.expectEqual(@as(?u64, 80), imageByteSize(&image));
+    try std.testing.expectEqual(@as(?u64, 32), bufferImageEndForBpp(region, 8));
+    try std.testing.expectEqual(@as(?usize, 72), imageSubresourceOffset(&image, 1, 1));
+    copyBufferImage(&buffer, &image, region, true);
+    try std.testing.expectEqualSlices(u8, &buffer_storage, image_storage[40..72]);
+
+    @memset(&buffer_storage, 0);
+    copyBufferImage(&buffer, &image, region, false);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32 }, &buffer_storage);
+}
+
+test "RGBA16F linear blits average half-float channels when generating mips" {
+    var source_bytes: [32]u8 align(64) = [_]u8{0} ** 32;
+    const source_values = [_]f16{
+        0, 0, 0, 1,
+        1, 1, 1, 1,
+        1, 0, 0, 1,
+        0, 1, 0, 1,
+    };
+    for (source_values, 0..) |value, index| std.mem.writeInt(u16, source_bytes[index * 2 ..][0..2], @bitCast(value), .little);
+    var destination_bytes: [8]u8 align(64) = [_]u8{0} ** 8;
+    var source = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 97, .usage = 3, .layout = 1, .owned_bytes = source_bytes[0..] };
+    var destination = ImageObj{ .owner = @ptrFromInt(8), .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 97, .usage = 3, .layout = 1, .owned_bytes = destination_bytes[0..] };
+    const subresource = ImageSubresourceLayers{ .aspect_mask = image_aspect_color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const region = ImageBlit{
+        .src_subresource = subresource,
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+        .dst_subresource = subresource,
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 } },
+    };
+    executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
+    const expected = [_]f16{ 0.5, 0.5, 0.25, 1 };
+    for (expected, 0..) |value, index| try std.testing.expectEqual(value, @as(f16, @bitCast(std.mem.readInt(u16, destination_bytes[index * 2 ..][0..2], .little))));
+}
+
+test "R8 linear blits generate mip texels from expanded sampled storage" {
+    var source_bytes: [16]u8 align(64) = .{
+        10, 0, 0, 255,
+        20, 0, 0, 255,
+        30, 0, 0, 255,
+        40, 0, 0, 255,
+    };
+    var destination_bytes: [4]u8 align(64) = .{0} ** 4;
+    var source = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .owned_bytes = source_bytes[0..] };
+    var destination = ImageObj{ .owner = @ptrFromInt(8), .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 9, .usage = 3, .layout = 1, .owned_bytes = destination_bytes[0..] };
+    const subresource = ImageSubresourceLayers{ .aspect_mask = image_aspect_color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const region = ImageBlit{
+        .src_subresource = subresource,
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+        .dst_subresource = subresource,
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 } },
+    };
+
+    try std.testing.expect(blittableColorFormat(9));
+    executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 25, 0, 0, 255 }, &destination_bytes);
+}
+
+test "RG8 linear blits generate mip texels from expanded sampled storage" {
+    var source_bytes: [16]u8 align(64) = .{
+        10, 20, 0, 255,
+        20, 40, 0, 255,
+        30, 60, 0, 255,
+        40, 80, 0, 255,
+    };
+    var destination_bytes: [4]u8 align(64) = .{0} ** 4;
+    var source = ImageObj{ .owner = @ptrFromInt(8), .width = 2, .height = 2, .array_layers = 1, .samples = 1, .format = 16, .usage = 3, .layout = 1, .owned_bytes = source_bytes[0..] };
+    var destination = ImageObj{ .owner = @ptrFromInt(8), .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 16, .usage = 3, .layout = 1, .owned_bytes = destination_bytes[0..] };
+    const subresource = ImageSubresourceLayers{ .aspect_mask = image_aspect_color_bit, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 };
+    const region = ImageBlit{
+        .src_subresource = subresource,
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+        .dst_subresource = subresource,
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 1, .y = 1, .z = 1 } },
+    };
+
+    try std.testing.expect(blittableColorFormat(16));
+    executeBlitImage(.{ .src = &source, .src_layout = 1, .dst = &destination, .dst_layout = 1, .region = region, .filter = 1 });
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 25, 50, 0, 255 }, &destination_bytes);
+}
+
+test "RGBA16F attachment clears preserve half-float values and rectangular bounds" {
+    var bytes: [32]u8 = [_]u8{0xa5} ** 32;
+    const first = [_]u16{
+        @bitCast(@as(f16, 1.5)),
+        @bitCast(@as(f16, -0.25)),
+        @bitCast(@as(f16, 2)),
+        @bitCast(@as(f16, 0.5)),
+    };
+    fillImageClearColor(&bytes, 97, .{ 0, 0, 0, 0 }, first, null);
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
+    try std.testing.expectEqual(@as(f32, -0.25), readHalfFloat(&bytes, 2));
+    const replacement = [_]u16{
+        @bitCast(@as(f16, 0.25)),
+        @bitCast(@as(f16, 0.5)),
+        @bitCast(@as(f16, 0.75)),
+        @bitCast(@as(f16, 1)),
+    };
+    fillImageClearColorRect(&bytes, 2, 97, .{ 0, 0, 0, 0 }, replacement, null, .{ .x = 1, .y = 0, .width = 1, .height = 2 });
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&bytes, 8));
+    try std.testing.expectEqual(@as(f32, 1.5), readHalfFloat(&bytes, 0));
+    try std.testing.expectEqual(@as(f32, 0.25), readHalfFloat(&bytes, 24));
 }
 
 const max_canonical_bytes = 2 * spirv.max_code_bytes + 64 * 1024;
@@ -14092,10 +15996,10 @@ fn destroyPipelineLayout(device: ?Device, handle: usize, alloc: ?*const Alloc) c
     }
 }
 
-fn appendAttachmentRef(w: *CanonicalWriter, ref: AttachmentReference, count: u32) CanonicalError!void {
+fn appendAttachmentRef(w: *CanonicalWriter, ref: AttachmentReference, count: u32, compatibility_only: bool) CanonicalError!void {
     if ((ref.attachment != 0xffff_ffff and ref.attachment >= count) or !supportedLayout(ref.layout)) return error.Invalid;
     try w.u32le(ref.attachment);
-    try w.i32le(ref.layout);
+    if (!compatibility_only) try w.i32le(ref.layout);
 }
 fn attachmentDescription2PNextValid(raw: ?*const anyopaque) bool {
     var next = raw;
@@ -14187,18 +16091,18 @@ fn buildRenderPass(ci: *const RenderPassCreateInfo, compatibility_only: bool) Ca
     for (ci.subpasses.?[0..ci.subpass_count]) |s| {
         if (s.flags != 0 or s.pipeline_bind_point != 0 or s.input_attachment_count > 4 or s.color_attachment_count > 4 or s.preserve_attachment_count > 16 or (s.input_attachment_count != 0 and s.input_attachments == null) or (s.color_attachment_count != 0 and s.color_attachments == null) or (s.preserve_attachment_count != 0 and s.preserve_attachments == null)) return error.Invalid;
         try w.u32le(s.input_attachment_count);
-        if (s.input_attachments) |refs| for (refs[0..s.input_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
+        if (s.input_attachments) |refs| for (refs[0..s.input_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count, compatibility_only);
         try w.u32le(s.color_attachment_count);
         if (s.color_attachments) |refs| for (refs[0..s.color_attachment_count], 0..) |ref, index| {
             for (refs[0..index]) |prior| if (ref.attachment != 0xffff_ffff and ref.attachment == prior.attachment) return error.Invalid;
-            try appendAttachmentRef(&w, ref, ci.attachment_count);
+            try appendAttachmentRef(&w, ref, ci.attachment_count, compatibility_only);
         };
         try w.u32le(if (s.resolve_attachments == null) 0 else 1);
-        if (s.resolve_attachments) |refs| for (refs[0..s.color_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count);
+        if (s.resolve_attachments) |refs| for (refs[0..s.color_attachment_count]) |ref| try appendAttachmentRef(&w, ref, ci.attachment_count, compatibility_only);
         try w.u32le(if (s.depth_stencil_attachment == null) 0 else 1);
         if (s.depth_stencil_attachment) |ref| {
             if (s.color_attachments) |refs| for (refs[0..s.color_attachment_count]) |color| if (ref.attachment != 0xffff_ffff and ref.attachment == color.attachment) return error.Invalid;
-            try appendAttachmentRef(&w, ref.*, ci.attachment_count);
+            try appendAttachmentRef(&w, ref.*, ci.attachment_count, compatibility_only);
         }
         try w.u32le(s.preserve_attachment_count);
         if (s.preserve_attachments) |refs| for (refs[0..s.preserve_attachment_count]) |ref| {
@@ -14234,6 +16138,8 @@ const RenderPassFramebufferMetadata = struct {
     color_feedback_input: bool = false,
     depth_load_op: i32 = 2,
     depth_store_op: i32 = 1,
+    stencil_load_op: i32 = 2,
+    stencil_store_op: i32 = 1,
     depth_initial_layout: i32 = 0,
     depth_subpass_layout: i32 = 0,
     depth_final_layout: i32 = 0,
@@ -14303,6 +16209,8 @@ fn snapshotRenderPassFramebufferMetadata(ci: *const RenderPassCreateInfo) Render
         result.attachments[depth_index] = .{ .format = descriptions[depth_index].format, .samples = descriptions[depth_index].samples, .role = .depth };
         result.depth_load_op = descriptions[depth_index].load_op;
         result.depth_store_op = descriptions[depth_index].store_op;
+        result.stencil_load_op = descriptions[depth_index].stencil_load_op;
+        result.stencil_store_op = descriptions[depth_index].stencil_store_op;
         result.depth_initial_layout = descriptions[depth_index].initial_layout;
         result.depth_subpass_layout = depth_reference.layout;
         result.depth_final_layout = descriptions[depth_index].final_layout;
@@ -14371,6 +16279,8 @@ fn createRenderPass(device: ?Device, info: ?*const RenderPassCreateInfo, alloc: 
             .color_feedback_input = framebuffer_metadata.color_feedback_input,
             .depth_load_op = framebuffer_metadata.depth_load_op,
             .depth_store_op = framebuffer_metadata.depth_store_op,
+            .stencil_load_op = framebuffer_metadata.stencil_load_op,
+            .stencil_store_op = framebuffer_metadata.stencil_store_op,
             .depth_initial_layout = framebuffer_metadata.depth_initial_layout,
             .depth_subpass_layout = framebuffer_metadata.depth_subpass_layout,
             .depth_final_layout = framebuffer_metadata.depth_final_layout,
@@ -14593,11 +16503,26 @@ test "frontend pipeline interface and descriptor compatibility is exact" {
     fragment.interfaces[1].member_count = 1;
     try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces = fragment_interfaces[0..1];
-    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &set0));
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &set0));
     fragment.interfaces = &fragment_interfaces;
     var vertex_without_uniform = vertex;
     vertex_without_uniform.interfaces = vertex_interfaces[0..2];
-    try std.testing.expect(!frontendInterfacesCompatible(&vertex_without_uniform, &fragment, &set0));
+    try std.testing.expect(frontendInterfacesCompatible(&vertex_without_uniform, &fragment, &set0));
+
+    const stage_bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 2, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 3, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 0x10, .immutable_samplers = null },
+    };
+    const stage_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 2, .bindings = &stage_bindings };
+    var stage_layout = try buildDescriptorSetLayout(&stage_layout_info);
+    defer stage_layout.deinit();
+    vertex_interfaces[2].binding = 2;
+    fragment.interfaces[1].binding = 3;
+    try std.testing.expect(frontendInterfacesCompatible(&vertex, &fragment, &stage_layout));
+    fragment.interfaces[1].binding = 2;
+    try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &stage_layout));
+    vertex_interfaces[2].binding = 2;
+    fragment.interfaces[1].binding = 2;
     var malformed = set0;
     malformed.bytes = malformed.bytes[0..20];
     try std.testing.expect(!frontendInterfacesCompatible(&vertex, &fragment, &malformed));
@@ -14655,15 +16580,27 @@ test "pipeline flags2 validation is bounded and allocation-free" {
     try std.testing.expectEqual(@as(?u32, 0), pipelineCreateFlags2(@ptrCast(&node), pipeline_create_dispatch_base_bit, true));
 }
 
-test "vertex input divisor pNext accepts only the feature-disabled default" {
-    var divisor = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_191_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
+test "vertex input divisor pNext accepts divisor one only" {
+    var divisor = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_190_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| try std.testing.expect(pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
     var divisor_description = VertexInputBindingDivisorDescription{ .binding = 0, .divisor = 1 };
     divisor.vertex_binding_divisor_count = 1;
     divisor.vertex_binding_divisors = @ptrCast(&divisor_description);
+    try std.testing.expect(pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor_description.divisor = 0;
     try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor_description.divisor = 2;
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor_description.divisor = 1;
+    const duplicate_binding = VertexInputBindingDivisorDescription{ .binding = 0, .divisor = 1 };
+    var two_divisors = [_]VertexInputBindingDivisorDescription{ divisor_description, duplicate_binding };
+    divisor.vertex_binding_divisor_count = 2;
+    divisor.vertex_binding_divisors = &two_divisors;
+    try std.testing.expect(!pipelineVertexInputDivisorStateValid(@ptrCast(&divisor)));
+    divisor.vertex_binding_divisor_count = 1;
+    divisor.vertex_binding_divisors = @ptrCast(&divisor_description);
     divisor.vertex_binding_divisor_count = 0;
     divisor.vertex_binding_divisors = null;
     var duplicate = divisor;
@@ -14741,6 +16678,14 @@ test "dynamic rendering pipeline pNext validation is bounded and canonical" {
         try std.testing.expectEqual(@as(i32, 44), parsed.?.rendering.?.color_format);
         try std.testing.expectEqual(@as(i32, 126), parsed.?.rendering.?.depth_format);
     }
+    rendering.depth_attachment_format = format_d24_unorm_s8_uint;
+    rendering.stencil_attachment_format = format_d24_unorm_s8_uint;
+    parsed = graphicsPipelinePNext(@ptrCast(&rendering), 0);
+    try std.testing.expect(parsed != null and parsed.?.rendering != null);
+    try std.testing.expectEqual(format_d24_unorm_s8_uint, parsed.?.rendering.?.depth_format);
+    try std.testing.expectEqual(format_d24_unorm_s8_uint, parsed.?.rendering.?.stencil_format);
+    rendering.depth_attachment_format = 126;
+    rendering.stencil_attachment_format = 0;
     var attachmentless = rendering;
     attachmentless.color_attachment_count = 0;
     attachmentless.color_attachment_formats = null;
@@ -14767,6 +16712,9 @@ test "dynamic rendering pipeline pNext validation is bounded and canonical" {
     try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
     bad = rendering;
     bad.depth_attachment_format = 37;
+    try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
+    bad = rendering;
+    bad.stencil_attachment_format = 126;
     try std.testing.expect(graphicsPipelinePNext(@ptrCast(&bad), 0) == null);
     var flags2 = PipelineCreateFlags2CreateInfo{ .s_type = pipeline_create_flags2_stype, .p_next = @ptrCast(&rendering), .flags = 0 };
     rendering.p_next = null;
@@ -14951,6 +16899,31 @@ fn validDepthBiasFactors(factors: [3]f32) bool {
     return std.math.isFinite(factors[0]) and std.math.isFinite(factors[1]) and std.math.isFinite(factors[2]);
 }
 
+fn profileMultisampleStateValid(ms: *const PipelineMultisampleStateCreateInfo) bool {
+    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or
+        (ms.sample_shading_enable != 0 and ms.sample_shading_enable != 1) or ms.sample_shading_enable != 0 or
+        !std.math.isFinite(ms.min_sample_shading) or ms.min_sample_shading < 0 or ms.min_sample_shading > 1 or
+        (ms.alpha_to_coverage_enable != 0 and ms.alpha_to_coverage_enable != 1) or ms.alpha_to_coverage_enable != 0 or
+        (ms.alpha_to_one_enable != 0 and ms.alpha_to_one_enable != 1) or ms.alpha_to_one_enable != 0) return false;
+    if (ms.sample_mask) |mask| if (mask[0] & 1 == 0) return false;
+    return true;
+}
+
+test "profile multisample state accepts only equivalent one-sample coverage" {
+    var sample_mask: u32 = 1;
+    var state = PipelineMultisampleStateCreateInfo{ .s_type = 24, .p_next = null, .flags = 0, .rasterization_samples = 1, .sample_shading_enable = 0, .min_sample_shading = 1, .sample_mask = @ptrCast(&sample_mask), .alpha_to_coverage_enable = 0, .alpha_to_one_enable = 0 };
+    try std.testing.expect(profileMultisampleStateValid(&state));
+    sample_mask = 0;
+    try std.testing.expect(!profileMultisampleStateValid(&state));
+    sample_mask = 1;
+    state.sample_mask = null;
+    state.rasterization_samples = 4;
+    try std.testing.expect(!profileMultisampleStateValid(&state));
+    state.rasterization_samples = 1;
+    state.sample_shading_enable = 1;
+    try std.testing.expect(!profileMultisampleStateValid(&state));
+}
+
 fn validBlendConstants(constants: [4]f32) bool {
     for (constants) |value| if (!std.math.isFinite(value)) return false;
     return true;
@@ -14967,7 +16940,13 @@ fn queueSubmitFailed(line: u32) Result {
 
 fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo) CanonicalError!GraphicsPipelineObj {
     const pnext = graphicsPipelinePNext(ci.p_next, ci.flags) orelse return pipelineInvalid(@src().line);
-    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.tessellation != null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) return pipelineInvalid(@src().line);
+    if (ci.s_type != 28 or ci.stage_count != 2 or ci.stages == null or ci.base_pipeline != 0 or (ci.base_pipeline_index != -1 and ci.base_pipeline_index != 0)) {
+        if (failureDiagnosticsEnabled()) std.debug.print(
+            "ZPU graphics pipeline create-info rejected sType={} stages={} stages_null={} tessellation={} base=0x{x} base_index={}\n",
+            .{ ci.s_type, ci.stage_count, ci.stages == null, ci.tessellation != null, ci.base_pipeline, ci.base_pipeline_index },
+        );
+        return pipelineInvalid(@src().line);
+    }
     const layout = validPipelineLayoutLocked(ci.layout) orelse return pipelineInvalid(@src().line);
     const dynamic_rendering_state = pnext.rendering;
     if (dynamic_rendering_state != null and ci.render_pass != 0) return pipelineInvalid(@src().line);
@@ -15048,10 +17027,11 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         const compiled = try compileFrontendStage(allocator, shader, frontend_stage, name, frontend_specs[0..frontend_spec_count]);
         if (compiled == null) cpu_cube_stage_mask |= stage.stage;
         if (compiled) |program| {
-            if (frontend_stage == .fragment and profileShaderCaptureEnabled() and profileShaderCaptureCandidate(&program) and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
+            const exact_shader_capture = std.c.getenv("ZPU_DIAGNOSE_PROFILE_SHADER_IR_DIGEST") != null;
+            if ((frontend_stage == .fragment or exact_shader_capture) and profileShaderCaptureEnabled() and profileShaderCaptureCandidate(&program) and render_diagnostic_profile_shader_capture.fetchAdd(1, .monotonic) < 4) {
                 std.debug.print(
-                    "ZPU profile shader capture spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
-                    .{ shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
+                    "ZPU profile shader capture stage={s} spirv_digest={x} spirv_words={d} ir_digest={x} ir_instructions={d} spirv_le_hex={x}\n",
+                    .{ @tagName(frontend_stage), shader.module.identity.digest, shader.module.words.len, program.identity.digest, program.instructions.len, std.mem.sliceAsBytes(shader.module.words) },
                 );
             }
             if (frontend_stage == .vertex) vertex_program = program else fragment_program = program;
@@ -15068,10 +17048,22 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         return pipelineInvalid(@src().line);
     }
     if (profile_pair and !frontendInterfacesCompatible(&vertex_program.?, &fragment_program.?, &layout.set0)) {
-        if (failureDiagnosticsEnabled()) std.debug.print(
-            "ZPU pipeline interfaces rejected vertex_words={d} fragment_words={d} vertex_digest={x} fragment_digest={x}\n",
-            .{ vertex_words, fragment_words, vertex_digest, fragment_digest },
-        );
+        if (failureDiagnosticsEnabled()) {
+            std.debug.print("ZPU pipeline interfaces rejected set0_len={d} vertex_words={d} fragment_words={d}\n", .{ layout.set0.bytes.len, vertex_words, fragment_words });
+            for ([_]*const render_ir.Program{ &vertex_program.?, &fragment_program.? }) |program| for (program.interfaces, 0..) |interface, index| {
+                std.debug.print("ZPU interface stage={s} index={d} storage={s} set={any} binding={any} block={} members={any} location={any} type={any}\n", .{ @tagName(program.stage), index, @tagName(interface.storage), interface.descriptor_set, interface.binding, interface.block, interface.member_count, interface.location, interface.ty });
+            };
+            if (layout.set0.bytes.len >= 36) {
+                const descriptor_count = std.mem.readInt(u32, layout.set0.bytes[32..36], .little);
+                if (descriptor_count <= (layout.set0.bytes.len - 36) / 16) {
+                    std.debug.print("ZPU set0 descriptor_count={d}\n", .{descriptor_count});
+                    for (0..descriptor_count) |index| {
+                        const item = layout.set0.bytes[36 + index * 16 ..][0..16];
+                        std.debug.print("ZPU set0 descriptor binding={d} type={d} count={d} stages=0x{x}\n", .{ std.mem.readInt(u32, item[0..4], .little), std.mem.readInt(i32, item[4..8], .little), std.mem.readInt(u32, item[8..12], .little), std.mem.readInt(u32, item[12..16], .little) });
+                    }
+                }
+            }
+        }
         return pipelineInvalid(@src().line);
     }
     if (profile_pair and !frontendSampledImagesCompatible(&vertex_program.?, &fragment_program.?, layout)) {
@@ -15287,33 +17279,54 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
     for (pipeline_depth_bias) |factor| try w.f32le(factor);
     if (!dynamic_line_width) try w.f32le(rs.line_width);
     const ms = ci.multisample orelse return pipelineInvalid(@src().line);
-    if (ms.s_type != 24 or ms.p_next != null or ms.flags != 0 or ms.rasterization_samples != 1 or try bool32(ms.sample_shading_enable) != 0 or ms.min_sample_shading != 0 or ms.sample_mask != null or try bool32(ms.alpha_to_coverage_enable) != 0 or try bool32(ms.alpha_to_one_enable) != 0) return pipelineInvalid(@src().line);
+    const sample_shading_enable = try bool32(ms.sample_shading_enable);
+    const alpha_to_coverage_enable = try bool32(ms.alpha_to_coverage_enable);
+    const alpha_to_one_enable = try bool32(ms.alpha_to_one_enable);
+    if (!profileMultisampleStateValid(ms)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU multisample state rejected sType={d} pNext={} flags=0x{x} samples={d} sampleShading={d} minShading={d} sampleMask={any} alphaCoverage={d} alphaOne={d}\n", .{ ms.s_type, ms.p_next != null, ms.flags, ms.rasterization_samples, sample_shading_enable, ms.min_sample_shading, if (ms.sample_mask) |mask| mask[0] else null, alpha_to_coverage_enable, alpha_to_one_enable });
+        return pipelineInvalid(@src().line);
+    }
     try w.u32le(1);
     const ds = ci.depth_stencil orelse return pipelineInvalid(@src().line);
-    const zero_stencil = std.mem.zeroes(StencilOpState);
-    var always_stencil = zero_stencil;
-    always_stencil.compare_op = 7;
     const pipeline_depth_test_enable = try bool32(ds.depth_test_enable);
     const pipeline_depth_write_enable = try bool32(ds.depth_write_enable);
     const pipeline_depth_bounds_test_enable = try bool32(ds.depth_bounds_test_enable);
     const pipeline_stencil_test_enable = try bool32(ds.stencil_test_enable);
+    const stencil_attachment_format = if (dynamic_rendering_state) |state|
+        state.stencil_format
+    else if (render_pass) |pass|
+        renderPassStencilFormat(pass)
+    else
+        0;
     const finite_depth_bounds = std.math.isFinite(ds.min_depth_bounds) and std.math.isFinite(ds.max_depth_bounds);
     const valid_depth_bounds = finite_depth_bounds and (pipeline_depth_bounds_test_enable == 0 or (ds.min_depth_bounds >= 0 and ds.max_depth_bounds <= 1 and ds.min_depth_bounds <= ds.max_depth_bounds));
-    const stencil_test = try bool32(ds.stencil_test_enable);
     const invalid_depth_stencil =
         ds.s_type != 25 or
         ds.p_next != null or
         ds.flags != 0 or
         ds.depth_compare_op < 0 or ds.depth_compare_op > 7 or
         !valid_depth_bounds or
-        stencil_test != 0 or
-        (!std.meta.eql(ds.front, zero_stencil) and !std.meta.eql(ds.front, always_stencil)) or
-        (!std.meta.eql(ds.back, zero_stencil) and !std.meta.eql(ds.back, always_stencil)) or
+        !stencilFaceStateValid(ds.front) or
+        !stencilFaceStateValid(ds.back) or
+        (pipeline_stencil_test_enable != 0 and stencil_attachment_format == 0) or
         (!dynamic_depth_bounds and pipeline_depth_bounds_test_enable == 1 and (ds.min_depth_bounds != 0.0 or ds.max_depth_bounds != 1.0));
     if (invalid_depth_stencil) return pipelineInvalid(@src().line);
-    try w.u32le(1);
-    try w.u32le(1);
-    try w.i32le(3);
+    try w.u32le(pipeline_depth_test_enable);
+    try w.u32le(pipeline_depth_write_enable);
+    try w.i32le(ds.depth_compare_op);
+    try w.u32le(pipeline_depth_bounds_test_enable);
+    try w.f32le(ds.min_depth_bounds);
+    try w.f32le(ds.max_depth_bounds);
+    try w.u32le(pipeline_stencil_test_enable);
+    inline for (.{ ds.front, ds.back }) |stencil_state| {
+        try w.i32le(stencil_state.fail_op);
+        try w.i32le(stencil_state.pass_op);
+        try w.i32le(stencil_state.depth_fail_op);
+        try w.i32le(stencil_state.compare_op);
+        try w.u32le(stencil_state.compare_mask);
+        try w.u32le(stencil_state.write_mask);
+        try w.u32le(stencil_state.reference);
+    }
     const cb = ci.color_blend orelse return pipelineInvalid(@src().line);
     var pipeline_color_blend_enable: u32 = 0;
     var pipeline_src_color_blend_factor: i32 = 1;
@@ -15329,7 +17342,10 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
         if (pass.framebuffer_supported and (pass.framebuffer_attachment_count == 0 or pass.framebuffer_attachments[0].role == .depth)) 0 else 1
     else
         1;
-    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op != 0 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !validBlendConstants(cb.blend_constants)) return pipelineInvalid(@src().line);
+    if (cb.s_type != 26 or cb.p_next != null or cb.flags != 0 or try bool32(cb.logic_op_enable) != 0 or cb.logic_op < 0 or cb.logic_op > 15 or cb.attachment_count != color_attachment_count or (color_attachment_count != 0 and cb.attachments == null) or (color_attachment_count == 0 and cb.attachments != null) or !validBlendConstants(cb.blend_constants)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU color blend rejected sType={d} pNext={} flags=0x{x} logicEnable={d} logicOp={d} attachments={d} supportedAttachments={d} attachmentPtr={} constantsValid={} renderPass=0x{x} framebufferSupported={} framebufferAttachments={d} framebufferFirstRole={s}\n", .{ cb.s_type, cb.p_next != null, cb.flags, cb.logic_op_enable, cb.logic_op, cb.attachment_count, color_attachment_count, cb.attachments != null, validBlendConstants(cb.blend_constants), ci.render_pass, if (render_pass) |pass| pass.framebuffer_supported else false, if (render_pass) |pass| pass.framebuffer_attachment_count else 0, if (render_pass) |pass| if (pass.framebuffer_attachment_count != 0) @tagName(pass.framebuffer_attachments[0].role) else "none" else "none" });
+        return pipelineInvalid(@src().line);
+    }
     try w.u32le(color_attachment_count);
     if (color_attachment_count != 0) {
         const attachment = cb.attachments.?[0];
@@ -15401,9 +17417,9 @@ fn buildGraphicsPipelineLocked(d: Device, ci: *const GraphicsPipelineCreateInfo)
                 return error.Invalid;
             },
         };
-        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+        profile_execution = .{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .vertex_push_constant = contract.vertex_push_constant, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_push_constant = contract.fragment_push_constant, .fragment_frag_coord = contract.fragment_frag_coord, .fragment_front_facing = contract.fragment_front_facing, .fragment_needs_derivatives = profileFragmentNeedsDerivatives(&fragment_program.?), .fragment_sampled_images = contract.fragment_sampled_images, .fragment_sampled_image_count = contract.fragment_sampled_image_count, .fragment_samplers = contract.fragment_samplers, .fragment_sampler_count = contract.fragment_sampler_count, .fragment_input_attachments = contract.fragment_input_attachments, .fragment_input_attachment_count = contract.fragment_input_attachment_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     }
-    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = if (dynamic_rendering_state) |state| state.stencil_format else 0, .viewport = baked_viewport, .scissor = baked_scissor };
+    return .{ .owner = DeviceIdentity.capture(d), .canonical = canonical, .layout = layout_identity, .set0 = set0, .set1 = set1, .render_compatibility = render_compatibility, .vertex_program = vertex_program, .fragment_program = fragment_program, .subpass = ci.subpass, .execution_abi = if (profile_execution) |profile| .{ .profile_v1_scalar_graphics = profile } else if (profile_pair) .profile_v1_metadata else .cpu_cube_v1, .cull_mode = rs.cull_mode, .front_face = rs.front_face, .provoking_vertex_mode = provoking_vertex_mode, .primitive_topology = ia.topology, .primitive_restart_enable = pipeline_primitive_restart_enable, .rasterizer_discard_enable = pipeline_rasterizer_discard_enable, .depth_test_enable = pipeline_depth_test_enable, .depth_write_enable = pipeline_depth_write_enable, .depth_compare_op = ds.depth_compare_op, .depth_bounds_test_enable = pipeline_depth_bounds_test_enable, .depth_bounds = .{ ds.min_depth_bounds, ds.max_depth_bounds }, .stencil_test_enable = pipeline_stencil_test_enable, .stencil_front = stencilFaceState(ds.front), .stencil_back = stencilFaceState(ds.back), .depth_bias_enable = pipeline_depth_bias_enable, .depth_bias = pipeline_depth_bias, .color_write_mask = pipeline_color_write_mask, .color_blend_enable = pipeline_color_blend_enable, .src_color_blend_factor = pipeline_src_color_blend_factor, .dst_color_blend_factor = pipeline_dst_color_blend_factor, .color_blend_op = pipeline_color_blend_op, .src_alpha_blend_factor = pipeline_src_alpha_blend_factor, .dst_alpha_blend_factor = pipeline_dst_alpha_blend_factor, .alpha_blend_op = pipeline_alpha_blend_op, .blend_constants = cb.blend_constants, .vertex_input_binding_mask = vertex_input_binding_mask, .dynamic_viewport = dynamic_viewport, .dynamic_scissor = dynamic_scissor, .dynamic_cull_mode = dynamic_cull_mode, .dynamic_front_face = dynamic_front_face, .dynamic_primitive_topology = dynamic_primitive_topology, .dynamic_primitive_restart_enable = dynamic_primitive_restart_enable, .dynamic_rasterizer_discard_enable = dynamic_rasterizer_discard_enable, .dynamic_depth_test_enable = dynamic_depth_test_enable, .dynamic_depth_write_enable = dynamic_depth_write_enable, .dynamic_depth_compare_op = dynamic_depth_compare_op, .dynamic_depth_bounds = dynamic_depth_bounds, .dynamic_depth_bounds_test_enable = dynamic_depth_bounds_test_enable, .dynamic_stencil_test_enable = dynamic_stencil_test_enable, .dynamic_stencil_op = dynamic_stencil_op, .dynamic_depth_bias_enable = dynamic_depth_bias_enable, .dynamic_vertex_input_binding_stride = dynamic_vertex_input_binding_stride, .dynamic_line_width = dynamic_line_width, .dynamic_line_stipple = dynamic_line_stipple, .dynamic_depth_bias = dynamic_depth_bias, .dynamic_blend_constants = dynamic_blend_constants, .dynamic_stencil_compare_mask = dynamic_stencil_compare_mask, .dynamic_stencil_write_mask = dynamic_stencil_write_mask, .dynamic_stencil_reference = dynamic_stencil_reference, .dynamic_rendering = dynamic_rendering_state != null, .rendering_color_format = if (dynamic_rendering_state) |state| state.color_format else 0, .rendering_depth_format = if (dynamic_rendering_state) |state| state.depth_format else 0, .rendering_stencil_format = stencil_attachment_format, .viewport = baked_viewport, .scissor = baked_scissor };
 }
 
 fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, set0: *const Canonical) bool {
@@ -15422,33 +17438,17 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
         };
         if (!matched) return false;
     };
-    for (vertex.interfaces) |left| if (left.storage == .uniform) {
-        var matched = false;
-        // Vertex and fragment stages declare independent views of the shared
-        // uniform binding; each program decodes the buffer with its own
-        // member layout, so compatibility is the descriptor coordinate plus
-        // block-ness, not struct equality.
-        for (fragment.interfaces) |right| if (right.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) {
-            if (left.block != right.block) return false;
-            matched = true;
-        };
-        if (!matched) return false;
-    };
-    for (fragment.interfaces) |right| if (right.storage == .uniform) {
-        var matched = false;
-        for (vertex.interfaces) |left| {
-            if (left.storage == .uniform and left.descriptor_set == right.descriptor_set and left.binding == right.binding) matched = true;
-        }
-        if (!matched) return false;
-    };
+    // Uniform bindings may be stage-specific. Validate each stage's binding
+    // against the descriptor layout and its stage flags below.
     for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .uniform) {
-        if (interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
+        if (!interface.block or interface.descriptor_set != 0 or interface.binding == null or set0.bytes.len < 36) return false;
         const count = std.mem.readInt(u32, set0.bytes[32..36], .little);
         if (set0.bytes.len != 36 + @as(usize, count) * 16) return false;
         var found = false;
         for (0..count) |index| {
             const item = set0.bytes[36 + index * 16 ..][0..16];
-            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 6 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
+            const descriptor_type = std.mem.readInt(i32, item[4..8], .little);
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and (descriptor_type == 6 or descriptor_type == 8) and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & (if (program.stage == .vertex) @as(u32, 1) else 16) != 0) found = true;
         }
         if (!found) return false;
     };
@@ -15467,14 +17467,24 @@ fn frontendInterfacesCompatible(vertex: *const render_ir.Program, fragment: *con
 }
 
 fn frontendSampledImagesCompatible(vertex: *const render_ir.Program, fragment: *const render_ir.Program, layout: *const PipelineLayoutObj) bool {
-    for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| if (interface.storage == .sampled_image) {
-        if (program.stage != .fragment or interface.descriptor_set != 1 or interface.binding == null or layout.set_count < 2 or layout.set1.bytes.len < 36) return false;
-        const count = std.mem.readInt(u32, layout.set1.bytes[32..36], .little);
-        if (layout.set1.bytes.len != 36 + @as(usize, count) * 16) return false;
+    for ([_]*const render_ir.Program{ vertex, fragment }) |program| for (program.interfaces) |interface| {
+        if (interface.storage != .sampled_image and interface.storage != .image and interface.storage != .sampler) continue;
+        const descriptor_set: u32 = interface.descriptor_set orelse return false;
+        const descriptor_type: i32 = switch (interface.storage) {
+            .sampled_image => 1,
+            .image => 2,
+            .sampler => 0,
+            else => unreachable,
+        };
+        if (program.stage != .fragment or descriptor_set > 1 or (interface.storage != .sampled_image and descriptor_set != 0) or interface.binding == null or (descriptor_set == 1 and layout.set_count < 2)) return false;
+        const set_layout = if (descriptor_set == 0) layout.set0 else layout.set1;
+        if (set_layout.bytes.len < 36) return false;
+        const count = std.mem.readInt(u32, set_layout.bytes[32..36], .little);
+        if (set_layout.bytes.len != 36 + @as(usize, count) * 16) return false;
         var found = false;
         for (0..count) |index| {
-            const item = layout.set1.bytes[36 + index * 16 ..][0..16];
-            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == 1 and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
+            const item = set_layout.bytes[36 + index * 16 ..][0..16];
+            if (std.mem.readInt(u32, item[0..4], .little) == interface.binding.? and std.mem.readInt(i32, item[4..8], .little) == descriptor_type and std.mem.readInt(u32, item[8..12], .little) == 1 and std.mem.readInt(u32, item[12..16], .little) & 16 != 0) found = true;
         }
         if (!found) return false;
     };
@@ -15492,12 +17502,18 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
     var vertex_inputs: u32 = 0;
     for (vertex.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
-            if (vertex_inputs == 16 or interface.location == null or
-                (interface.ty.scalar != .f32 and !(interface.ty.scalar == .u32 and interface.ty.columns == 2)) or
-                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4) or interface.ty.rows != 1) return null;
+            if (interface.builtin_vertex_index) {
+                if (result.vertex_index_interface != null or interface.location != null or interface.ty.scalar != .i32 or interface.ty.columns != 1 or interface.ty.rows != 1) return null;
+                result.vertex_index_interface = @intCast(index);
+                continue;
+            }
+            const supported_scalar = interface.ty.scalar == .f32 or (interface.ty.scalar == .u32 and interface.ty.columns == 2 and interface.ty.rows == 1);
+            const supported_shape = interface.ty.rows == 1 or (interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 4);
+            if (vertex_inputs == 16 or interface.location == null or !supported_scalar or !supported_shape or
+                (interface.ty.columns != 1 and interface.ty.columns != 2 and interface.ty.columns != 3 and interface.ty.columns != 4)) return null;
             result.inputs[vertex_inputs].interface = @intCast(index);
             result.inputs[vertex_inputs].location = interface.location.?;
-            result.inputs[vertex_inputs].byte_size = @as(u8, interface.ty.columns) * 4;
+            result.inputs[vertex_inputs].byte_size = @as(u8, interface.ty.columns) * @as(u8, interface.ty.rows) * 4;
             vertex_inputs += 1;
         },
         .output => {
@@ -15512,7 +17528,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             } else if (interface.location == null) return null;
         },
         .uniform => {
-            if (result.vertex_uniform_count != 0 or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? != 0 or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
+            if (result.vertex_uniform_count == result.vertex_uniforms.len or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_uniforms[result.vertex_uniform_count] = .{ .interface = @intCast(index) };
             result.vertex_uniform_count += 1;
         },
@@ -15520,10 +17536,11 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             if (result.vertex_push_constant != null or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.vertex_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
-        .sampled_image, .input_attachment => return null,
+        .sampled_image, .input_attachment, .image, .sampler => return null,
     };
-    if (result.vertex_output == 0 or vertex_inputs == 0) return null;
+    if (result.vertex_output == 0 or (vertex_inputs == 0 and result.vertex_index_interface == null)) return null;
     var fragment_outputs: u32 = 0;
+    var fragment_output_locations = [_]bool{false} ** 8;
     for (fragment.interfaces, 0..) |interface, index| switch (interface.storage) {
         .input => {
             if (interface.builtin_frag_coord) {
@@ -15551,7 +17568,7 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.varying_count += 1;
         },
         .uniform => {
-            if (result.fragment_uniform_count != 0 or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? != 0 or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
+            if (result.fragment_uniform_count == result.fragment_uniforms.len or interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or !interface.block or interface.member_count == 0 or interface.member_count > render_ir.max_uniform_members) return null;
             result.fragment_uniforms[result.fragment_uniform_count] = .{ .interface = @intCast(index) };
             result.fragment_uniform_count += 1;
         },
@@ -15560,10 +17577,22 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.fragment_push_constant = .{ .interface = @intCast(index), .byte_size = profileBlockByteSize(interface) orelse return null };
         },
         .sampled_image => {
-            if (interface.descriptor_set != 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
-            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.binding == interface.binding.?) return null;
-            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
+            if (interface.descriptor_set == null or interface.descriptor_set.? > 1 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
+            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == interface.descriptor_set.? and prior.binding == interface.binding.?) return null;
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = @intCast(interface.descriptor_set.?), .sampler_required = true, .cube = profileImageUsesCube(fragment, @intCast(index)) };
             result.fragment_sampled_image_count += 1;
+        },
+        .image => {
+            if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampled_image_count == result.fragment_sampled_images.len) return null;
+            for (result.fragment_sampled_images[0..result.fragment_sampled_image_count]) |prior| if (prior.descriptor_set == 0 and prior.binding == interface.binding.?) return null;
+            result.fragment_sampled_images[result.fragment_sampled_image_count] = .{ .interface = @intCast(index), .binding = interface.binding.?, .descriptor_set = 0, .sampler_required = false, .cube = profileImageUsesCube(fragment, @intCast(index)) };
+            result.fragment_sampled_image_count += 1;
+        },
+        .sampler => {
+            if (interface.descriptor_set != 0 or interface.binding == null or interface.binding.? >= max_profile_sampled_bindings or interface.ty.scalar != .f32 or interface.ty.columns != 4 or interface.ty.rows != 1 or result.fragment_sampler_count == result.fragment_samplers.len) return null;
+            for (result.fragment_samplers[0..result.fragment_sampler_count]) |prior| if (prior.binding == interface.binding.?) return null;
+            result.fragment_samplers[result.fragment_sampler_count] = .{ .interface = @intCast(index), .binding = interface.binding.? };
+            result.fragment_sampler_count += 1;
         },
         .input_attachment => {
             // The profile intentionally supports only the one-set
@@ -15574,44 +17603,93 @@ fn profileGraphicsContract(vertex: *const render_ir.Program, fragment: *const re
             result.fragment_input_attachment_count += 1;
         },
         .output => {
-            if (fragment_outputs != 0 or interface.location == null or interface.location.? != 0 or (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1))) return null;
-            result.fragment_output = @intCast(index);
-            result.fragment_bool = interface.ty.scalar == .bool;
+            if (interface.location == null or interface.location.? >= fragment_output_locations.len or
+                (interface.ty.scalar != .bool and !(interface.ty.scalar == .f32 and interface.ty.columns == 4 and interface.ty.rows == 1)) or
+                (interface.ty.scalar == .bool and interface.location.? != 0)) return null;
+            const location: usize = @intCast(interface.location.?);
+            if (fragment_output_locations[location]) return null;
+            fragment_output_locations[location] = true;
+            // The current framebuffer bridge has one color attachment. Keep
+            // location zero as the materialized color and let the executor
+            // write higher, unattached locations to bounded scratch buffers.
+            if (location == 0) {
+                result.fragment_output = @intCast(index);
+                result.fragment_bool = interface.ty.scalar == .bool;
+            }
             fragment_outputs += 1;
         },
     };
-    if (fragment_outputs != 1) return null;
+    if (fragment_outputs == 0 or !fragment_output_locations[0]) return null;
     const bindings = if (vi.bindings) |items| items[0..vi.binding_count] else &.{};
     const attributes = if (vi.attributes) |items| items[0..vi.attribute_count] else &.{};
-    if (attributes.len != vertex_inputs) return null;
+    var expected_attribute_count: usize = 0;
+    for (0..vertex_inputs) |input_index| expected_attribute_count += if (vertex.interfaces[result.inputs[input_index].interface].ty.rows > 1) 4 else 1;
+    if (attributes.len != expected_attribute_count) return null;
     for (0..vertex_inputs) |input_index| {
-        var found = false;
-        for (attributes) |attribute| if (attribute.location == result.inputs[input_index].location) {
-            const source_byte_size: u8 = switch (attribute.format) {
-                37 => if (result.inputs[input_index].byte_size == 16) 4 else return null,
-                81 => if (vertex.interfaces[result.inputs[input_index].interface].ty.scalar == .u32 and result.inputs[input_index].byte_size == 8) 4 else return null,
-                100 => if (result.inputs[input_index].byte_size == 4) 4 else return null,
-                103 => if (result.inputs[input_index].byte_size == 8) 8 else return null,
-                106 => if (result.inputs[input_index].byte_size == 12) 12 else return null,
-                109 => if (result.inputs[input_index].byte_size == 16) 16 else return null,
-                else => return null,
+        const input = result.inputs[input_index];
+        const interface = vertex.interfaces[input.interface];
+        const column_count: u32 = if (interface.ty.rows > 1) 4 else 1;
+        var first_attribute: ?VertexInputAttributeDescription = null;
+        var matrix_rate: ?i32 = null;
+        for (0..column_count) |column| {
+            const location = input.location + @as(u32, @intCast(column));
+            var attribute_match: ?VertexInputAttributeDescription = null;
+            for (attributes) |attribute| if (attribute.location == location) {
+                if (attribute_match != null) return null;
+                attribute_match = attribute;
             };
-            if (found or attribute.binding >= 16 or attribute.offset > 2047) return null;
-            var binding_found = false;
-            for (bindings) |binding| if (binding.binding == attribute.binding) {
-                if (binding_found or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
-                result.inputs[input_index].binding = attribute.binding;
-                result.inputs[input_index].offset = attribute.offset;
-                result.inputs[input_index].stride = binding.stride;
-                result.inputs[input_index].source_byte_size = source_byte_size;
-                result.inputs[input_index].format = attribute.format;
-                result.inputs[input_index].input_rate = binding.input_rate;
-                binding_found = true;
-            };
-            if (!binding_found) return null;
-            found = true;
+            const attribute = attribute_match orelse return null;
+            if (attribute.binding >= 16 or attribute.offset > 2047) return null;
+            if (interface.ty.rows > 1) {
+                if (attribute.format != 109) return null;
+                var matched_binding = false;
+                for (bindings) |binding| if (binding.binding == attribute.binding) {
+                    if (matched_binding or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
+                    if (matrix_rate) |rate| {
+                        if (rate != binding.input_rate) return null;
+                    } else matrix_rate = binding.input_rate;
+                    result.inputs[input_index].matrix_bindings[column] = attribute.binding;
+                    result.inputs[input_index].matrix_offsets[column] = attribute.offset;
+                    result.inputs[input_index].matrix_strides[column] = binding.stride;
+                    matched_binding = true;
+                };
+                if (!matched_binding) return null;
+            } else if (first_attribute) |first| {
+                if (attribute.binding != first.binding or attribute.format != first.format or attribute.offset != first.offset) return null;
+            } else first_attribute = attribute;
+        }
+        if (interface.ty.rows > 1) {
+            result.inputs[input_index].matrix_columns = true;
+            result.inputs[input_index].source_byte_size = 64;
+            result.inputs[input_index].format = 109;
+            result.inputs[input_index].input_rate = matrix_rate orelse return null;
+            result.inputs[input_index].binding = result.inputs[input_index].matrix_bindings[0];
+            result.inputs[input_index].offset = result.inputs[input_index].matrix_offsets[0];
+            result.inputs[input_index].stride = result.inputs[input_index].matrix_strides[0];
+            continue;
+        }
+        const attribute = first_attribute orelse return null;
+        const source_byte_size: u8 = switch (attribute.format) {
+            37 => if (input.byte_size == 16) 4 else return null,
+            81 => if (interface.ty.scalar == .u32 and input.byte_size == 8) 4 else return null,
+            100 => if (input.byte_size == 4) 4 else return null,
+            103 => if (input.byte_size == 8) 8 else return null,
+            106 => if (input.byte_size == 12) 12 else return null,
+            109 => if (input.byte_size <= 16) 16 else return null,
+            else => return null,
         };
-        if (!found) return null;
+        var binding_found = false;
+        for (bindings) |binding| if (binding.binding == attribute.binding) {
+            if (binding_found or binding.input_rate < 0 or binding.input_rate > 1 or binding.stride > 2048) return null;
+            result.inputs[input_index].binding = attribute.binding;
+            result.inputs[input_index].offset = attribute.offset;
+            result.inputs[input_index].stride = binding.stride;
+            result.inputs[input_index].source_byte_size = source_byte_size;
+            result.inputs[input_index].format = attribute.format;
+            result.inputs[input_index].input_rate = binding.input_rate;
+            binding_found = true;
+        };
+        if (!binding_found) return null;
     }
     result.input_count = @intCast(vertex_inputs);
     return result;
@@ -15670,7 +17748,15 @@ fn cpuCubeShaderCompatible(shader: *const ShaderModuleObj, stage: render_ir.Stag
 }
 
 fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) void {
-    const path = std.c.getenv("ZPU_DUMP_REJECTED_SPIRV") orelse return;
+    const unique_dir = std.c.getenv("ZPU_DUMP_REJECTED_SPIRV_DIR");
+    var unique_path: [512]u8 = undefined;
+    const path: [*:0]const u8 = if (unique_dir) |dir| blk: {
+        const formatted = std.fmt.bufPrintZ(&unique_path, "{s}/{s}-{x}.spv", .{ std.mem.span(dir), @tagName(stage), shader.module.identity.digest }) catch {
+            std.debug.print("ZPU rejected SPIR-V dump path is too long\n", .{});
+            return;
+        };
+        break :blk formatted.ptr;
+    } else std.c.getenv("ZPU_DUMP_REJECTED_SPIRV") orelse return;
     const fd = open(path, 0x241, 0o600); // O_WRONLY | O_CREAT | O_TRUNC
     if (fd < 0) {
         std.debug.print("ZPU rejected SPIR-V dump open failed path={s}\n", .{std.mem.span(path)});
@@ -15688,6 +17774,7 @@ fn dumpRejectedSpirv(shader: *const ShaderModuleObj, stage: render_ir.Stage) voi
 }
 
 fn compileFrontendStage(stage_allocator: std.mem.Allocator, shader: *const ShaderModuleObj, stage: render_ir.Stage, name: []const u8, specs: []const spirv_frontend.Specialization) CanonicalError!?render_ir.Program {
+    spirv_frontend.setFailureDiagnosticsEnabled(failureDiagnosticsEnabled());
     if (cpuCubeShaderCompatible(shader, stage, name, specs.len)) return null;
     if (stage == .fragment and specs.len == 0 and std.mem.eql(u8, name, "main") and std.mem.eql(u8, &shader.module.identity.digest, &chromium_vp9_color_transform_raw_identity)) {
         return spirv_frontend.compile(stage_allocator, std.mem.bytesAsSlice(u32, &chromium_vp9_color_transform_inline_bytes), stage, name, specs) catch |err| switch (err) {
@@ -15944,7 +18031,7 @@ fn samplerCreatePNextState(raw: ?*const anyopaque) SamplerCreatePNextState {
 fn createSampler(device: ?Device, create_info: ?*const SamplerCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     const info = create_info orelse return .error_initialization_failed;
     const pnext = samplerCreatePNextState(info.p_next);
-    if (alloc != null or info.s_type != 31 or !pnext.valid or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.min_lod < 0 or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
+    if (alloc != null or info.s_type != 31 or !pnext.valid or info.flags != 0 or info.mag_filter < 0 or info.mag_filter > 1 or info.min_filter < 0 or info.min_filter > 1 or info.mipmap_mode < 0 or info.mipmap_mode > 1 or info.address_mode_u < 0 or info.address_mode_u > 4 or info.address_mode_v < 0 or info.address_mode_v > 4 or info.address_mode_w < 0 or info.address_mode_w > 4 or !std.math.isFinite(info.mip_lod_bias) or info.anisotropy_enable != 0 or !std.math.isFinite(info.max_anisotropy) or info.compare_enable != 0 or info.compare_op < 0 or info.compare_op > 7 or !std.math.isFinite(info.min_lod) or !std.math.isFinite(info.max_lod) or info.max_lod < info.min_lod or info.border_color < 0 or info.border_color > 5 or info.unnormalized_coordinates != 0) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (pnext.reduction_mode != 0) return .error_feature_not_present;
@@ -16226,18 +18313,22 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
     if (alloc != null or ci.s_type != 16 or ci.p_next != null or ci.flags != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module create rejected alloc={} s_type={} pnext={} flags=0x{x}\n", .{ alloc != null, ci.s_type, ci.p_next != null, ci.flags });
         hit(.shader_invalid);
         return .error_initialization_failed;
     }
-    const word_count = spirv.validateByteSize(ci.code_size) catch {
+    const word_count = spirv.validateByteSize(ci.code_size) catch |err| {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module byte size rejected size={} error={s}\n", .{ ci.code_size, @errorName(err) });
         hit(.shader_invalid);
         return .error_invalid_shader;
     };
     const raw = ci.p_code orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module rejected null code size={}\n", .{ci.code_size});
         hit(.shader_invalid);
         return .error_invalid_shader;
     };
     if (@intFromPtr(raw) % @alignOf(u32) != 0) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU shader module rejected unaligned code pointer=0x{x} size={}\n", .{ @intFromPtr(raw), ci.code_size });
         hit(.shader_invalid);
         return .error_invalid_shader;
     }
@@ -16256,7 +18347,10 @@ fn createShaderModule(device: ?Device, info: ?*const ShaderModuleCreateInfo, all
     };
     if (failTestAllocation()) return .error_out_of_host_memory;
     var module = spirv.Module.parse(allocator, source[0..word_count]) catch |err| {
-        if (err != error.OutOfMemory) hit(.shader_invalid);
+        if (err != error.OutOfMemory) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU SPIR-V module rejected words={} error={s} version=0x{x} bound={} schema={}\n", .{ word_count, @errorName(err), if (word_count > 1) source[1] else 0, if (word_count > 3) source[3] else 0, if (word_count > 4) source[4] else 0 });
+            hit(.shader_invalid);
+        }
         return if (err == error.OutOfMemory) .error_out_of_host_memory else .error_invalid_shader;
     };
     errdefer module.deinit(allocator);
@@ -16385,7 +18479,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     const ci = info orelse return imageViewInvalid("create-info");
     const out = output orelse return imageViewInvalid("output");
     const pnext = imageViewCreatePNextState(ci.p_next);
-    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 5) or !validComponentSwizzles(ci.components) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
+    if (ci.s_type != 15 or !pnext.valid or ci.flags != 0 or (ci.view_type != 1 and ci.view_type != 3 and ci.view_type != 5 and ci.view_type != 6) or !validComponentSwizzles(ci.components) or ci.subresource_range.level_count == 0 or ci.subresource_range.layer_count == 0) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=structure s_type={} pnext_valid={} flags=0x{x} view_type={} components={any} mip={} levels={} aspect=0x{x} base_layer={} layers={} usage_present={} usage=0x{x}\n",
             .{ ci.s_type, pnext.valid, ci.flags, ci.view_type, ci.components, ci.subresource_range.base_mip_level, ci.subresource_range.level_count, ci.subresource_range.aspect_mask, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, pnext.has_usage, pnext.usage },
@@ -16401,7 +18495,17 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
         if (conversion.owner != d or conversion.conversion.format != image.format) return imageViewInvalid("ycbcr-format");
         break :blk conversion.conversion;
     } else null;
-    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or (ci.subresource_range.aspect_mask != image_aspect_color_bit and ci.subresource_range.aspect_mask != 2) or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
+    const valid_view_aspect = if (isDepthStencilFormat(image.format)) validImageAspectMask(image, ci.subresource_range.aspect_mask) else ci.subresource_range.aspect_mask == image_aspect_color_bit or ci.subresource_range.aspect_mask == image_aspect_depth_bit;
+    const cube_view = ci.view_type == 3 or ci.view_type == 6;
+    const cube_view_valid = if (!cube_view)
+        true
+    else if (image.flags & 0x10 == 0 or image.width != image.height or ci.subresource_range.base_array_layer % 6 != 0)
+        false
+    else if (ci.view_type == 3)
+        ci.subresource_range.layer_count == 6
+    else
+        ci.subresource_range.layer_count >= 6 and ci.subresource_range.layer_count % 6 == 0;
+    if (!validDeviceLocked(d) or image.owner != d or ci.format != image.format or usage & ~image.usage != 0 or !valid_view_aspect or !cube_view_valid or (ycbcr420Nv12Format(image.format) and (ycbcr == null or ci.subresource_range.aspect_mask != image_aspect_color_bit)) or (!ycbcr420Nv12Format(image.format) and ycbcr != null) or ci.subresource_range.base_mip_level >= image.mip_levels or ci.subresource_range.level_count > image.mip_levels - ci.subresource_range.base_mip_level or ci.subresource_range.base_array_layer >= image.array_layers or ci.subresource_range.layer_count > image.array_layers - ci.subresource_range.base_array_layer) {
         if (failureDiagnosticsEnabled()) std.debug.print(
             "ZPU image view rejected reason=compat image={x} image_format={} view_format={} image_usage=0x{x} view_usage=0x{x} aspect=0x{x} layers={} base={} count={} owner={} device_valid={}\n",
             .{ ci.image, image.format, ci.format, image.usage, usage, ci.subresource_range.aspect_mask, image.array_layers, ci.subresource_range.base_array_layer, ci.subresource_range.layer_count, image.owner == d, validDeviceLocked(d) },
@@ -16410,7 +18514,7 @@ fn createImageView(device: ?Device, info: ?*const ImageViewCreateInfo, alloc: ?*
     }
     for (&image_view_objects, &image_view_state) |*object, *state| if (state.* != .live) {
         const handle = allocateGenericHandle();
-        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .ycbcr = ycbcr, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
+        object.* = .{ .handle = handle, .owner = d, .image = image, .format = ci.format, .usage = usage, .aspect_mask = ci.subresource_range.aspect_mask, .components = ci.components, .ycbcr = ycbcr, .view_type = ci.view_type, .base_mip_level = ci.subresource_range.base_mip_level, .level_count = ci.subresource_range.level_count, .base_array_layer = ci.subresource_range.base_array_layer, .layer_count = ci.subresource_range.layer_count };
         state.* = .live;
         out.* = handle;
         return .success;
@@ -16444,6 +18548,27 @@ fn sampledYcbcrCompatible(view: *const ImageViewObj, sampler: *const SamplerObj)
     if (ycbcr420Nv12Format(view.image.format)) return view.ycbcr != null and sampler.ycbcr != null and std.meta.eql(view.ycbcr.?, sampler.ycbcr.?);
     return view.ycbcr == null and sampler.ycbcr == null;
 }
+fn sampledImageLayoutValid(layout: i32, view: *const ImageViewObj) bool {
+    if (layout == 1 or layout == 5) return true;
+    return layout == 4 and view.aspect_mask & (image_aspect_depth_bit | image_aspect_stencil_bit) != 0 and isDepthStencilFormat(view.image.format);
+}
+test "sampled image descriptors accept depth-stencil read-only layout only for depth-stencil views" {
+    var color_image = ImageObj{ .owner = undefined, .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = 44, .usage = 0x4, .layout = 0 };
+    const color_view = ImageViewObj{ .handle = 0, .owner = undefined, .image = &color_image, .format = 44, .usage = 0x4, .aspect_mask = image_aspect_color_bit, .components = .{ 0, 0, 0, 0 }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(sampledImageLayoutValid(1, &color_view));
+    try std.testing.expect(sampledImageLayoutValid(5, &color_view));
+    try std.testing.expect(!sampledImageLayoutValid(4, &color_view));
+
+    var depth_image = color_image;
+    depth_image.format = 126;
+    const depth_view = ImageViewObj{ .handle = 0, .owner = undefined, .image = &depth_image, .format = 126, .usage = 0x4, .aspect_mask = image_aspect_depth_bit, .components = .{ 0, 0, 0, 0 }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(sampledImageLayoutValid(4, &depth_view));
+
+    var stencil_image = color_image;
+    stencil_image.format = format_s8_uint;
+    const stencil_view = ImageViewObj{ .handle = 0, .owner = undefined, .image = &stencil_image, .format = format_s8_uint, .usage = 0x4, .aspect_mask = image_aspect_stencil_bit, .components = .{ 0, 0, 0, 0 }, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(sampledImageLayoutValid(4, &stencil_view));
+}
 fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc: ?*const Alloc, output: ?*usize) callconv(.c) Result {
     if (alloc != null) return .error_initialization_failed;
     const d = device orelse return .error_initialization_failed;
@@ -16471,6 +18596,8 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     }
     var color: ?*ImageObj = null;
     var depth: ?*ImageObj = null;
+    var color_base_layer: u32 = 0;
+    var depth_base_layer: u32 = 0;
     var prior_view: ?*ImageViewObj = null;
     if (ci.attachments) |attachments| {
         for (attachments[0..ci.attachment_count], render_pass.framebuffer_attachments[0..ci.attachment_count], 0..) |handle, requirement, index| {
@@ -16478,7 +18605,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
                 if (failureDiagnosticsEnabled()) std.debug.print("ZPU framebuffer rejected stale view index={} view=0x{x}\n", .{ index, handle });
                 return .error_initialization_failed;
             };
-            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.base_array_layer != 0 or view.layer_count < ci.layers or view.image.array_layers < ci.layers) {
+            if (view.owner != d or view == prior_view or (prior_view != null and view.image == prior_view.?.image) or view.format != requirement.format or view.image.format != requirement.format or view.image.samples != requirement.samples or view.image.width < ci.width or view.image.height < ci.height or view.base_mip_level != 0 or view.level_count != 1 or view.layer_count < ci.layers) {
                 if (failureDiagnosticsEnabled()) std.debug.print(
                     "ZPU framebuffer rejected view index={} owner={} duplicate_view={} duplicate_image={} view_format={} required_format={} image_format={} samples={}/{} image={}x{} requested={}x{} mip={}+{} layer={}+{} image_layers={}\n",
                     .{ index, view.owner == d, view == prior_view, prior_view != null and view.image == prior_view.?.image, view.format, requirement.format, view.image.format, view.image.samples, requirement.samples, view.image.width, view.image.height, ci.width, ci.height, view.base_mip_level, view.level_count, view.base_array_layer, view.layer_count, view.image.array_layers },
@@ -16489,10 +18616,15 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
                 .color => {
                     if (view.aspect_mask != 1 or view.usage & 0x10 == 0 or (render_pass.color_feedback_input and view.usage & 0x80 == 0) or color != null) return .error_initialization_failed;
                     color = view.image;
+                    color_base_layer = view.base_array_layer;
                 },
                 .depth => {
-                    if (view.aspect_mask != 2 or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
+                    const depth_aspect_valid = view.aspect_mask == image_aspect_depth_bit or
+                        (isStencilFormat(view.format) and view.aspect_mask == image_aspect_stencil_bit) or
+                        (isStencilFormat(view.format) and view.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit));
+                    if (!depth_aspect_valid or view.usage & 0x20 == 0 or depth != null) return .error_initialization_failed;
                     depth = view.image;
+                    depth_base_layer = view.base_array_layer;
                 },
             }
             prior_view = view;
@@ -16515,7 +18647,7 @@ fn createFramebuffer(device: ?Device, info: ?*const FramebufferCreateInfo, alloc
     }
     var compatibility = render_pass.compatibility.clone() catch return .error_out_of_host_memory;
     for (&framebuffer_objects, &framebuffer_state) |*object, *state| if (state.* != .live) {
-        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
+        object.* = .{ .owner = d, .color_image = color, .depth_image = depth, .color_base_layer = color_base_layer, .depth_base_layer = depth_base_layer, .render_compatibility = compatibility, .width = ci.width, .height = ci.height, .layers = ci.layers };
         state.* = .live;
         out.* = @intFromPtr(object);
         return .success;
@@ -16774,13 +18906,18 @@ fn createDescriptorPool(device: ?Device, info: ?*const DescriptorPoolCreateInfo,
     const d = device orelse return .error_initialization_failed;
     const ci = info orelse return .error_initialization_failed;
     const out = output orelse return .error_initialization_failed;
-    if (ci.s_type != 33 or ci.p_next != null or ci.flags & ~@as(u32, 1) != 0 or ci.max_sets == 0 or ci.pool_size_count > descriptor_type_count or (ci.pool_size_count != 0 and ci.pool_sizes == null)) return .error_initialization_failed;
+    if (ci.s_type != 33 or ci.p_next != null or ci.flags & ~@as(u32, 1) != 0 or ci.max_sets == 0 or ci.pool_size_count > max_api_items or (ci.pool_size_count != 0 and ci.pool_sizes == null)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor pool rejected sType={d} pNext={} flags=0x{x} maxSets={d} poolSizes={d} sizesPtr={} alloc={}\n", .{ ci.s_type, ci.p_next != null, ci.flags, ci.max_sets, ci.pool_size_count, ci.pool_sizes != null, alloc != null });
+        return .error_initialization_failed;
+    }
     var capacity = [_]u32{0} ** descriptor_type_count;
     if (ci.pool_sizes) |sizes| for (sizes[0..ci.pool_size_count]) |size| {
-        if (size.descriptor_type < 0 or size.descriptor_type >= descriptor_type_count or size.descriptor_count == 0) return .error_initialization_failed;
+        if (size.descriptor_type < 0 or size.descriptor_type >= descriptor_type_count or size.descriptor_count == 0) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor pool size rejected type={d} count={d}\n", .{ size.descriptor_type, size.descriptor_count });
+            return .error_initialization_failed;
+        }
         const index: usize = @intCast(size.descriptor_type);
-        if (capacity[index] != 0) return .error_initialization_failed;
-        capacity[index] = size.descriptor_count;
+        capacity[index] = std.math.add(u32, capacity[index], size.descriptor_count) catch return .error_initialization_failed;
     };
     lock();
     defer mutex.unlock();
@@ -16903,26 +19040,48 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
     const d = device orelse return;
     lock();
     defer mutex.unlock();
-    if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) return;
+    if (!validDeviceLocked(d) or write_count > max_api_items or copy_count != 0 or copies != null) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor update rejected device={} writes={d} copies={d} copiesPointer={}\n", .{ validDeviceLocked(d), write_count, copy_count, copies != null });
+        return;
+    }
     if (write_count == 0) return;
     const list = writes orelse return;
-    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_binding: u8, writes_texture: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
+    const Update = struct { set: *DescriptorSetObj, uniform: ?*BufferObj, uniform_offset: u64, uniform_range: u64, uniform_dynamic: bool, uniform_binding: u8, storage: ?*BufferObj, storage_binding: u32, storage_offset: u64, storage_range: u64, writes_uniform: bool, writes_storage: bool, texture: ?*ImageObj, sampler: ?*SamplerObj, texture_components: [4]i32, texture_ycbcr: ?YcbcrConversion, texture_view_type: i32, texture_base_mip_level: u32, texture_level_count: u32, texture_base_array_layer: u32, texture_layer_count: u32, texture_binding: u8, writes_texture: bool, writes_sampler: bool, input_attachment: ?*ImageObj, input_components: [4]i32, input_binding: u8, writes_input_attachment: bool };
     var updates: [max_api_items]Update = undefined;
     for (list[0..write_count], 0..) |descriptor_write, index| {
-        if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) return;
-        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse return;
-        if (!set.owner.eql(d)) return;
-        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_binding = 0, .writes_texture = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
-        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding == 0 and set.binding_types[0] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
+        if (descriptor_write.s_type != 35 or descriptor_write.p_next != null or descriptor_write.dst_array_element != 0 or descriptor_write.descriptor_count != 1 or descriptor_write.texel_buffer_view != null) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor write rejected reason=metadata type={d} binding={d} sType={d} pNext={} arrayElement={d} count={d} texelViews={}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, descriptor_write.s_type, descriptor_write.p_next != null, descriptor_write.dst_array_element, descriptor_write.descriptor_count, descriptor_write.texel_buffer_view != null });
+            return;
+        }
+        const set = validDescriptorSetLocked(descriptor_write.dst_set) orelse {
+            if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=set binding={d} handle=0x{x}\n", .{ descriptor_write.dst_binding, descriptor_write.dst_set });
+            return;
+        };
+        if (!set.owner.eql(d)) {
+            if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=set_owner binding={d}\n", .{descriptor_write.dst_binding});
+            return;
+        }
+        var update = Update{ .set = set, .uniform = null, .uniform_offset = 0, .uniform_range = 0, .uniform_dynamic = false, .uniform_binding = 0, .storage = null, .storage_binding = 0, .storage_offset = 0, .storage_range = 0, .writes_uniform = false, .writes_storage = false, .texture = null, .sampler = null, .texture_components = .{ 0, 0, 0, 0 }, .texture_ycbcr = null, .texture_view_type = 1, .texture_base_mip_level = 0, .texture_level_count = 1, .texture_base_array_layer = 0, .texture_layer_count = 1, .texture_binding = 0, .writes_texture = false, .writes_sampler = false, .input_attachment = null, .input_components = .{ 0, 0, 0, 0 }, .input_binding = 0, .writes_input_attachment = false };
+        if ((descriptor_write.descriptor_type == 6 or descriptor_write.descriptor_type == 8) and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
-            const buffer = validBufferLocked(info.buffer) orelse return;
-            if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) return;
+            const buffer = validBufferLocked(info.buffer) orelse {
+                if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=buffer binding={d} handle=0x{x}\n", .{ descriptor_write.dst_binding, info.buffer });
+                return;
+            };
+            if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (descriptor_write.descriptor_type == 8 and info.offset % 256 != 0)) {
+                if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=buffer_state binding={d} owner={} usage=0x{x} memory={} memoryLive={} offset={d} size={d}\n", .{ descriptor_write.dst_binding, buffer.owner == d, buffer.usage, buffer.memory != null, buffer.memory != null and liveMemoryObject(buffer.memory.?), info.offset, buffer.size });
+                return;
+            }
             const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
-            if (range == 0 or range > buffer.size - info.offset) return;
+            if (range == 0 or range > buffer.size - info.offset) {
+                if (failureDiagnosticsEnabled() and descriptor_write.descriptor_type == 8) std.debug.print("ZPU dynamic descriptor write rejected reason=range binding={d} offset={d} requested={d} resolved={d} size={d}\n", .{ descriptor_write.dst_binding, info.offset, info.range, range, buffer.size });
+                return;
+            }
             update.uniform = buffer;
             update.uniform_offset = info.offset;
             update.uniform_range = range;
             update.uniform_dynamic = descriptor_write.descriptor_type == 8;
+            update.uniform_binding = @intCast(descriptor_write.dst_binding);
             update.writes_uniform = true;
         } else if (descriptor_write.descriptor_type == 7 and descriptor_write.dst_binding <= 1 and set.binding_types[descriptor_write.dst_binding] == 7 and descriptor_write.buffer_info != null and descriptor_write.image_info == null) {
             const info = descriptor_write.buffer_info.?[0];
@@ -16935,15 +19094,45 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.storage_offset = info.offset;
             update.storage_range = range;
             update.writes_storage = true;
-        } else if (descriptor_write.descriptor_type == 1 and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 1 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+        } else if (descriptor_write.descriptor_type == 0 and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 0 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
             const info = descriptor_write.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return;
-            const view = validImageViewLocked(info.image_view) orelse return;
-            if (sampler.owner != d or view.owner != d or view.usage & 0x4 == 0 or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
+            if (info.image_view != 0 or info.image_layout != 0 or sampler.owner != d) return;
+            update.sampler = sampler;
+            update.texture_binding = @intCast(descriptor_write.dst_binding);
+            update.writes_sampler = true;
+        } else if ((descriptor_write.descriptor_type == 1 or descriptor_write.descriptor_type == 2) and descriptor_write.dst_binding < update.set.sampled_images.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == descriptor_write.descriptor_type and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
+            const info = descriptor_write.image_info.?[0];
+            const view = validImageViewLocked(info.image_view) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=view type={d} binding={d} handle=0x{x}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, info.image_view });
+                return;
+            };
+            const sampler: ?*SamplerObj = if (descriptor_write.descriptor_type == 1) validSamplerLocked(info.sampler) orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=sampler binding={d} handle=0x{x}\n", .{ descriptor_write.dst_binding, info.sampler });
+                return;
+            } else null;
+            if (view.owner != d or view.usage & 0x4 == 0 or !sampledImageLayoutValid(info.image_layout, view)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=view_state type={d} binding={d} owner={} usage=0x{x} layout={d} viewType={d}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, view.owner == d, view.usage, info.image_layout, view.view_type });
+                return;
+            }
+            if (sampler) |value| {
+                if (value.owner != d or !sampledYcbcrCompatible(view, value)) {
+                    if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=sampler_compatibility binding={d} owner={} ycbcr={}\n", .{ descriptor_write.dst_binding, value.owner == d, sampledYcbcrCompatible(view, value) });
+                    return;
+                }
+            } else if (info.sampler != 0 or view.ycbcr != null) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU sampled descriptor write rejected reason=samplerless binding={d} sampler=0x{x} ycbcr={}\n", .{ descriptor_write.dst_binding, info.sampler, view.ycbcr != null });
+                return;
+            }
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_components = view.components;
             update.texture_ycbcr = view.ycbcr;
+            update.texture_view_type = view.view_type;
+            update.texture_base_mip_level = view.base_mip_level;
+            update.texture_level_count = view.level_count;
+            update.texture_base_array_layer = view.base_array_layer;
+            update.texture_layer_count = view.layer_count;
             update.texture_binding = @intCast(descriptor_write.dst_binding);
             update.writes_texture = true;
         } else if (descriptor_write.descriptor_type == 10 and descriptor_write.dst_binding < update.set.input_attachments.len and descriptor_write.dst_binding < set.binding_types.len and set.binding_types[descriptor_write.dst_binding] == 10 and descriptor_write.image_info != null and descriptor_write.buffer_info == null) {
@@ -16956,15 +19145,21 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.input_components = view.components;
             update.input_binding = @intCast(descriptor_write.dst_binding);
             update.writes_input_attachment = true;
-        } else return;
+        } else {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU descriptor write rejected reason=layout_binding type={d} binding={d} setBindingType={d} bufferInfo={} imageInfo={} descriptorCount={d}\n", .{ descriptor_write.descriptor_type, descriptor_write.dst_binding, if (descriptor_write.dst_binding < set.binding_types.len) set.binding_types[descriptor_write.dst_binding] else -1, descriptor_write.buffer_info != null, descriptor_write.image_info != null, descriptor_write.descriptor_count });
+            return;
+        }
         updates[index] = update;
     }
     for (updates[0..write_count]) |update| {
         if (update.writes_uniform) {
-            update.set.uniform = update.uniform;
-            update.set.uniform_offset = update.uniform_offset;
-            update.set.uniform_range = update.uniform_range;
-            update.set.uniform_dynamic = update.uniform_dynamic;
+            update.set.uniform_bindings[update.uniform_binding] = .{ .buffer = update.uniform, .offset = update.uniform_offset, .range = update.uniform_range, .dynamic = update.uniform_dynamic };
+            if (update.uniform_binding == 0) {
+                update.set.uniform = update.uniform;
+                update.set.uniform_offset = update.uniform_offset;
+                update.set.uniform_range = update.uniform_range;
+                update.set.uniform_dynamic = update.uniform_dynamic;
+            }
         }
         if (update.writes_storage) {
             update.set.storage = update.storage;
@@ -16973,10 +19168,11 @@ fn updateDescriptorSets(device: ?Device, write_count: u32, writes: ?[*]const Wri
             update.set.storage_range = update.storage_range;
         }
         if (update.writes_texture) {
-            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components, .ycbcr = update.texture_ycbcr };
+            update.set.sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = update.texture_components, .ycbcr = update.texture_ycbcr, .view_type = update.texture_view_type, .base_mip_level = update.texture_base_mip_level, .level_count = update.texture_level_count, .base_array_layer = update.texture_base_array_layer, .layer_count = update.texture_layer_count };
             update.set.texture = update.texture;
             update.set.sampler = update.sampler;
         }
+        if (update.writes_sampler) update.set.sampled_images[update.texture_binding] = .{ .sampler = update.sampler };
         if (update.writes_input_attachment) update.set.input_attachments[update.input_binding] = .{ .image = update.input_attachment, .components = update.input_components };
     }
 }
@@ -16996,7 +19192,7 @@ fn createDescriptorUpdateTemplate(device: ?Device, info: ?*const DescriptorUpdat
         pipeline_layout = validPipelineLayoutLocked(ci.pipeline_layout) orelse return .error_initialization_failed;
         if (!pipeline_layout.?.owner.eql(d) or !pipeline_layout.?.push_descriptor or !pipeline_layout.?.set0.eql(&layout.canonical)) return .error_initialization_failed;
     }
-    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1) or entry.stride == 0 or (entry.descriptor_type == 8 and (entry.dst_binding != 0 or layout.binding_types[0] != 8)) or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or layout.binding_types[entry.dst_binding] != 7)) or (entry.descriptor_type == 6 and entry.dst_binding == 0 and layout.binding_types[0] != 6) or (entry.descriptor_type == 1 and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 1))) return .error_initialization_failed;
+    if (ci.descriptor_update_entries) |entries| for (entries[0..ci.descriptor_update_entry_count]) |entry| if (entry.dst_array_element != 0 or entry.descriptor_count != 1 or (entry.descriptor_type != 0 and entry.descriptor_type != 6 and entry.descriptor_type != 7 and entry.descriptor_type != 8 and entry.descriptor_type != 1 and entry.descriptor_type != 2) or entry.stride == 0 or (entry.descriptor_type == 7 and (entry.dst_binding > 1 or entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != 7)) or ((entry.descriptor_type == 6 or entry.descriptor_type == 8 or entry.descriptor_type == 0) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type)) or ((entry.descriptor_type == 1 or entry.descriptor_type == 2) and (entry.dst_binding >= layout.binding_types.len or layout.binding_types[entry.dst_binding] != entry.descriptor_type))) return .error_initialization_failed;
     for (&descriptor_update_template_objects, &descriptor_update_template_state) |*object, *state| if (state.* != .live) {
         object.* = .{ .owner = DeviceIdentity.capture(d), .layout = layout, .template_type = ci.template_type, .pipeline_bind_point = ci.pipeline_bind_point, .pipeline_layout = if (pipeline_layout != null) ci.pipeline_layout else 0, .entry_count = ci.descriptor_update_entry_count, .entries = [_]DescriptorUpdateTemplateEntry{std.mem.zeroes(DescriptorUpdateTemplateEntry)} ** 32 };
         if (ci.descriptor_update_entries) |entries| @memcpy(object.entries[0..ci.descriptor_update_entry_count], entries[0..ci.descriptor_update_entry_count]);
@@ -17023,6 +19219,7 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
     if (!validDeviceLocked(d) or !set.owner.eql(d) or !template.owner.eql(d) or !template.layout.owner.eql(d) or template.template_type != 0 or !set.layout.eql(&template.layout.canonical)) return;
     if (template.entry_count != 0 and data == null) return;
     const Update = struct {
+        uniform_bindings: [max_profile_sampled_bindings]DescriptorUniformBinding,
         uniform: ?*BufferObj,
         uniform_offset: u64,
         uniform_range: u64,
@@ -17035,21 +19232,25 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
         sampler: ?*SamplerObj,
         texture_binding: u8,
     };
-    var update = Update{ .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture, .sampler = set.sampler, .texture_binding = 0 };
+    var update = Update{ .uniform_bindings = set.uniform_bindings, .uniform = set.uniform, .uniform_offset = set.uniform_offset, .uniform_range = set.uniform_range, .uniform_dynamic = set.uniform_dynamic, .storage = set.storage, .storage_binding = set.storage_binding, .storage_offset = set.storage_offset, .storage_range = set.storage_range, .texture = set.texture, .sampler = set.sampler, .texture_binding = 0 };
     var sampled_images = set.sampled_images;
     const source: [*]const u8 = @ptrCast(data orelse return);
     for (template.entries[0..template.entry_count]) |entry| {
         const item: [*]const u8 = source + entry.offset;
-        if (entry.descriptor_type == 6 or entry.descriptor_type == 8) {
+        if ((entry.descriptor_type == 6 or entry.descriptor_type == 8) and entry.dst_binding < update.uniform_bindings.len and set.binding_types[entry.dst_binding] == entry.descriptor_type) {
             const descriptor: *const DescriptorBufferInfo = @ptrCast(@alignCast(item));
             const buffer = validBufferLocked(descriptor.buffer) orelse return;
             if (buffer.owner != d or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or descriptor.offset > buffer.size or (entry.descriptor_type == 8 and descriptor.offset % 256 != 0)) return;
             const range = if (descriptor.range == std.math.maxInt(u64)) buffer.size - descriptor.offset else descriptor.range;
             if (range == 0 or range > buffer.size - descriptor.offset) return;
-            update.uniform = buffer;
-            update.uniform_offset = descriptor.offset;
-            update.uniform_range = range;
-            update.uniform_dynamic = entry.descriptor_type == 8;
+            const dynamic = entry.descriptor_type == 8;
+            update.uniform_bindings[entry.dst_binding] = .{ .buffer = buffer, .offset = descriptor.offset, .range = range, .dynamic = dynamic };
+            if (entry.dst_binding == 0) {
+                update.uniform = buffer;
+                update.uniform_offset = descriptor.offset;
+                update.uniform_range = range;
+                update.uniform_dynamic = dynamic;
+            }
         } else if (entry.descriptor_type == 7) {
             const descriptor: *const DescriptorBufferInfo = @ptrCast(@alignCast(item));
             const buffer = validBufferLocked(descriptor.buffer) orelse return;
@@ -17060,17 +19261,27 @@ fn updateDescriptorSetWithTemplate(device: ?Device, set_handle: usize, template_
             update.storage_binding = entry.dst_binding;
             update.storage_offset = descriptor.offset;
             update.storage_range = range;
-        } else {
+        } else if (entry.descriptor_type == 0 and entry.dst_binding < sampled_images.len and set.binding_types[entry.dst_binding] == 0) {
             const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
             const sampler = validSamplerLocked(descriptor.sampler) orelse return;
+            if (descriptor.image_view != 0 or descriptor.image_layout != 0 or sampler.owner != d) return;
+            sampled_images[entry.dst_binding] = .{ .sampler = sampler };
+        } else {
+            const descriptor: *const DescriptorImageInfo = @ptrCast(@alignCast(item));
+            if (entry.descriptor_type != 1 and entry.descriptor_type != 2) return;
             const view = validImageViewLocked(descriptor.image_view) orelse return;
-            if (entry.dst_binding >= sampled_images.len or sampler.owner != d or view.owner != d or descriptor.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return;
+            const sampler: ?*SamplerObj = if (entry.descriptor_type == 1) validSamplerLocked(descriptor.sampler) orelse return else null;
+            if (entry.dst_binding >= sampled_images.len or view.owner != d or view.usage & 0x4 == 0 or !sampledImageLayoutValid(descriptor.image_layout, view)) return;
+            if (sampler) |value| {
+                if (value.owner != d or !sampledYcbcrCompatible(view, value)) return;
+            } else if (descriptor.sampler != 0 or view.ycbcr != null) return;
             update.texture = view.image;
             update.sampler = sampler;
             update.texture_binding = @intCast(entry.dst_binding);
-            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr };
+            sampled_images[update.texture_binding] = .{ .image = update.texture, .sampler = update.sampler, .components = view.components, .ycbcr = view.ycbcr, .view_type = view.view_type, .base_mip_level = view.base_mip_level, .level_count = view.level_count, .base_array_layer = view.base_array_layer, .layer_count = view.layer_count };
         }
     }
+    set.uniform_bindings = update.uniform_bindings;
     set.uniform = update.uniform;
     set.uniform_offset = update.uniform_offset;
     set.uniform_range = update.uniform_range;
@@ -17118,13 +19329,15 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const area_end_y = std.math.add(u64, area_y, begin.render_area.extent.height) catch std.math.maxInt(u64);
     var color = [4]f32{ 0, 0, 0, 0 };
     var depth_value: f32 = 1;
+    var stencil_value: u32 = 0;
     const clear_color = color_image != null and render_pass.color_load_op == 1;
-    const clear_depth = depth != null and render_pass.depth_load_op == 1;
+    const clear_depth = if (depth) |depth_image| isDepthFormat(depth_image.format) and render_pass.depth_load_op == 1 else false;
+    const clear_stencil = if (depth) |depth_image| isStencilFormat(depth_image.format) and render_pass.stencil_load_op == 1 else false;
     const depth_clear_index: usize = if (color_image != null) 1 else 0;
     var clear_values_valid = begin.clear_value_count <= render_pass.framebuffer_attachment_count and
         (begin.clear_value_count == 0 or begin.clear_values != null) and
         (!clear_color or begin.clear_value_count >= 1) and
-        (!clear_depth or begin.clear_value_count > depth_clear_index);
+        (!(clear_depth or clear_stencil) or begin.clear_value_count > depth_clear_index);
     if (clear_values_valid and begin.clear_value_count != 0) {
         if (clear_color) {
             color = begin.clear_values.?[0].color.float32;
@@ -17132,9 +19345,11 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
                 if (!std.math.isFinite(component)) clear_values_valid = false;
             }
         }
-        if (clear_depth) {
-            depth_value = begin.clear_values.?[depth_clear_index].depth_stencil.depth;
-            if (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1) clear_values_valid = false;
+        if (clear_depth or clear_stencil) {
+            const depth_stencil = begin.clear_values.?[depth_clear_index].depth_stencil;
+            depth_value = depth_stencil.depth;
+            stencil_value = depth_stencil.stencil;
+            if (clear_depth and (!std.math.isFinite(depth_value) or depth_value < 0 or depth_value > 1)) clear_values_valid = false;
         }
     }
     // UNDEFINED is an explicit discard request: the tracked previous layout
@@ -17149,13 +19364,13 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     const first_color_layout = render_pass.subpass_color_layouts[0];
     const first_depth_layout = render_pass.subpass_depth_layouts[0];
     const layout_count: usize = @as(usize, @intFromBool(color_image != null)) + @as(usize, @intFromBool(depth != null));
-    const clear_count: usize = @as(usize, if (clear_color or clear_depth) 1 else 0);
+    const clear_count: usize = @as(usize, if (clear_color or clear_depth or clear_stencil) 1 else 0);
     // DONT_CARE (and the promoted LOAD_OP_NONE) invalidate attachment
     // contents at the start of the render pass. Record an explicit discard
     // after any initial-layout transition so the undefined-content contract
     // is visible to submission prevalidation and the CPU image metadata.
     const color_discard = color_image != null and (render_pass.color_load_op == attachment_load_op_dont_care or render_pass.color_load_op == attachment_load_op_none);
-    const depth_discard = depth != null and (render_pass.depth_load_op == attachment_load_op_dont_care or render_pass.depth_load_op == attachment_load_op_none);
+    const depth_discard = if (depth) |depth_image| (isDepthFormat(depth_image.format) and (render_pass.depth_load_op == attachment_load_op_dont_care or render_pass.depth_load_op == attachment_load_op_none)) or (isStencilFormat(depth_image.format) and (render_pass.stencil_load_op == attachment_load_op_dont_care or render_pass.stencil_load_op == attachment_load_op_none)) else false;
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
     const layout_capacity = @as(usize, command_buffer.impl.count) + layout_count + clear_count + discard_count;
     if ((contents != 0 and contents != 1) or begin.s_type != 43 or !renderPassBeginPNextValid(begin.p_next) or command_buffer.impl.level != 0 or command_buffer.impl.state != 1 or command_buffer.impl.active_framebuffer != null or layout_capacity > command_buffer.impl.commands.len or !clear_values_valid or !render_pass.owner.eql(command_buffer.impl.owner) or framebuffer.owner != command_buffer.impl.owner or (image != null and image.?.owner != command_buffer.impl.owner) or !framebuffer.render_compatibility.eql(&render_pass.compatibility) or (color_image != null and render_pass.color_initial_layout != 0 and tracked_color_layout != render_pass.color_initial_layout) or (depth != null and render_pass.depth_initial_layout != 0 and tracked_depth_layout != render_pass.depth_initial_layout) or begin.render_area.extent.width == 0 or begin.render_area.extent.height == 0 or area_end_x > render_width or area_end_y > render_height) {
@@ -17177,15 +19392,29 @@ fn cmdBeginRenderPass(cb: ?CommandBuffer, info: ?*const RenderPassBeginInfo, con
     if (depth) |depth_image| if (depth_old_layout != first_depth_layout) record(command_buffer, .{ .transition = .{ .image = depth_image, .old_layout = depth_old_layout, .new_layout = first_depth_layout } });
     if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color_image.?, .layer_count = framebuffer.layers } });
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .layer_count = framebuffer.layers } });
-    if (clear_color or clear_depth) {
+    if (clear_color or clear_depth or clear_stencil) {
         if (color_image) |color_target| {
             var clear_bytes = [4]u8{ 0, 0, 0, 0 };
+            var half_color: ?[4]u16 = null;
+            var float_color: ?[4]f32 = null;
             if (clear_color) {
-                for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
-                if (color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
+                if (halfFloatColorFormat(color_target.format)) {
+                    half_color = halfColorFromComponents(color) orelse {
+                        command_buffer.impl.invalid = true;
+                        return;
+                    };
+                } else if (floatColorFormat(color_target.format)) {
+                    float_color = floatColorFromComponents(color) orelse {
+                        command_buffer.impl.invalid = true;
+                        return;
+                    };
+                } else {
+                    for (color, 0..) |component, index| clear_bytes[index] = @intFromFloat(std.math.clamp(component, 0, 1) * 255);
+                    if (color_target.format == 43 or color_target.format == 44) std.mem.swap(u8, &clear_bytes[0], &clear_bytes[2]);
+                }
             }
-            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .depth_value = depth_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth } });
-        } else if (depth) |depth_image| if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .layer_count = framebuffer.layers } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_target, .depth = depth, .color = clear_bytes, .half_color = half_color, .float_color = float_color, .depth_value = depth_value, .stencil_value = stencil_value, .expected_color_layout = first_color_layout, .expected_depth_layout = if (depth != null) first_depth_layout else -1, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
+        } else if (depth) |depth_image| if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = first_depth_layout, .depth = depth_value, .stencil = stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .layer_count = framebuffer.layers } });
     }
 }
 fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.c) void {
@@ -17236,19 +19465,43 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
             return;
         };
         tracked_depth_layout = commandBufferImageLayout(command_buffer, depth_view_object.image);
-        if (depth_view_object.owner != command_buffer.impl.owner or depth_view_object.aspect_mask != 2 or depth_view_object.usage & 0x20 == 0 or !isDepthFormat(depth_view_object.image.format) or tracked_depth_layout != depth_attachment.image_layout or depth_view_object.base_array_layer >= depth_view_object.image.array_layers or depth_view_object.layer_count < ci.layer_count or ci.layer_count > depth_view_object.image.array_layers - depth_view_object.base_array_layer or (color != null and (depth_view_object.image.width != color.?.width or depth_view_object.image.height != color.?.height))) {
+        if (depth_view_object.owner != command_buffer.impl.owner or (depth_view_object.aspect_mask != image_aspect_depth_bit and depth_view_object.aspect_mask != (image_aspect_depth_bit | image_aspect_stencil_bit)) or depth_view_object.usage & 0x20 == 0 or !isDepthFormat(depth_view_object.image.format) or tracked_depth_layout != depth_attachment.image_layout or depth_view_object.base_array_layer >= depth_view_object.image.array_layers or depth_view_object.layer_count < ci.layer_count or ci.layer_count > depth_view_object.image.array_layers - depth_view_object.base_array_layer or (color != null and (depth_view_object.image.width != color.?.width or depth_view_object.image.height != color.?.height))) {
             command_buffer.impl.invalid = true;
             return;
         }
         depth = depth_view_object.image;
         depth_view = depth_view_object;
     }
-    if (ci.stencil_attachment != null) {
-        command_buffer.impl.invalid = true;
-        return;
+    var stencil_attachment: ?*const RenderingAttachmentInfo = null;
+    var stencil_view: ?*ImageViewObj = null;
+    var tracked_stencil_layout: i32 = -1;
+    if (ci.stencil_attachment) |attachment| {
+        if (attachment.s_type != 1000044000 or attachment.p_next != null or attachment.resolve_mode != 0 or attachment.resolve_image_view != 0 or !validAttachmentLoadOp(attachment.load_op) or !validAttachmentStoreOp(attachment.store_op) or !supportedLayout(attachment.image_layout) or !renderingAttachmentLayoutValid(attachment.image_layout, image_aspect_stencil_bit)) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        const stencil_view_object = validImageViewLocked(attachment.image_view) orelse {
+            command_buffer.impl.invalid = true;
+            return;
+        };
+        tracked_stencil_layout = commandBufferImageLayout(command_buffer, stencil_view_object.image);
+        const stencil_aspect_valid = stencil_view_object.aspect_mask == image_aspect_stencil_bit or stencil_view_object.aspect_mask == (image_aspect_depth_bit | image_aspect_stencil_bit);
+        if (stencil_view_object.owner != command_buffer.impl.owner or !stencil_aspect_valid or stencil_view_object.usage & 0x20 == 0 or !isStencilFormat(stencil_view_object.image.format) or (depth != null and stencil_view_object.image != depth.?) or tracked_stencil_layout != attachment.image_layout or (ci.depth_attachment != null and attachment.image_layout != ci.depth_attachment.?.image_layout) or (depth_view != null and stencil_view_object.base_array_layer != depth_view.?.base_array_layer) or stencil_view_object.layer_count < ci.layer_count or ci.layer_count > stencil_view_object.image.array_layers - stencil_view_object.base_array_layer or (color != null and (stencil_view_object.image.width != color.?.width or stencil_view_object.image.height != color.?.height))) {
+            command_buffer.impl.invalid = true;
+            return;
+        }
+        if (depth == null) {
+            depth = stencil_view_object.image;
+            depth_view = stencil_view_object;
+            tracked_depth_layout = tracked_stencil_layout;
+        }
+        stencil_attachment = attachment;
+        stencil_view = stencil_view_object;
     }
     var clear_color = false;
     var clear_color_value = [4]u8{ 0, 0, 0, 0 };
+    var clear_color_half: ?[4]u16 = null;
+    var clear_color_float: ?[4]f32 = null;
     if (color_attachment) |attachment| {
         if (attachment.load_op == 1) {
             const clear_components = attachment.clear_value.color.float32;
@@ -17257,21 +19510,41 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
                 return;
             }
             clear_color = true;
-            clear_color_value = .{ @intFromFloat(std.math.clamp(clear_components[2], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[1], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[0], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[3], 0, 1) * 255) };
+            if (halfFloatColorFormat(color.?.format)) {
+                clear_color_half = halfColorFromComponents(clear_components) orelse {
+                    command_buffer.impl.invalid = true;
+                    return;
+                };
+            } else if (floatColorFormat(color.?.format)) {
+                clear_color_float = floatColorFromComponents(clear_components) orelse {
+                    command_buffer.impl.invalid = true;
+                    return;
+                };
+            } else {
+                clear_color_value = .{ @intFromFloat(std.math.clamp(clear_components[2], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[1], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[0], 0, 1) * 255), @intFromFloat(std.math.clamp(clear_components[3], 0, 1) * 255) };
+            }
         }
     }
     var clear_depth = false;
     var clear_depth_value: f32 = 1;
-    if (depth) |depth_image| {
-        _ = depth_image;
-        const depth_attachment = ci.depth_attachment.?;
-        if (depth_attachment.load_op == 1) {
-            clear_depth_value = depth_attachment.clear_value.depth_stencil.depth;
-            if (!std.math.isFinite(clear_depth_value) or clear_depth_value < 0 or clear_depth_value > 1) {
-                command_buffer.impl.invalid = true;
-                return;
+    if (depth != null) {
+        if (ci.depth_attachment) |depth_attachment| {
+            if (depth_attachment.load_op == 1) {
+                clear_depth_value = depth_attachment.clear_value.depth_stencil.depth;
+                if (!std.math.isFinite(clear_depth_value) or clear_depth_value < 0 or clear_depth_value > 1) {
+                    command_buffer.impl.invalid = true;
+                    return;
+                }
+                clear_depth = true;
             }
-            clear_depth = true;
+        }
+    }
+    var clear_stencil = false;
+    var clear_stencil_value: u32 = 0;
+    if (stencil_attachment) |attachment| {
+        if (attachment.load_op == 1) {
+            clear_stencil_value = attachment.clear_value.depth_stencil.stencil;
+            clear_stencil = true;
         }
     }
     // DONT_CARE and LOAD_OP_NONE make attachment contents undefined at the
@@ -17279,9 +19552,9 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     // ordered before any load-op clear, while retaining the view's layer
     // range for arrayed attachments.
     const color_discard = color_attachment != null and (color_attachment.?.load_op == attachment_load_op_dont_care or color_attachment.?.load_op == attachment_load_op_none);
-    const depth_discard = depth != null and (ci.depth_attachment.?.load_op == attachment_load_op_dont_care or ci.depth_attachment.?.load_op == attachment_load_op_none);
+    const depth_discard = depth != null and ((if (ci.depth_attachment) |attachment| attachment.load_op == attachment_load_op_dont_care or attachment.load_op == attachment_load_op_none else false) or (if (stencil_attachment) |attachment| attachment.load_op == attachment_load_op_dont_care or attachment.load_op == attachment_load_op_none else false));
     const discard_count: usize = @as(usize, @intFromBool(color_discard)) + @as(usize, @intFromBool(depth_discard));
-    const clear_count: usize = @as(usize, @intFromBool(clear_color or clear_depth));
+    const clear_count: usize = @as(usize, @intFromBool(clear_color or clear_depth or clear_stencil));
     if (@as(usize, command_buffer.impl.count) + discard_count + clear_count > command_buffer.impl.commands.len) {
         command_buffer.impl.invalid = true;
         return;
@@ -17298,11 +19571,11 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     }
     if (color_discard) record(command_buffer, .{ .discard_image = .{ .image = color.?, .base_layer = color_view.?.base_array_layer, .layer_count = ci.layer_count } });
     if (depth_discard) record(command_buffer, .{ .discard_image = .{ .image = depth.?, .base_layer = depth_view.?.base_array_layer, .layer_count = ci.layer_count } });
-    if (clear_color or clear_depth) {
+    if (clear_color or clear_depth or clear_stencil) {
         if (color) |color_image| {
-            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .depth_value = clear_depth_value, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth } });
+            record(command_buffer, .{ .render_clear = .{ .image = color_image, .depth = depth, .color = clear_color_value, .half_color = clear_color_half, .float_color = clear_color_float, .depth_value = clear_depth_value, .stencil_value = clear_stencil_value, .color_base_layer = if (color_view) |view| view.base_array_layer else 0, .depth_base_layer = if (depth_view) |view| view.base_array_layer else 0, .layer_count = ci.layer_count, .expected_color_layout = tracked_color_layout, .expected_depth_layout = tracked_depth_layout, .clear_color = clear_color, .clear_depth = clear_depth, .clear_stencil = clear_stencil } });
         } else if (depth) |depth_image| {
-            if (clear_depth) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .layer_count = ci.layer_count } });
+            if (clear_depth or clear_stencil) record(command_buffer, .{ .clear_depth = .{ .image = depth_image, .layout = tracked_depth_layout, .depth = clear_depth_value, .stencil = clear_stencil_value, .aspect_mask = (if (clear_depth) image_aspect_depth_bit else 0) | (if (clear_stencil) image_aspect_stencil_bit else 0), .base_layer = if (depth_view) |view| view.base_array_layer else 0, .layer_count = ci.layer_count } });
         }
     }
     command_buffer.impl.dynamic_rendering = true;
@@ -17310,13 +19583,14 @@ fn cmdBeginRendering(cb: ?CommandBuffer, info: ?*const RenderingInfo) callconv(.
     command_buffer.impl.render_contents = if (ci.flags & rendering_contents_secondary_bit != 0) 1 else 0;
     command_buffer.impl.dynamic_color_image = color;
     command_buffer.impl.dynamic_depth_image = depth;
+    command_buffer.impl.inherited_dynamic_stencil_format = if (stencil_view) |view| view.format else 0;
     command_buffer.impl.dynamic_color_base_layer = if (color_view) |view| view.base_array_layer else 0;
     command_buffer.impl.dynamic_depth_base_layer = if (depth_view) |view| view.base_array_layer else 0;
     command_buffer.impl.dynamic_layer_count = ci.layer_count;
     command_buffer.impl.dynamic_color_store_none = if (color_attachment) |attachment| attachment.store_op == attachment_store_op_none else false;
-    command_buffer.impl.dynamic_depth_store_none = if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_none else false;
+    command_buffer.impl.dynamic_depth_store_none = (if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_none else false) or (if (stencil_attachment) |attachment| attachment.store_op == attachment_store_op_none else false);
     command_buffer.impl.dynamic_color_store_discard = if (color_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false;
-    command_buffer.impl.dynamic_depth_store_discard = if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false;
+    command_buffer.impl.dynamic_depth_store_discard = (if (ci.depth_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false) or (if (stencil_attachment) |attachment| attachment.store_op == attachment_store_op_dont_care or attachment.store_op == attachment_store_op_none else false);
     // VK_KHR_dynamic_rendering_local_read state is scoped to the active
     // rendering instance; a later begin starts with the attachment identity
     // mappings reset rather than inheriting stale locations or input indices.
@@ -17354,6 +19628,7 @@ fn cmdEndRendering(cb: ?CommandBuffer) callconv(.c) void {
     command_buffer.impl.dynamic_depth_store_none = false;
     command_buffer.impl.dynamic_color_store_discard = false;
     command_buffer.impl.dynamic_depth_store_discard = false;
+    command_buffer.impl.inherited_dynamic_stencil_format = 0;
     command_buffer.impl.rendering_location_count = 0;
     command_buffer.impl.rendering_input_count = 0;
     command_buffer.impl.rendering_depth_input_index = null;
@@ -17428,14 +19703,17 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
         .{ command_buffer.impl.invalid, command_buffer.impl.count, bind_point, first_set, count, dynamic_count },
     );
     if ((bind_point != 0 and bind_point != 1) or count == 0 or count > 2 or first_set > 1 or count > 2 - first_set or sets == null or command_buffer.impl.state != 1 or command_buffer.impl.invalid) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=arguments bindPoint={d} firstSet={d} count={d} state={d} invalid={} sets={}\n", .{ bind_point, first_set, count, command_buffer.impl.state, command_buffer.impl.invalid, sets != null });
         command_buffer.impl.invalid = true;
         return;
     }
     const layout_object = validPipelineLayoutLocked(layout) orelse {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=invalid_layout handle=0x{x}\n", .{layout});
         command_buffer.impl.invalid = true;
         return;
     };
     if (!layout_object.owner.eql(command_buffer.impl.owner) or first_set + count > layout_object.set_count) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=layout_scope owner={} firstSet={d} count={d} layoutSets={d}\n", .{ layout_object.owner.eql(command_buffer.impl.owner), first_set, count, layout_object.set_count });
         command_buffer.impl.invalid = true;
         return;
     }
@@ -17444,37 +19722,77 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     for (0..count) |index| {
         const set_index = first_set + @as(u32, @intCast(index));
         const descriptor = validDescriptorSetLocked(sets.?[index]) orelse {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=invalid_descriptor setIndex={d} handle=0x{x}\n", .{ index, sets.?[index] });
             command_buffer.impl.invalid = true;
             return;
         };
         const expected_layout = if (set_index == 0) &layout_object.set0 else &layout_object.set1;
-        if (!descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(expected_layout) or (set_index != 0 and descriptor.uniform_dynamic)) {
+        if (!descriptor.owner.eql(command_buffer.impl.owner) or !descriptor.layout.eql(expected_layout)) {
+            if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=descriptor_layout setIndex={d} owner={} descriptorDigest=0x{x} expectedDigest=0x{x} descriptorBytes={d} expectedBytes={d}\n", .{ set_index, descriptor.owner.eql(command_buffer.impl.owner), descriptor.layout.digest, expected_layout.digest, descriptor.layout.bytes.len, expected_layout.bytes.len });
             command_buffer.impl.invalid = true;
             return;
         }
         descriptors[index] = descriptor;
-        if (descriptor.uniform_dynamic) expected_dynamic_count += 1;
+        for (descriptor.binding_types) |descriptor_type| {
+            if (descriptor_type == 8) {
+                if (set_index != 0 or expected_dynamic_count == max_profile_sampled_bindings) {
+                    command_buffer.impl.invalid = true;
+                    return;
+                }
+                expected_dynamic_count += 1;
+            }
+        }
     }
-    if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null) or (dynamic_count == 0 and offsets != null)) {
+    if (dynamic_count != expected_dynamic_count or (dynamic_count != 0 and offsets == null)) {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_count actual={d} expected={d} offsets={}\n", .{ dynamic_count, expected_dynamic_count, offsets != null });
         command_buffer.impl.invalid = true;
         return;
     }
-    var dynamic_offset: u64 = 0;
-    if (expected_dynamic_count != 0) {
-        const descriptor = descriptors[0];
-        dynamic_offset = offsets.?[0];
-        const buffer = descriptor.uniform orelse {
-            command_buffer.impl.invalid = true;
-            return;
-        };
-        if (dynamic_offset % 256 != 0 or descriptor.uniform_offset > std.math.maxInt(u64) - dynamic_offset) {
-            command_buffer.impl.invalid = true;
-            return;
-        }
-        const effective_offset = descriptor.uniform_offset + dynamic_offset;
-        if (effective_offset > buffer.size or descriptor.uniform_range == 0 or descriptor.uniform_range > buffer.size - effective_offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) {
-            command_buffer.impl.invalid = true;
-            return;
+    var dynamic_offsets = command_buffer.impl.dynamic_uniform_offsets;
+    if (first_set == 0) dynamic_offsets = [_]u64{0} ** max_profile_sampled_bindings;
+    var dynamic_index: usize = 0;
+    for (descriptors[0..count], first_set..) |descriptor, set_index| {
+        for (descriptor.binding_types, 0..) |descriptor_type, binding| {
+            if (descriptor_type != 8) continue;
+            if (set_index != 0 or dynamic_index >= expected_dynamic_count) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_binding_position setIndex={d} dynamicIndex={d} expected={d}\n", .{ set_index, dynamic_index, expected_dynamic_count });
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            const dynamic_offset: u64 = offsets.?[dynamic_index];
+            const uniform = descriptorUniformBinding(descriptor, @intCast(binding)) orelse {
+                // ANGLE may bind a layout that includes dynamic uniform slots
+                // unused by the current pipeline without initializing those
+                // descriptors. The slot still consumes a dynamic offset; a
+                // draw that actually reads it is rejected later when its
+                // shader resource is resolved.
+                if (set_index == 0 and descriptor.binding_types[binding] == 8 and dynamic_offset % 256 == 0) {
+                    dynamic_offsets[binding] = dynamic_offset;
+                    dynamic_index += 1;
+                    continue;
+                }
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_binding setIndex={d} binding={d} dynamicOffset={d}\n", .{ set_index, binding, dynamic_offset });
+                command_buffer.impl.invalid = true;
+                return;
+            };
+            const buffer = uniform.buffer orelse {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_buffer setIndex={d} binding={d}\n", .{ set_index, binding });
+                command_buffer.impl.invalid = true;
+                return;
+            };
+            if (!uniform.dynamic or !liveBufferObject(buffer) or buffer.owner != command_buffer.impl.owner or dynamic_offset % 256 != 0 or uniform.offset > std.math.maxInt(u64) - dynamic_offset) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_offset binding={d} dynamic={} live={} owner={} offset={d} base={d}\n", .{ binding, uniform.dynamic, liveBufferObject(buffer), buffer.owner == command_buffer.impl.owner, dynamic_offset, uniform.offset });
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            const effective_offset = uniform.offset + dynamic_offset;
+            if (effective_offset > buffer.size or uniform.range == 0 or uniform.range > buffer.size - effective_offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) {
+                if (failureDiagnosticsEnabled()) std.debug.print("ZPU bind descriptor sets rejected reason=dynamic_uniform_range binding={d} effective={d} range={d} bufferSize={d} memory={}\n", .{ binding, effective_offset, uniform.range, buffer.size, buffer.memory != null and liveMemoryObject(buffer.memory.?) });
+                command_buffer.impl.invalid = true;
+                return;
+            }
+            dynamic_offsets[binding] = dynamic_offset;
+            dynamic_index += 1;
         }
     }
     for (descriptors[0..count], first_set..) |descriptor, set_index| {
@@ -17484,10 +19802,13 @@ fn cmdBindDescriptorSets(cb: ?CommandBuffer, bind_point: i32, layout: usize, fir
     command_buffer.impl.bound_descriptor_stage_flags = if (bind_point == 1) 0x20 else 0x1f;
     command_buffer.impl.bound_layout = layout_object;
     command_buffer.impl.bound_layout_handle = layout;
-    command_buffer.impl.dynamic_uniform_offset = dynamic_offset;
-    command_buffer.impl.push_descriptor_active = false;
-    command_buffer.impl.push_descriptor_bind_point = 0;
-    command_buffer.impl.push_descriptor_stage_flags = 0;
+    command_buffer.impl.dynamic_uniform_offsets = dynamic_offsets;
+    command_buffer.impl.dynamic_uniform_offset = dynamic_offsets[0];
+    if (first_set == 0) {
+        command_buffer.impl.push_descriptor_active = false;
+        command_buffer.impl.push_descriptor_bind_point = 0;
+        command_buffer.impl.push_descriptor_stage_flags = 0;
+    }
 }
 fn cmdBindDescriptorSets2(cb: ?CommandBuffer, info: ?*const BindDescriptorSetsInfo) callconv(.c) void {
     const ci = info orelse {
@@ -17757,11 +20078,19 @@ fn cmdSetStencilOp(cb: ?CommandBuffer, face_mask: u32, fail_op: i32, pass_op: i3
         c.impl.invalid = true;
         return;
     }
-    c.impl.dynamic.stencil_fail_op = fail_op;
-    c.impl.dynamic.stencil_pass_op = pass_op;
-    c.impl.dynamic.stencil_depth_fail_op = depth_fail_op;
-    c.impl.dynamic.stencil_compare_op = compare_op;
-    c.impl.dynamic.stencil_op_set = true;
+    if (face_mask & 1 != 0) {
+        c.impl.dynamic.stencil_fail_op[0] = fail_op;
+        c.impl.dynamic.stencil_pass_op[0] = pass_op;
+        c.impl.dynamic.stencil_depth_fail_op[0] = depth_fail_op;
+        c.impl.dynamic.stencil_compare_op[0] = compare_op;
+    }
+    if (face_mask & 2 != 0) {
+        c.impl.dynamic.stencil_fail_op[1] = fail_op;
+        c.impl.dynamic.stencil_pass_op[1] = pass_op;
+        c.impl.dynamic.stencil_depth_fail_op[1] = depth_fail_op;
+        c.impl.dynamic.stencil_compare_op[1] = compare_op;
+    }
+    c.impl.dynamic.stencil_op_set |= @intCast(face_mask);
 }
 fn cmdSetLineWidth(cb: ?CommandBuffer, line_width: f32) callconv(.c) void {
     lock();
@@ -17901,17 +20230,21 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
     candidate.synthetic = true;
     if (writes) |items| for (items[0..count]) |item| {
         if (item.s_type != 35 or item.p_next != null or item.dst_array_element != 0 or item.descriptor_count != 1 or item.texel_buffer_view != null) return false;
-        if ((item.descriptor_type == 6 or item.descriptor_type == 8) and item.dst_binding == 0 and candidate.binding_types[0] == item.descriptor_type and item.buffer_info != null and item.image_info == null) {
+        if ((item.descriptor_type == 6 or item.descriptor_type == 8) and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == item.descriptor_type and (item.descriptor_type != 8 or item.dst_binding == 0) and item.buffer_info != null and item.image_info == null) {
             if (candidate.counts[6] == 0) return false;
             const info = item.buffer_info.?[0];
             const buffer = validBufferLocked(info.buffer) orelse return false;
             if (buffer.owner != command_buffer.impl.owner or buffer.usage & 0x10 == 0 or buffer.memory == null or !liveMemoryObject(buffer.memory.?) or info.offset > buffer.size or (item.descriptor_type == 8 and info.offset % 256 != 0)) return false;
             const range = if (info.range == std.math.maxInt(u64)) buffer.size - info.offset else info.range;
             if (range == 0 or range > buffer.size - info.offset) return false;
-            candidate.uniform = buffer;
-            candidate.uniform_offset = info.offset;
-            candidate.uniform_range = range;
-            candidate.uniform_dynamic = item.descriptor_type == 8;
+            const dynamic = item.descriptor_type == 8;
+            candidate.uniform_bindings[item.dst_binding] = .{ .buffer = buffer, .offset = info.offset, .range = range, .dynamic = dynamic };
+            if (item.dst_binding == 0) {
+                candidate.uniform = buffer;
+                candidate.uniform_offset = info.offset;
+                candidate.uniform_range = range;
+                candidate.uniform_dynamic = dynamic;
+            }
         } else if (item.descriptor_type == 7 and item.dst_binding <= 1 and candidate.binding_types[item.dst_binding] == 7 and item.buffer_info != null and item.image_info == null) {
             if (candidate.counts[7] == 0) return false;
             const info = item.buffer_info.?[0];
@@ -17923,15 +20256,24 @@ fn applyPushDescriptorWritesLocked(command_buffer: *CommandBufferObj, layout: *P
             candidate.storage_binding = item.dst_binding;
             candidate.storage_offset = info.offset;
             candidate.storage_range = range;
-        } else if (item.descriptor_type == 1 and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == 1 and item.image_info != null and item.buffer_info == null) {
-            if (candidate.counts[1] == 0) return false;
+        } else if (item.descriptor_type == 0 and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == 0 and item.image_info != null and item.buffer_info == null) {
+            if (candidate.counts[0] == 0) return false;
             const info = item.image_info.?[0];
             const sampler = validSamplerLocked(info.sampler) orelse return false;
+            if (info.image_view != 0 or info.image_layout != 0 or sampler.owner != command_buffer.impl.owner) return false;
+            candidate.sampled_images[item.dst_binding] = .{ .sampler = sampler };
+        } else if ((item.descriptor_type == 1 or item.descriptor_type == 2) and item.dst_binding < candidate.sampled_images.len and item.dst_binding < candidate.binding_types.len and candidate.binding_types[item.dst_binding] == item.descriptor_type and item.image_info != null and item.buffer_info == null) {
+            if (candidate.counts[@intCast(item.descriptor_type)] == 0) return false;
+            const info = item.image_info.?[0];
             const view = validImageViewLocked(info.image_view) orelse return false;
-            if (sampler.owner != command_buffer.impl.owner or view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or info.image_layout != 5 or !sampledYcbcrCompatible(view, sampler)) return false;
+            const sampler: ?*SamplerObj = if (item.descriptor_type == 1) validSamplerLocked(info.sampler) orelse return false else null;
+            if (view.owner != command_buffer.impl.owner or view.usage & 0x4 == 0 or view.image.owner != command_buffer.impl.owner or !liveImageObject(view.image) or !sampledImageLayoutValid(info.image_layout, view)) return false;
+            if (sampler) |value| {
+                if (value.owner != command_buffer.impl.owner or !sampledYcbcrCompatible(view, value)) return false;
+            } else if (info.sampler != 0 or view.ycbcr != null) return false;
             candidate.texture = view.image;
             candidate.sampler = sampler;
-            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components, .ycbcr = view.ycbcr };
+            candidate.sampled_images[item.dst_binding] = .{ .image = view.image, .sampler = sampler, .components = view.components, .ycbcr = view.ycbcr, .view_type = view.view_type, .base_mip_level = view.base_mip_level, .level_count = view.level_count, .base_array_layer = view.base_array_layer, .layer_count = view.layer_count };
         } else return false;
     };
     command_buffer.impl.push_descriptor = candidate;
@@ -18047,7 +20389,26 @@ fn cmdPushDescriptorSetWithTemplate2(cb: ?CommandBuffer, info: ?*const PushDescr
     };
     cmdPushDescriptorSetWithTemplateLocked(command_buffer, ci.descriptor_update_template, template.pipeline_bind_point, ci.layout, ci.set, ci.data);
 }
-const DrawRasterState = struct { viewport: Viewport, scissor: cpu_cube.Rect, cull_mode: u32, front_face: i32, primitive_topology: i32, primitive_restart_enable: u32, rasterizer_discard_enable: u32, depth_test_enable: u32, depth_write_enable: u32, depth_compare_op: i32, depth_bounds_test_enable: u32, depth_bounds: [2]f32, depth_bias_enable: u32, depth_bias: [3]f32, blend_constants: [4]f32, line_stipple_factor: u32, line_stipple_pattern: u16 };
+const DrawRasterState = struct {
+    viewport: Viewport,
+    scissor: cpu_cube.Rect,
+    cull_mode: u32,
+    front_face: i32,
+    primitive_topology: i32,
+    primitive_restart_enable: u32,
+    rasterizer_discard_enable: u32,
+    depth_test_enable: u32,
+    depth_write_enable: u32,
+    depth_compare_op: i32,
+    depth_bounds_test_enable: u32,
+    depth_bounds: [2]f32,
+    stencil: StencilRasterState,
+    depth_bias_enable: u32,
+    depth_bias: [3]f32,
+    blend_constants: [4]f32,
+    line_stipple_factor: u32,
+    line_stipple_pattern: u16,
+};
 fn graphicsDrawExecutionAllowed(abi: ExecutionAbi) bool {
     return switch (abi) {
         .cpu_cube_v1, .profile_v1_scalar_graphics => true,
@@ -18061,13 +20422,13 @@ fn dynamicPipelineRenderingCompatible(command_buffer: *const CommandBufferImpl, 
     if (!pipeline.dynamic_rendering) return true;
     const color_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_color_format else if (command_buffer.dynamic_color_image) |color| color.format else 0;
     if (color_format != pipeline.rendering_color_format) return false;
-    const depth_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_depth_format else if (command_buffer.dynamic_depth_image) |depth| depth.format else 0;
+    const depth_format = if (command_buffer.dynamic_inheritance) command_buffer.inherited_dynamic_depth_format else if (command_buffer.dynamic_depth_image) |depth| if (isDepthFormat(depth.format)) depth.format else 0 else 0;
     if (pipeline.rendering_depth_format == 0) {
         if (depth_format != 0) return false;
     } else {
         if (depth_format != pipeline.rendering_depth_format) return false;
     }
-    return pipeline.rendering_stencil_format == 0;
+    return command_buffer.inherited_dynamic_stencil_format == pipeline.rendering_stencil_format;
 }
 fn pipelineUsesBlendConstants(pipeline: *const GraphicsPipelineObj) bool {
     if (pipeline.color_blend_enable == 0) return false;
@@ -18085,9 +20446,12 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     if (pipeline.dynamic_viewport and !command_buffer.impl.viewport_set) missing |= 1 << 0;
     if (pipeline.dynamic_scissor and !command_buffer.impl.scissor_set) missing |= 1 << 1;
     if (pipeline.dynamic_vertex_input_binding_stride and pipeline.vertex_input_binding_mask & command_buffer.impl.vertex_bindings.stride_set != pipeline.vertex_input_binding_mask) missing |= 1 << 2;
-    if (pipeline.dynamic_line_width and !command_buffer.impl.line_width_set) missing |= 1 << 3;
+    // The admitted graphics profile uses triangle topologies, where line
+    // width has no raster effect. Chromium can include it in a shared
+    // dynamic-state set without issuing vkCmdSetLineWidth for triangle draws.
     if (pipeline.dynamic_line_stipple and !command_buffer.impl.line_stipple_set) missing |= 1 << 4;
-    if (pipeline.dynamic_depth_bias and !command_buffer.impl.depth_bias_set) missing |= 1 << 5;
+    const effective_depth_bias_enable = if (pipeline.dynamic_depth_bias_enable) command_buffer.impl.dynamic.depth_bias_enable else pipeline.depth_bias_enable;
+    if (pipeline.dynamic_depth_bias and effective_depth_bias_enable != 0 and !command_buffer.impl.depth_bias_set) missing |= 1 << 5;
     if (pipeline.dynamic_blend_constants and pipelineUsesBlendConstants(pipeline) and !command_buffer.impl.blend_constants_set) missing |= 1 << 6;
     if (pipeline.dynamic_stencil_compare_mask and command_buffer.impl.stencil_compare_mask_set != 3) missing |= 1 << 7;
     if (pipeline.dynamic_stencil_write_mask and command_buffer.impl.stencil_write_mask_set != 3) missing |= 1 << 8;
@@ -18100,10 +20464,11 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
     if (pipeline.dynamic_depth_test_enable and !command_buffer.impl.dynamic.depth_test_enable_set) missing |= 1 << 15;
     if (pipeline.dynamic_depth_write_enable and !command_buffer.impl.dynamic.depth_write_enable_set) missing |= 1 << 16;
     if (pipeline.dynamic_depth_compare_op and !command_buffer.impl.dynamic.depth_compare_op_set) missing |= 1 << 17;
-    if (pipeline.dynamic_depth_bounds and !command_buffer.impl.depth_bounds_set) missing |= 1 << 18;
+    const effective_depth_bounds_test_enable = if (pipeline.dynamic_depth_bounds_test_enable) command_buffer.impl.dynamic.depth_bounds_test_enable else pipeline.depth_bounds_test_enable;
+    if (pipeline.dynamic_depth_bounds and effective_depth_bounds_test_enable != 0 and !command_buffer.impl.depth_bounds_set) missing |= 1 << 18;
     if (pipeline.dynamic_depth_bounds_test_enable and !command_buffer.impl.dynamic.depth_bounds_test_enable_set) missing |= 1 << 19;
     if (pipeline.dynamic_stencil_test_enable and !command_buffer.impl.dynamic.stencil_test_enable_set) missing |= 1 << 20;
-    if (pipeline.dynamic_stencil_op and !command_buffer.impl.dynamic.stencil_op_set) missing |= 1 << 21;
+    if (pipeline.dynamic_stencil_op and command_buffer.impl.dynamic.stencil_op_set != 3) missing |= 1 << 21;
     if (pipeline.dynamic_depth_bias_enable and !command_buffer.impl.dynamic.depth_bias_enable_set) missing |= 1 << 22;
     if (missing != 0) {
         if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster state rejected missing=0x{x}\n", .{missing});
@@ -18124,9 +20489,25 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
         pipeline.execution_abi == .profile_v1_scalar_graphics,
         primitive_topology,
     );
-    if (!topology_supported or (primitive_restart_enable != 0 and primitive_topology != 3) or stencil_test_enable != 0) {
-        if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster mode rejected topology={d} supported={} restart={d} stencil={d}\n", .{ primitive_topology, topology_supported, primitive_restart_enable, stencil_test_enable });
+    if (!topology_supported or (primitive_restart_enable != 0 and primitive_topology != 3) or
+        (stencil_test_enable != 0 and (pipeline.execution_abi != .profile_v1_scalar_graphics or pipeline.rendering_stencil_format == 0)))
+    {
+        if (failureDiagnosticsEnabled()) std.debug.print("ZPU draw raster mode rejected topology={d} supported={} restart={d} stencil={d} stencilFormat={d} abi={s}\n", .{ primitive_topology, topology_supported, primitive_restart_enable, stencil_test_enable, pipeline.rendering_stencil_format, @tagName(pipeline.execution_abi) });
         return null;
+    }
+    var stencil = StencilRasterState{ .test_enable = stencil_test_enable, .front = pipeline.stencil_front, .back = pipeline.stencil_back };
+    for (0..2) |face_index| {
+        var face = if (face_index == 0) pipeline.stencil_front else pipeline.stencil_back;
+        if (pipeline.dynamic_stencil_op) {
+            face.fail_op = command_buffer.impl.dynamic.stencil_fail_op[face_index];
+            face.pass_op = command_buffer.impl.dynamic.stencil_pass_op[face_index];
+            face.depth_fail_op = command_buffer.impl.dynamic.stencil_depth_fail_op[face_index];
+            face.compare_op = command_buffer.impl.dynamic.stencil_compare_op[face_index];
+        }
+        if (pipeline.dynamic_stencil_compare_mask) face.compare_mask = command_buffer.impl.stencil_compare_mask[face_index];
+        if (pipeline.dynamic_stencil_write_mask) face.write_mask = command_buffer.impl.stencil_write_mask[face_index];
+        if (pipeline.dynamic_stencil_reference) face.reference = command_buffer.impl.stencil_reference[face_index];
+        if (face_index == 0) stencil.front = face else stencil.back = face;
     }
     return .{
         .viewport = if (pipeline.dynamic_viewport) command_buffer.impl.viewport else pipeline.viewport,
@@ -18141,6 +20522,7 @@ fn drawRasterState(command_buffer: *CommandBufferObj, pipeline: *const GraphicsP
         .depth_compare_op = depth_compare_op,
         .depth_bounds_test_enable = depth_bounds_test_enable,
         .depth_bounds = depth_bounds,
+        .stencil = stencil,
         .depth_bias_enable = depth_bias_enable,
         .depth_bias = depth_bias,
         .blend_constants = if (pipeline.dynamic_blend_constants) command_buffer.impl.blend_constants else pipeline.blend_constants,
@@ -18166,6 +20548,9 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.depth_compare_op = 3;
     pipeline.depth_bounds_test_enable = 1;
     pipeline.depth_bounds = .{ 0, 1 };
+    pipeline.stencil_front = .{ .compare_mask = 0x3c, .write_mask = 0x30, .reference = 0x0c };
+    pipeline.stencil_back = .{ .compare_mask = 0x5a, .write_mask = 0xa5, .reference = 0x03 };
+    pipeline.rendering_stencil_format = 0;
     pipeline.color_blend_enable = 0;
     pipeline.src_color_blend_factor = 1;
     pipeline.dst_color_blend_factor = 0;
@@ -18213,6 +20598,13 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     impl.dynamic.depth_test_enable_set = false;
     impl.dynamic.depth_write_enable_set = false;
     impl.dynamic.depth_compare_op_set = false;
+    impl.dynamic.stencil_fail_op = .{ 1, 2 };
+    impl.dynamic.stencil_pass_op = .{ 3, 4 };
+    impl.dynamic.stencil_depth_fail_op = .{ 5, 6 };
+    impl.dynamic.stencil_compare_op = .{ 2, 5 };
+    impl.stencil_compare_mask = .{ 0x12, 0x34 };
+    impl.stencil_write_mask = .{ 0x56, 0x78 };
+    impl.stencil_reference = .{ 0x9a, 0xbc };
     var command_buffer = CommandBufferObj{ .loader_data = 0, .impl = &impl };
 
     try std.testing.expect(validViewportDomain(baked_viewport));
@@ -18346,8 +20738,15 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     pipeline.dynamic_stencil_test_enable = false;
     pipeline.dynamic_stencil_op = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
-    impl.dynamic.stencil_op_set = true;
+    impl.dynamic.stencil_op_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(i32, 1), resolved.stencil.front.fail_op);
+    try std.testing.expectEqual(@as(i32, 4), resolved.stencil.back.pass_op);
+    try std.testing.expectEqual(@as(i32, 6), resolved.stencil.back.depth_fail_op);
+    try std.testing.expectEqual(@as(i32, 5), resolved.stencil.back.compare_op);
+    try std.testing.expectEqual(@as(u32, 0x3c), resolved.stencil.front.compare_mask);
+    try std.testing.expectEqual(@as(u32, 0xa5), resolved.stencil.back.write_mask);
+    try std.testing.expectEqual(@as(u32, 0x03), resolved.stencil.back.reference);
     pipeline.dynamic_stencil_op = false;
     pipeline.dynamic_depth_bias_enable = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
@@ -18368,7 +20767,7 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expectEqual(@as(u16, 1), impl.vertex_bindings.stride_set);
     pipeline.dynamic_vertex_input_binding_stride = false;
     pipeline.dynamic_line_width = true;
-    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
+    try std.testing.expect(drawRasterState(&command_buffer, &pipeline) != null);
     impl.line_width_set = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
     pipeline.dynamic_line_width = false;
@@ -18382,9 +20781,11 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expectEqual(@as(u16, 0x55aa), resolved.line_stipple_pattern);
     pipeline.dynamic_line_stipple = false;
     pipeline.dynamic_depth_bias = true;
+    pipeline.depth_bias_enable = 1;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.depth_bias_set = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    pipeline.depth_bias_enable = 0;
     pipeline.dynamic_depth_bias = false;
     pipeline.dynamic_blend_constants = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) != null);
@@ -18400,16 +20801,22 @@ test "draw raster state selects baked and dynamic viewport scissor without alloc
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_compare_mask_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 0x12), resolved.stencil.front.compare_mask);
+    try std.testing.expectEqual(@as(u32, 0x34), resolved.stencil.back.compare_mask);
     pipeline.dynamic_stencil_compare_mask = false;
     pipeline.dynamic_stencil_write_mask = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_write_mask_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 0x56), resolved.stencil.front.write_mask);
+    try std.testing.expectEqual(@as(u32, 0x78), resolved.stencil.back.write_mask);
     pipeline.dynamic_stencil_write_mask = false;
     pipeline.dynamic_stencil_reference = true;
     try std.testing.expect(drawRasterState(&command_buffer, &pipeline) == null);
     impl.stencil_reference_set = 3;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
+    try std.testing.expectEqual(@as(u32, 0x9a), resolved.stencil.front.reference);
+    try std.testing.expectEqual(@as(u32, 0xbc), resolved.stencil.back.reference);
     pipeline.dynamic_stencil_reference = false;
     pipeline.dynamic_line_stipple = true;
     resolved = drawRasterState(&command_buffer, &pipeline).?;
@@ -18468,7 +20875,7 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     defer vertex_executor.deinit();
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
-    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
     pipeline.color_write_mask = 0xf;
@@ -18681,6 +21088,33 @@ test "scalar graphics profile executes vertex input triangle allocation free" {
     bounded_command.cube_draw.depth_bounds = .{ 0.49, 0.51 };
     executeValidatedCommand(bounded_command, &context);
     try std.testing.expect(std.mem.readInt(u32, color_bytes[0..4], .little) != 0 or std.mem.readInt(u32, color_bytes[4..8], .little) != 0);
+
+    // Exercise stencil on the actual scalar triangle raster path. A NEVER
+    // comparison leaves both attachments untouched; ALWAYS then replaces the
+    // low nibble while preserving the high stencil bits and depth test/write.
+    var stencil_bytes: [64]u8 align(64) = [_]u8{0} ** 64;
+    for (0..16) |pixel| std.mem.writeInt(u32, stencil_bytes[pixel * 4 ..][0..4], 0xffff_ffaa, .little);
+    var stencil_memory = MemoryObj{ .owner = undefined, .bytes = stencil_bytes[0..], .mapped = true };
+    var stencil_image = ImageObj{ .owner = undefined, .width = 4, .height = 4, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x2, .layout = 1, .memory = &stencil_memory };
+    var stencil_command = command;
+    stencil_command.cube_draw.depth_image = &stencil_image;
+    stencil_command.cube_draw.stencil = .{ .test_enable = 1, .front = .{ .compare_op = 0, .write_mask = 0xff, .reference = 0x05 }, .back = .{ .compare_op = 0, .write_mask = 0xff, .reference = 0x05 } };
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(stencil_command, &context);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, color_bytes[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 0xffff_ffaa), std.mem.readInt(u32, stencil_bytes[0..4], .little));
+    stencil_command.cube_draw.stencil.front = .{ .pass_op = 2, .compare_op = 7, .compare_mask = 0xff, .write_mask = 0x0f, .reference = 0x05 };
+    stencil_command.cube_draw.stencil.back = stencil_command.cube_draw.stencil.front;
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(stencil_command, &context);
+    var saw_stencil_pixel = false;
+    for (0..16) |pixel| {
+        const color_pixel = std.mem.readInt(u32, color_bytes[pixel * 4 ..][0..4], .little);
+        const depth_stencil_pixel = std.mem.readInt(u32, stencil_bytes[pixel * 4 ..][0..4], .little);
+        if (color_pixel != 0 and depth_stencil_pixel & 0xff == 0xa5) saw_stencil_pixel = true;
+    }
+    try std.testing.expect(saw_stencil_pixel);
+
     var index_bytes: [6]u8 align(64) = .{ 0, 0, 1, 0, 2, 0 };
     var index_memory = MemoryObj{ .owner = undefined, .bytes = index_bytes[0..], .mapped = true };
     var index_buffer = BufferObj{ .owner = undefined, .size = index_bytes.len, .usage = 0x40, .memory = &index_memory };
@@ -18793,6 +21227,90 @@ test "scalar graphics profile contract is explicit and allocation free" {
     for (0..4096) |_| try std.testing.expect(profileGraphicsContract(&vertex, &fragment, &vi) != null);
 }
 
+test "scalar graphics profile routes unattached fragment outputs through bounded scratch" {
+    var vertex = try spirv_frontend.compile(std.testing.allocator, &spirv_frontend.rich_vertex, .vertex, "main", &.{});
+    defer vertex.deinit(std.testing.allocator);
+    var fragment = try spirv_frontend.compile(std.testing.allocator, &spirv_frontend.bool_fragment, .fragment, "main", &.{});
+    defer fragment.deinit(std.testing.allocator);
+    const binding = VertexInputBindingDescription{ .binding = 0, .stride = 16, .input_rate = 0 };
+    const attribute = VertexInputAttributeDescription{ .location = 0, .binding = 0, .format = 109, .offset = 0 };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
+    const extra_count = 2;
+    const interfaces = try std.testing.allocator.alloc(render_ir.Interface, fragment.interfaces.len + extra_count);
+    defer std.testing.allocator.free(interfaces);
+    @memcpy(interfaces[0..fragment.interfaces.len], fragment.interfaces);
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    interfaces[fragment.interfaces.len] = .{ .storage = .output, .ty = vec4, .location = 1 };
+    interfaces[fragment.interfaces.len + 1] = .{ .storage = .output, .ty = vec4, .location = 7 };
+    var multi_output_fragment = fragment;
+    multi_output_fragment.interfaces = interfaces;
+    const contract = profileGraphicsContract(&vertex, &multi_output_fragment, &vi).?;
+    try std.testing.expect(contract.fragment_bool);
+    var primary_output: ?u32 = null;
+    for (fragment.interfaces, 0..) |interface, index| if (interface.storage == .output and interface.location == 0) {
+        primary_output = @intCast(index);
+    };
+    try std.testing.expectEqual(primary_output.?, contract.fragment_output);
+
+    interfaces[fragment.interfaces.len + 1].location = 8;
+    try std.testing.expect(profileGraphicsContract(&vertex, &multi_output_fragment, &vi) == null);
+    interfaces[fragment.interfaces.len + 1].location = 1;
+    try std.testing.expect(profileGraphicsContract(&vertex, &multi_output_fragment, &vi) == null);
+}
+
+test "scalar graphics profile feeds VertexIndex to an attribute-free vertex shader" {
+    const vertex_bytes align(4) = @embedFile("fixtures/threejs_vertex_index.spv").*;
+    var vertex = try spirv_frontend.compile(std.testing.allocator, std.mem.bytesAsSlice(u32, &vertex_bytes), .vertex, "main", &.{});
+    defer vertex.deinit(std.testing.allocator);
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const fragment_interfaces = [_]render_ir.Interface{.{ .storage = .output, .ty = vec4, .location = 0 }};
+    const color_literal = [_]u8{ 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63 };
+    const color_output_operands = [_]u32{ 0, 0 };
+    const fragment_instructions = [_]render_ir.Instruction{
+        .{ .op = .constant, .ty = vec4, .operands = &.{}, .literal = &color_literal },
+        .{ .op = .output, .ty = vec4, .operands = &color_output_operands, .literal = &.{} },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = @constCast(&fragment_instructions), .bytes = &.{}, .identity = identity };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null, .attribute_count = 0, .attributes = null };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 0), contract.input_count);
+    try std.testing.expect(contract.vertex_index_interface != null);
+
+    var vertex_executor = try render_ir_exec.Executor.init(std.testing.allocator, &vertex);
+    defer vertex_executor.deinit();
+    var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment);
+    defer fragment_executor.deinit();
+    var profile = ProfileGraphics{
+        .vertex = vertex_executor,
+        .fragment = fragment_executor,
+        .vertex_index_interface = contract.vertex_index_interface,
+        .vertex_output = contract.vertex_output - 1,
+        .vertex_outputs = contract.vertex_outputs,
+        .vertex_output_count = contract.vertex_output_count,
+        .vertex_position_slot = contract.vertex_position_slot,
+        .varyings = contract.varyings,
+        .varying_count = contract.varying_count,
+        .fragment_output = contract.fragment_output,
+        .fragment_bool = contract.fragment_bool,
+    };
+    const draw = .{
+        .indexed = @as(?IndexedDrawState, null),
+        .base_vertex = @as(u32, 0),
+        .instance_index = @as(u32, 0),
+        .vertex_bindings = VertexBindingState{},
+        .pipeline = .{ .dynamic_vertex_input_binding_stride = false },
+        .viewport = Viewport{ .x = 0, .y = 0, .width = 4, .height = 4, .min_depth = 0, .max_depth = 1 },
+    };
+    const expected = [_][2]f32{ .{ 0, 0 }, .{ 8, 0 }, .{ 0, 8 } };
+    for (expected, 0..) |screen, vertex_index| {
+        const evaluated = profileEvaluateVertex(draw, &profile, @intCast(vertex_index), &.{}) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(screen[0], evaluated.screen.x);
+        try std.testing.expectEqual(screen[1], evaluated.screen.y);
+    }
+}
+
 test "scalar graphics profile admits bounded sampled bindings and aliases" {
     const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
     const vertex_interfaces = [_]render_ir.Interface{
@@ -18806,6 +21324,8 @@ test "scalar graphics profile admits bounded sampled bindings and aliases" {
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 1 },
         .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 2 },
+        .{ .storage = .image, .ty = vec4, .descriptor_set = 0, .binding = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 0, .binding = 1 },
         .{ .storage = .output, .ty = vec4, .location = 0 },
     };
     const name = [_]u8{ 'm', 'a', 'i', 'n' };
@@ -18817,8 +21337,12 @@ test "scalar graphics profile admits bounded sampled bindings and aliases" {
     const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding), .attribute_count = 1, .attributes = @ptrCast(&attribute) };
     const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
     try std.testing.expectEqual(@as(u8, 2), contract.varying_count);
-    try std.testing.expectEqual(@as(u8, 3), contract.fragment_sampled_image_count);
+    try std.testing.expectEqual(@as(u8, 5), contract.fragment_sampled_image_count);
     try std.testing.expectEqual(@as(u32, 2), contract.fragment_sampled_images[2].binding);
+    try std.testing.expectEqual(@as(u8, 0), contract.fragment_sampled_images[3].descriptor_set);
+    try std.testing.expect(!contract.fragment_sampled_images[3].sampler_required);
+    try std.testing.expectEqual(@as(u8, 0), contract.fragment_sampled_images[4].descriptor_set);
+    try std.testing.expect(contract.fragment_sampled_images[4].sampler_required);
 }
 
 test "scalar graphics profile decodes normalized vertex inputs" {
@@ -18833,7 +21357,7 @@ test "scalar graphics profile decodes normalized vertex inputs" {
         .format = 37,
         .input_rate = 1,
     };
-    var storage: [16]u8 = undefined;
+    var storage: [64]u8 = undefined;
     const decoded = profileVertexInputBytes(input, &.{ 0, 127, 255, 64 }, &storage).?;
     const expected = [_]f32{ 0, 127.0 / 255.0, 1, 64.0 / 255.0 };
     for (expected, 0..) |value, index| {
@@ -18902,8 +21426,56 @@ test "scalar graphics profile admits Chromium vec3 vertex inputs and varyings" {
     try std.testing.expectEqual(@as(u8, 12), contract.inputs[0].source_byte_size);
     try std.testing.expectEqual(@as(i32, 106), contract.inputs[0].format);
     try std.testing.expectEqual(@as(u8, 3), contract.varyings[0].lanes);
-    var decoded: [16]u8 = undefined;
+    var decoded: [64]u8 = undefined;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, &decoded).?);
+    var vec4_binding = binding;
+    vec4_binding.stride = 16;
+    var vec4_attribute = attribute;
+    vec4_attribute.format = 109;
+    var vec4_vi = vi;
+    vec4_vi.bindings = @ptrCast(&vec4_binding);
+    vec4_vi.attributes = @ptrCast(&vec4_attribute);
+    const vec4_source_contract = profileGraphicsContract(&vertex, &fragment, &vec4_vi).?;
+    try std.testing.expectEqual(@as(u8, 16), vec4_source_contract.inputs[0].source_byte_size);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }, profileVertexInputBytes(vec4_source_contract.inputs[0], &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, &decoded).?);
+}
+
+test "scalar graphics profile assembles an instance-rate mat4 vertex input" {
+    const mat4 = render_ir.Type{ .scalar = .f32, .columns = 4, .rows = 4 };
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    const vertex_interfaces = [_]render_ir.Interface{
+        .{ .storage = .input, .ty = mat4, .location = 2 },
+        .{ .storage = .output, .ty = vec4, .builtin_position = true },
+    };
+    const fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .output, .ty = vec4, .location = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = @constCast(&vertex_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = @constCast(&fragment_interfaces), .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const bindings = [_]VertexInputBindingDescription{
+        .{ .binding = 1, .stride = 0, .input_rate = 1 },
+        .{ .binding = 2, .stride = 0, .input_rate = 1 },
+        .{ .binding = 3, .stride = 0, .input_rate = 1 },
+        .{ .binding = 4, .stride = 0, .input_rate = 1 },
+    };
+    const attributes = [_]VertexInputAttributeDescription{
+        .{ .location = 2, .binding = 1, .format = 109, .offset = 0 },
+        .{ .location = 3, .binding = 2, .format = 109, .offset = 0 },
+        .{ .location = 4, .binding = 3, .format = 109, .offset = 0 },
+        .{ .location = 5, .binding = 4, .format = 109, .offset = 0 },
+    };
+    const vi = PipelineVertexInputStateCreateInfo{ .s_type = 19, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings, .attribute_count = attributes.len, .attributes = &attributes };
+    const contract = profileGraphicsContract(&vertex, &fragment, &vi).?;
+    try std.testing.expectEqual(@as(u8, 64), contract.inputs[0].byte_size);
+    try std.testing.expectEqual(@as(u8, 64), contract.inputs[0].source_byte_size);
+    try std.testing.expectEqual([4]u32{ 1, 2, 3, 4 }, contract.inputs[0].matrix_bindings);
+    try std.testing.expectEqual(@as(i32, 1), contract.inputs[0].input_rate);
+    var source: [64]u8 = undefined;
+    for (&source, 0..) |*byte, index| byte.* = @intCast(index);
+    var decoded: [64]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, &source, profileVertexInputBytes(contract.inputs[0], &source, &decoded).?);
 }
 
 test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
@@ -18930,7 +21502,7 @@ test "scalar graphics profile widens Chromium R16G16_UINT vertex inputs" {
     try std.testing.expectEqual(@as(u8, 8), contract.inputs[0].byte_size);
     try std.testing.expectEqual(@as(u8, 4), contract.inputs[0].source_byte_size);
     try std.testing.expectEqual(@as(i32, 81), contract.inputs[0].format);
-    var storage: [16]u8 = undefined;
+    var storage: [64]u8 = undefined;
     const decoded = profileVertexInputBytes(contract.inputs[0], &[_]u8{ 97, 0, 95, 0 }, &storage).?;
     try std.testing.expectEqualSlices(u8, &[_]u8{ 97, 0, 0, 0, 95, 0, 0, 0 }, decoded);
 
@@ -18995,7 +21567,7 @@ test "scalar graphics profile executes descriptor uniform blocks" {
     defer vertex_executor.deinit();
     var fragment_executor = try render_ir_exec.Executor.init(std.testing.allocator, &fragment_program);
     defer fragment_executor.deinit();
-    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
+    const profile = ProfileGraphics{ .vertex = vertex_executor, .fragment = fragment_executor, .inputs = contract.inputs, .input_count = contract.input_count, .vertex_index_interface = contract.vertex_index_interface, .vertex_output = contract.vertex_output - 1, .vertex_outputs = contract.vertex_outputs, .vertex_output_count = contract.vertex_output_count, .vertex_position_slot = contract.vertex_position_slot, .varyings = contract.varyings, .varying_count = contract.varying_count, .vertex_uniforms = contract.vertex_uniforms, .vertex_uniform_count = contract.vertex_uniform_count, .fragment_uniforms = contract.fragment_uniforms, .fragment_uniform_count = contract.fragment_uniform_count, .fragment_output = contract.fragment_output, .fragment_bool = contract.fragment_bool };
     var pipeline: GraphicsPipelineObj = undefined;
     pipeline.execution_abi = .{ .profile_v1_scalar_graphics = profile };
     pipeline.color_write_mask = 0xf;
@@ -19061,6 +21633,27 @@ test "scalar graphics profile executes descriptor uniform blocks" {
         if (std.mem.readInt(u32, depth_bytes[pixel * 4 ..][0..4], .little) != 0x3f80_0000) changed_depth = true;
     }
     try std.testing.expect(changed_depth);
+
+    // D24 depth comparisons decode the normalized high 24 bits and preserve
+    // each pixel's low-byte stencil value when a fragment writes depth.
+    depth.format = format_d24_unorm_s8_uint;
+    for (0..16) |pixel| std.mem.writeInt(u32, depth_bytes[pixel * 4 ..][0..4], 0xffff_ff5a, .little);
+    @memset(color_bytes[0..], 0);
+    executeValidatedCommand(command, &context);
+    changed_depth = false;
+    var changed_depth_pixel: ?usize = null;
+    for (0..16) |pixel| {
+        const stored = std.mem.readInt(u32, depth_bytes[pixel * 4 ..][0..4], .little);
+        try std.testing.expectEqual(@as(u32, 0x5a), stored & 0xff);
+        if (stored >> 8 != 0x00ff_ffff) {
+            changed_depth = true;
+            if (changed_depth_pixel == null) changed_depth_pixel = pixel;
+        }
+    }
+    try std.testing.expect(changed_depth);
+    const changed_offset = changed_depth_pixel.? * 4;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), depthValueFromStorage(depth.format, depth_bytes[0..], changed_offset), 0.000001);
+    depth.format = 126;
 
     // The same descriptor snapshot must work for indexed and indirect draws;
     // these paths share the profile executor but take different argument
@@ -19137,8 +21730,11 @@ fn graphicsDescriptorBindingValid(command_buffer: *const CommandBufferImpl) bool
 }
 const GraphicsDescriptorRequirements = struct { set0: bool, set1: bool, layout: bool };
 fn profileGraphicsDescriptorRequirements(profile: *const ProfileGraphics) GraphicsDescriptorRequirements {
-    const set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0 or profile.fragment_input_attachment_count != 0;
-    const set1 = profile.fragment_sampled_image_count != 0;
+    var set0 = profile.vertex_uniform_count != 0 or profile.fragment_uniform_count != 0 or profile.fragment_input_attachment_count != 0;
+    var set1 = false;
+    for (profile.fragment_sampled_images[0..profile.fragment_sampled_image_count]) |image| {
+        if (image.descriptor_set == 0) set0 = true else if (image.descriptor_set == 1) set1 = true else return .{ .set0 = false, .set1 = false, .layout = false };
+    }
     return .{ .set0 = set0, .set1 = set1, .layout = set0 or set1 };
 }
 fn graphicsDescriptorRequirements(pipeline: *const GraphicsPipelineObj) GraphicsDescriptorRequirements {
@@ -19163,7 +21759,10 @@ test "graphics descriptor requirements exclude push-constant-only pipelines" {
 
     profile.vertex_uniform_count = 0;
     profile.fragment_sampled_image_count = 1;
+    profile.fragment_sampled_images[0] = .{ .interface = 0, .binding = 0 };
     try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = false, .set1 = true, .layout = true }, profileGraphicsDescriptorRequirements(&profile));
+    profile.fragment_sampled_images[0] = .{ .interface = 0, .binding = 0, .descriptor_set = 0, .sampler_required = false };
+    try std.testing.expectEqual(GraphicsDescriptorRequirements{ .set0 = true, .set1 = false, .layout = true }, profileGraphicsDescriptorRequirements(&profile));
 }
 fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipeline: *const GraphicsPipelineObj) bool {
     const requirements = graphicsDescriptorRequirements(pipeline);
@@ -19183,6 +21782,28 @@ fn graphicsDescriptorStateValid(command_buffer: *const CommandBufferObj, pipelin
     }
     return true;
 }
+fn materializeDynamicUniformBindings(command_buffer: *const CommandBufferObj, snapshot: *DescriptorSetObj, descriptors: *const DescriptorSetObj) bool {
+    for (descriptors.binding_types, 0..) |descriptor_type, binding| {
+        if (descriptor_type != 8) continue;
+        var uniform = descriptorUniformBinding(descriptors, @intCast(binding)) orelse continue;
+        if (!uniform.dynamic) return false;
+        const buffer = uniform.buffer orelse return false;
+        const dynamic_offset = command_buffer.impl.dynamic_uniform_offsets[binding];
+        if (uniform.offset > std.math.maxInt(u64) - dynamic_offset) return false;
+        uniform.offset += dynamic_offset;
+        if (!liveBufferObject(buffer) or buffer.owner != command_buffer.impl.owner or uniform.offset > buffer.size or uniform.range == 0 or uniform.range > buffer.size - uniform.offset or buffer.memory == null or !liveMemoryObject(buffer.memory.?)) return false;
+        uniform.dynamic = false;
+        snapshot.uniform_bindings[binding] = uniform;
+        if (binding == 0) {
+            snapshot.uniform = buffer;
+            snapshot.uniform_offset = uniform.offset;
+            snapshot.uniform_range = uniform.range;
+            snapshot.uniform_dynamic = false;
+        }
+    }
+    return true;
+}
+
 fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const DescriptorSetObj) ?*DescriptorSetObj {
     if (command_buffer.impl.count >= command_buffer.impl.commands.len) return null;
     const snapshot = &command_buffer.impl.descriptor_snapshots[command_buffer.impl.count];
@@ -19195,15 +21816,11 @@ fn snapshotDescriptorSet(command_buffer: *CommandBufferObj, descriptors: *const 
     if (command_buffer.impl.bound_sampled_descriptors) |sampled| {
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
-        snapshot.sampled_images = sampled.sampled_images;
+        snapshot.sampled_images_set1 = sampled.sampled_images;
         snapshot.input_attachments = sampled.input_attachments;
         snapshot.sampled_source_set = sampled;
     }
-    if (descriptors.uniform_dynamic) {
-        if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
-        snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
-        snapshot.uniform_dynamic = false;
-    }
+    if (!materializeDynamicUniformBindings(command_buffer, snapshot, descriptors)) return null;
     snapshot.synthetic = true;
     return snapshot;
 }
@@ -19215,11 +21832,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         const descriptors = activeDescriptorSet(command_buffer) orelse return null;
         snapshot.* = descriptors.*;
         if (!descriptors.synthetic) snapshot.source_set = @constCast(descriptors);
-        if (descriptors.uniform_dynamic) {
-            if (descriptors.uniform_offset > std.math.maxInt(u64) - command_buffer.impl.dynamic_uniform_offset) return null;
-            snapshot.uniform_offset = descriptors.uniform_offset + command_buffer.impl.dynamic_uniform_offset;
-            snapshot.uniform_dynamic = false;
-        }
+        if (!materializeDynamicUniformBindings(command_buffer, snapshot, descriptors)) return null;
     } else {
         snapshot.* = .{
             .owner = pipeline.owner,
@@ -19234,8 +21847,7 @@ fn snapshotGraphicsDescriptorState(command_buffer: *CommandBufferObj, pipeline: 
         const sampled = command_buffer.impl.bound_sampled_descriptors orelse return null;
         snapshot.texture = sampled.texture;
         snapshot.sampler = sampled.sampler;
-        snapshot.sampled_images = sampled.sampled_images;
-        snapshot.input_attachments = sampled.input_attachments;
+        snapshot.sampled_images_set1 = sampled.sampled_images;
         snapshot.sampled_source_set = sampled;
     }
     snapshot.synthetic = true;
@@ -19292,7 +21904,7 @@ fn cmdDraw(cb: ?CommandBuffer, vertex_count: u32, instance_count: u32, first_ver
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .instance_index = first_instance, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = vertex_count, .base_vertex = first_vertex, .instance_count = instance_count, .instance_index = first_instance, .indexed = null, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .stencil = raster.stencil, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_recorded_draws.fetchAdd(1, .monotonic);
 }
 fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32) callconv(.c) void {
@@ -19389,7 +22001,7 @@ fn cmdDrawIndexed(cb: ?CommandBuffer, index_count: u32, instance_count: u32, fir
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
+    record(command_buffer, .{ .cube_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .vertex_count = index_count, .base_vertex = 0, .instance_count = instance_count, .instance_index = first_instance, .indexed = .{ .buffer = index_buffer, .offset = start, .byte_count = byte_count, .index_type = command_buffer.impl.index_type, .vertex_offset = vertex_offset }, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .primitive_restart_enable = raster.primitive_restart_enable, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .stencil = raster.stencil, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants } });
     if (renderDiagnosticsEnabled()) _ = render_diagnostic_recorded_draws.fetchAdd(1, .monotonic);
 }
 fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64, draw_count: u32, stride: u64, indexed: bool, count_source: ?IndirectCountState) void {
@@ -19464,7 +22076,7 @@ fn cmdDrawIndirectCommon(cb: ?CommandBuffer, indirect_handle: usize, offset: u64
         command_buffer.impl.invalid = true;
         return;
     };
-    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants, .count_source = count_source } });
+    record(command_buffer, .{ .indirect_draw = .{ .framebuffer = framebuffer, .color_image = if (dynamic_rendering) command_buffer.impl.dynamic_color_image else null, .depth_image = if (dynamic_rendering) command_buffer.impl.dynamic_depth_image else null, .expected_color_layout = recordedAttachmentLayout(command_buffer, true), .expected_depth_layout = recordedAttachmentLayout(command_buffer, false), .pipeline = pipeline, .descriptors = descriptor_snapshot, .indirect_buffer = indirect_buffer, .offset = offset, .draw_count = draw_count, .stride = stride, .indexed = indexed, .index_buffer = index_buffer, .index_offset = command_buffer.impl.index_offset, .index_type = command_buffer.impl.index_type, .viewport = raster.viewport, .scissor = raster.scissor, .cull_mode = raster.cull_mode, .front_face = raster.front_face, .primitive_topology = raster.primitive_topology, .depth_bounds_test_enable = raster.depth_bounds_test_enable, .depth_bounds = raster.depth_bounds, .stencil = raster.stencil, .depth_bias_enable = raster.depth_bias_enable, .depth_bias = raster.depth_bias, .blend_constants = raster.blend_constants, .line_stipple_factor = raster.line_stipple_factor, .line_stipple_pattern = raster.line_stipple_pattern, .rasterizer_discard_enable = raster.rasterizer_discard_enable, .depth_test_enable = raster.depth_test_enable, .depth_write_enable = raster.depth_write_enable, .depth_compare_op = raster.depth_compare_op, .vertex_bindings = command_buffer.impl.vertex_bindings, .push_constants = command_buffer.impl.push_constants, .count_source = count_source } });
 }
 fn cmdDrawIndirect(cb: ?CommandBuffer, indirect: usize, offset: u64, draw_count: u32, stride: u64) callconv(.c) void {
     cmdDrawIndirectCommon(cb, indirect, offset, draw_count, stride, false, null);
@@ -20346,7 +22958,16 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
     const fence = if (fence_handle == 0) null else validFenceLocked(fence_handle) orelse return queueSubmitFailed(@src().line);
     if (fence) |item| if (!validOwner(q.owner, item.owner) or item.signaled.load(.acquire)) return queueSubmitFailed(@src().line);
     var layouts: [max_image_objects]i32 = undefined;
-    for (&image_objects, image_state, 0..) |*image, state, index| layouts[index] = if (state == .live) image.layout else 0;
+    var mip_layouts = emptyImageMipLayouts();
+    for (&image_objects, image_state, 0..) |*image, state, index| {
+        layouts[index] = if (state == .live) image.layout else 0;
+        if (state == .live) {
+            mip_layouts[index] = image.mip_layouts;
+            // The existing public tracker remains the source of truth for
+            // mip zero, including host transitions and attachment paths.
+            mip_layouts[index][0] = image.layout;
+        }
+    }
     var semaphore_states = [_]bool{false} ** max_child_objects;
     var timeline_states = [_]u64{0} ** max_child_objects;
     var submitted_command_buffers = [_]bool{false} ** max_child_objects;
@@ -20445,7 +23066,7 @@ fn queueSubmit(queue: ?Queue, count: u32, submits: ?[*]const SubmitInfo, fence_h
             submitted_command_buffers[cb_slot] = true;
             for (valid_cb.impl.secondaries[0..valid_cb.impl.secondary_count]) |secondary| if ((stateForObject(CommandBufferObj, secondary, &command_buffer_objects, &command_buffer_state) orelse return .error_initialization_failed).* != .live or secondary.impl.state != 2) return queueSubmitFailed(@src().line);
             for (valid_cb.impl.commands[0..valid_cb.impl.count], 0..) |command, command_index| {
-                const prevalid = prevalidateCommand(command, q.owner, &layouts);
+                const prevalid = prevalidateCommandWithMipLayouts(command, q.owner, &layouts, @as(?*ImageMipLayouts, &mip_layouts));
                 const query_valid = queryCommandSequenceValid(command, list[0..count], submit_index, command_buffer_index, command_index);
                 if (!prevalid or !query_valid) {
                     if (failureDiagnosticsEnabled()) std.debug.print("ZPU queue submit command rejected submit={d} command_buffer={d} command={d} kind={s} prevalid={} query_valid={}\n", .{ submit_index, command_buffer_index, command_index, @tagName(command), prevalid, query_valid });
@@ -21294,7 +23915,7 @@ test "core instance physical and device enumeration is bounded and allocation fr
         try std.testing.expectEqual(@as(u64, heap_size), memory_properties.memory_heaps[0].size);
         var format_properties: FormatProperties = undefined;
         getFormatProperties(physical[0], 44, &format_properties);
-        try std.testing.expectEqual(@as(u32, 0xd181), format_properties.optimal_tiling_features);
+        try std.testing.expectEqual(@as(u32, 0xdd81), format_properties.optimal_tiling_features);
         var image_format_properties: ImageFormatProperties = undefined;
         try std.testing.expectEqual(Result.success, getImageFormatProperties(physical[0], 44, 1, 0, 0x13, 0, &image_format_properties));
         try std.testing.expectEqual(@as(u32, 1), image_format_properties.sample_counts);
@@ -21683,6 +24304,30 @@ test "vkcube presentation path records submits and presents two swapchain images
     var sampler: usize = 0;
     try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&sampler_info), null, &sampler));
     destroySampler(device, sampler, null);
+    // ANGLE uses these broad sampler LOD bounds to preserve an unclamped
+    // implicit LOD range. Vulkan requires maxLod >= minLod but does not require
+    // minLod to be non-negative.
+    var angle_sampler_info = sampler_info;
+    angle_sampler_info.mag_filter = 1;
+    angle_sampler_info.min_filter = 1;
+    angle_sampler_info.mipmap_mode = 1;
+    angle_sampler_info.address_mode_u = 2;
+    angle_sampler_info.address_mode_v = 2;
+    angle_sampler_info.compare_op = 3;
+    angle_sampler_info.min_lod = -1000;
+    angle_sampler_info.max_lod = 1000;
+    angle_sampler_info.border_color = 1;
+    var angle_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, &angle_sampler_info, null, &angle_sampler));
+    try std.testing.expectEqual(@as(f32, -1000), validSamplerLocked(angle_sampler).?.min_lod);
+    try std.testing.expectEqual(@as(f32, 1000), validSamplerLocked(angle_sampler).?.max_lod);
+    destroySampler(device, angle_sampler, null);
+    var inverted_lod_info = sampler_info;
+    inverted_lod_info.min_lod = 1;
+    inverted_lod_info.max_lod = 0;
+    unpublished_sampler = 0xabcd;
+    try std.testing.expectEqual(Result.error_initialization_failed, createSampler(device, &inverted_lod_info, null, &unpublished_sampler));
+    try std.testing.expectEqual(@as(usize, 0xabcd), unpublished_sampler);
     // The promoted reduction-mode node is accepted in its default form,
     // while the optional MIN/MAX feature remains truthfully disabled.
     var weighted_reduction = SamplerReductionModeCreateInfo{ .s_type = 1000130001, .p_next = null, .reduction_mode = 0 };
@@ -21800,6 +24445,12 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expect(baseline_pipeline.dynamic_stencil_compare_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_write_mask);
     try std.testing.expect(baseline_pipeline.dynamic_stencil_reference);
+    const unused_tessellation = PipelineTessellationStateCreateInfo{ .s_type = 21, .p_next = null, .flags = 0, .patch_control_points = 3 };
+    var unused_tessellation_info = pipeline_info;
+    unused_tessellation_info.tessellation = &unused_tessellation;
+    var unused_tessellation_pipeline: [1]usize = .{0xfeed_face};
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&unused_tessellation_info), null, &unused_tessellation_pipeline));
+    destroyPipeline(device, unused_tessellation_pipeline[0], null);
     var masked_attachment = blend_attachment;
     masked_attachment.color_write_mask = 0x5;
     var masked_blend = color_blend;
@@ -21825,7 +24476,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     const biased_pipeline_object = validGraphicsPipelineLocked(biased_pipeline[0]).?;
     try std.testing.expectEqual([3]f32{ 8, 0.25, 1.5 }, biased_pipeline_object.depth_bias);
     destroyPipeline(device, biased_pipeline[0], null);
-    var divisor_state = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_191_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
+    var divisor_state = PipelineVertexInputDivisorStateCreateInfo{ .s_type = 1_000_190_001, .p_next = null, .vertex_binding_divisor_count = 0, .vertex_binding_divisors = null };
     var divisor_vertex_input = vertex_input;
     divisor_vertex_input.p_next = @ptrCast(&divisor_state);
     var divisor_pipeline_info = pipeline_info;
@@ -21889,7 +24540,7 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(@as(i32, 44), dynamic_pipeline_object.rendering_color_format);
     try std.testing.expectEqual(@as(i32, 126), dynamic_pipeline_object.rendering_depth_format);
     dynamic_pipeline_object.execution_abi = .cpu_cube_v1;
-    dynamic_pipeline_formats[0] = 43;
+    dynamic_pipeline_formats[0] = 42;
     const dynamic_pipeline_states_before_rejection = graphics_pipeline_state;
     var invalid_dynamic_pipeline = [_]usize{0xfeed_face};
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&dynamic_pipeline_info), null, &invalid_dynamic_pipeline));
@@ -22297,7 +24948,7 @@ test "vkcube presentation path records submits and presents two swapchain images
         try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     }
     var bad_multisample = multisample;
-    bad_multisample.min_sample_shading = 0.5;
+    bad_multisample.min_sample_shading = 1.5;
     invalid_pipeline = pipeline_info;
     invalid_pipeline.multisample = &bad_multisample;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
@@ -22327,11 +24978,16 @@ test "vkcube presentation path records submits and presents two swapchain images
     bad_depth = depth_stencil;
     bad_depth.front.fail_op = 1;
     invalid_pipeline.depth_stencil = &bad_depth;
-    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    var static_stencil_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &static_stencil_pipeline));
+    try std.testing.expectEqual(@as(i32, 1), validGraphicsPipelineLocked(static_stencil_pipeline[0]).?.stencil_front.fail_op);
+    destroyPipeline(device, static_stencil_pipeline[0], null);
     bad_depth = depth_stencil;
     bad_depth.back.reference = 1;
     invalid_pipeline.depth_stencil = &bad_depth;
-    try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &static_stencil_pipeline));
+    try std.testing.expectEqual(@as(u32, 1), validGraphicsPipelineLocked(static_stencil_pipeline[0]).?.stencil_back.reference);
+    destroyPipeline(device, static_stencil_pipeline[0], null);
     var bad_blend_attachment = blend_attachment;
     bad_blend_attachment.blend_enable = 1;
     var bad_blend = color_blend;
@@ -22353,7 +25009,15 @@ test "vkcube presentation path records submits and presents two swapchain images
         destroyPipeline(device, mutated_blend_pipeline[0], null);
     }
     bad_blend = color_blend;
+    bad_blend.logic_op = 3;
+    invalid_pipeline.color_blend = &bad_blend;
+    var ignored_logic_op_pipeline: [1]usize = undefined;
+    try std.testing.expectEqual(Result.success, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &ignored_logic_op_pipeline));
+    try std.testing.expect(baseline_pipeline.canonical.eql(&validGraphicsPipelineLocked(ignored_logic_op_pipeline[0]).?.canonical));
+    destroyPipeline(device, ignored_logic_op_pipeline[0], null);
+    bad_blend = color_blend;
     bad_blend.logic_op = 1;
+    bad_blend.logic_op_enable = 1;
     invalid_pipeline.color_blend = &bad_blend;
     try std.testing.expectEqual(Result.error_initialization_failed, createGraphicsPipelines(device, 0, 1, @ptrCast(&invalid_pipeline), null, &unchanged));
     inline for (0..4) |index| {
@@ -22496,6 +25160,19 @@ test "vkcube presentation path records submits and presents two swapchain images
     try std.testing.expectEqual(validSamplerLocked(draw_sampler).?, validDescriptorSetLocked(sets[0]).?.sampler.?);
     try std.testing.expectEqual(draw_sampler_info.mag_filter, validSamplerLocked(draw_sampler).?.mag_filter);
     try std.testing.expectEqual(draw_sampler_info.address_mode_u, validSamplerLocked(draw_sampler).?.address_mode_u);
+    const general_sampler_info = SamplerCreateInfo{ .s_type = 31, .p_next = null, .flags = 0, .mag_filter = 1, .min_filter = 1, .mipmap_mode = 0, .address_mode_u = 1, .address_mode_v = 1, .address_mode_w = 1, .mip_lod_bias = 0, .anisotropy_enable = 0, .max_anisotropy = 0, .compare_enable = 0, .compare_op = 0, .min_lod = 0, .max_lod = 0, .border_color = 0, .unnormalized_coordinates = 0 };
+    var general_sampler: usize = 0;
+    try std.testing.expectEqual(Result.success, createSampler(device, @ptrCast(&general_sampler_info), null, &general_sampler));
+    var general_descriptor_image = descriptor_image;
+    general_descriptor_image.sampler = general_sampler;
+    general_descriptor_image.image_layout = 1;
+    var general_descriptor_write = descriptor_writes[1];
+    general_descriptor_write.image_info = @ptrCast(&general_descriptor_image);
+    updateDescriptorSets(device, 1, @ptrCast(&general_descriptor_write), 0, null);
+    try std.testing.expectEqual(validSamplerLocked(general_sampler).?, validDescriptorSetLocked(sets[0]).?.sampled_images[1].sampler.?);
+    general_descriptor_write.image_info = @ptrCast(&descriptor_image);
+    updateDescriptorSets(device, 1, @ptrCast(&general_descriptor_write), 0, null);
+    destroySampler(device, general_sampler, null);
 
     const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
@@ -24437,10 +27114,29 @@ test "all physical queries cover success boundaries and invalid handles" {
     getFormatProperties(p, 0, &format);
     try std.testing.expectEqual(FormatProperties{ .linear_tiling_features = 0, .optimal_tiling_features = 0, .buffer_features = 0 }, format);
     const format_cases = [_]struct { format: i32, linear: u32, optimal: u32, buffer: u32, linear_usage: u32, optimal_usage: u32 }{
-        .{ .format = 37, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
-        .{ .format = 43, .linear = 0x1, .optimal = 0x1, .buffer = 0, .linear_usage = 0x4, .optimal_usage = 0x4 },
-        .{ .format = 44, .linear = 0xd181, .optimal = 0xd181, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
-        .{ .format = 126, .linear = 0, .optimal = 0x8200, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x22 },
+        .{ .format = 2, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 3, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 4, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 5, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 6, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 7, .linear = 0, .optimal = 0x181, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x14 },
+        .{ .format = 9, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 16, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x17, .optimal_usage = 0x17 },
+        .{ .format = 76, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 83, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 97, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 100, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 103, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 109, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 122, .linear = 0, .optimal = 0xDD81, .buffer = 0, .linear_usage = 0, .optimal_usage = 0x97 },
+        .{ .format = 37, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 43, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 44, .linear = 0xdd81, .optimal = 0xdd81, .buffer = 0, .linear_usage = 0x97, .optimal_usage = 0x97 },
+        .{ .format = 124, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 125, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 126, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 127, .linear = 0, .optimal = depth_stencil_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
+        .{ .format = 129, .linear = 0, .optimal = depth_sampled_image_features, .buffer = 0, .linear_usage = 0, .optimal_usage = depth_stencil_image_usage },
     };
     for (format_cases) |case| {
         getFormatProperties(p, case.format, &format);
@@ -24696,6 +27392,151 @@ test "framebuffer fetch accepts only a GENERAL self input attachment and descrip
     try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &malformed_info, null, &rejected));
     defer destroyRenderPass(ctx.device, rejected, null);
     try std.testing.expect(!validRenderPassLocked(rejected).?.framebuffer_supported);
+}
+
+test "framebuffer image views render into their selected array layer" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    var memory: usize = 0;
+    defer if (memory != 0) freeMemory(ctx.device, memory, null);
+    var image: usize = 0;
+    defer if (image != 0) destroyImage(ctx.device, image, null);
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 37, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 2, .samples = 1, .tiling = 0, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 32, .memory_type_index = 0 };
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &allocation, null, &memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, image, memory, 0));
+    const image_object = validImageLocked(image).?;
+    @memset(imageLayerBytes(image_object, 0), 0x11);
+    @memset(imageLayerBytes(image_object, 1), 0x22);
+
+    var render_pass: usize = 0;
+    defer if (render_pass != 0) destroyRenderPass(ctx.device, render_pass, null);
+    const attachment = [_]AttachmentDescription{.{ .flags = 0, .format = 37, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 2, .stencil_store_op = 1, .initial_layout = 0, .final_layout = 2 }};
+    const color_reference = AttachmentReference{ .attachment = 0, .layout = 2 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 1, .color_attachments = @ptrCast(&color_reference), .resolve_attachments = null, .depth_stencil_attachment = null, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &attachment, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &render_pass_info, null, &render_pass));
+
+    var view: usize = 0;
+    defer if (view != 0) destroyImageView(ctx.device, view, null);
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 37, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 1, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+
+    var framebuffer: usize = 0;
+    defer if (framebuffer != 0) destroyFramebuffer(ctx.device, framebuffer, null);
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = @ptrCast(&view), .width = 2, .height = 2, .layers = 1 };
+    try std.testing.expectEqual(Result.success, createFramebuffer(ctx.device, &framebuffer_info, null, &framebuffer));
+    try std.testing.expectEqual(@as(u32, 1), validFramebufferLocked(framebuffer).?.color_base_layer);
+
+    var pool: usize = 0;
+    defer if (pool != 0) destroyCommandPool(ctx.device, pool, null);
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
+    var commands: [1]CommandBuffer = undefined;
+    var commands_allocated = false;
+    defer if (commands_allocated) freeCommandBuffers(ctx.device, pool, 1, &commands);
+    const allocation_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &allocation_info, &commands));
+    commands_allocated = true;
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var clear_value = std.mem.zeroes(ClearValue);
+    clear_value.color.float32 = .{ 0, 0, 0, 0 };
+    const pass_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&clear_value) };
+    cmdBeginRenderPass(commands[0], &pass_begin, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    for (imageLayerBytes(image_object, 0)) |byte| try std.testing.expectEqual(@as(u8, 0x11), byte);
+    for (imageLayerBytes(image_object, 1)) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "samplerless sampled-image descriptor writes preserve image-view metadata" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = 44, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x4, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &image_info, null, &image));
+    defer destroyImage(ctx.device, image, null);
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = 44, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &view_info, null, &view));
+    defer destroyImageView(ctx.device, view, null);
+
+    const layout_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 2, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&layout_binding) };
+    var layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &layout));
+    defer destroyDescriptorSetLayout(ctx.device, layout, null);
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 2, .descriptor_count = 1 };
+    const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
+    defer destroyDescriptorPool(ctx.device, pool, null);
+    const allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&layout) };
+    var set: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &allocate_info, @ptrCast(&set)));
+
+    const descriptor = DescriptorImageInfo{ .sampler = 0, .image_view = view, .image_layout = 5 };
+    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 2, .image_info = @ptrCast(&descriptor), .buffer_info = null, .texel_buffer_view = null };
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    const set_object = validDescriptorSetLocked(set).?;
+    try std.testing.expectEqual(validImageLocked(image).?, set_object.sampled_images[0].image.?);
+    try std.testing.expect(set_object.sampled_images[0].sampler == null);
+    try std.testing.expectEqual(@as(i32, 1), set_object.sampled_images[0].view_type);
+    try std.testing.expectEqual(@as(u32, 0), set_object.sampled_images[0].base_mip_level);
+
+    const template_entry = [_]DescriptorUpdateTemplateEntry{.{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 2, .offset = 0, .stride = @sizeOf(DescriptorImageInfo) }};
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = &template_entry, .template_type = 0, .descriptor_set_layout = layout, .pipeline_bind_point = 0, .pipeline_layout = 0, .set = 0 };
+    var template: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
+    defer destroyDescriptorUpdateTemplate(ctx.device, template, null);
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    try std.testing.expectEqual(validImageLocked(image).?, set_object.sampled_images[0].image.?);
+}
+
+test "pipeline layouts keep set-zero images separate from set-one samplers" {
+    const ctx = try createTestDeviceContext();
+    defer destroyInstance(ctx.instance, null);
+    defer destroyDevice(ctx.device, null);
+
+    const image_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 2, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const image_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&image_binding) };
+    var image_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &image_layout_info, null, &image_layout));
+    defer destroyDescriptorSetLayout(ctx.device, image_layout, null);
+    const sampler_binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 1, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null };
+    const sampler_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&sampler_binding) };
+    var sampler_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &sampler_layout_info, null, &sampler_layout));
+    defer destroyDescriptorSetLayout(ctx.device, sampler_layout, null);
+    const layouts = [_]usize{ image_layout, sampler_layout };
+    const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = layouts.len, .set_layouts = &layouts, .push_constant_range_count = 0, .push_constant_ranges = null };
+    var pipeline_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
+    defer destroyPipelineLayout(ctx.device, pipeline_layout, null);
+
+    const vec4 = render_ir.Type{ .scalar = .f32, .columns = 4 };
+    var fragment_interfaces = [_]render_ir.Interface{
+        .{ .storage = .image, .ty = vec4, .descriptor_set = 0, .binding = 0 },
+        .{ .storage = .sampled_image, .ty = vec4, .descriptor_set = 1, .binding = 0 },
+    };
+    const name = [_]u8{ 'm', 'a', 'i', 'n' };
+    const identity = render_ir.Identity{ .digest = .{0} ** 32, .bytes = &.{} };
+    const vertex = render_ir.Program{ .stage = .vertex, .entry_name = @constCast(&name), .interfaces = &.{}, .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const fragment = render_ir.Program{ .stage = .fragment, .entry_name = @constCast(&name), .interfaces = &fragment_interfaces, .instructions = &.{}, .bytes = &.{}, .identity = identity };
+    const layout = validPipelineLayoutLocked(pipeline_layout).?;
+    try std.testing.expect(frontendSampledImagesCompatible(&vertex, &fragment, layout));
+    fragment_interfaces[0].binding = 1;
+    try std.testing.expect(!frontendSampledImagesCompatible(&vertex, &fragment, layout));
 }
 
 test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
@@ -25092,7 +27933,7 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     var divisor_features = PhysicalDeviceVertexAttributeDivisorFeatures{ .s_type = 1000191002, .p_next = @ptrCast(&storage_features), .vertex_attribute_instance_rate_divisor = 0xffff_ffff, .vertex_attribute_instance_rate_zero_divisor = 0xffff_ffff };
     features.p_next = @ptrCast(&divisor_features);
     getPhysicalDeviceFeatures2(ctx.physical, &features);
-    try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_divisor);
+    try std.testing.expectEqual(@as(u32, 1), divisor_features.vertex_attribute_instance_rate_divisor);
     try std.testing.expectEqual(@as(u32, 0), divisor_features.vertex_attribute_instance_rate_zero_divisor);
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&storage_features)[16..], 0));
     try std.testing.expectEqual(@as(u32, 0), storage_features.storage_buffer16_bit_access);
@@ -25368,13 +28209,13 @@ test "Vulkan 1.1 physical and memory query variants are ABI exact and bounded" {
     properties.p_next = null;
     var format = PhysicalDeviceFormatProperties2{ .s_type = 1000059002, .p_next = null, .format_properties = std.mem.zeroes(FormatProperties) };
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u32, 0xd181), format.format_properties.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u32, 0xdd81), format.format_properties.optimal_tiling_features);
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(FormatProperties3));
     var format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xffff_ffff_ffff_ffff, .optimal_tiling_features = 0xffff_ffff_ffff_ffff, .buffer_features = 0xffff_ffff_ffff_ffff };
     format.p_next = @ptrCast(&format3);
     getPhysicalDeviceFormatProperties2(ctx.physical, 37, &format);
-    try std.testing.expectEqual(@as(u64, 0xd181), format3.optimal_tiling_features);
-    try std.testing.expectEqual(@as(u64, 0xd181), format3.linear_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xdd81), format3.optimal_tiling_features);
+    try std.testing.expectEqual(@as(u64, 0xdd81), format3.linear_tiling_features);
     var duplicate_format3 = FormatProperties3{ .s_type = 1_000_360_000, .p_next = null, .linear_tiling_features = 0xaaaa, .optimal_tiling_features = 0xbbbb, .buffer_features = 0xcccc };
     format3.p_next = @ptrCast(&duplicate_format3);
     format3.linear_tiling_features = 0xffff_ffff_ffff_ffff;
@@ -26254,7 +29095,7 @@ test "image blit and resolve commands preserve bounded pixels and ABI" {
     validImageLocked(resolved).?.layout = 1;
     const source_bytes = imageBytes(validImageLocked(src).?);
     for (0..4) |index| std.mem.writeInt(u32, source_bytes[index * 4 ..][0..4], @as(u32, @intCast(index + 1)), .little);
-    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 0, .queue_family_index = 0 };
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createCommandPool(ctx.device, &pool_info, null, &pool));
     const allocate_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
@@ -26280,6 +29121,60 @@ test "image blit and resolve commands preserve bounded pixels and ABI" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, destination_bytes[0..4], .little));
     try std.testing.expectEqual(@as(u32, 4), std.mem.readInt(u32, destination_bytes[(3 * 4 + 3) * 4 ..][0..4], .little));
     try std.testing.expectEqualSlices(u8, source_bytes, imageBytes(validImageLocked(resolved).?));
+
+    // Mip generation blits may use one image for both sides when their mip
+    // subresources do not overlap. Track layouts per mip through submission,
+    // then verify that those layouts remain available to a later submit.
+    var mip_info = image_info;
+    mip_info.extent = .{ .width = 4, .height = 4, .depth = 1 };
+    mip_info.mip_levels = 3;
+    var mip_image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &mip_info, null, &mip_image));
+    const mip_image_object = validImageLocked(mip_image).?;
+    const mip_memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = imageByteSize(mip_image_object).?, .memory_type_index = 0 };
+    var mip_memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &mip_memory_info, null, &mip_memory));
+    try std.testing.expectEqual(Result.success, bindImageMemory(ctx.device, mip_image, mip_memory, 0));
+    const mip_source = imageBytes(mip_image_object);
+    const mip_color = [_]u8{ 0x24, 0x68, 0xac, 0xff };
+    for (0..16) |pixel| @memcpy(mip_source[pixel * 4 ..][0..4], &mip_color);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const ignored_family = std.math.maxInt(u32);
+    const all_mips = ImageSubresourceRange{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 3, .base_array_layer = 0, .layer_count = 1 };
+    var mip_barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x800, .old_layout = 0, .new_layout = 6, .src_queue_family_index = ignored_family, .dst_queue_family_index = ignored_family, .image = mip_image, .subresource_range = all_mips };
+    cmdPipelineBarrier(command[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mip_barrier));
+    mip_barrier.subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    mip_barrier.src_access_mask = 0x800;
+    mip_barrier.old_layout = 6;
+    cmdPipelineBarrier(command[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mip_barrier));
+    mip_barrier.subresource_range.base_mip_level = 1;
+    mip_barrier.new_layout = 7;
+    mip_barrier.dst_access_mask = 0x1000;
+    cmdPipelineBarrier(command[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&mip_barrier));
+    const mip_blit = ImageBlit{
+        .src_subresource = .{ .aspect_mask = 1, .mip_level = 0, .base_array_layer = 0, .layer_count = 1 },
+        .src_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 4, .y = 4, .z = 1 } },
+        .dst_subresource = .{ .aspect_mask = 1, .mip_level = 1, .base_array_layer = 0, .layer_count = 1 },
+        .dst_offsets = .{ .{ .x = 0, .y = 0, .z = 0 }, .{ .x = 2, .y = 2, .z = 1 } },
+    };
+    cmdBlitImage(command[0], mip_image, 6, mip_image, 7, 1, @ptrCast(&mip_blit), 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+    const mip_offset = imageSubresourceOffset(mip_image_object, 1, 0).?;
+    for (0..4) |pixel| try std.testing.expectEqualSlices(u8, &mip_color, mip_source[mip_offset + pixel * 4 ..][0..4]);
+    try std.testing.expectEqual(@as(i32, 6), mip_image_object.mip_layouts[0]);
+    try std.testing.expectEqual(@as(i32, 7), mip_image_object.mip_layouts[1]);
+
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    cmdBlitImage(command[0], mip_image, 6, mip_image, 7, 1, @ptrCast(&mip_blit), 0);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(ctx.queue, 1, @ptrCast(&submit), 0));
+
+    destroyImage(ctx.device, mip_image, null);
+    freeMemory(ctx.device, mip_memory, null);
     freeCommandBuffers(ctx.device, pool, 1, &command);
     destroyCommandPool(ctx.device, pool, null);
     destroyImage(ctx.device, resolved, null);
@@ -27459,7 +30354,7 @@ test "Vulkan 1.4 host image copies transitions and layout queries are bounded" {
     const area = RenderingAreaInfo{ .s_type = 1000470003, .p_next = null, .view_mask = 0, .color_attachment_count = 1, .color_attachment_formats = @ptrCast(&image_info.format), .depth_attachment_format = 0, .stencil_attachment_format = 0 };
     getRenderingAreaGranularity(ctx.device, &area, &granularity);
     try std.testing.expectEqual(Extent2D{ .width = 1, .height = 1 }, granularity);
-    var unsupported_area_format: i32 = 43;
+    var unsupported_area_format: i32 = 42;
     var bad_area = area;
     bad_area.color_attachment_formats = @ptrCast(&unsupported_area_format);
     granularity = .{ .width = 0xdead, .height = 0xbeef };
@@ -27653,6 +30548,41 @@ test "bounded 2D array images isolate layers across views clears and transfers" 
     destroyImageView(ctx.device, view, null);
     destroyImage(ctx.device, image, null);
     freeMemory(ctx.device, image_memory, null);
+    destroyDevice(ctx.device, null);
+    destroyInstance(ctx.instance, null);
+}
+
+test "cube compatible float images require square six layer groups and cube views" {
+    const ctx = try createTestDeviceContext();
+    var format_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(ctx.physical, 97, 1, 0, 4, 0x10, &format_properties));
+    const cube_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0x10, .image_type = 1, .format = 97, .extent = .{ .width = 8, .height = 8, .depth = 1 }, .mip_levels = 1, .array_layers = 7, .samples = 1, .tiling = 0, .usage = 4, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(ctx.device, &cube_info, null, &image));
+    var requirements: MemoryRequirements = undefined;
+    getImageMemoryRequirements(ctx.device, image, &requirements);
+    try std.testing.expectEqual(@as(u64, 8 * 8 * 8 * 7), requirements.size);
+
+    const cube_view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 3, .format = 97, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = 1, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 6 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(ctx.device, &cube_view_info, null, &view));
+
+    var invalid_info = cube_info;
+    invalid_info.extent.height = 4;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &invalid_info, null, &image));
+    invalid_info = cube_info;
+    invalid_info.array_layers = 5;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImage(ctx.device, &invalid_info, null, &image));
+
+    var invalid_view = cube_view_info;
+    invalid_view.subresource_range.layer_count = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &invalid_view, null, &view));
+    invalid_view = cube_view_info;
+    invalid_view.subresource_range.base_array_layer = 1;
+    try std.testing.expectEqual(Result.error_initialization_failed, createImageView(ctx.device, &invalid_view, null, &view));
+
+    destroyImageView(ctx.device, view, null);
+    destroyImage(ctx.device, image, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
 }
@@ -28714,6 +31644,16 @@ test "descriptor pool budgets free reset and rollback are exact" {
     var bad_sizes = sizes;
     bad_sizes[1].descriptor_type = 6;
     pool_info.pool_sizes = &bad_sizes;
+    var duplicate_type_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &duplicate_type_pool));
+    try std.testing.expectEqual(@as(u32, 6), validDescriptorPoolLocked(duplicate_type_pool).?.capacity[6]);
+    destroyDescriptorPool(ctx.device, duplicate_type_pool, null);
+
+    const overflowing_sizes = [_]DescriptorPoolSize{
+        .{ .descriptor_type = 6, .descriptor_count = std.math.maxInt(u32) },
+        .{ .descriptor_type = 6, .descriptor_count = 1 },
+    };
+    pool_info.pool_sizes = &overflowing_sizes;
     var unchanged: usize = 0x1234;
     try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorPool(ctx.device, &pool_info, null, &unchanged));
     try std.testing.expectEqual(@as(usize, 0x1234), unchanged);
@@ -28757,14 +31697,17 @@ test "descriptor pool empty control operations are allocation free and bounded" 
 test "descriptor updates and binds are atomic and allocation free" {
     try std.testing.expectEqual(@as(usize, 64), @sizeOf(WriteDescriptorSet));
     const ctx = try createTestDeviceContext();
-    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
-    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    const bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 6, .descriptor_count = 1, .stage_flags = 0x10, .immutable_samplers = null },
+    };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings };
     var set_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &set_layout));
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
-    const pool_size = DescriptorPoolSize{ .descriptor_type = 6, .descriptor_count = 1 };
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 6, .descriptor_count = 2 };
     const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
@@ -28784,6 +31727,11 @@ test "descriptor updates and binds are atomic and allocation free" {
     const set_object = validDescriptorSetLocked(set).?;
     try std.testing.expect(set_object.uniform != null);
     try std.testing.expectEqual(@as(u64, 64), set_object.uniform_range);
+    descriptor_write.dst_binding = 1;
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expectEqual(validBufferLocked(buffer).?, descriptorUniformBinding(set_object, 1).?.buffer.?);
+    try std.testing.expectEqual(@as(u64, 64), descriptorUniformBinding(set_object, 1).?.range);
+    descriptor_write.dst_binding = 0;
     const uniform_before = set_object.uniform;
     const range_before = set_object.uniform_range;
     descriptor_write.descriptor_count = 2;
@@ -28794,24 +31742,29 @@ test "descriptor updates and binds are atomic and allocation free" {
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
-    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
-    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    const template_entries = [_]DescriptorUpdateTemplateEntry{
+        .{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) },
+        .{ .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 6, .offset = @sizeOf(DescriptorBufferInfo), .stride = @sizeOf(DescriptorBufferInfo) },
+    };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = template_entries.len, .descriptor_update_entries = &template_entries, .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
     var template: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor_buffer);
+    var template_data = [_]DescriptorBufferInfo{ descriptor_buffer, descriptor_buffer };
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &template_data);
     try std.testing.expectEqual(@as(u64, 64), validDescriptorSetLocked(set).?.uniform_range);
+    try std.testing.expectEqual(validBufferLocked(buffer).?, descriptorUniformBinding(set_object, 1).?.buffer.?);
     const template_uniform_before = validDescriptorSetLocked(set).?.uniform;
     const template_offset_before = validDescriptorSetLocked(set).?.uniform_offset;
     const template_range_before = validDescriptorSetLocked(set).?.uniform_range;
-    var invalid_template_descriptor = descriptor_buffer;
-    invalid_template_descriptor.buffer = 0xdead_beef;
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &invalid_template_descriptor);
+    template_data[1].buffer = 0xdead_beef;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &template_data);
     try std.testing.expectEqual(template_uniform_before, validDescriptorSetLocked(set).?.uniform);
     try std.testing.expectEqual(template_offset_before, validDescriptorSetLocked(set).?.uniform_offset);
     try std.testing.expectEqual(template_range_before, validDescriptorSetLocked(set).?.uniform_range);
     updateDescriptorSetWithTemplate(ctx.device, set, template, null);
     try std.testing.expectEqual(template_uniform_before, validDescriptorSetLocked(set).?.uniform);
-    for (0..4096) |_| updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor_buffer);
+    template_data[1] = descriptor_buffer;
+    for (0..4096) |_| updateDescriptorSetWithTemplate(ctx.device, set, template, &template_data);
     destroyDescriptorUpdateTemplate(ctx.device, template, null);
     const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
     var command_pool: usize = 0;
@@ -28834,6 +31787,10 @@ test "descriptor updates and binds are atomic and allocation free" {
     try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin_info));
+    const ignored_dynamic_offset = [_]u32{123};
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, &ignored_dynamic_offset);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(validDescriptorSetLocked(set).?, command[0].impl.bound_descriptors.?);
     for (0..4096) |_| cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
     try std.testing.expect(!command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, endCommandBuffer(command[0]));
@@ -28850,14 +31807,17 @@ test "descriptor updates and binds are atomic and allocation free" {
 
 test "dynamic uniform descriptors apply aligned per-bind offsets transactionally" {
     const ctx = try createTestDeviceContext();
-    const binding = DescriptorSetLayoutBinding{ .binding = 0, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null };
-    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 1, .bindings = @ptrCast(&binding) };
+    const bindings = [_]DescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 1, .immutable_samplers = null },
+        .{ .binding = 1, .descriptor_type = 8, .descriptor_count = 1, .stage_flags = 16, .immutable_samplers = null },
+    };
+    const layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = bindings.len, .bindings = &bindings };
     var set_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &layout_info, null, &set_layout));
     const pipeline_layout_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_layout_info, null, &pipeline_layout));
-    const pool_size = DescriptorPoolSize{ .descriptor_type = 8, .descriptor_count = 1 };
+    const pool_size = DescriptorPoolSize{ .descriptor_type = 8, .descriptor_count = 2 };
     const pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 1, .max_sets = 1, .pool_size_count = 1, .pool_sizes = @ptrCast(&pool_size) };
     var pool: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &pool_info, null, &pool));
@@ -28871,25 +31831,38 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     var memory: usize = 0;
     try std.testing.expectEqual(Result.success, allocateMemory(ctx.device, &memory_info, null, &memory));
     try std.testing.expectEqual(Result.success, bindBufferMemory(ctx.device, buffer, memory, 0));
-    var descriptor = DescriptorBufferInfo{ .buffer = buffer, .offset = 0, .range = 256 };
-    var descriptor_write = WriteDescriptorSet{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptor), .texel_buffer_view = null };
-    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    var descriptors = [_]DescriptorBufferInfo{
+        .{ .buffer = buffer, .offset = 0, .range = 256 },
+        .{ .buffer = buffer, .offset = 0, .range = 256 },
+    };
+    var descriptor_writes = [_]WriteDescriptorSet{
+        .{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptors[0]), .texel_buffer_view = null },
+        .{ .s_type = 35, .p_next = null, .dst_set = set, .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .image_info = null, .buffer_info = @ptrCast(&descriptors[1]), .texel_buffer_view = null },
+    };
+    updateDescriptorSets(ctx.device, descriptor_writes.len, &descriptor_writes, 0, null);
     const set_object = validDescriptorSetLocked(set).?;
     try std.testing.expect(set_object.uniform_dynamic);
     try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
-    descriptor.offset = 4;
-    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_write), 0, null);
+    try std.testing.expect(set_object.uniform_bindings[1].dynamic);
+    descriptors[0].offset = 4;
+    updateDescriptorSets(ctx.device, 1, @ptrCast(&descriptor_writes[0]), 0, null);
     try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
-    descriptor.offset = 0;
-    const template_entry = DescriptorUpdateTemplateEntry{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) };
-    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = 1, .descriptor_update_entries = @ptrCast(&template_entry), .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
+    descriptors[0].offset = 0;
+    const template_entries = [_]DescriptorUpdateTemplateEntry{
+        .{ .dst_binding = 0, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = 0, .stride = @sizeOf(DescriptorBufferInfo) },
+        .{ .dst_binding = 1, .dst_array_element = 0, .descriptor_count = 1, .descriptor_type = 8, .offset = @sizeOf(DescriptorBufferInfo), .stride = @sizeOf(DescriptorBufferInfo) },
+    };
+    const template_info = DescriptorUpdateTemplateCreateInfo{ .s_type = 1000085000, .p_next = null, .flags = 0, .descriptor_update_entry_count = template_entries.len, .descriptor_update_entries = &template_entries, .template_type = 0, .descriptor_set_layout = set_layout, .pipeline_bind_point = 0, .pipeline_layout = pipeline_layout, .set = 0 };
     var template: usize = 0;
     try std.testing.expectEqual(Result.success, createDescriptorUpdateTemplate(ctx.device, &template_info, null, &template));
-    descriptor.offset = 256;
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    descriptors[0].offset = 256;
+    descriptors[1].offset = 512;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptors);
     try std.testing.expectEqual(@as(u64, 256), set_object.uniform_offset);
-    descriptor.offset = 0;
-    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptor);
+    try std.testing.expectEqual(@as(u64, 512), set_object.uniform_bindings[1].offset);
+    descriptors[0].offset = 0;
+    descriptors[1].offset = 0;
+    updateDescriptorSetWithTemplate(ctx.device, set, template, &descriptors);
     try std.testing.expectEqual(@as(u64, 0), set_object.uniform_offset);
 
     const command_pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
@@ -28900,44 +31873,55 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     try std.testing.expectEqual(Result.success, allocateCommandBuffers(ctx.device, &command_info, &command));
     const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    var dynamic_offset: u32 = 256;
+    var dynamic_offsets = [_]u32{ 256, 512 };
     cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 0, null);
     try std.testing.expect(command[0].impl.invalid);
     try std.testing.expect(command[0].impl.bound_descriptors == null);
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offsets));
     try std.testing.expect(command[0].impl.invalid);
     try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, null);
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, null);
     try std.testing.expect(command[0].impl.invalid);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    dynamic_offset = 4;
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    dynamic_offsets[1] = 4;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
     try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    dynamic_offset = 256;
-    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+    dynamic_offsets[1] = 1024;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
+    try std.testing.expect(command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.bound_descriptors == null);
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    dynamic_offsets[1] = 512;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
     try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offsets[0]);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
     try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
     const snapshot = snapshotDescriptorSet(command[0], set_object).?;
     try std.testing.expectEqual(@as(u64, 256), snapshot.uniform_offset);
+    try std.testing.expectEqual(@as(u64, 512), snapshot.uniform_bindings[1].offset);
     try std.testing.expect(!snapshot.uniform_dynamic);
+    try std.testing.expect(!snapshot.uniform_bindings[1].dynamic);
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
-    const bind2 = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&set), .dynamic_offset_count = 1, .dynamic_offsets = @ptrCast(&dynamic_offset) };
+    const bind2 = BindDescriptorSetsInfo{ .s_type = 1000545003, .p_next = null, .stage_flags = 1, .layout = pipeline_layout, .first_set = 0, .descriptor_set_count = 1, .descriptor_sets = @ptrCast(&set), .dynamic_offset_count = 2, .dynamic_offsets = @ptrCast(&dynamic_offsets) };
     cmdBindDescriptorSets2(command[0], &bind2);
     try std.testing.expect(!command[0].impl.invalid);
-    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
     var compute_bind2 = bind2;
     compute_bind2.stage_flags = 32;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
     try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
     cmdBindDescriptorSets2(command[0], &compute_bind2);
     try std.testing.expect(!command[0].impl.invalid);
-    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offset);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
     try std.testing.expectEqual(@as(i32, 1), command[0].impl.bound_descriptor_bind_point);
     try std.testing.expectEqual(@as(u32, 0x20), command[0].impl.bound_descriptor_stage_flags);
     try std.testing.expect(!graphicsDescriptorBindingValid(command[0].impl));
@@ -28950,6 +31934,32 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     try std.testing.expectEqual(@as(i32, 0), command[0].impl.bound_descriptor_bind_point);
     try std.testing.expectEqual(@as(u32, 0x3f), command[0].impl.bound_descriptor_stage_flags);
     try std.testing.expect(graphicsDescriptorBindingValid(command[0].impl));
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(command[0], &begin));
+    const saved_uniform_binding_zero = set_object.uniform_bindings[0];
+    const saved_uniform = set_object.uniform;
+    const saved_uniform_offset = set_object.uniform_offset;
+    const saved_uniform_range = set_object.uniform_range;
+    const saved_uniform_dynamic = set_object.uniform_dynamic;
+    set_object.uniform_bindings[0] = .{};
+    set_object.uniform = null;
+    set_object.uniform_offset = 0;
+    set_object.uniform_range = 0;
+    set_object.uniform_dynamic = false;
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expectEqual(@as(u64, 256), command[0].impl.dynamic_uniform_offsets[0]);
+    try std.testing.expectEqual(@as(u64, 512), command[0].impl.dynamic_uniform_offsets[1]);
+    var snapshot_with_unbound_dynamic_slot = set_object.*;
+    try std.testing.expect(materializeDynamicUniformBindings(command[0], &snapshot_with_unbound_dynamic_slot, set_object));
+    try std.testing.expect(snapshot_with_unbound_dynamic_slot.uniform_bindings[0].buffer == null);
+    try std.testing.expectEqual(@as(u64, 512), snapshot_with_unbound_dynamic_slot.uniform_bindings[1].offset);
+    try std.testing.expect(!snapshot_with_unbound_dynamic_slot.uniform_bindings[1].dynamic);
+    set_object.uniform_bindings[0] = saved_uniform_binding_zero;
+    set_object.uniform = saved_uniform;
+    set_object.uniform_offset = saved_uniform_offset;
+    set_object.uniform_range = saved_uniform_range;
+    set_object.uniform_dynamic = saved_uniform_dynamic;
     var unsupported_bind2 = bind2;
     unsupported_bind2.stage_flags = 0x40;
     try std.testing.expectEqual(Result.success, resetCommandBuffer(command[0], 0));
@@ -28961,7 +31971,7 @@ test "dynamic uniform descriptors apply aligned per-bind offsets transactionally
     test_allocations_before_failure = 0;
     defer test_allocations_before_failure = null;
     for (0..4096) |_| {
-        cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 1, @ptrCast(&dynamic_offset));
+        cmdBindDescriptorSets(command[0], 0, pipeline_layout, 0, 1, @ptrCast(&set), 2, @ptrCast(&dynamic_offsets));
         try std.testing.expect(!command[0].impl.invalid);
         cmdBindDescriptorSets2(command[0], &bind2);
         try std.testing.expect(!command[0].impl.invalid);
@@ -28987,16 +31997,28 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &push_layout_info, null, &push_set_layout));
     try std.testing.expectEqual(@as(u32, 1), validDescriptorSetLayoutLocked(push_set_layout).?.flags);
 
+    const empty_set_layout_info = DescriptorSetLayoutCreateInfo{ .s_type = 32, .p_next = null, .flags = 0, .binding_count = 0, .bindings = null };
+    var empty_set_layout: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorSetLayout(ctx.device, &empty_set_layout_info, null, &empty_set_layout));
+
     var unsupported_layout = push_layout_info;
     unsupported_layout.flags = 2;
     var unpublished_layout: usize = 0xfeed_face;
     try std.testing.expectEqual(Result.error_initialization_failed, createDescriptorSetLayout(ctx.device, &unsupported_layout, null, &unpublished_layout));
     try std.testing.expectEqual(@as(usize, 0xfeed_face), unpublished_layout);
 
-    const pipeline_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = 1, .set_layouts = @ptrCast(&push_set_layout), .push_constant_range_count = 0, .push_constant_ranges = null };
+    const set_layouts = [_]usize{ push_set_layout, empty_set_layout };
+    const pipeline_info = PipelineLayoutCreateInfo{ .s_type = 30, .p_next = null, .flags = 0, .set_layout_count = set_layouts.len, .set_layouts = &set_layouts, .push_constant_range_count = 0, .push_constant_ranges = null };
     var pipeline_layout: usize = 0;
     try std.testing.expectEqual(Result.success, createPipelineLayout(ctx.device, &pipeline_info, null, &pipeline_layout));
     try std.testing.expect(validPipelineLayoutLocked(pipeline_layout).?.push_descriptor);
+
+    const descriptor_pool_info = DescriptorPoolCreateInfo{ .s_type = 33, .p_next = null, .flags = 0, .max_sets = 1, .pool_size_count = 0, .pool_sizes = null };
+    var descriptor_pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createDescriptorPool(ctx.device, &descriptor_pool_info, null, &descriptor_pool));
+    const set_allocate_info = DescriptorSetAllocateInfo{ .s_type = 34, .p_next = null, .descriptor_pool = descriptor_pool, .descriptor_set_count = 1, .set_layouts = @ptrCast(&empty_set_layout) };
+    var sampled_set: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateDescriptorSets(ctx.device, &set_allocate_info, @ptrCast(&sampled_set)));
 
     const buffer_info = BufferCreateInfo{ .s_type = 12, .p_next = null, .flags = 0, .size = 64, .usage = 0x10, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null };
     var buffer: usize = 0;
@@ -29034,6 +32056,10 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     try std.testing.expectEqual(@as(u64, 4), command[0].impl.push_descriptor.uniform_offset);
     try std.testing.expectEqual(@as(u64, 32), command[0].impl.push_descriptor.uniform_range);
     try std.testing.expectEqual(validBufferLocked(buffer).?, command[0].impl.push_descriptor.uniform.?);
+    cmdBindDescriptorSets(command[0], 0, pipeline_layout, 1, 1, @ptrCast(&sampled_set), 0, null);
+    try std.testing.expect(!command[0].impl.invalid);
+    try std.testing.expect(command[0].impl.push_descriptor_active);
+    try std.testing.expectEqual(validDescriptorSetLocked(sampled_set).?, command[0].impl.bound_sampled_descriptors.?);
 
     const uniform_before = command[0].impl.push_descriptor.uniform;
     const range_before = command[0].impl.push_descriptor.uniform_range;
@@ -29145,7 +32171,9 @@ test "push descriptors own layout state, template decoding, rollback, and warm p
     destroyCommandPool(ctx.device, pool, null);
     destroyBuffer(ctx.device, buffer, null);
     freeMemory(ctx.device, memory, null);
+    destroyDescriptorPool(ctx.device, descriptor_pool, null);
     destroyPipelineLayout(ctx.device, pipeline_layout, null);
+    destroyDescriptorSetLayout(ctx.device, empty_set_layout, null);
     destroyDescriptorSetLayout(ctx.device, push_set_layout, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
@@ -29574,7 +32602,7 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expect(commands[0].impl.dynamic.depth_bounds_test_enable_set);
         try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.stencil_test_enable);
         try std.testing.expect(commands[0].impl.dynamic.stencil_test_enable_set);
-        try std.testing.expect(commands[0].impl.dynamic.stencil_op_set);
+        try std.testing.expectEqual(@as(u2, 3), commands[0].impl.dynamic.stencil_op_set);
         try std.testing.expect(commands[0].impl.dynamic.depth_bias_enable_set);
         try std.testing.expect(commands[0].impl.dynamic.depth_test_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_write_enable);
@@ -29582,7 +32610,7 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expectEqual(@as(i32, 3), commands[0].impl.dynamic.depth_compare_op);
         try std.testing.expect(commands[0].impl.dynamic.depth_compare_op_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_test_enable);
-        try std.testing.expectEqual(@as(i32, 7), commands[0].impl.dynamic.stencil_compare_op);
+        try std.testing.expectEqual([2]i32{ 7, 7 }, commands[0].impl.dynamic.stencil_compare_op);
         try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
         try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
         try std.testing.expect(!commands[0].impl.line_width_set);
@@ -29606,7 +32634,7 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
         try std.testing.expect(!commands[0].impl.dynamic.depth_bounds_test_enable_set);
         try std.testing.expectEqual(@as(u32, 0), commands[0].impl.dynamic.stencil_test_enable);
         try std.testing.expect(!commands[0].impl.dynamic.stencil_test_enable_set);
-        try std.testing.expect(!commands[0].impl.dynamic.stencil_op_set);
+        try std.testing.expectEqual(@as(u2, 0), commands[0].impl.dynamic.stencil_op_set);
         try std.testing.expect(!commands[0].impl.dynamic.depth_bias_enable_set);
         try std.testing.expectEqual(@as(u32, 1), commands[0].impl.dynamic.depth_write_enable);
         try std.testing.expect(!commands[0].impl.dynamic.depth_write_enable_set);
@@ -29617,6 +32645,427 @@ test "core dynamic scalar blend depth and stencil states are exact and allocatio
     destroyCommandPool(ctx.device, pool, null);
     destroyDevice(ctx.device, null);
     destroyInstance(ctx.instance, null);
+}
+
+test "D24 S8 storage quantizes depth and preserves the untouched aspect" {
+    var storage: [8]u8 align(64) = undefined;
+    std.mem.writeInt(u32, storage[0..4], 0x1234_56ab, .little);
+    std.mem.writeInt(u32, storage[4..8], 0x6543_21cd, .little);
+    const image = ImageObj{ .owner = undefined, .width = 2, .height = 1, .array_layers = 1, .samples = 1, .format = format_d24_unorm_s8_uint, .usage = 0x22, .layout = 1, .owned_bytes = storage[0..] };
+    try std.testing.expect(isDepthFormat(format_d24_unorm_s8_uint));
+    try std.testing.expect(isStencilFormat(format_d24_unorm_s8_uint));
+    try std.testing.expectEqual(depth_stencil_image_usage, imageFormatUsage(format_d24_unorm_s8_uint, 0));
+    try std.testing.expect(validImageAspectMask(&image, image_aspect_depth_bit));
+    try std.testing.expect(validImageAspectMask(&image, image_aspect_stencil_bit));
+    try std.testing.expect(validImageAspectMask(&image, image_aspect_depth_bit | image_aspect_stencil_bit));
+    try std.testing.expect(!validImageAspectMask(&image, image_aspect_color_bit));
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+    var properties = std.mem.zeroes(FormatProperties);
+    try std.testing.expect(getFormatPropertiesLocked(context.physical, format_d24_unorm_s8_uint, &properties));
+    try std.testing.expectEqual(@as(u32, 0), properties.linear_tiling_features);
+    try std.testing.expectEqual(depth_sampled_image_features, properties.optimal_tiling_features);
+    var image_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, depth_stencil_image_usage, 0, &image_properties));
+
+    clearDepthStencilBytes(&image, storage[0..], 0.25, 0, image_aspect_depth_bit);
+    const first_after_depth = std.mem.readInt(u32, storage[0..4], .little);
+    const second_after_depth = std.mem.readInt(u32, storage[4..8], .little);
+    try std.testing.expectEqual(@as(u32, 0xab), first_after_depth & 0xff);
+    try std.testing.expectEqual(@as(u32, 0xcd), second_after_depth & 0xff);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), depthValueFromStorage(image.format, storage[0..], 0), 0.000001);
+
+    clearDepthStencilBytes(&image, storage[0..], 0, 0x156, image_aspect_stencil_bit);
+    const first_after_stencil = std.mem.readInt(u32, storage[0..4], .little);
+    const second_after_stencil = std.mem.readInt(u32, storage[4..8], .little);
+    try std.testing.expectEqual(first_after_depth & 0xffff_ff00, first_after_stencil & 0xffff_ff00);
+    try std.testing.expectEqual(second_after_depth & 0xffff_ff00, second_after_stencil & 0xffff_ff00);
+    try std.testing.expectEqual(@as(u32, 0x56), first_after_stencil & 0xff);
+    try std.testing.expectEqual(@as(u32, 0x56), second_after_stencil & 0xff);
+
+    clearDepthStencilRect(&image, storage[0..], .{ .offset = .{ .x = 1, .y = 0 }, .extent = .{ .width = 1, .height = 1 } }, 1, 0xaa, image_aspect_depth_bit | image_aspect_stencil_bit);
+    const first_after_rect = std.mem.readInt(u32, storage[0..4], .little);
+    const second_after_rect = std.mem.readInt(u32, storage[4..8], .little);
+    try std.testing.expectEqual(first_after_stencil, first_after_rect);
+    try std.testing.expectEqual(@as(u32, 0xffff_ffaa), second_after_rect);
+
+    writeDepthValueToStorage(image.format, storage[0..], 0, 0.5);
+    const first_after_write = std.mem.readInt(u32, storage[0..4], .little);
+    try std.testing.expectEqual(@as(u32, 0x56), first_after_write & 0xff);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), depthValueFromStorage(image.format, storage[0..], 0), 0.000001);
+}
+
+test "ANGLE attachment layout resync accepts only known repeated transitions" {
+    try std.testing.expect(angleAttachmentLayoutResync(83, 2, 5, 2));
+    try std.testing.expect(angleAttachmentLayoutResync(format_d32_sfloat, 1000117001, 4, 1000117001));
+    try std.testing.expect(!angleAttachmentLayoutResync(83, 5, 5, 2));
+    try std.testing.expect(!angleAttachmentLayoutResync(83, 2, 4, 2));
+    try std.testing.expect(!angleAttachmentLayoutResync(format_d24_unorm_s8_uint, 7, 6, 7));
+}
+
+test "D24 S8 same-layout barriers reconcile an untracked attachment layout" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = depth_stencil_image_usage, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const aspects = ImageSubresourceRange{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    var barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0x1000, .dst_access_mask = 0x1000, .old_layout = 7, .new_layout = 7, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = aspects };
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 7), validImageLocked(image).?.layout);
+
+    // The compatibility is limited to a same-layout dependency. A stale
+    // layout-changing transition still fails atomically.
+    try std.testing.expectEqual(Result.success, resetCommandBuffer(commands[0], 0));
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    barrier.old_layout = 6;
+    barrier.new_layout = 7;
+    cmdPipelineBarrier(commands[0], 0x1000, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    try std.testing.expectEqual(Result.error_initialization_failed, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    try std.testing.expectEqual(@as(i32, 7), validImageLocked(image).?.layout);
+}
+
+test "standalone X8 D24 and S8 attachment formats preserve their single aspect" {
+    var depth_storage: [4]u8 align(64) = .{ 0xaa, 0xbb, 0xcc, 0xdd };
+    var stencil_storage: [4]u8 align(64) = .{ 0x12, 0x34, 0x56, 0x78 };
+    const depth_image = ImageObj{ .owner = undefined, .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = format_x8_d24_unorm_pack32, .usage = 0x22, .layout = 1, .owned_bytes = depth_storage[0..] };
+    const stencil_image = ImageObj{ .owner = undefined, .width = 1, .height = 1, .array_layers = 1, .samples = 1, .format = format_s8_uint, .usage = 0x22, .layout = 1, .owned_bytes = stencil_storage[0..] };
+
+    try std.testing.expect(isDepthFormat(format_x8_d24_unorm_pack32));
+    try std.testing.expect(!isStencilFormat(format_x8_d24_unorm_pack32));
+    try std.testing.expect(!isDepthFormat(format_s8_uint));
+    try std.testing.expect(isStencilFormat(format_s8_uint));
+    try std.testing.expectEqual(image_aspect_depth_bit, imageAspectMaskForFormat(format_x8_d24_unorm_pack32));
+    try std.testing.expectEqual(image_aspect_stencil_bit, imageAspectMaskForFormat(format_s8_uint));
+    try std.testing.expect(validImageAspectMask(&depth_image, image_aspect_depth_bit));
+    try std.testing.expect(!validImageAspectMask(&depth_image, image_aspect_stencil_bit));
+    try std.testing.expect(validImageAspectMask(&stencil_image, image_aspect_stencil_bit));
+    try std.testing.expect(!validImageAspectMask(&stencil_image, image_aspect_depth_bit));
+
+    // The generic instance/device registries are deliberately small and keep
+    // tombstones for stale-handle detection. Reclaim the prior test's dead
+    // entries before this feature test, as the later pool-exhaustion tests do.
+    instance_state = [_]SlotState{.never} ** max_objects;
+    device_state = [_]SlotState{.never} ** max_objects;
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+    var properties = std.mem.zeroes(FormatProperties);
+    try std.testing.expect(getFormatPropertiesLocked(context.physical, format_x8_d24_unorm_pack32, &properties));
+    try std.testing.expectEqual(depth_sampled_image_features, properties.optimal_tiling_features);
+    try std.testing.expect(getFormatPropertiesLocked(context.physical, format_s8_uint, &properties));
+    try std.testing.expectEqual(depth_stencil_sampled_image_features, properties.optimal_tiling_features);
+    var image_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_x8_d24_unorm_pack32, 1, 0, depth_stencil_image_usage, 0, &image_properties));
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_s8_uint, 1, 0, depth_stencil_image_usage, 0, &image_properties));
+    try std.testing.expectEqual(depth_stencil_image_usage, imageFormatUsage(format_x8_d24_unorm_pack32, 0));
+    try std.testing.expectEqual(depth_stencil_image_usage, imageFormatUsage(format_s8_uint, 0));
+
+    clearDepthStencilBytes(&depth_image, depth_storage[0..], 0.25, 0, image_aspect_depth_bit);
+    try std.testing.expectEqual(@as(u32, 0xdd00_0000), std.mem.readInt(u32, depth_storage[0..4], .little) & 0xff00_0000);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), depthValueFromStorage(depth_image.format, depth_storage[0..], 0), 0.000001);
+    clearDepthStencilBytes(&stencil_image, stencil_storage[0..], 1, 0x1aa, image_aspect_stencil_bit);
+    try std.testing.expectEqual(@as(u32, 0x78), std.mem.readInt(u32, stencil_storage[0..4], .little) >> 24);
+    try std.testing.expectEqual(@as(u32, 0xaa), std.mem.readInt(u32, stencil_storage[0..4], .little) & 0xff);
+
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &allocation, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    const depth_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_x8_d24_unorm_pack32, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x22, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var depth_handle: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &depth_info, null, &depth_handle));
+    defer destroyImage(context.device, depth_handle, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, depth_handle, memory, 0));
+    const stencil_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_s8_uint, .extent = .{ .width = 1, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x22, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var stencil_handle: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &stencil_info, null, &stencil_handle));
+    defer destroyImage(context.device, stencil_handle, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, stencil_handle, memory, 4));
+
+    var depth_view: usize = 0;
+    const depth_view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = depth_handle, .view_type = 1, .format = format_x8_d24_unorm_pack32, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_depth_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &depth_view_info, null, &depth_view));
+    defer destroyImageView(context.device, depth_view, null);
+    var stencil_view: usize = 0;
+    const stencil_view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = stencil_handle, .view_type = 1, .format = format_s8_uint, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &stencil_view_info, null, &stencil_view));
+    defer destroyImageView(context.device, stencil_view, null);
+}
+
+test "D24 S8 Vulkan images create and clear depth and stencil aspects independently" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+    var properties = std.mem.zeroes(FormatProperties);
+    try std.testing.expect(getFormatPropertiesLocked(context.physical, format_d24_unorm_s8_uint, &properties));
+    try std.testing.expectEqual(depth_sampled_image_features, properties.optimal_tiling_features);
+    var format_properties: ImageFormatProperties = undefined;
+    try std.testing.expectEqual(Result.success, getImageFormatProperties(context.physical, format_d24_unorm_s8_uint, 1, 0, depth_stencil_image_usage, 0, &format_properties));
+
+    const memory_info = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 8, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &memory_info, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 1, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x22, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 8, 0, &mapped));
+    const initial_words: []u8 = @alignCast(@as([*]u8, @ptrCast(mapped.?))[0..8]);
+    std.mem.writeInt(u32, initial_words[0..4], 0x1234_56ab, .little);
+    std.mem.writeInt(u32, initial_words[4..8], 0x6543_21cd, .little);
+    unmapMemory(context.device, memory);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    const both_aspects = ImageSubresourceRange{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    try std.testing.expect(validBarrierRangeForImage(imageObjectForHandle(image).?, both_aspects));
+    try std.testing.expect(!validBarrierRangeForImage(imageObjectForHandle(image).?, .{ .aspect_mask = image_aspect_depth_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 }));
+    const barrier = ImageMemoryBarrier{ .s_type = 45, .p_next = null, .src_access_mask = 0, .dst_access_mask = 0x1000, .old_layout = 0, .new_layout = 1, .src_queue_family_index = std.math.maxInt(u32), .dst_queue_family_index = std.math.maxInt(u32), .image = image, .subresource_range = both_aspects };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    cmdPipelineBarrier(commands[0], 1, 0x1000, 0, 0, null, 0, null, 1, @ptrCast(&barrier));
+    const depth_value = ClearDepthStencilValue{ .depth = 0.25, .stencil = 0 };
+    const depth_range = ImageSubresourceRange{ .aspect_mask = image_aspect_depth_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    cmdClearDepthStencilImage(commands[0], image, 1, &depth_value, 1, @ptrCast(&depth_range));
+    const stencil_value = ClearDepthStencilValue{ .depth = 0, .stencil = 0x156 };
+    const stencil_range = ImageSubresourceRange{ .aspect_mask = image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 };
+    cmdClearDepthStencilImage(commands[0], image, 1, &stencil_value, 1, @ptrCast(&stencil_range));
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    mapped = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 8, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..8]);
+    const depth_bits: u32 = @intFromFloat(@round(0.25 * 16_777_215.0));
+    try std.testing.expectEqual((depth_bits << 8) | 0x56, std.mem.readInt(u32, result_words[0..4], .little));
+    try std.testing.expectEqual((depth_bits << 8) | 0x56, std.mem.readInt(u32, result_words[4..8], .little));
+    unmapMemory(context.device, memory);
+}
+
+test "mip barriers validate arbitrary mip ranges and only update level-zero layout state" {
+    var image = ImageObj{
+        .owner = undefined,
+        .width = 16,
+        .height = 16,
+        .mip_levels = 5,
+        .array_layers = 6,
+        .samples = 1,
+        .format = 97,
+        .usage = 0,
+        .layout = 0,
+    };
+    const all_mips = ImageSubresourceRange{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 0, .level_count = 5, .base_array_layer = 0, .layer_count = 6 };
+    const middle_mips = ImageSubresourceRange{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 2, .level_count = 2, .base_array_layer = 1, .layer_count = 3 };
+    try std.testing.expect(validBarrierRangeForImage(&image, all_mips));
+    try std.testing.expect(validBarrierRangeForImage(&image, middle_mips));
+    try std.testing.expect(!validBarrierRangeForImage(&image, .{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 4, .level_count = 2, .base_array_layer = 0, .layer_count = 1 }));
+
+    const partial_base = ImageTransitionCommand{ .image = &image, .old_layout = 7, .new_layout = 6, .subresource_range = .{ .aspect_mask = image_aspect_color_bit, .base_mip_level = 0, .level_count = 5, .base_array_layer = 1, .layer_count = 1 } };
+    const higher_mip = ImageTransitionCommand{ .image = &image, .old_layout = 7, .new_layout = 6, .subresource_range = middle_mips };
+    try std.testing.expect(transitionTracksBaseMip(partial_base));
+    try std.testing.expect(!transitionCoversAllBaseLayers(partial_base));
+    try std.testing.expect(!transitionTracksBaseMip(higher_mip));
+    try std.testing.expect(!transitionCoversAllBaseLayers(higher_mip));
+}
+
+test "D24 S8 combined-aspect views attach and clear through a traditional render pass" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &allocation, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = format_d24_unorm_s8_uint, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &view_info, null, &view));
+    defer destroyImageView(context.device, view, null);
+
+    const description = [_]AttachmentDescription{.{ .flags = 0, .format = format_d24_unorm_s8_uint, .samples = 1, .load_op = 1, .store_op = 0, .stencil_load_op = 1, .stencil_store_op = 0, .initial_layout = 0, .final_layout = 3 }};
+    const reference = AttachmentReference{ .attachment = 0, .layout = 3 };
+    const subpass = SubpassDescription{ .flags = 0, .pipeline_bind_point = 0, .input_attachment_count = 0, .input_attachments = null, .color_attachment_count = 0, .color_attachments = null, .resolve_attachments = null, .depth_stencil_attachment = &reference, .preserve_attachment_count = 0, .preserve_attachments = null };
+    const render_pass_info = RenderPassCreateInfo{ .s_type = 38, .p_next = null, .flags = 0, .attachment_count = 1, .attachments = &description, .subpass_count = 1, .subpasses = @ptrCast(&subpass), .dependency_count = 0, .dependencies = null };
+    var render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(context.device, &render_pass_info, null, &render_pass));
+    defer destroyRenderPass(context.device, render_pass, null);
+    const attachment_views = [_]usize{view};
+    const framebuffer_info = FramebufferCreateInfo{ .s_type = 37, .p_next = null, .flags = 0, .render_pass = render_pass, .attachment_count = 1, .attachments = &attachment_views, .width = 2, .height = 2, .layers = 1 };
+    var framebuffer: usize = 0;
+    try std.testing.expectEqual(Result.success, createFramebuffer(context.device, &framebuffer_info, null, &framebuffer));
+    defer destroyFramebuffer(context.device, framebuffer, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const command_allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &command_allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var clear_value = std.mem.zeroes(ClearValue);
+    clear_value.depth_stencil = .{ .depth = 0.25, .stencil = 0xa5 };
+    const pass_begin = RenderPassBeginInfo{ .s_type = 43, .p_next = null, .render_pass = render_pass, .framebuffer = framebuffer, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .clear_value_count = 1, .clear_values = @ptrCast(&clear_value) };
+    cmdBeginRenderPass(commands[0], &pass_begin, 0);
+    try std.testing.expect(!commands[0].impl.invalid);
+    cmdEndRenderPass(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 16, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    const depth_bits: u32 = @intFromFloat(@round(0.25 * 16_777_215.0));
+    for (0..4) |pixel| try std.testing.expectEqual((depth_bits << 8) | 0xa5, std.mem.readInt(u32, result_words[pixel * 4 ..][0..4], .little));
+    unmapMemory(context.device, memory);
+}
+
+test "D24 S8 dynamic rendering clears separate depth and stencil attachment state" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_d24_unorm_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &allocation, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+    validImageLocked(image).?.layout = 1;
+
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = format_d24_unorm_s8_uint, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_depth_bit | image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &view_info, null, &view));
+    defer destroyImageView(context.device, view, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const command_allocation = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &command_allocation, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var depth_clear = std.mem.zeroes(ClearValue);
+    depth_clear.depth_stencil.depth = 0.25;
+    var stencil_clear = std.mem.zeroes(ClearValue);
+    stencil_clear.depth_stencil.stencil = 0xa5;
+    const depth_attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = depth_clear };
+    const stencil_attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = stencil_clear };
+    const rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 0, .color_attachments = null, .depth_attachment = &depth_attachment, .stencil_attachment = &stencil_attachment };
+    cmdBeginRendering(commands[0], &rendering);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(format_d24_unorm_s8_uint, commands[0].impl.inherited_dynamic_stencil_format);
+    try std.testing.expectEqual(@as(u16, 1), commands[0].impl.count);
+    try std.testing.expectEqual(@as(std.meta.Tag(Command), .clear_depth), std.meta.activeTag(commands[0].impl.commands[0]));
+    try std.testing.expectEqual(image_aspect_depth_bit | image_aspect_stencil_bit, commands[0].impl.commands[0].clear_depth.aspect_mask);
+    cmdEndRendering(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 16, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    const depth_bits: u32 = @intFromFloat(@round(0.25 * 16_777_215.0));
+    for (0..4) |pixel| try std.testing.expectEqual((depth_bits << 8) | 0xa5, std.mem.readInt(u32, result_words[pixel * 4 ..][0..4], .little));
+    unmapMemory(context.device, memory);
+}
+
+test "S8-only dynamic rendering clears a standalone stencil attachment" {
+    const context = try createTestDeviceContext();
+    defer destroyInstance(context.instance, null);
+    defer destroyDevice(context.device, null);
+    const image_info = ImageCreateInfo{ .s_type = 14, .p_next = null, .flags = 0, .image_type = 1, .format = format_s8_uint, .extent = .{ .width = 2, .height = 2, .depth = 1 }, .mip_levels = 1, .array_layers = 1, .samples = 1, .tiling = 0, .usage = 0x20, .sharing_mode = 0, .queue_family_index_count = 0, .queue_family_indices = null, .initial_layout = 0 };
+    var image: usize = 0;
+    try std.testing.expectEqual(Result.success, createImage(context.device, &image_info, null, &image));
+    defer destroyImage(context.device, image, null);
+    const allocation = MemoryAllocateInfo{ .s_type = 5, .p_next = null, .allocation_size = 16, .memory_type_index = 0 };
+    var memory: usize = 0;
+    try std.testing.expectEqual(Result.success, allocateMemory(context.device, &allocation, null, &memory));
+    defer freeMemory(context.device, memory, null);
+    try std.testing.expectEqual(Result.success, bindImageMemory(context.device, image, memory, 0));
+    validImageLocked(image).?.layout = 1;
+
+    const view_info = ImageViewCreateInfo{ .s_type = 15, .p_next = null, .flags = 0, .image = image, .view_type = 1, .format = format_s8_uint, .components = .{ 0, 0, 0, 0 }, .subresource_range = .{ .aspect_mask = image_aspect_stencil_bit, .base_mip_level = 0, .level_count = 1, .base_array_layer = 0, .layer_count = 1 } };
+    var view: usize = 0;
+    try std.testing.expectEqual(Result.success, createImageView(context.device, &view_info, null, &view));
+    defer destroyImageView(context.device, view, null);
+
+    const pool_info = CommandPoolCreateInfo{ .s_type = 39, .p_next = null, .flags = 2, .queue_family_index = 0 };
+    var pool: usize = 0;
+    try std.testing.expectEqual(Result.success, createCommandPool(context.device, &pool_info, null, &pool));
+    defer destroyCommandPool(context.device, pool, null);
+    const allocation_info = CommandBufferAllocateInfo{ .s_type = 40, .p_next = null, .command_pool = pool, .level = 0, .command_buffer_count = 1 };
+    var commands: [1]CommandBuffer = undefined;
+    try std.testing.expectEqual(Result.success, allocateCommandBuffers(context.device, &allocation_info, &commands));
+    defer freeCommandBuffers(context.device, pool, 1, &commands);
+    const begin = CommandBufferBeginInfo{ .s_type = 42, .p_next = null, .flags = 0, .inheritance_info = null };
+    try std.testing.expectEqual(Result.success, beginCommandBuffer(commands[0], &begin));
+    var clear = std.mem.zeroes(ClearValue);
+    clear.depth_stencil.stencil = 0xa5;
+    const stencil_attachment = RenderingAttachmentInfo{ .s_type = 1000044000, .p_next = null, .image_view = view, .image_layout = 1, .resolve_mode = 0, .resolve_image_view = 0, .resolve_image_layout = 0, .load_op = 1, .store_op = 0, .clear_value = clear };
+    const rendering = RenderingInfo{ .s_type = 1000044001, .p_next = null, .flags = 0, .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = 2, .height = 2 } }, .layer_count = 1, .view_mask = 0, .color_attachment_count = 0, .color_attachments = null, .depth_attachment = null, .stencil_attachment = &stencil_attachment };
+    cmdBeginRendering(commands[0], &rendering);
+    try std.testing.expect(!commands[0].impl.invalid);
+    try std.testing.expectEqual(validImageLocked(image).?, commands[0].impl.dynamic_depth_image.?);
+    try std.testing.expectEqual(format_s8_uint, commands[0].impl.inherited_dynamic_stencil_format);
+    try std.testing.expectEqual(@as(i32, 0), commands[0].impl.inherited_dynamic_depth_format);
+    cmdEndRendering(commands[0]);
+    try std.testing.expectEqual(Result.success, endCommandBuffer(commands[0]));
+    const submit = SubmitInfo{ .s_type = 4, .p_next = null, .wait_semaphore_count = 0, .wait_semaphores = null, .wait_dst_stage_mask = null, .command_buffer_count = 1, .command_buffers = &commands, .signal_semaphore_count = 0, .signal_semaphores = null };
+    try std.testing.expectEqual(Result.success, queueSubmit(context.queue, 1, @ptrCast(&submit), 0));
+    var mapped: ?*anyopaque = null;
+    try std.testing.expectEqual(Result.success, mapMemory(context.device, memory, 0, 16, 0, &mapped));
+    const result_words: []const u8 = @alignCast(@as([*]const u8, @ptrCast(mapped.?))[0..16]);
+    for (0..4) |pixel| try std.testing.expectEqual(@as(u32, 0xa5), std.mem.readInt(u32, result_words[pixel * 4 ..][0..4], .little) & 0xff);
+    unmapMemory(context.device, memory);
 }
 
 test "depth stencil image clear uses exact D32 depth semantics" {
@@ -31719,7 +35168,7 @@ test "shader module ABI rejects malformed and unsupported inputs without publish
         &.{ spirv.magic, 0x0001_0000, 0, 0, 0 },
         &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0 },
         &.{ spirv.magic, 0x0001_0000, 0, 1, 0, 0x0002_0000 },
-        &.{ spirv.magic, 0x0001_0100, 0, 1, 0 },
+        &.{ spirv.magic, 0x0001_0700, 0, 1, 0 },
     };
     for (malformed) |words| {
         info.code_size = words.len * 4;
@@ -31954,6 +35403,76 @@ test "traditional render passes honor load operations and image layout transitio
     try std.testing.expectEqual(@as(i32, 0), validRenderPassLocked(render_pass).?.color_initial_layout);
     try std.testing.expectEqual(@as(i32, 2), validRenderPassLocked(render_pass).?.color_subpass_layout);
     try std.testing.expectEqual(@as(i32, 1), validRenderPassLocked(render_pass).?.color_final_layout);
+    const read_only_depth_ref = AttachmentReference{ .attachment = 1, .layout = 4 };
+    const color_depth_subpass = SubpassDescription{
+        .flags = 0,
+        .pipeline_bind_point = 0,
+        .input_attachment_count = 0,
+        .input_attachments = null,
+        .color_attachment_count = 1,
+        .color_attachments = @ptrCast(@constCast(&color_ref)),
+        .resolve_attachments = null,
+        .depth_stencil_attachment = @ptrCast(&read_only_depth_ref),
+        .preserve_attachment_count = 0,
+        .preserve_attachments = null,
+    };
+    const color_depth_attachments = [_]AttachmentDescription{
+        attachment,
+        .{ .flags = 0, .format = 129, .samples = 1, .load_op = 0, .store_op = 0, .stencil_load_op = 0, .stencil_store_op = 0, .initial_layout = 4, .final_layout = 4 },
+    };
+    const color_depth_dependency = [_]SubpassDependency{
+        .{ .src_subpass = 0, .dst_subpass = 0, .src_stage_mask = 0x400, .dst_stage_mask = 0x480, .src_access_mask = 0x100, .dst_access_mask = 0x10, .dependency_flags = 1 },
+    };
+    var color_depth_info = render_info;
+    color_depth_info.attachment_count = 2;
+    color_depth_info.attachments = @ptrCast(&color_depth_attachments);
+    color_depth_info.subpasses = @ptrCast(&color_depth_subpass);
+    color_depth_info.dependency_count = 1;
+    color_depth_info.dependencies = @ptrCast(&color_depth_dependency);
+    var read_only_depth_compatibility = try buildRenderPass(&color_depth_info, true);
+    defer read_only_depth_compatibility.deinit();
+    var writable_depth_ref = read_only_depth_ref;
+    writable_depth_ref.layout = 3;
+    var writable_depth_subpass = color_depth_subpass;
+    writable_depth_subpass.depth_stencil_attachment = @ptrCast(&writable_depth_ref);
+    var writable_depth_info = color_depth_info;
+    writable_depth_info.subpasses = @ptrCast(&writable_depth_subpass);
+    var writable_depth_compatibility = try buildRenderPass(&writable_depth_info, true);
+    defer writable_depth_compatibility.deinit();
+    try std.testing.expect(read_only_depth_compatibility.eql(&writable_depth_compatibility));
+    const separate_depth_stencil_layout: i32 = 1_000_117_001;
+    var separate_depth_stencil_ref = read_only_depth_ref;
+    separate_depth_stencil_ref.layout = separate_depth_stencil_layout;
+    var separate_depth_stencil_subpass = color_depth_subpass;
+    separate_depth_stencil_subpass.depth_stencil_attachment = @ptrCast(&separate_depth_stencil_ref);
+    var separate_depth_stencil_attachments = color_depth_attachments;
+    separate_depth_stencil_attachments[1].initial_layout = separate_depth_stencil_layout;
+    separate_depth_stencil_attachments[1].final_layout = separate_depth_stencil_layout;
+    var separate_depth_stencil_info = color_depth_info;
+    separate_depth_stencil_info.attachments = @ptrCast(&separate_depth_stencil_attachments);
+    separate_depth_stencil_info.subpasses = @ptrCast(&separate_depth_stencil_subpass);
+    var separate_depth_stencil_compatibility = try buildRenderPass(&separate_depth_stencil_info, true);
+    defer separate_depth_stencil_compatibility.deinit();
+    try std.testing.expect(read_only_depth_compatibility.eql(&separate_depth_stencil_compatibility));
+    try std.testing.expect(renderingAttachmentLayoutValid(separate_depth_stencil_layout, image_aspect_depth_bit));
+    try std.testing.expect(renderingAttachmentLayoutValid(separate_depth_stencil_layout, image_aspect_stencil_bit));
+    try std.testing.expect(renderingAttachmentLayoutValid(1_000_241_000, image_aspect_depth_bit));
+    try std.testing.expect(!renderingAttachmentLayoutValid(1_000_241_000, image_aspect_stencil_bit));
+    var changed_format_attachments = color_depth_attachments;
+    changed_format_attachments[0].format = 43;
+    var changed_format_info = color_depth_info;
+    changed_format_info.attachments = @ptrCast(&changed_format_attachments);
+    var changed_format_compatibility = try buildRenderPass(&changed_format_info, true);
+    defer changed_format_compatibility.deinit();
+    try std.testing.expect(!read_only_depth_compatibility.eql(&changed_format_compatibility));
+    var color_depth_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &color_depth_info, null, &color_depth_render_pass));
+    try std.testing.expectEqual(@as(i32, 4), validRenderPassLocked(color_depth_render_pass).?.subpass_depth_layouts[0]);
+    destroyRenderPass(ctx.device, color_depth_render_pass, null);
+    var separate_depth_stencil_render_pass: usize = 0;
+    try std.testing.expectEqual(Result.success, createRenderPass(ctx.device, &separate_depth_stencil_info, null, &separate_depth_stencil_render_pass));
+    try std.testing.expectEqual(separate_depth_stencil_layout, validRenderPassLocked(separate_depth_stencil_render_pass).?.subpass_depth_layouts[0]);
+    destroyRenderPass(ctx.device, separate_depth_stencil_render_pass, null);
     // Vulkan 1.1 promotes the render-pass multiview and input-attachment
     // aspect nodes.  ZPU has those features disabled, but a well-formed
     // zero-valued chain is still an ABI-valid request and must not be
